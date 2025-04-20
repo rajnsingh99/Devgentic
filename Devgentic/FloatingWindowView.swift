@@ -82,18 +82,16 @@ struct FloatingWindowView: View {
     // --- Focus State ---
     @FocusState private var isInputFocused: Bool // <--- Add FocusState
 
+    // --- State Variables ---
+    @State private var isSidebarCollapsed: Bool = true // For collapsible sidebar
     @State private var userInput = ""
-    // --- Updated State ---
     @State var conversations: [Conversation] // Use @State for mutable array
     @State var selectedConversationID: UUID? // Use @State for mutable selection
-    // --------------------
-
-    // --- New State Variables ---
     @State private var showSettings: Bool = false
     @State private var windowOpacity: Double = 1.0 // Default opacity
     @State private var isSending: Bool = false // To disable input/button while waiting for response
     @State private var llmModelName: String = "gemma4b" // Default model, make configurable later if needed
-    // --------------------------
+    // --------------------
 
     // --- AI Connection ---
     // Consider making this injectable or configurable
@@ -130,75 +128,89 @@ struct FloatingWindowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // --- Left Sidebar ---
-            ZStack {
-                Color.black.opacity(0.25)
-                VStack(alignment: .leading, spacing: 0) {
-                    // Header with New Chat Button
-                    HStack {
-                        Text("Conversations")
-                            .font(.title3) // Slightly smaller title
-                            .fontWeight(.semibold)
-                            .foregroundColor(.white)
-                        Spacer()
-                        Button(action: startNewConversation) {
-                            Image(systemName: "plus.circle.fill")
-                                .foregroundColor(.white.opacity(0.8))
+            // --- Left Sidebar (Collapsible) ---
+            if !isSidebarCollapsed { // Only show if not collapsed
+                ZStack {
+                    Color.black.opacity(0.25)
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Header with New Chat Button
+                        HStack {
+                            Text("Conversations")
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+                            Spacer()
+                            Button(action: startNewConversation) {
+                                Image(systemName: "plus.circle.fill")
+                                    .foregroundColor(.white.opacity(0.8))
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            // .keyboardShortcut("n", modifiers: .command) // <-- STEP 1: REMOVE Shortcut from here
                         }
-                        .buttonStyle(PlainButtonStyle())
-                        // Add the shortcut to the visible button as well, for menu bar integration
-                        .keyboardShortcut("n", modifiers: .command) // <--- Add shortcut here too
-                    }
-                    .padding()
+                        .padding()
 
+                        Divider().background(Color.white.opacity(0.2))
 
-                    Divider().background(Color.white.opacity(0.2))
-
-                    // List of Conversations
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 5) { // Reduced spacing
-                            // Use the computed property for sorting
-                            ForEach(sortedConversations) { conversation in
-                                // Use HStack + onTapGesture for better hit testing
-                                HStack {
-                                    Text(conversation.displayTitle)
-                                        .foregroundColor(selectedConversationID == conversation.id ? .blue : .white) // Highlight selected
-                                        .padding(.horizontal)
-                                        .padding(.vertical, 8) // Slightly more padding
-                                        .frame(maxWidth: .infinity, alignment: .leading) // Make visual content fill width
-                                        .lineLimit(1) // Ensure title doesn't wrap
-                                        .truncationMode(.tail)
-                                }
-                                .background(selectedConversationID == conversation.id ? Color.white.opacity(0.2) : Color.clear) // Background for the HStack
-                                .cornerRadius(5) // Corner radius for the HStack background
-                                .contentShape(Rectangle()) // Define the tappable shape as the rectangle
-                                .onTapGesture { // Add the tap action
-                                    selectedConversationID = conversation.id
-                                    // Don't set focus immediately, let the .onChange handle it after scroll
+                        // List of Conversations
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 5) {
+                                ForEach(sortedConversations) { conversation in
+                                    HStack {
+                                        Text(conversation.displayTitle)
+                                            .foregroundColor(selectedConversationID == conversation.id ? .blue : .white)
+                                            .padding(.horizontal)
+                                            .padding(.vertical, 8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .lineLimit(1)
+                                            .truncationMode(.tail)
+                                    }
+                                    .background(selectedConversationID == conversation.id ? Color.white.opacity(0.2) : Color.clear)
+                                    .cornerRadius(5)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        selectedConversationID = conversation.id
+                                    }
                                 }
                             }
+                            .padding(.horizontal, 5)
+                            .padding(.top, 10)
                         }
-                        .padding(.horizontal, 5) // Padding for the list itself
-                        .padding(.top, 10)
+                        Spacer()
                     }
-                    Spacer() // Pushes list to the top
                 }
+                .frame(width: 240) // Fixed width when expanded
+                .transition(.move(edge: .leading)) // Animation for appearing/disappearing
             }
-            .frame(width: 240)
             // --- End Left Sidebar ---
 
-            Divider()
+            // --- Divider (Only show if sidebar is not collapsed) ---
+            if !isSidebarCollapsed {
+                 Divider()
+            }
+            // ------------------------------------------------------
 
             // --- Main Interaction Area (Right Side) ---
             VStack(spacing: 0) {
-                // Header with Settings Button
+                // Header with Sidebar Toggle and Settings Button
                 HStack {
+                    // --- Sidebar Toggle Button ---
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { // Add animation
+                            isSidebarCollapsed.toggle()
+                        }
+                    } label: {
+                        Image(systemName: isSidebarCollapsed ? "sidebar.right" : "sidebar.left")
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    // ---------------------------------
+
                     // Display title of current chat or placeholder
                     Text(currentConversationTitle)
                         .font(.headline)
                         .foregroundColor(.white.opacity(0.8))
-                        .lineLimit(1) // Prevent wrapping
-                        .truncationMode(.tail) // Add ellipsis if too long
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     Spacer()
                     Button {
                         withAnimation { showSettings.toggle() }
@@ -211,7 +223,7 @@ struct FloatingWindowView: View {
                 .padding()
                 .background(Color.gray.opacity(0.2))
 
-                // Settings Slider (Conditional)
+                // Settings Panel (Conditional)
                 if showSettings {
                     VStack(alignment: .leading) {
                         HStack {
@@ -289,23 +301,23 @@ struct FloatingWindowView: View {
                                 // Use DispatchQueue to allow view update before scrolling
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     scrollToBottom(scrollProxy: scrollProxy, history: currentChatHistory, animated: false)
-                                    isInputFocused = true // <--- Set focus when selection changes
+                                    isInputFocused = true // Set focus when selection changes
                                 }
                             }
                         }
                     }
-                    .padding(.bottom, 5) // <--- Added padding below the ScrollViewReader
+                    .padding(.bottom, 5) // Padding below the ScrollViewReader
 
                 } else {
                     // Placeholder view when no conversation is selected AND the list is empty
                     Spacer()
-                    Text("Type a message or press ⌘N to start a new chat.") // Updated placeholder
+                    Text("Type a message or press ⌘N to start a new chat.")
                         .foregroundColor(.gray)
                     Spacer()
                 }
 
-                // Input Area (disable only when sending)
-                VStack(spacing: 6) { // <--- Parent VStack
+                // Input Area (VStack containing TextEditor and Icons)
+                VStack(spacing: 6) {
                     // --- ZStack for TextEditor and Placeholder ---
                     ZStack(alignment: .topLeading) {
                         // --- CustomTextEditor ---
@@ -319,17 +331,14 @@ struct FloatingWindowView: View {
                             Text("Type a message (Shift+Enter to send)...")
                                 .font(Font.system(size: NSFont.systemFontSize))
                                 .foregroundColor(.gray)
-                                .padding(.horizontal, 7.5)
-                                .padding(.top, 8)
+                                // Adjusted Padding
+                                .padding(.horizontal, 7) // Horizontal padding for placeholder
+                                .padding(.top, 6)        // Top padding for placeholder
                                 .allowsHitTesting(false)
                         }
                     }
                     // --- Frame for Dynamic Height (Applied to ZStack) ---
-                    .frame(minHeight: 30, maxHeight: 40)
-                    // --- REMOVED Background and CornerRadius from ZStack ---
-                    // .background(Color.white.opacity(0.1)) // <-- REMOVED
-                    // .cornerRadius(10)                   // <-- REMOVED
-                    // ----------------------------------------------------
+                    .frame(minHeight: 30, maxHeight: 40) // Reduced height
                     .focused($isInputFocused)
                     .disabled(isSending)
 
@@ -375,46 +384,50 @@ struct FloatingWindowView: View {
                         .disabled(userInput.isEmpty || isSending)
                     }
                     // --- End HStack ---
-                    .padding(.horizontal, 8) // Add some horizontal padding for icons
-                    .padding(.bottom, 8)    // Add some bottom padding for icons
+                    .padding(.horizontal, 8) // Internal padding for icons
+                    .padding(.bottom, 8)    // Internal padding for icons
 
-                } // --- End of Parent VStack ---
-                // --- APPLY Background and CornerRadius to VStack ---
-                .background(Color.white.opacity(0.1)) // <-- MOVED HERE
-                .cornerRadius(10)                   // <-- MOVED HERE
-
-                .padding(.horizontal)
-                .padding(.bottom, 10)
-
+                } // --- End of Parent VStack for Input Area ---
+                // --- APPLY Background and CornerRadius to the whole Input Area VStack ---
+                .background(Color.white.opacity(0.1))
+                .cornerRadius(10)
+                // -----------------------------------------------------------------------
+                .padding(.horizontal) // Outer padding for the input block
+                .padding(.bottom, 10) // Outer padding for the input block
 
                 // --- Hidden Button for Keyboard Shortcut (Cmd+N) ---
                 Button(action: startNewConversation) { EmptyView() }
-                    .hidden() // Make it invisible
-                    .keyboardShortcut("n", modifiers: .command) // Assign Cmd+N
+                    .hidden()
+                    .keyboardShortcut("n", modifiers: .command)
                 // ---------------------------------------------
 
             }
             .background(VisualEffectBlur())
             // --- End Main Interaction Area ---
-        }
+        } // End Outermost HStack
         .opacity(windowOpacity)
         .frame(minWidth: 800, minHeight: 500) // Keep overall window frame
         .onAppear {
              // Select the most recent conversation on launch, if any
              if selectedConversationID == nil, let mostRecent = sortedConversations.first {
                  selectedConversationID = mostRecent.id
-                 // Optionally set focus on appear if a chat is auto-selected
-                 // DispatchQueue.main.async { isInputFocused = true } // Focus handled by onChange now
              } else if conversations.isEmpty {
                  // If starting completely fresh, set focus
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
+        // --- STEP 2: ADD Shortcut to the main container ---
+        // .keyboardShortcut("n", modifiers: .command, perform: startNewConversation)
+        // --------------------------------------------------
     }
 
     // MARK: - Computed Properties for UI
     private var currentConversationTitle: String {
-        guard let index = selectedConversationIndex else { return "New Chat" } // Show "New Chat" if none selected
+        guard let index = selectedConversationIndex else {
+            // If no conversation is selected, show a generic title
+            // or handle based on whether conversations exist
+            return conversations.isEmpty ? "Devgentic" : "Select Chat"
+        }
         return conversations[index].displayTitle
     }
 
@@ -427,8 +440,7 @@ struct FloatingWindowView: View {
         conversations.append(newConversation)
         selectedConversationID = newConversation.id // Select the new one
         logger.info("Started new conversation with ID: \(newConversation.id.uuidString)")
-        // Set focus when starting a new chat - handled by onChange(of: selectedConversationID) now
-        // DispatchQueue.main.async { isInputFocused = true }
+        // Focus is handled by onChange(of: selectedConversationID)
     }
 
     func sendMessage() {
@@ -464,7 +476,6 @@ struct FloatingWindowView: View {
         let messageLog = messageToSend // Capture for logging before clearing
         userInput = "" // Clear input field *after* processing
         isSending = true
-        // Focus management is handled by onChange events and onAppear
 
         Task {
             var agentResponse = "Error: Agent response not received."
@@ -505,7 +516,7 @@ struct FloatingWindowView: View {
                     logger.error("Error: Conversation \(currentID.uuidString) disappeared before agent response could be added.")
                 }
                 isSending = false
-                // Restore focus after response if desired and input is empty
+                // Optionally restore focus if needed, e.g., if input is still empty
                 // if userInput.isEmpty {
                 //     DispatchQueue.main.async { isInputFocused = true }
                 // }
