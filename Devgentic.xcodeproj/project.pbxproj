@@ -1,0 +1,548 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		35FCBA9A2DB5526B00D39123 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 35FCBA802DB5526B00D39123 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 35FCBA872DB5526B00D39123;
+			remoteInfo = devgentic;
+		};
+		35FCBAA42DB5526B00D39123 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 35FCBA802DB5526B00D39123 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 35FCBA872DB5526B00D39123;
+			remoteInfo = devgentic;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		35FCBA882DB5526B00D39123 /* devgentic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = devgentic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		35FCBA992DB5526B00D39123 /* devgenticTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		35FCBA8A2DB5526B00D39123 /* devgentic */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = devgentic;
+			sourceTree = "<group>";
+		};
+		35FCBA9C2DB5526B00D39123 /* devgenticTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = devgenticTests;
+			sourceTree = "<group>";
+		};
+		35FCBAA62DB5526B00D39123 /* devgenticUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = devgenticUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		35FCBA852DB5526B00D39123 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		35FCBA962DB5526B00D39123 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		35FCBAA02DB5526B00D39123 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		35FCBA7F2DB5526B00D39123 = {
+			isa = PBXGroup;
+			children = (
+				35FCBA8A2DB5526B00D39123 /* devgentic */,
+				35FCBA9C2DB5526B00D39123 /* devgenticTests */,
+				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
+				35FCBA892DB5526B00D39123 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		35FCBA892DB5526B00D39123 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				35FCBA882DB5526B00D39123 /* devgentic.app */,
+				35FCBA992DB5526B00D39123 /* devgenticTests.xctest */,
+				35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		35FCBA872DB5526B00D39123 /* devgentic */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 35FCBAAD2DB5526B00D39123 /* Build configuration list for PBXNativeTarget "devgentic" */;
+			buildPhases = (
+				35FCBA842DB5526B00D39123 /* Sources */,
+				35FCBA852DB5526B00D39123 /* Frameworks */,
+				35FCBA862DB5526B00D39123 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				35FCBA8A2DB5526B00D39123 /* devgentic */,
+			);
+			name = devgentic;
+			packageProductDependencies = (
+			);
+			productName = devgentic;
+			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
+			productType = "com.apple.product-type.application";
+		};
+		35FCBA982DB5526B00D39123 /* devgenticTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 35FCBAB02DB5526B00D39123 /* Build configuration list for PBXNativeTarget "devgenticTests" */;
+			buildPhases = (
+				35FCBA952DB5526B00D39123 /* Sources */,
+				35FCBA962DB5526B00D39123 /* Frameworks */,
+				35FCBA972DB5526B00D39123 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				35FCBA9B2DB5526B00D39123 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				35FCBA9C2DB5526B00D39123 /* devgenticTests */,
+			);
+			name = devgenticTests;
+			packageProductDependencies = (
+			);
+			productName = devgenticTests;
+			productReference = 35FCBA992DB5526B00D39123 /* devgenticTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		35FCBAA22DB5526B00D39123 /* devgenticUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 35FCBAB32DB5526B00D39123 /* Build configuration list for PBXNativeTarget "devgenticUITests" */;
+			buildPhases = (
+				35FCBA9F2DB5526B00D39123 /* Sources */,
+				35FCBAA02DB5526B00D39123 /* Frameworks */,
+				35FCBAA12DB5526B00D39123 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				35FCBAA52DB5526B00D39123 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
+			);
+			name = devgenticUITests;
+			packageProductDependencies = (
+			);
+			productName = devgenticUITests;
+			productReference = 35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		35FCBA802DB5526B00D39123 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					35FCBA872DB5526B00D39123 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+					35FCBA982DB5526B00D39123 = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 35FCBA872DB5526B00D39123;
+					};
+					35FCBAA22DB5526B00D39123 = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = 35FCBA872DB5526B00D39123;
+					};
+				};
+			};
+			buildConfigurationList = 35FCBA832DB5526B00D39123 /* Build configuration list for PBXProject "Devgentic" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 35FCBA7F2DB5526B00D39123;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				35FCBA872DB5526B00D39123 /* devgentic */,
+				35FCBA982DB5526B00D39123 /* devgenticTests */,
+				35FCBAA22DB5526B00D39123 /* devgenticUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		35FCBA862DB5526B00D39123 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		35FCBA972DB5526B00D39123 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		35FCBAA12DB5526B00D39123 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		35FCBA842DB5526B00D39123 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		35FCBA952DB5526B00D39123 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		35FCBA9F2DB5526B00D39123 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		35FCBA9B2DB5526B00D39123 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 35FCBA872DB5526B00D39123 /* devgentic */;
+			targetProxy = 35FCBA9A2DB5526B00D39123 /* PBXContainerItemProxy */;
+		};
+		35FCBAA52DB5526B00D39123 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 35FCBA872DB5526B00D39123 /* devgentic */;
+			targetProxy = 35FCBAA42DB5526B00D39123 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		35FCBAAB2DB5526B00D39123 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		35FCBAAC2DB5526B00D39123 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		35FCBAAE2DB5526B00D39123 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = devgentic/devgentic.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = devgentic/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dev.devgentic;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		35FCBAAF2DB5526B00D39123 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = devgentic/devgentic.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = devgentic/Info.plist;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dev.devgentic;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		35FCBAB12DB5526B00D39123 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dev.devgenticTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/devgentic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/devgentic";
+			};
+			name = Debug;
+		};
+		35FCBAB22DB5526B00D39123 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dev.devgenticTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/devgentic.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/devgentic";
+			};
+			name = Release;
+		};
+		35FCBAB42DB5526B00D39123 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dev.devgenticUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = devgentic;
+			};
+			name = Debug;
+		};
+		35FCBAB52DB5526B00D39123 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dev.devgenticUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = devgentic;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		35FCBA832DB5526B00D39123 /* Build configuration list for PBXProject "Devgentic" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35FCBAAB2DB5526B00D39123 /* Debug */,
+				35FCBAAC2DB5526B00D39123 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		35FCBAAD2DB5526B00D39123 /* Build configuration list for PBXNativeTarget "devgentic" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35FCBAAE2DB5526B00D39123 /* Debug */,
+				35FCBAAF2DB5526B00D39123 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		35FCBAB02DB5526B00D39123 /* Build configuration list for PBXNativeTarget "devgenticTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35FCBAB12DB5526B00D39123 /* Debug */,
+				35FCBAB22DB5526B00D39123 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		35FCBAB32DB5526B00D39123 /* Build configuration list for PBXNativeTarget "devgenticUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35FCBAB42DB5526B00D39123 /* Debug */,
+				35FCBAB52DB5526B00D39123 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 35FCBA802DB5526B00D39123 /* Project object */;
+}
