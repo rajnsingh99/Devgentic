@@ -305,10 +305,10 @@ struct FloatingWindowView: View {
                 }
 
                 // Input Area (disable only when sending)
-                VStack(spacing: 6) {
+                VStack(spacing: 6) { // <--- Parent VStack
                     // --- ZStack for TextEditor and Placeholder ---
-                    ZStack(alignment: .topLeading) { // Align placeholder to top-left
-                        // --- CustomTextEditor (No placeholder parameter) ---
+                    ZStack(alignment: .topLeading) {
+                        // --- CustomTextEditor ---
                         CustomTextEditor(
                             text: $userInput,
                             onCommit: sendMessage
@@ -317,71 +317,49 @@ struct FloatingWindowView: View {
                         // --- Placeholder Text Overlay ---
                         if userInput.isEmpty {
                             Text("Type a message (Shift+Enter to send)...")
-                                .font(Font.system(size: NSFont.systemFontSize)) // Match editor font
+                                .font(Font.system(size: NSFont.systemFontSize))
                                 .foregroundColor(.gray)
-                                // --- Increased Padding ---
-                                // Increase horizontal padding by 2 (from 5 to 7)
-                                .padding(.horizontal, 7) // <--- Increased by 2
-                                // Increase top padding by 2 (from 3 to 5)
-                                .padding(.top, 5)        // <--- Increased by 2
-                                // ---------------------------
-                                .allowsHitTesting(false) // Let clicks pass through to the editor
+                                .padding(.horizontal, 7.5)
+                                .padding(.top, 8)
+                                .allowsHitTesting(false)
                         }
-                        // ---------------------------------
                     }
                     // --- Frame for Dynamic Height (Applied to ZStack) ---
-                    .frame(minHeight: 40, maxHeight: 150) // Allow growth up to 150 points
-                    // -----------------------------------------
-                    .background(Color.white.opacity(0.1))
-                    .cornerRadius(10)
+                    .frame(minHeight: 30, maxHeight: 40)
+                    // --- REMOVED Background and CornerRadius from ZStack ---
+                    // .background(Color.white.opacity(0.1)) // <-- REMOVED
+                    // .cornerRadius(10)                   // <-- REMOVED
+                    // ----------------------------------------------------
                     .focused($isInputFocused)
                     .disabled(isSending)
 
                     // --- HStack with Icons ---
                     HStack(spacing: 10) {
                         // Web Icon
-                        Button {
-                            // TODO: Implement web action
-                            logger.info("Web icon tapped")
-                        } label: {
+                        Button { logger.info("Web icon tapped") } label: {
                             Image(systemName: "globe")
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 20, height: 20)
+                                .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
                                 .foregroundColor(.white.opacity(0.7))
                         }
-                        .buttonStyle(PlainButtonStyle())
-                        .disabled(isSending)
+                        .buttonStyle(PlainButtonStyle()).disabled(isSending)
 
                         // Plus Icon
-                        Button {
-                            // TODO: Implement plus action (e.g., attach file)
-                            logger.info("Plus icon tapped")
-                        } label: {
+                        Button { logger.info("Plus icon tapped") } label: {
                             Image(systemName: "plus")
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 20, height: 20)
+                                .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
                                 .foregroundColor(.white.opacity(0.7))
                         }
-                        .buttonStyle(PlainButtonStyle())
-                        .disabled(isSending)
+                        .buttonStyle(PlainButtonStyle()).disabled(isSending)
 
                         Spacer() // Pushes remaining icons to the right
 
                         // Mic Icon
-                        Button {
-                            // TODO: Implement mic action (e.g., voice input)
-                            logger.info("Mic icon tapped")
-                        } label: {
+                        Button { logger.info("Mic icon tapped") } label: {
                             Image(systemName: "mic.fill")
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 20, height: 20)
+                                .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
                                 .foregroundColor(.white.opacity(0.7))
                         }
-                        .buttonStyle(PlainButtonStyle())
-                        .disabled(isSending)
+                        .buttonStyle(PlainButtonStyle()).disabled(isSending)
 
                         // Send Button
                         Button(action: sendMessage) {
@@ -389,8 +367,7 @@ struct FloatingWindowView: View {
                                 ProgressView().controlSize(.small).frame(width: 28, height: 28)
                             } else {
                                 Image(systemName: "arrow.up.circle.fill")
-                                    .resizable()
-                                    .frame(width: 28, height: 28)
+                                    .resizable().frame(width: 28, height: 28)
                                     .foregroundColor(userInput.isEmpty ? .gray : .blue)
                             }
                         }
@@ -398,7 +375,14 @@ struct FloatingWindowView: View {
                         .disabled(userInput.isEmpty || isSending)
                     }
                     // --- End HStack ---
-                }
+                    .padding(.horizontal, 8) // Add some horizontal padding for icons
+                    .padding(.bottom, 8)    // Add some bottom padding for icons
+
+                } // --- End of Parent VStack ---
+                // --- APPLY Background and CornerRadius to VStack ---
+                .background(Color.white.opacity(0.1)) // <-- MOVED HERE
+                .cornerRadius(10)                   // <-- MOVED HERE
+
                 .padding(.horizontal)
                 .padding(.bottom, 10)
 
