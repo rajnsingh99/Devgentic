@@ -1,11 +1,15 @@
-// CustomTextEditor.swift
-
+// /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/CustomTextEditor.swift
 import SwiftUI
 import AppKit
 
 struct CustomTextEditor: NSViewRepresentable {
     @Binding var text: String
     var onCommit: () -> Void // Action to perform on Shift+Enter
+    // var placeholder: String = "" // REMOVED - Will be handled by SwiftUI overlay
+
+    // --- Define colors used for text ---
+    private let textColor: NSColor = .white
+    // -----------------------------------
 
     // Coordinator to handle delegate methods
     func makeCoordinator() -> Coordinator {
@@ -14,33 +18,38 @@ struct CustomTextEditor: NSViewRepresentable {
 
     // Create the underlying NSTextView
     func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSTextView.scrollableTextView() // Use scrollable for multi-line
+        let scrollView = NSTextView.scrollableTextView()
 
         guard let textView = scrollView.documentView as? NSTextView else {
-            // Fallback in case something goes wrong, though unlikely
             return scrollView
         }
 
-        textView.delegate = context.coordinator // Set the delegate
+        textView.delegate = context.coordinator
         textView.isEditable = true
         textView.isSelectable = true
-        textView.isRichText = false // We want plain text
+        textView.isRichText = false
         textView.allowsUndo = true
-        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize) // Match system font or customize
-        textView.textColor = NSColor.white // Match your UI style
-        textView.backgroundColor = NSColor.clear // Match your UI style
-        textView.insertionPointColor = NSColor.white // Match your UI style
+        textView.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        textView.textColor = textColor // Set text color directly
+        textView.backgroundColor = NSColor.clear
+        textView.insertionPointColor = textColor
         textView.string = text // Initial text
+
+        // --- Add Internal Padding ---
+        textView.textContainer?.lineFragmentPadding = 8.0
 
         // Allow vertical resizing
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false // Usually false for chat inputs
-        textView.autoresizingMask = [.width] // Resize width with scroll view
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 0, height: 5) 
 
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.contentView.drawsBackground = false
 
         return scrollView
     }
@@ -48,12 +57,12 @@ struct CustomTextEditor: NSViewRepresentable {
     // Update the NSTextView when the SwiftUI binding changes
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? NSTextView else { return }
-        // Only update if the text is actually different to avoid feedback loops
+
+        // Update if text differs
         if textView.string != text {
-            // Preserve cursor position if possible (simple implementation)
             let selectedRange = textView.selectedRange()
             textView.string = text
-            // Check if the range is valid before setting it
+            // Restore selection safely
             if selectedRange.location != NSNotFound && (selectedRange.location + selectedRange.length) <= (text as NSString).length {
                  textView.setSelectedRange(selectedRange)
             }
@@ -63,39 +72,42 @@ struct CustomTextEditor: NSViewRepresentable {
     // Coordinator class
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CustomTextEditor
+        // private var isEditing = false // REMOVED - No longer needed for placeholder
 
         init(_ parent: CustomTextEditor) {
             self.parent = parent
         }
 
-        // Update the SwiftUI binding when the text view's content changes
+        // --- REMOVED Placeholder Logic ---
+        // func showPlaceholder...
+        // func hidePlaceholder...
+        // func updatePlaceholder...
+        // ---------------------------------
+
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            // Use DispatchQueue to avoid modifying state during view update cycle
-            DispatchQueue.main.async {
-                // Ensure parent is still valid if text changes rapidly after view disappears
-                // (Though less likely in this specific setup)
-                // Optional: Add weak self check if needed in complex scenarios
-                self.parent.text = textView.string
-            }
+            // Update binding directly (consider if async is truly needed - usually not if delegate is on main thread)
+            // DispatchQueue.main.async { // Removed async for simplicity, monitor if needed
+                 self.parent.text = textView.string
+            // }
         }
 
-        // Intercept key commands
+        // --- REMOVED textDidBeginEditing / textDidEndEditing for placeholder ---
+        // func textDidBeginEditing...
+        // func textDidEndEditing...
+        // ---------------------------------------------------------------------
+
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            // Check if the command is 'insertNewline:' (Enter key)
             if commandSelector == #selector(NSTextView.insertNewline(_:)) {
-                // Check if the Shift key is pressed using the current event
                 if let event = NSApp.currentEvent, event.modifierFlags.contains(.shift) {
-                    // Shift + Enter: Trigger the commit action
                     parent.onCommit()
-                    return true // Command was handled, don't insert newline
+                    return true // Handled Shift+Enter
                 } else {
-                    // Just Enter: Allow default behavior (insert newline)
-                    return false // Let NSTextView handle inserting the newline
+                    // Allow normal newline insertion
+                    return false
                 }
             }
-            // For any other command, let NSTextView handle it
-            return false
+            return false // Not handled
         }
     }
 }

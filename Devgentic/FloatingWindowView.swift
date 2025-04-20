@@ -1,4 +1,4 @@
-// /Users/alice/Documents/Workspace/mac-projects/devgentic-mac/AgenticDev/FloatingWindowView.swift
+// /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/FloatingWindowView.swift
 //
 //  ContentView.swift
 //  AgenticDev
@@ -24,10 +24,23 @@ struct Conversation: Identifiable, Equatable {
         // Find the first message starting with "You: "
         if let firstUserMessage = messages.first(where: { $0.starts(with: "You:") }) {
             let content = firstUserMessage.dropFirst(4).trimmingCharacters(in: .whitespacesAndNewlines)
-            return String(content.prefix(30)) + (content.count > 30 ? "..." : "")
+            // Limit title length for display
+            let maxLength = 30
+            return String(content.prefix(maxLength)) + (content.count > maxLength ? "..." : "")
         }
         // Fallback if no user message yet or only agent messages
-        return messages.first?.prefix(30).trimmingCharacters(in: .whitespacesAndNewlines) ?? "New Chat"
+        if let firstMessage = messages.first {
+            let content = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Limit title length for display
+            let maxLength = 30
+            // Include "Agent:" prefix if it's the first message
+            if content.starts(with: "Agent:") {
+                 return String(content.prefix(maxLength + 7)) + (content.count > (maxLength + 7) ? "..." : "") // Account for "Agent: "
+            } else {
+                 return String(content.prefix(maxLength)) + (content.count > maxLength ? "..." : "")
+            }
+        }
+        return "New Chat"
     }
 }
 
@@ -119,7 +132,7 @@ struct FloatingWindowView: View {
         HStack(spacing: 0) {
             // --- Left Sidebar ---
             ZStack {
-                Color.black.opacity(0.85)
+                Color.black.opacity(0.25)
                 VStack(alignment: .leading, spacing: 0) {
                     // Header with New Chat Button
                     HStack {
@@ -153,13 +166,15 @@ struct FloatingWindowView: View {
                                         .padding(.horizontal)
                                         .padding(.vertical, 8) // Slightly more padding
                                         .frame(maxWidth: .infinity, alignment: .leading) // Make visual content fill width
+                                        .lineLimit(1) // Ensure title doesn't wrap
+                                        .truncationMode(.tail)
                                 }
                                 .background(selectedConversationID == conversation.id ? Color.white.opacity(0.2) : Color.clear) // Background for the HStack
                                 .cornerRadius(5) // Corner radius for the HStack background
                                 .contentShape(Rectangle()) // Define the tappable shape as the rectangle
                                 .onTapGesture { // Add the tap action
                                     selectedConversationID = conversation.id
-                                    isInputFocused = true // <--- Set focus when selecting a chat
+                                    // Don't set focus immediately, let the .onChange handle it after scroll
                                 }
                             }
                         }
@@ -262,8 +277,8 @@ struct FloatingWindowView: View {
                             }
                         }
                         .onChange(of: isSending) { _ in
-                             // Only scroll if a conversation is selected
-                             if selectedConversationID != nil {
+                             // Only scroll if a conversation is selected and we just finished sending
+                             if selectedConversationID != nil && !isSending {
                                  scrollToBottom(scrollProxy: scrollProxy, history: currentChatHistory)
                              }
                         }
@@ -289,20 +304,86 @@ struct FloatingWindowView: View {
                     Spacer()
                 }
 
-
                 // Input Area (disable only when sending)
                 VStack(spacing: 6) {
-                    // Use CustomTextEditor instead of standard TextEditor
-                    CustomTextEditor(text: $userInput, onCommit: sendMessage)
-                        .padding(2) // Add slight padding around the scrollview if needed
-                        .frame(minHeight: 40, maxHeight: 120)
-                        .background(Color.white.opacity(0.1)) // Apply background to the container
-                        .cornerRadius(10) // Apply corner radius to the container
-                        .focused($isInputFocused) // Bind focus state
+                    // --- ZStack for TextEditor and Placeholder ---
+                    ZStack(alignment: .topLeading) { // Align placeholder to top-left
+                        // --- CustomTextEditor (No placeholder parameter) ---
+                        CustomTextEditor(
+                            text: $userInput,
+                            onCommit: sendMessage
+                        )
+
+                        // --- Placeholder Text Overlay ---
+                        if userInput.isEmpty {
+                            Text("Type a message (Shift+Enter to send)...")
+                                .font(Font.system(size: NSFont.systemFontSize)) // Match editor font
+                                .foregroundColor(.gray)
+                                // --- Increased Padding ---
+                                // Increase horizontal padding by 2 (from 5 to 7)
+                                .padding(.horizontal, 7) // <--- Increased by 2
+                                // Increase top padding by 2 (from 3 to 5)
+                                .padding(.top, 5)        // <--- Increased by 2
+                                // ---------------------------
+                                .allowsHitTesting(false) // Let clicks pass through to the editor
+                        }
+                        // ---------------------------------
+                    }
+                    // --- Frame for Dynamic Height (Applied to ZStack) ---
+                    .frame(minHeight: 40, maxHeight: 150) // Allow growth up to 150 points
+                    // -----------------------------------------
+                    .background(Color.white.opacity(0.1))
+                    .cornerRadius(10)
+                    .focused($isInputFocused)
+                    .disabled(isSending)
+
+                    // --- HStack with Icons ---
+                    HStack(spacing: 10) {
+                        // Web Icon
+                        Button {
+                            // TODO: Implement web action
+                            logger.info("Web icon tapped")
+                        } label: {
+                            Image(systemName: "globe")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 20, height: 20)
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        .buttonStyle(PlainButtonStyle())
                         .disabled(isSending)
 
-                    HStack {
-                        Spacer()
+                        // Plus Icon
+                        Button {
+                            // TODO: Implement plus action (e.g., attach file)
+                            logger.info("Plus icon tapped")
+                        } label: {
+                            Image(systemName: "plus")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 20, height: 20)
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .disabled(isSending)
+
+                        Spacer() // Pushes remaining icons to the right
+
+                        // Mic Icon
+                        Button {
+                            // TODO: Implement mic action (e.g., voice input)
+                            logger.info("Mic icon tapped")
+                        } label: {
+                            Image(systemName: "mic.fill")
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: 20, height: 20)
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .disabled(isSending)
+
+                        // Send Button
                         Button(action: sendMessage) {
                             if isSending {
                                 ProgressView().controlSize(.small).frame(width: 28, height: 28)
@@ -316,9 +397,11 @@ struct FloatingWindowView: View {
                         .buttonStyle(PlainButtonStyle())
                         .disabled(userInput.isEmpty || isSending)
                     }
+                    // --- End HStack ---
                 }
                 .padding(.horizontal)
-                .padding(.bottom, 10) // Existing padding below input area
+                .padding(.bottom, 10)
+
 
                 // --- Hidden Button for Keyboard Shortcut (Cmd+N) ---
                 Button(action: startNewConversation) { EmptyView() }
@@ -331,13 +414,13 @@ struct FloatingWindowView: View {
             // --- End Main Interaction Area ---
         }
         .opacity(windowOpacity)
-        .frame(minWidth: 800, minHeight: 500)
+        .frame(minWidth: 800, minHeight: 500) // Keep overall window frame
         .onAppear {
              // Select the most recent conversation on launch, if any
              if selectedConversationID == nil, let mostRecent = sortedConversations.first {
                  selectedConversationID = mostRecent.id
                  // Optionally set focus on appear if a chat is auto-selected
-                 // DispatchQueue.main.async { isInputFocused = true }
+                 // DispatchQueue.main.async { isInputFocused = true } // Focus handled by onChange now
              } else if conversations.isEmpty {
                  // If starting completely fresh, set focus
                  DispatchQueue.main.async { isInputFocused = true }
@@ -360,8 +443,8 @@ struct FloatingWindowView: View {
         conversations.append(newConversation)
         selectedConversationID = newConversation.id // Select the new one
         logger.info("Started new conversation with ID: \(newConversation.id.uuidString)")
-        // Set focus when starting a new chat
-        DispatchQueue.main.async { isInputFocused = true } // Use async to ensure view updates first
+        // Set focus when starting a new chat - handled by onChange(of: selectedConversationID) now
+        // DispatchQueue.main.async { isInputFocused = true }
     }
 
     func sendMessage() {
@@ -382,7 +465,7 @@ struct FloatingWindowView: View {
 
         if selectedConversationID == nil {
             logger.info("No conversation selected. Starting a new one before sending.")
-            startNewConversation() // This will also set focus
+            startNewConversation() // This will also trigger focus via onChange
         }
 
         guard let currentID = selectedConversationID,
@@ -394,12 +477,10 @@ struct FloatingWindowView: View {
         let userMessage = "You: \(messageToSend)"
         conversations[conversationIndex].messages.append(userMessage)
         conversations[conversationIndex].timestamp = Date()
-        let messageLog = messageToSend
+        let messageLog = messageToSend // Capture for logging before clearing
         userInput = "" // Clear input field *after* processing
         isSending = true
-        // Ensure focus remains after sending if needed, though clearing might shift it
-        // DispatchQueue.main.async { isInputFocused = true }
-
+        // Focus management is handled by onChange events and onAppear
 
         Task {
             var agentResponse = "Error: Agent response not received."
@@ -440,8 +521,10 @@ struct FloatingWindowView: View {
                     logger.error("Error: Conversation \(currentID.uuidString) disappeared before agent response could be added.")
                 }
                 isSending = false
-                // Restore focus after response if desired
-                // DispatchQueue.main.async { isInputFocused = true }
+                // Restore focus after response if desired and input is empty
+                // if userInput.isEmpty {
+                //     DispatchQueue.main.async { isInputFocused = true }
+                // }
             }
         }
     }
@@ -449,6 +532,7 @@ struct FloatingWindowView: View {
     private func scrollToBottom(scrollProxy: ScrollViewProxy, history: [String], animated: Bool = true) {
          guard !history.isEmpty else { return }
          let lastIndex = history.count - 1
+         logger.trace("Scrolling to index \(lastIndex)")
          if animated {
              withAnimation(.easeOut(duration: 0.2)) {
                  scrollProxy.scrollTo(lastIndex, anchor: .bottom)
@@ -466,10 +550,13 @@ struct FloatingWindowView: View {
             case .notConnectedToInternet: return "Error: Not connected to the internet."
             case .badServerResponse: return "Error: Received an invalid response from the server."
             case .cannotFindHost: return "Error: Cannot find the AI server host (check address/DNS)."
-            case URLError.Code(rawValue: 1): return "Error: Operation not permitted (check Sandbox/Firewall)."
-            default: return "Error: Network request failed (\(urlError.localizedDescription))."
+            case URLError.Code(rawValue: 1): return "Error: Operation not permitted (check Sandbox/Firewall)." // Common POSIX permission denied
+            default:
+                logger.warning("Unhandled URLError code: \(urlError.code.rawValue) - \(urlError.localizedDescription)")
+                return "Error: Network request failed (\(urlError.localizedDescription))."
             }
         }
+        logger.warning("Unhandled error type: \(type(of: error)) - \(error.localizedDescription)")
         return "Error: \(error.localizedDescription)" // General error
     }
 
@@ -486,7 +573,9 @@ struct MessageView: View {
     }
 
     var body: some View {
-        let displayText = (isUser ? message.dropFirst(4) : message.dropFirst(6))
+        // Determine prefix length safely
+        let prefixLength = isUser ? 4 : (message.starts(with: "Agent:") ? 6 : 0)
+        let displayText = message.dropFirst(prefixLength)
                             .trimmingCharacters(in: .whitespacesAndNewlines)
         Text(displayText)
             .padding(10)
