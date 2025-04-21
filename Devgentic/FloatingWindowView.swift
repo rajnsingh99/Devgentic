@@ -73,13 +73,14 @@ struct FloatingWindowView_Previews: PreviewProvider {
         // Example with some preview data
         FloatingWindowView(
             conversations: [
-                Conversation(id: UUID(), messages: ["You: Hello there!", "Agent: Hi! How can I help?"], timestamp: Date()),
-                Conversation(id: UUID(), messages: ["You: What is Swift?"], timestamp: Date().addingTimeInterval(-3600))
+                Conversation(id: UUID(), messages: ["You: Hello there!", "Agent: Hi! How can I help?"], timestamp: Date()), // Today
+                Conversation(id: UUID(), messages: ["You: What is Swift?"], timestamp: Date().addingTimeInterval(-86400)), // Yesterday
+                Conversation(id: UUID(), messages: ["You: Old question"], timestamp: Date().addingTimeInterval(-86400 * 3)) // Older
             ],
             selectedConversationID: nil // Start with none selected in preview
         )
         .frame(width: 800, height: 500)
-        .previewDisplayName("With Conversations")
+        .previewDisplayName("With Grouped Conversations")
 
         // Example with no conversations
         FloatingWindowView(conversations: [])
@@ -107,7 +108,7 @@ struct FloatingWindowView: View {
     @State private var showSettings: Bool = false
     @State private var windowOpacity: Double = 1.0
     @State private var isSending: Bool = false
-    @State private var llmModelName: String = "gemma4b" // Default Ollama model
+    @State private var llmModelName: String = "gemma:2b" // Default Ollama model
 
     // --- NEW State for Backend Selection ---
     @State private var selectedBackend: BackendType // Initialized in init
@@ -117,7 +118,7 @@ struct FloatingWindowView: View {
 
     // --- AI Connection ---
     // Initialize without base URL, assuming AIConnect is modified to accept it dynamically
-    private let aiConnect = AIConnect()
+    private let aiConnect = AIConnect() // Ensure AIConnect is defined elsewhere
     // --------------------
 
     // Initializer for previews or external data loading
@@ -146,16 +147,61 @@ struct FloatingWindowView: View {
         return conversations.firstIndex(where: { $0.id == selectedID })
     }
 
-    // Computed property for sorted conversations (Optimization)
-    private var sortedConversations: [Conversation] {
-        conversations.sorted { $0.timestamp > $1.timestamp }
+    // --- Grouped Conversations ---
+    private var groupedConversations: [String: [Conversation]] {
+        let calendar = Calendar.current
+        let now = Date()
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "MMMM d, yyyy" // Format for older dates
+
+        // Group conversations using reduce
+        let grouped = conversations.reduce(into: [String: [Conversation]]()) { result, conversation in
+            let timestamp = conversation.timestamp
+            let groupKey: String
+            if calendar.isDateInToday(timestamp) {
+                groupKey = "Today"
+            } else if calendar.isDateInYesterday(timestamp) {
+                groupKey = "Yesterday"
+            } else {
+                groupKey = dateFormatter.string(from: timestamp)
+            }
+            result[groupKey, default: []].append(conversation)
+        }
+
+        // Sort conversations within each group (most recent first)
+        return grouped.mapValues { $0.sorted { $0.timestamp > $1.timestamp } }
     }
+
+    // --- Sorted Group Keys ---
+    private var sortedGroupKeys: [String] {
+        let calendar = Calendar.current
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "MMMM d, yyyy"
+
+        return groupedConversations.keys.sorted { key1, key2 in
+            // Define order: Today > Yesterday > Older Dates (most recent first)
+            if key1 == "Today" { return true }
+            if key2 == "Today" { return false }
+            if key1 == "Yesterday" { return true }
+            if key2 == "Yesterday" { return false }
+
+            // If both are dates, compare them
+            if let date1 = dateFormatter.date(from: key1), let date2 = dateFormatter.date(from: key2) {
+                return date1 > date2 // Sort dates descending (most recent first)
+            }
+
+            // Fallback (shouldn't happen with defined keys)
+            return key1 > key2
+        }
+    }
+    // --------------------------------
 
     // Computed property for the title in the header
     private var currentConversationTitle: String {
         guard let index = selectedConversationIndex else {
             return conversations.isEmpty ? "Devgentic" : "Select Chat"
         }
+        // Use the original conversation array for title lookup based on ID
         return conversations[index].displayTitle
     }
 
@@ -184,30 +230,60 @@ struct FloatingWindowView: View {
 
                         Divider().background(Color.white.opacity(0.2))
 
-                        // List of Conversations
+                        // --- UPDATED: List of Conversations (Adjusted DisclosureGroup Style) ---
                         ScrollView {
-                            VStack(alignment: .leading, spacing: 5) {
-                                ForEach(sortedConversations) { conversation in
-                                    HStack {
-                                        Text(conversation.displayTitle)
-                                            .foregroundColor(selectedConversationID == conversation.id ? .blue : .white)
-                                            .padding(.horizontal)
-                                            .padding(.vertical, 8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                            .lineLimit(1)
-                                            .truncationMode(.tail)
-                                    }
-                                    .background(selectedConversationID == conversation.id ? Color.white.opacity(0.2) : Color.clear)
-                                    .cornerRadius(5)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        selectedConversationID = conversation.id
-                                    }
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(sortedGroupKeys, id: \.self) { groupKey in
+                                    let isGroupSelected = groupedConversations[groupKey]?.contains(where: { $0.id == selectedConversationID }) ?? false
+
+                                    DisclosureGroup(
+                                        content: {
+                                            // Content remains the same
+                                            if let conversationsInGroup = groupedConversations[groupKey] {
+                                                VStack(alignment: .leading, spacing: 5) {
+                                                    ForEach(conversationsInGroup) { conversation in
+                                                        HStack {
+                                                            Text(conversation.displayTitle)
+                                                                .foregroundColor(selectedConversationID == conversation.id ? .cyan : .white)
+                                                                .padding(.horizontal, 8)
+                                                                .padding(.vertical, 6)
+                                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                                .lineLimit(1)
+                                                                .truncationMode(.tail)
+                                                        }
+                                                        .background(selectedConversationID == conversation.id ? Color.blue.opacity(0.4) : Color.clear)
+                                                        .cornerRadius(5)
+                                                        .contentShape(Rectangle())
+                                                        .onTapGesture {
+                                                            selectedConversationID = conversation.id
+                                                        }
+                                                    }
+                                                }
+                                                .padding(.leading, 10)
+                                                .padding(.bottom, 5)
+                                            }
+                                        },
+                                        label: {
+                                            Text(groupKey)
+                                                .font(.footnote) // << Increased font size
+                                                .fontWeight(.semibold)
+                                                .foregroundColor(isGroupSelected ? .white.opacity(0.9) : .gray)
+                                                .padding(.vertical, 6) // << Slightly increased vertical padding
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                    )
+                                    .accentColor(.white.opacity(0.7))
+                                    .background(isGroupSelected ? Color.white.opacity(0.1) : Color.clear)
+                                    .cornerRadius(4)
+                                    .padding(.horizontal, 5)
+                                    .padding(.leading, 5) // << Added extra leading padding for arrow space
+                                    .padding(.bottom, 3)
                                 }
                             }
-                            .padding(.horizontal, 5)
                             .padding(.top, 10)
+                            .padding(.bottom, 10)
                         }
+                        // --- END UPDATED List ---
                         Spacer()
                     }
                 }
@@ -251,7 +327,7 @@ struct FloatingWindowView: View {
                 .padding()
                 .background(Color.gray.opacity(0.2))
 
-                // --- UPDATED Settings Panel (Conditional) ---
+                // --- Settings Panel (Conditional) ---
                 if showSettings {
                     VStack(alignment: .leading, spacing: 8) {
                         // Backend Selection
@@ -327,7 +403,7 @@ struct FloatingWindowView: View {
                                         let message = currentChatHistory[index]
                                         HStack {
                                             if message.starts(with: "Agent:") { Spacer() }
-                                            MessageView(message: message)
+                                            MessageView(message: message) // Ensure MessageView is defined
                                             if message.starts(with: "You:") { Spacer() }
                                         }
                                         .id(index)
@@ -381,6 +457,7 @@ struct FloatingWindowView: View {
                 // Input Area
                 VStack(spacing: 6) {
                     ZStack(alignment: .topLeading) {
+                        // This will now unambiguously use the CustomTextEditor from CustomTextEditor.swift
                         CustomTextEditor(
                             text: $userInput,
                             onCommit: sendMessage
@@ -389,12 +466,12 @@ struct FloatingWindowView: View {
                             Text("Type a message (Shift+Enter to send)...")
                                 .font(Font.system(size: NSFont.systemFontSize))
                                 .foregroundColor(.gray)
-                                .padding(.horizontal, 7)
-                                .padding(.top, 6)
+                                .padding(.horizontal, 7) // Adjust padding to match CustomTextEditor's internal padding
+                                .padding(.top, 8)       // Adjust padding to match CustomTextEditor's internal padding
                                 .allowsHitTesting(false)
                         }
                     }
-                    .frame(minHeight: 30, maxHeight: 40)
+                    .frame(minHeight: 30, maxHeight: 120) // Allow more height for multi-line input
                     .focused($isInputFocused)
                     .disabled(isSending)
 
@@ -455,9 +532,13 @@ struct FloatingWindowView: View {
         .opacity(windowOpacity)
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
-             if selectedConversationID == nil, let mostRecent = sortedConversations.first {
-                 selectedConversationID = mostRecent.id
+             // Select the first conversation in the first group if none is selected
+             if selectedConversationID == nil,
+                let firstKey = sortedGroupKeys.first,
+                let firstConv = groupedConversations[firstKey]?.first {
+                 selectedConversationID = firstConv.id
              } else if conversations.isEmpty {
+                 // Focus input if there are no conversations at all
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
@@ -474,7 +555,7 @@ struct FloatingWindowView: View {
         // Focus is handled by onChange(of: selectedConversationID)
     }
 
-    // --- UPDATED sendMessage Function ---
+    // --- sendMessage Function (Unchanged from previous version) ---
     func sendMessage() {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         logger.debug("sendMessage called. Backend: \(selectedBackend.rawValue), isSending: \(isSending), trimmedInput: '\(trimmedInput)'")
@@ -518,7 +599,6 @@ struct FloatingWindowView: View {
             let targetURL: String
             let targetEndpoint: String
             let payload: [String: Any]
-            let requiresJsonResponse: Bool // Flag to know how to parse response
 
             switch selectedBackend {
             case .ollama:
@@ -529,7 +609,6 @@ struct FloatingWindowView: View {
                     "prompt": messageToSend,
                     "stream": false
                 ]
-                requiresJsonResponse = true // Ollama sends JSON with "response" key
                 logger.debug("Configured for Ollama. Model: \(llmModelName)")
 
             case .agent:
@@ -539,8 +618,6 @@ struct FloatingWindowView: View {
                     "main_task": messageToSend,
                     "strategy": agentDelegationStrategy
                 ]
-                // Assume Agent might return JSON with "result" or plain text
-                requiresJsonResponse = false // Allow plain text fallback
                 logger.debug("Configured for Agent. URL: \(targetURL), Strategy: \(agentDelegationStrategy)")
             }
 
@@ -550,36 +627,76 @@ struct FloatingWindowView: View {
                 // Use dynamic URL/Endpoint (Assumes AIConnect is adapted)
                 let responseData = try await aiConnect.postToLocalServer(baseURL: targetURL, endpoint: targetEndpoint, payload: payload)
 
-                // Adapt Response Handling
-                if let json = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any] {
-                    let replyKey = (selectedBackend == .ollama) ? "response" : "result"
-                    if let reply = json[replyKey] as? String {
-                        agentResponse = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                        logger.debug("Received JSON response using key '\(replyKey)': \(agentResponse)")
-                    } else {
-                        logger.warning("Received JSON, but key '\(replyKey)' not found or not a string. Keys: \(json.keys)")
-                        if let fallbackText = String(data: responseData, encoding: .utf8) {
-                             agentResponse = fallbackText.trimmingCharacters(in: .whitespacesAndNewlines)
-                             logger.warning("Using raw JSON as text fallback.")
+                // --- UPDATED Response Handling ---
+                if selectedBackend == .agent {
+                    // Try parsing the specific Agent JSON structure
+                    if let json = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
+                       let resultsArray = json["results"] as? [[String: Any]] {
+
+                        // Find the first result dictionary where status is "completed"
+                        if let completedResultDict = resultsArray.first(where: { ($0["status"] as? String) == "completed" }),
+                           let resultString = completedResultDict["result"] as? String {
+                            // Successfully found and extracted the completed result
+                            agentResponse = resultString.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let slaveId = completedResultDict["slave_id"] as? String ?? "unknown"
+                            logger.debug("Extracted result from first completed agent (\(slaveId)): \(agentResponse)")
                         } else {
-                             agentResponse = "Error: Received unreadable JSON."
+                            // Handle cases where no agent completed successfully
+                            let failedCount = resultsArray.filter { ($0["status"] as? String) != "completed" }.count
+                            if failedCount > 0 && failedCount == resultsArray.count {
+                                // If all agents failed, try to show the first error message
+                                if let firstFailure = resultsArray.first, let errorMsg = firstFailure["result"] as? String {
+                                     agentResponse = "Agent Error: \(errorMsg)"
+                                     logger.warning("All agents failed. First error: \(errorMsg)")
+                                } else {
+                                     agentResponse = "Error: All agents failed to complete the task."
+                                     logger.warning("All agents failed, but couldn't extract specific error message.")
+                                }
+                            } else if resultsArray.isEmpty {
+                                 agentResponse = "Error: Received empty results array from agent."
+                                 logger.warning("Agent returned an empty results array.")
+                            } else {
+                                 // This might happen if there are other statuses or partial success without 'completed'
+                                 agentResponse = "Error: No agent completed the task successfully."
+                                 logger.warning("No agent found with 'completed' status in results: \(resultsArray)")
+                            }
                         }
-                    }
-                } else if let textResponse = String(data: responseData, encoding: .utf8) {
-                    if !requiresJsonResponse || agentResponse == "Error: Agent response not received." {
-                         agentResponse = textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
-                         logger.debug("Received plain text response: \(agentResponse)")
+                    } else if let textResponse = String(data: responseData, encoding: .utf8) {
+                        // Fallback if it's not the expected JSON structure, treat as plain text
+                        // This might indicate an error message from the server itself before the agent logic ran
+                        agentResponse = textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+                        logger.warning("Received non-standard JSON or plain text from Agent backend: \(agentResponse)")
                     } else {
-                         // Construct the error message string first
-                         let errorMessage = "Error: Expected JSON, received text: \(textResponse.prefix(100))..."
-                         agentResponse = errorMessage
-                         // Use string interpolation for the logger
-                         logger.error("\(errorMessage)") // <-- FIX HERE
+                        // Fallback if decoding fails completely
+                        logger.error("Failed to decode Agent response data (neither expected JSON nor UTF-8 text).")
+                        agentResponse = "Error: Could not decode server response."
                     }
-                } else {
-                    logger.error("Failed to decode response data (neither JSON nor UTF-8 text).")
-                    agentResponse = "Error: Could not decode server response."
+
+                } else if selectedBackend == .ollama {
+                    // Keep the existing Ollama handling logic
+                    if let json = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any] {
+                        let replyKey = "response" // Ollama uses "response"
+                        if let reply = json[replyKey] as? String {
+                            agentResponse = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+                            logger.debug("Received Ollama JSON response using key '\(replyKey)': \(agentResponse)")
+                        } else {
+                            logger.warning("Received Ollama JSON, but key '\(replyKey)' not found or not a string. Keys: \(json.keys)")
+                            if let fallbackText = String(data: responseData, encoding: .utf8) {
+                                 agentResponse = fallbackText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                 logger.warning("Using raw JSON as text fallback for Ollama.")
+                            } else {
+                                 agentResponse = "Error: Received unreadable JSON from Ollama."
+                            }
+                        }
+                    } else if let textResponse = String(data: responseData, encoding: .utf8) {
+                         agentResponse = textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+                         logger.warning("Expected JSON from Ollama, received text: \(textResponse.prefix(100))...")
+                    } else {
+                        logger.error("Failed to decode Ollama response data (neither JSON nor UTF-8 text).")
+                        agentResponse = "Error: Could not decode server response."
+                    }
                 }
+                // --- End UPDATED Response Handling ---
 
             } catch {
                 logger.error("Error during API call or decoding: \(error.localizedDescription)")
@@ -589,13 +706,16 @@ struct FloatingWindowView: View {
 
             // Update UI on Main Actor
             await MainActor.run {
+                // Find index using the main conversations array
                 if let updatedIndex = conversations.firstIndex(where: { $0.id == currentID }) {
                     conversations[updatedIndex].messages.append("Agent: \(agentResponse)")
-                    conversations[updatedIndex].timestamp = Date()
+                    conversations[updatedIndex].timestamp = Date() // Update timestamp on response
                 } else {
                     logger.error("Error: Conversation \(currentID.uuidString) disappeared before agent response could be added.")
                 }
                 isSending = false
+                // Optionally re-focus input if needed
+                // isInputFocused = true
             }
         }
     }
@@ -664,3 +784,6 @@ struct MessageView: View {
             .textSelection(.enabled) // Allow text selection
     }
 }
+
+// Ensure AIConnect struct/class is defined elsewhere in your project.
+// Ensure CustomTextEditor struct is defined in CustomTextEditor.swift
