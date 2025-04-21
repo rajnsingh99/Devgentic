@@ -1,6 +1,6 @@
 // /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/FloatingWindowView.swift
 //
-//  ContentView.swift
+//  ContentView.swift (Adapted for FloatingWindowView)
 //  AgenticDev
 //
 //  Created by Raj Singh on 19/04/25.
@@ -12,6 +12,16 @@ import os // Import os for logging
 
 // Logger for better debugging
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "FloatingWindowView")
+
+// MARK: - Backend Type Definition
+// Define the possible AI backend types
+enum BackendType: String, CaseIterable, Identifiable {
+    case ollama = "Ollama"
+    case agent = "Agent"
+
+    var id: String { self.rawValue }
+}
+
 
 // MARK: - Data Model
 struct Conversation: Identifiable, Equatable {
@@ -44,7 +54,7 @@ struct Conversation: Identifiable, Equatable {
     }
 }
 
-
+// MARK: - Visual Effect View
 struct VisualEffectBlur: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
@@ -69,48 +79,63 @@ struct FloatingWindowView_Previews: PreviewProvider {
             selectedConversationID: nil // Start with none selected in preview
         )
         .frame(width: 800, height: 500)
+        .previewDisplayName("With Conversations")
 
         // Example with no conversations
         FloatingWindowView(conversations: [])
             .frame(width: 800, height: 500)
             .previewDisplayName("No Conversations")
 
+        // Example with Agent backend selected in preview
+        FloatingWindowView(conversations: [], selectedBackend: .agent)
+            .frame(width: 800, height: 500)
+            .previewDisplayName("Agent Backend Selected")
     }
 }
 
+
+// MARK: - Main View
 struct FloatingWindowView: View {
     // --- Focus State ---
-    @FocusState private var isInputFocused: Bool // <--- Add FocusState
+    @FocusState private var isInputFocused: Bool
 
     // --- State Variables ---
-    @State private var isSidebarCollapsed: Bool = true // For collapsible sidebar
+    @State private var isSidebarCollapsed: Bool = true
     @State private var userInput = ""
-    @State var conversations: [Conversation] // Use @State for mutable array
-    @State var selectedConversationID: UUID? // Use @State for mutable selection
+    @State var conversations: [Conversation]
+    @State var selectedConversationID: UUID?
     @State private var showSettings: Bool = false
-    @State private var windowOpacity: Double = 1.0 // Default opacity
-    @State private var isSending: Bool = false // To disable input/button while waiting for response
-    @State private var llmModelName: String = "gemma4b" // Default model, make configurable later if needed
-    // --------------------
+    @State private var windowOpacity: Double = 1.0
+    @State private var isSending: Bool = false
+    @State private var llmModelName: String = "gemma4b" // Default Ollama model
+
+    // --- NEW State for Backend Selection ---
+    @State private var selectedBackend: BackendType // Initialized in init
+    @State private var agentBaseURL: String = "http://127.0.0.1:8000" // Default Agent URL
+    @State private var agentDelegationStrategy: String = "send_to_first_available" // Default Agent strategy
+    // --------------------------------------
 
     // --- AI Connection ---
-    // Consider making this injectable or configurable
-    private let aiConnect = AIConnect(baseURL: "http://127.0.0.1:11434")
-    private let chatEndpoint = "/api/generate"
+    // Initialize without base URL, assuming AIConnect is modified to accept it dynamically
+    private let aiConnect = AIConnect()
     // --------------------
 
     // Initializer for previews or external data loading
-    init(conversations: [Conversation] = [], selectedConversationID: UUID? = nil) {
+    // Added selectedBackend parameter
+    init(conversations: [Conversation] = [], selectedConversationID: UUID? = nil, selectedBackend: BackendType = .ollama) {
         _conversations = State(initialValue: conversations)
         _selectedConversationID = State(initialValue: selectedConversationID)
+        _selectedBackend = State(initialValue: selectedBackend) // Initialize backend state
     }
 
+
+    // MARK: - Computed Properties
 
     // Computed property to get the messages of the selected conversation
     private var currentChatHistory: [String] {
         guard let selectedID = selectedConversationID,
               let conversation = conversations.first(where: { $0.id == selectedID }) else {
-            return [] // Return empty if no conversation is selected
+            return []
         }
         return conversation.messages
     }
@@ -126,10 +151,19 @@ struct FloatingWindowView: View {
         conversations.sorted { $0.timestamp > $1.timestamp }
     }
 
+    // Computed property for the title in the header
+    private var currentConversationTitle: String {
+        guard let index = selectedConversationIndex else {
+            return conversations.isEmpty ? "Devgentic" : "Select Chat"
+        }
+        return conversations[index].displayTitle
+    }
+
+    // MARK: - Body
     var body: some View {
         HStack(spacing: 0) {
             // --- Left Sidebar (Collapsible) ---
-            if !isSidebarCollapsed { // Only show if not collapsed
+            if !isSidebarCollapsed {
                 ZStack {
                     Color.black.opacity(0.25)
                     VStack(alignment: .leading, spacing: 0) {
@@ -145,7 +179,6 @@ struct FloatingWindowView: View {
                                     .foregroundColor(.white.opacity(0.8))
                             }
                             .buttonStyle(PlainButtonStyle())
-                            // .keyboardShortcut("n", modifiers: .command) // <-- STEP 1: REMOVE Shortcut from here
                         }
                         .padding()
 
@@ -178,8 +211,8 @@ struct FloatingWindowView: View {
                         Spacer()
                     }
                 }
-                .frame(width: 240) // Fixed width when expanded
-                .transition(.move(edge: .leading)) // Animation for appearing/disappearing
+                .frame(width: 240)
+                .transition(.move(edge: .leading))
             }
             // --- End Left Sidebar ---
 
@@ -193,19 +226,14 @@ struct FloatingWindowView: View {
             VStack(spacing: 0) {
                 // Header with Sidebar Toggle and Settings Button
                 HStack {
-                    // --- Sidebar Toggle Button ---
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { // Add animation
-                            isSidebarCollapsed.toggle()
-                        }
+                        withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() }
                     } label: {
                         Image(systemName: isSidebarCollapsed ? "sidebar.right" : "sidebar.left")
                             .foregroundColor(.white.opacity(0.8))
                     }
                     .buttonStyle(PlainButtonStyle())
-                    // ---------------------------------
 
-                    // Display title of current chat or placeholder
                     Text(currentConversationTitle)
                         .font(.headline)
                         .foregroundColor(.white.opacity(0.8))
@@ -223,9 +251,24 @@ struct FloatingWindowView: View {
                 .padding()
                 .background(Color.gray.opacity(0.2))
 
-                // Settings Panel (Conditional)
+                // --- UPDATED Settings Panel (Conditional) ---
                 if showSettings {
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        // Backend Selection
+                        HStack {
+                            Text("Backend:")
+                                .foregroundColor(.white.opacity(0.8))
+                                .font(.caption)
+                            Picker("Backend", selection: $selectedBackend) {
+                                ForEach(BackendType.allCases) { type in
+                                    Text(type.rawValue).tag(type)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .controlSize(.small)
+                        }
+
+                        // Transparency
                         HStack {
                             Text("Transparency:")
                                 .foregroundColor(.white.opacity(0.8))
@@ -233,27 +276,52 @@ struct FloatingWindowView: View {
                             Slider(value: $windowOpacity, in: 0.2...1.0)
                                 .controlSize(.small)
                         }
-                        HStack {
-                            Text("Model:")
-                                .foregroundColor(.white.opacity(0.8))
-                                .font(.caption)
-                            TextField("Model Name", text: $llmModelName)
-                                .textFieldStyle(RoundedBorderTextFieldStyle())
-                                .controlSize(.small)
+
+                        Divider().background(Color.white.opacity(0.2))
+
+                        // Conditional Settings
+                        if selectedBackend == .ollama {
+                            HStack {
+                                Text("Ollama Model:")
+                                    .foregroundColor(.white.opacity(0.8))
+                                    .font(.caption)
+                                TextField("Model Name", text: $llmModelName)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .controlSize(.small)
+                            }
+                        } else if selectedBackend == .agent {
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack {
+                                    Text("Agent URL:")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .font(.caption)
+                                    TextField("Base URL", text: $agentBaseURL)
+                                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                                        .controlSize(.small)
+                                }
+                                HStack {
+                                    Text("Agent Strategy:")
+                                        .foregroundColor(.white.opacity(0.8))
+                                        .font(.caption)
+                                    TextField("Delegation Strategy", text: $agentDelegationStrategy)
+                                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                                        .controlSize(.small)
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal)
-                    .padding(.vertical, 5)
+                    .padding(.vertical, 10)
                     .background(Color.black.opacity(0.3))
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
+                // --- End Settings Panel ---
 
                 // Chat Message Area
                 if selectedConversationID != nil || !conversations.isEmpty {
                     ScrollViewReader { scrollProxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 10) {
-                                // Display messages only if a conversation is selected
                                 if selectedConversationID != nil {
                                     ForEach(currentChatHistory.indices, id: \.self) { index in
                                         let message = currentChatHistory[index]
@@ -262,11 +330,10 @@ struct FloatingWindowView: View {
                                             MessageView(message: message)
                                             if message.starts(with: "You:") { Spacer() }
                                         }
-                                        .id(index) // ID for scrolling
+                                        .id(index)
                                         .frame(maxWidth: .infinity, alignment: message.starts(with: "You:") ? .trailing : .leading)
                                     }
                                 }
-                                // Typing indicator (only show if sending within a selected chat)
                                 if isSending && selectedConversationID != nil {
                                     HStack {
                                          Text("Agent is thinking...")
@@ -280,71 +347,58 @@ struct FloatingWindowView: View {
                                      .padding(.leading)
                                 }
                             }
-                            .padding() // Padding inside the scroll view
+                            .padding()
                         }
                         .onChange(of: currentChatHistory) { _ in
-                            // Only scroll if a conversation is selected
                             if selectedConversationID != nil {
                                 scrollToBottom(scrollProxy: scrollProxy, history: currentChatHistory)
                             }
                         }
                         .onChange(of: isSending) { _ in
-                             // Only scroll if a conversation is selected and we just finished sending
                              if selectedConversationID != nil && !isSending {
                                  scrollToBottom(scrollProxy: scrollProxy, history: currentChatHistory)
                              }
                         }
-                        // Scroll when conversation changes
                         .onChange(of: selectedConversationID) { newID in
-                            // Only scroll if the new ID is not nil
                             if newID != nil {
-                                // Use DispatchQueue to allow view update before scrolling
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     scrollToBottom(scrollProxy: scrollProxy, history: currentChatHistory, animated: false)
-                                    isInputFocused = true // Set focus when selection changes
+                                    isInputFocused = true
                                 }
                             }
                         }
                     }
-                    .padding(.bottom, 5) // Padding below the ScrollViewReader
+                    .padding(.bottom, 5)
 
                 } else {
-                    // Placeholder view when no conversation is selected AND the list is empty
+                    // Placeholder view when no conversations exist
                     Spacer()
                     Text("Type a message or press ⌘N to start a new chat.")
                         .foregroundColor(.gray)
                     Spacer()
                 }
 
-                // Input Area (VStack containing TextEditor and Icons)
+                // Input Area
                 VStack(spacing: 6) {
-                    // --- ZStack for TextEditor and Placeholder ---
                     ZStack(alignment: .topLeading) {
-                        // --- CustomTextEditor ---
                         CustomTextEditor(
                             text: $userInput,
                             onCommit: sendMessage
                         )
-
-                        // --- Placeholder Text Overlay ---
                         if userInput.isEmpty {
                             Text("Type a message (Shift+Enter to send)...")
                                 .font(Font.system(size: NSFont.systemFontSize))
                                 .foregroundColor(.gray)
-                                // Adjusted Padding
-                                .padding(.horizontal, 7) // Horizontal padding for placeholder
-                                .padding(.top, 6)        // Top padding for placeholder
+                                .padding(.horizontal, 7)
+                                .padding(.top, 6)
                                 .allowsHitTesting(false)
                         }
                     }
-                    // --- Frame for Dynamic Height (Applied to ZStack) ---
-                    .frame(minHeight: 30, maxHeight: 40) // Reduced height
+                    .frame(minHeight: 30, maxHeight: 40)
                     .focused($isInputFocused)
                     .disabled(isSending)
 
-                    // --- HStack with Icons ---
                     HStack(spacing: 10) {
-                        // Web Icon
                         Button { logger.info("Web icon tapped") } label: {
                             Image(systemName: "globe")
                                 .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
@@ -352,7 +406,6 @@ struct FloatingWindowView: View {
                         }
                         .buttonStyle(PlainButtonStyle()).disabled(isSending)
 
-                        // Plus Icon
                         Button { logger.info("Plus icon tapped") } label: {
                             Image(systemName: "plus")
                                 .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
@@ -360,9 +413,8 @@ struct FloatingWindowView: View {
                         }
                         .buttonStyle(PlainButtonStyle()).disabled(isSending)
 
-                        Spacer() // Pushes remaining icons to the right
+                        Spacer()
 
-                        // Mic Icon
                         Button { logger.info("Mic icon tapped") } label: {
                             Image(systemName: "mic.fill")
                                 .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
@@ -370,7 +422,6 @@ struct FloatingWindowView: View {
                         }
                         .buttonStyle(PlainButtonStyle()).disabled(isSending)
 
-                        // Send Button
                         Button(action: sendMessage) {
                             if isSending {
                                 ProgressView().controlSize(.small).frame(width: 28, height: 28)
@@ -383,69 +434,50 @@ struct FloatingWindowView: View {
                         .buttonStyle(PlainButtonStyle())
                         .disabled(userInput.isEmpty || isSending)
                     }
-                    // --- End HStack ---
-                    .padding(.horizontal, 8) // Internal padding for icons
-                    .padding(.bottom, 8)    // Internal padding for icons
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 8)
 
-                } // --- End of Parent VStack for Input Area ---
-                // --- APPLY Background and CornerRadius to the whole Input Area VStack ---
+                }
                 .background(Color.white.opacity(0.1))
                 .cornerRadius(10)
-                // -----------------------------------------------------------------------
-                .padding(.horizontal) // Outer padding for the input block
-                .padding(.bottom, 10) // Outer padding for the input block
+                .padding(.horizontal)
+                .padding(.bottom, 10)
 
-                // --- Hidden Button for Keyboard Shortcut (Cmd+N) ---
+                // Hidden Button for Keyboard Shortcut (Cmd+N)
                 Button(action: startNewConversation) { EmptyView() }
                     .hidden()
                     .keyboardShortcut("n", modifiers: .command)
-                // ---------------------------------------------
 
             }
             .background(VisualEffectBlur())
             // --- End Main Interaction Area ---
         } // End Outermost HStack
         .opacity(windowOpacity)
-        .frame(minWidth: 800, minHeight: 500) // Keep overall window frame
+        .frame(minWidth: 800, minHeight: 500)
         .onAppear {
-             // Select the most recent conversation on launch, if any
              if selectedConversationID == nil, let mostRecent = sortedConversations.first {
                  selectedConversationID = mostRecent.id
              } else if conversations.isEmpty {
-                 // If starting completely fresh, set focus
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
-        // --- STEP 2: ADD Shortcut to the main container ---
-        // .keyboardShortcut("n", modifiers: .command, perform: startNewConversation)
-        // --------------------------------------------------
     }
-
-    // MARK: - Computed Properties for UI
-    private var currentConversationTitle: String {
-        guard let index = selectedConversationIndex else {
-            // If no conversation is selected, show a generic title
-            // or handle based on whether conversations exist
-            return conversations.isEmpty ? "Devgentic" : "Select Chat"
-        }
-        return conversations[index].displayTitle
-    }
-
 
     // MARK: - Actions
 
     func startNewConversation() {
-        userInput = "" // Clear input field
+        userInput = ""
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
         conversations.append(newConversation)
-        selectedConversationID = newConversation.id // Select the new one
+        selectedConversationID = newConversation.id
         logger.info("Started new conversation with ID: \(newConversation.id.uuidString)")
         // Focus is handled by onChange(of: selectedConversationID)
     }
 
+    // --- UPDATED sendMessage Function ---
     func sendMessage() {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.debug("sendMessage called. isSending: \(isSending), trimmedInput: '\(trimmedInput)', isInputFocused: \(isInputFocused)")
+        logger.debug("sendMessage called. Backend: \(selectedBackend.rawValue), isSending: \(isSending), trimmedInput: '\(trimmedInput)'")
 
         guard !isSending else {
             logger.warning("sendMessage aborted: Already sending.")
@@ -461,44 +493,91 @@ struct FloatingWindowView: View {
 
         if selectedConversationID == nil {
             logger.info("No conversation selected. Starting a new one before sending.")
-            startNewConversation() // This will also trigger focus via onChange
+            startNewConversation()
         }
 
         guard let currentID = selectedConversationID,
               let conversationIndex = conversations.firstIndex(where: { $0.id == currentID }) else {
-            logger.error("CRITICAL: Could not find or create a conversation (ID: \(String(describing: selectedConversationID))) to send message.")
+            logger.error("CRITICAL: Could not find or create conversation (ID: \(String(describing: selectedConversationID))).")
             return
         }
 
+        // Append user message locally
         let userMessage = "You: \(messageToSend)"
         conversations[conversationIndex].messages.append(userMessage)
         conversations[conversationIndex].timestamp = Date()
-        let messageLog = messageToSend // Capture for logging before clearing
-        userInput = "" // Clear input field *after* processing
+        let messageLog = messageToSend // Capture for logging
+        userInput = "" // Clear input field
         isSending = true
 
         Task {
             var agentResponse = "Error: Agent response not received."
             var taskError: Error? = nil
 
-            do {
-                let payload: [String: Any] = [
+            // Determine Backend Configuration
+            let targetURL: String
+            let targetEndpoint: String
+            let payload: [String: Any]
+            let requiresJsonResponse: Bool // Flag to know how to parse response
+
+            switch selectedBackend {
+            case .ollama:
+                targetURL = "http://127.0.0.1:11434" // Ollama default URL
+                targetEndpoint = "/api/generate"
+                payload = [
                     "model": llmModelName,
                     "prompt": messageToSend,
                     "stream": false
                 ]
-                logger.debug("Sending query '\(messageLog)' to \(chatEndpoint) for conversation \(currentID.uuidString)")
-                let responseData = try await aiConnect.postToLocalServer(endpoint: chatEndpoint, payload: payload)
+                requiresJsonResponse = true // Ollama sends JSON with "response" key
+                logger.debug("Configured for Ollama. Model: \(llmModelName)")
 
-                if let json = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any],
-                   let reply = json["response"] as? String {
-                    agentResponse = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                    logger.debug("Received JSON response: \(agentResponse)")
+            case .agent:
+                targetURL = agentBaseURL // Use the configured Agent URL
+                targetEndpoint = "/execute_task" // Agent endpoint
+                payload = [
+                    "main_task": messageToSend,
+                    "strategy": agentDelegationStrategy
+                ]
+                // Assume Agent might return JSON with "result" or plain text
+                requiresJsonResponse = false // Allow plain text fallback
+                logger.debug("Configured for Agent. URL: \(targetURL), Strategy: \(agentDelegationStrategy)")
+            }
+
+            do {
+                logger.debug("Sending task '\(messageLog)' to \(targetURL)\(targetEndpoint) for conversation \(currentID.uuidString)")
+
+                // Use dynamic URL/Endpoint (Assumes AIConnect is adapted)
+                let responseData = try await aiConnect.postToLocalServer(baseURL: targetURL, endpoint: targetEndpoint, payload: payload)
+
+                // Adapt Response Handling
+                if let json = try? JSONSerialization.jsonObject(with: responseData, options: []) as? [String: Any] {
+                    let replyKey = (selectedBackend == .ollama) ? "response" : "result"
+                    if let reply = json[replyKey] as? String {
+                        agentResponse = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+                        logger.debug("Received JSON response using key '\(replyKey)': \(agentResponse)")
+                    } else {
+                        logger.warning("Received JSON, but key '\(replyKey)' not found or not a string. Keys: \(json.keys)")
+                        if let fallbackText = String(data: responseData, encoding: .utf8) {
+                             agentResponse = fallbackText.trimmingCharacters(in: .whitespacesAndNewlines)
+                             logger.warning("Using raw JSON as text fallback.")
+                        } else {
+                             agentResponse = "Error: Received unreadable JSON."
+                        }
+                    }
                 } else if let textResponse = String(data: responseData, encoding: .utf8) {
-                    agentResponse = textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
-                    logger.warning("Received non-JSON or unexpected JSON response. Used plain text.")
+                    if !requiresJsonResponse || agentResponse == "Error: Agent response not received." {
+                         agentResponse = textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+                         logger.debug("Received plain text response: \(agentResponse)")
+                    } else {
+                         // Construct the error message string first
+                         let errorMessage = "Error: Expected JSON, received text: \(textResponse.prefix(100))..."
+                         agentResponse = errorMessage
+                         // Use string interpolation for the logger
+                         logger.error("\(errorMessage)") // <-- FIX HERE
+                    }
                 } else {
-                    logger.error("Failed to decode response data.")
+                    logger.error("Failed to decode response data (neither JSON nor UTF-8 text).")
                     agentResponse = "Error: Could not decode server response."
                 }
 
@@ -508,6 +587,7 @@ struct FloatingWindowView: View {
                 agentResponse = generateErrorMessage(error: error)
             }
 
+            // Update UI on Main Actor
             await MainActor.run {
                 if let updatedIndex = conversations.firstIndex(where: { $0.id == currentID }) {
                     conversations[updatedIndex].messages.append("Agent: \(agentResponse)")
@@ -516,13 +596,12 @@ struct FloatingWindowView: View {
                     logger.error("Error: Conversation \(currentID.uuidString) disappeared before agent response could be added.")
                 }
                 isSending = false
-                // Optionally restore focus if needed, e.g., if input is still empty
-                // if userInput.isEmpty {
-                //     DispatchQueue.main.async { isInputFocused = true }
-                // }
             }
         }
     }
+    // --- End sendMessage ---
+
+    // MARK: - Helper Functions
 
     private func scrollToBottom(scrollProxy: ScrollViewProxy, history: [String], animated: Bool = true) {
          guard !history.isEmpty else { return }
@@ -540,12 +619,18 @@ struct FloatingWindowView: View {
     private func generateErrorMessage(error: Error) -> String {
         if let urlError = error as? URLError {
             switch urlError.code {
-            case .cannotConnectToHost: return "Error: Could not connect to the local AI server (check if running)."
+            case .cannotConnectToHost: return "Error: Could not connect to the server (\(selectedBackend.rawValue)). Check if it's running and the URL/Port is correct."
             case .networkConnectionLost: return "Error: Network connection lost."
             case .notConnectedToInternet: return "Error: Not connected to the internet."
-            case .badServerResponse: return "Error: Received an invalid response from the server."
-            case .cannotFindHost: return "Error: Cannot find the AI server host (check address/DNS)."
-            case URLError.Code(rawValue: 1): return "Error: Operation not permitted (check Sandbox/Firewall)." // Common POSIX permission denied
+            case .badServerResponse:
+                // Try to get more info from userInfo if available
+                if let responseData = urlError.userInfo["ResponseData"] as? Data,
+                   let responseString = String(data: responseData, encoding: .utf8) {
+                    return "Error: Bad server response. Server said: \(responseString.prefix(150))"
+                }
+                return "Error: Received an invalid response from the server."
+            case .cannotFindHost: return "Error: Cannot find the server host (\(selectedBackend.rawValue)). Check address/DNS."
+            case URLError.Code(rawValue: 1): return "Error: Operation not permitted (check Sandbox/Firewall)." // POSIX EPERM
             default:
                 logger.warning("Unhandled URLError code: \(urlError.code.rawValue) - \(urlError.localizedDescription)")
                 return "Error: Network request failed (\(urlError.localizedDescription))."
@@ -568,7 +653,6 @@ struct MessageView: View {
     }
 
     var body: some View {
-        // Determine prefix length safely
         let prefixLength = isUser ? 4 : (message.starts(with: "Agent:") ? 6 : 0)
         let displayText = message.dropFirst(prefixLength)
                             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -577,6 +661,6 @@ struct MessageView: View {
             .background(isUser ? Color.blue.opacity(0.4) : Color.white.opacity(0.1))
             .foregroundColor(.white)
             .cornerRadius(10)
-            .textSelection(.enabled)
+            .textSelection(.enabled) // Allow text selection
     }
 }
