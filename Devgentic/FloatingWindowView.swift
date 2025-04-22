@@ -108,18 +108,28 @@ struct FloatingWindowView_Previews: PreviewProvider {
             ],
             selectedConversationID: nil // Start with none selected in preview
         )
-        .frame(width: 800, height: 500)
+        .frame(width: 800, height: 600)
         .previewDisplayName("With Grouped Conversations")
 
         // Example with no conversations
         FloatingWindowView(conversations: [])
-            .frame(width: 800, height: 500)
+            .frame(width: 800, height: 600)
             .previewDisplayName("No Conversations")
 
         // Example showing settings panel initially
         FloatingWindowView(conversations: [], showSettingsInitial: true)
-             .frame(width: 800, height: 500)
+             .frame(width: 800, height: 600)
              .previewDisplayName("Settings Open")
+
+        // Example showing context area initially with a file
+        FloatingWindowView(conversations: [], showContextAreaInitial: true, activeFilePathInitial: "/Users/alice/Documents/project/main.swift")
+             .frame(width: 800, height: 600)
+             .previewDisplayName("Context Area Open (File)")
+
+        // Example showing context area initially with nothing
+        FloatingWindowView(conversations: [], showContextAreaInitial: true, activeFilePathInitial: nil)
+             .frame(width: 800, height: 600)
+             .previewDisplayName("Context Area Open (Nothing)")
     }
 }
 
@@ -137,6 +147,10 @@ struct FloatingWindowView: View {
     @State private var showSettings: Bool
     @State private var isSending: Bool = false
     @State private var selectedSettingsSection: SettingsSection = .general // State for master-detail
+    // --- UPDATED Context State ---
+    @State private var showContextArea: Bool
+    @State private var activeContextFilePath: String? = nil // Keep this to know *if* context is active
+    // -------------------------
 
     // --- AppStorage for Persistent Settings ---
     @AppStorage(SettingsKeys.selectedBackend) private var selectedBackend: BackendType = .ollama
@@ -150,11 +164,17 @@ struct FloatingWindowView: View {
     private let aiConnect = AIConnect() // Ensure AIConnect is defined elsewhere
     // --------------------
 
-    // Initializer (Allow setting initial showSettings state for previews)
-    init(conversations: [Conversation] = [], selectedConversationID: UUID? = nil, showSettingsInitial: Bool = false) {
+    // Initializer (Allow setting initial states for previews) - UPDATED
+    init(conversations: [Conversation] = [],
+         selectedConversationID: UUID? = nil,
+         showSettingsInitial: Bool = false,
+         showContextAreaInitial: Bool = false,
+         activeFilePathInitial: String? = nil) { // Added active file path initial state
         _conversations = State(initialValue: conversations)
         _selectedConversationID = State(initialValue: selectedConversationID)
-        _showSettings = State(initialValue: showSettingsInitial) // Initialize showSettings
+        _showSettings = State(initialValue: showSettingsInitial)
+        _showContextArea = State(initialValue: showContextAreaInitial) // Initialize context state
+        _activeContextFilePath = State(initialValue: activeFilePathInitial) // Initialize active file path
     }
 
 
@@ -268,6 +288,7 @@ struct FloatingWindowView: View {
                                         let isGroupSelected = groupedConversations[groupKey]?.contains(where: { $0.id == selectedConversationID }) ?? false
 
                                         DisclosureGroup(
+                                            isExpanded: .constant(isGroupSelected || groupKey == "Today"), // Keep Today expanded by default
                                             content: {
                                                 if let conversationsInGroup = groupedConversations[groupKey] {
                                                     VStack(alignment: .leading, spacing: 5) {
@@ -356,8 +377,6 @@ struct FloatingWindowView: View {
                     .padding()
                     .background(Color.gray.opacity(0.2))
 
-                    // --- Settings Panel REMOVED from here ---
-
                     // --- Chat Message Area ---
                     // Conditional display is now handled by the ZStack overlay
                     if selectedConversationID != nil || !conversations.isEmpty {
@@ -425,14 +444,17 @@ struct FloatingWindowView: View {
                     // --- End Chat Message Area ---
 
                     // --- Input Area ---
-                    VStack(spacing: 6) {
+                    VStack(spacing: 6) { // Reduced spacing slightly
+
+                        // --- Input Editor ---
                         ZStack(alignment: .topLeading) {
                             CustomTextEditor(
                                 text: $userInput,
                                 onCommit: sendMessage
                             )
+                            // Placeholder text logic updated for context area
                             if userInput.isEmpty {
-                                Text("Type a message (Shift+Enter to send)...")
+                                Text(showContextArea ? "Context active. Type a message..." : "Type a message (Shift+Enter to send)...") // Adjusted placeholder
                                     .font(Font.system(size: NSFont.systemFontSize))
                                     .foregroundColor(.gray)
                                     .padding(.horizontal, 7)
@@ -444,6 +466,53 @@ struct FloatingWindowView: View {
                         .focused($isInputFocused)
                         .disabled(isSending || showSettings) // Disable input when settings are shown
 
+
+                        // --- NEW Horizontal Context Area ---
+                        if showContextArea {
+                            ScrollView(.horizontal, showsIndicators: false) { // Allow scrolling if more contexts are added later
+                                HStack(spacing: 8) {
+                                    // --- VS Code Context Container ---
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "chevron.left.forwardslash.chevron.right") // VS Code-like icon
+                                            .font(.system(size: 12)) // Smaller icon
+                                            .foregroundColor(.blue)
+                                        Text("VsCode")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.white.opacity(0.9))
+
+                                        // Optionally display file info or status icon
+                                        if activeContextFilePath != nil {
+                                            Image(systemName: "doc.text.fill") // Indicate file loaded
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.green.opacity(0.8))
+                                        } else {
+                                             Image(systemName: "questionmark.circle") // Indicate nothing loaded/error
+                                                 .font(.system(size: 10))
+                                                 .foregroundColor(.gray)
+                                        }
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.white.opacity(0.15)) // Slightly more prominent background
+                                    .cornerRadius(6)
+                                    // Add tap gesture if needed later (e.g., to show file path)
+                                    // .onTapGesture { logger.info("VS Code context tapped. Path: \(activeContextFilePath ?? "None")") }
+
+                                    // --- Add containers for other apps here later ---
+                                    // Example:
+                                    // HStack { ... } .padding(...) .background(...) ...
+
+                                } // End Horizontal Stack for Contexts
+                                .padding(.horizontal, 8) // Padding for the scroll view content
+                            } // End ScrollView
+                            .frame(height: 28) // Fixed height for the context row
+                            .padding(.bottom, 4) // Space below context row
+                            .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top))) // Subtle animation
+                        }
+                        // --- End NEW Horizontal Context Area ---
+
+
+                        // --- Input Buttons HStack ---
                         HStack(spacing: 10) {
                             Button { logger.info("Web icon tapped") } label: {
                                 Image(systemName: "globe")
@@ -459,7 +528,37 @@ struct FloatingWindowView: View {
                             }
                             .buttonStyle(PlainButtonStyle()).disabled(isSending || showSettings)
 
-                            Spacer()
+                            // --- Context Button (Action remains similar) ---
+                            Button {
+                                // Action: Toggle context area and simulate fetching file
+                                withAnimation {
+                                    showContextArea.toggle()
+                                    if showContextArea {
+                                        // --- SIMULATION ---
+                                        // Replace this block with your actual VS Code interaction logic
+                                        let shouldSimulateSuccess = Bool.random() // Randomly simulate success/failure
+                                        if shouldSimulateSuccess {
+                                            activeContextFilePath = "/Users/Shared/DemoProject/Sources/App/Controllers/UserController.swift" // Example path
+                                            logger.info("Context button tapped: Showing active file (Simulated).")
+                                        } else {
+                                            activeContextFilePath = nil // Simulate failure (VS Code not running or no file open)
+                                            logger.info("Context button tapped: Showing context area (Nothing active - Simulated).")
+                                        }
+                                        // --- END SIMULATION ---
+                                    } else {
+                                        activeContextFilePath = nil // Clear path when hiding
+                                        logger.info("Context button tapped: Hiding context area.")
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "paperclip")
+                                    .resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20)
+                                    .foregroundColor(showContextArea ? .blue : .white.opacity(0.7)) // Indicate active state
+                            }
+                            .buttonStyle(PlainButtonStyle()).disabled(isSending || showSettings)
+                            // --- End Context Button ---
+
+                            Spacer() // Keep spacer
 
                             Button { logger.info("Mic icon tapped") } label: {
                                 Image(systemName: "mic.fill")
@@ -483,7 +582,7 @@ struct FloatingWindowView: View {
                         .padding(.horizontal, 8)
                         .padding(.bottom, 8)
 
-                    }
+                    } // End Input Area VStack
                     .background(Color.white.opacity(0.1))
                     .cornerRadius(10)
                     .padding(.horizontal)
@@ -610,6 +709,11 @@ struct FloatingWindowView: View {
         if showSettings {
             withAnimation { showSettings = false }
         }
+        // If context area is open, optionally close it or leave it open
+        // if showContextArea {
+        //     withAnimation { showContextArea = false; activeContextFilePath = nil } // Clear path if closing context
+        // }
+
         userInput = ""
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
         conversations.append(newConversation)
@@ -638,7 +742,20 @@ struct FloatingWindowView: View {
              return
         }
 
-        let messageToSend = trimmedInput
+        // --- TODO: Integrate Context ---
+        // Here you would potentially read data from your context state
+        // (e.g., the activeContextFilePath) and prepend it or format it
+        // with the user's message. You might also need to read the file content.
+        // Example:
+        var contextPrefix = ""
+        if showContextArea, let filePath = activeContextFilePath {
+            // In a real scenario, you'd read the file content here
+            // let fileContent = readFileContent(at: filePath) ?? "Error reading file"
+            // contextPrefix = "Context File: \(filePath)\nContent:\n\(fileContent)\n\nUser Message:\n"
+            contextPrefix = "Context File: \(filePath)\n\nUser Message:\n" // Simplified for now
+        }
+        let messageToSend = contextPrefix + trimmedInput
+        // -----------------------------
 
         if selectedConversationID == nil {
             logger.info("No conversation selected. Starting a new one before sending.")
@@ -651,11 +768,11 @@ struct FloatingWindowView: View {
             return
         }
 
-        // Append user message locally
-        let userMessage = "You: \(messageToSend)"
+        // Append user message locally (use the original input for display)
+        let userMessage = "You: \(trimmedInput)"
         conversations[conversationIndex].messages.append(userMessage)
         conversations[conversationIndex].timestamp = Date()
-        let messageLog = messageToSend // Capture for logging
+        let messageLog = messageToSend // Capture the full message (with context) for logging/sending
         userInput = "" // Clear input field
         isSending = true
 
@@ -675,7 +792,7 @@ struct FloatingWindowView: View {
                 targetEndpoint = "/api/generate"
                 payload = [
                     "model": llmModelName,
-                    "prompt": messageToSend,
+                    "prompt": messageToSend, // Send the full message with context
                     "stream": false
                 ]
                 logger.debug("Configured for Ollama. Model: \(llmModelName)")
@@ -684,14 +801,14 @@ struct FloatingWindowView: View {
                 targetURL = agentBaseURL
                 targetEndpoint = "/execute_task"
                 payload = [
-                    "main_task": messageToSend,
+                    "main_task": messageToSend, // Send the full message with context
                     "strategy": agentDelegationStrategy
                 ]
                 logger.debug("Configured for Agent. URL: \(targetURL), Strategy: \(agentDelegationStrategy)")
             }
 
             do {
-                logger.debug("Sending task '\(messageLog)' to \(targetURL)\(targetEndpoint) for conversation \(currentID.uuidString)")
+                logger.debug("Sending task '\(messageLog.prefix(200))...' to \(targetURL)\(targetEndpoint) for conversation \(currentID.uuidString)")
 
                 let responseData = try await aiConnect.postToLocalServer(baseURL: targetURL, endpoint: targetEndpoint, payload: payload)
 
@@ -816,9 +933,12 @@ struct FloatingWindowView: View {
         return "Error: \(error.localizedDescription)" // General error
     }
 
+    // --- TODO: Add file reading function if needed by sendMessage ---
+    // func readFileContent(at path: String) -> String? { ... }
+
 }
 
-// MARK: - Settings Detail Views (New Helper Structs)
+// MARK: - Settings Detail Views (Unchanged Helper Structs)
 
 struct GeneralSettingsView: View {
     @Binding var windowOpacity: Double
@@ -921,7 +1041,7 @@ struct LicenseSettingsView: View {
 }
 
 
-// MARK: - Message View (Helper)
+// MARK: - Message View (Unchanged Helper)
 struct MessageView: View {
     let message: String
     let isUser: Bool
@@ -943,6 +1063,3 @@ struct MessageView: View {
             .textSelection(.enabled) // Allow text selection
     }
 }
-
-// Ensure AIConnect struct/class is defined elsewhere in your project.
-// Ensure CustomTextEditor struct is defined in CustomTextEditor.swift
