@@ -1,4 +1,3 @@
-// Views/ChatHistoryView.swift
 import SwiftUI
 import os
 
@@ -14,45 +13,39 @@ struct ChatHistoryView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                // Display messages only if a conversation is selected
                 if hasSelectedConversation {
                     ForEach(history.indices, id: \.self) { index in
                         let message = history[index]
-                        // Align messages left/right based on sender
                         HStack {
-                            if message.starts(with: "Agent:") { Spacer() } // Push Agent messages right
-                            MessageView(message: message) // Use the existing MessageView
-                            if message.starts(with: "You:") { Spacer() } // Push User messages left
+                            if message.starts(with: "You:") {
+                                Spacer()
+                                MessageView(message: message)
+                            } else {
+                                MessageView(message: message)
+                                Spacer()
+                            }
                         }
-                        .id(index) // ID for ScrollViewReader
-                        .frame(maxWidth: .infinity, alignment: message.starts(with: "You:") ? .trailing : .leading)
+                        .id(index)
                     }
                 }
 
-                // "Agent is thinking..." indicator
                 if isSending && hasSelectedConversation {
                     HStack {
-                         Text("Agent is thinking...")
-                             .font(.caption)
-                             .foregroundColor(.gray)
-                             .padding(10)
-                             .background(Color.white.opacity(0.1))
-                             .cornerRadius(10)
-                         Spacer() // Align left
-                     }
-                     .padding(.leading)
-                     .id("thinkingIndicator") // ID for ScrollViewReader if needed
+                        Text("Agent is thinking...")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                            .padding(10)
+                            .background(Color.white.opacity(0.1))
+                            .cornerRadius(10)
+                        Spacer()
+                    }
+                    .padding(.leading)
+                    .id("thinkingIndicator")
                 }
-
-                // REMOVED Spacer()
-
-            } // End VStack
-            .padding() // Padding around the message list
-            // Add frame modifier to make VStack expand vertically within ScrollView and align content top
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top) // <--- APPLY FRAME HERE
-
-        } // End ScrollView
-        // Note: .onChange modifiers and ScrollViewReader are kept in the parent view (FloatingWindowView)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
     }
 }
 
