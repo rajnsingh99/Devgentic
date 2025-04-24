@@ -184,7 +184,7 @@ struct MainApplicationView: View {
                         .keyboardShortcut("n", modifiers: .command)
 
                 } // End Main Interaction VStack
-                .background(VisualEffectBlur()) // Use the extracted blur view
+                .background(VisualEffectBlur(material: .windowBackground)) // Use the extracted blur view
                 // --- End Main Interaction Area ---
             } // End Main Content HStack
             .allowsHitTesting(!viewModel.showSettings) // Disable interaction based on ViewModel state

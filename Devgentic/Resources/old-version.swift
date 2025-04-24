@@ -1,6 +1,6 @@
-// // /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/FloatingWindowView.swift
+// // /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/MainApplicationView.swift
 // //
-// //  ContentView.swift (Adapted for FloatingWindowView)
+// //  ContentView.swift (Adapted for MainApplicationView)
 // //  AgenticDev
 // //
 // //  Created by Raj Singh on 19/04/25.
@@ -11,7 +11,7 @@
 // import os // Import os for logging
 
 // // Logger for better debugging
-// private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "FloatingWindowView")
+// private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationView")
 
 // // MARK: - Backend Type Definition
 // // Define the possible AI backend types
@@ -100,7 +100,7 @@
 // struct FloatingWindowView_Previews: PreviewProvider {
 //     static var previews: some View {
 //         // Example with some preview data
-//         FloatingWindowView(
+//         MainApplicationView(
 //             conversations: [
 //                 Conversation(id: UUID(), messages: ["You: Hello there!", "Agent: Hi! How can I help?"], timestamp: Date()), // Today
 //                 Conversation(id: UUID(), messages: ["You: What is Swift?"], timestamp: Date().addingTimeInterval(-86400)), // Yesterday
@@ -112,22 +112,22 @@
 //         .previewDisplayName("With Grouped Conversations")
 
 //         // Example with no conversations
-//         FloatingWindowView(conversations: [])
+//         MainApplicationView(conversations: [])
 //             .frame(width: 800, height: 600)
 //             .previewDisplayName("No Conversations")
 
 //         // Example showing settings panel initially
-//         FloatingWindowView(conversations: [], showSettingsInitial: true)
+//         MainApplicationView(conversations: [], showSettingsInitial: true)
 //              .frame(width: 800, height: 600)
 //              .previewDisplayName("Settings Open")
 
 //         // Example showing context area initially with a file
-//         FloatingWindowView(conversations: [], showContextAreaInitial: true, activeFilePathInitial: "/Users/alice/Documents/project/main.swift")
+//         MainApplicationView(conversations: [], showContextAreaInitial: true, activeFilePathInitial: "/Users/alice/Documents/project/main.swift")
 //              .frame(width: 800, height: 600)
 //              .previewDisplayName("Context Area Open (File)")
 
 //         // Example showing context area initially with nothing
-//         FloatingWindowView(conversations: [], showContextAreaInitial: true, activeFilePathInitial: nil)
+//         MainApplicationView(conversations: [], showContextAreaInitial: true, activeFilePathInitial: nil)
 //              .frame(width: 800, height: 600)
 //              .previewDisplayName("Context Area Open (Nothing)")
 //     }
@@ -135,7 +135,7 @@
 
 
 // // MARK: - Main View
-// struct FloatingWindowView: View {
+// struct MainApplicationView: View {
 //     // --- Focus State ---
 //     @FocusState private var isInputFocused: Bool
 
