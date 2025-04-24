@@ -16,16 +16,19 @@ struct ChatHistoryView: View {
                 if hasSelectedConversation {
                     ForEach(history.indices, id: \.self) { index in
                         let message = history[index]
-                        HStack {
-                            if message.starts(with: "You:") {
-                                Spacer()
+                        if message.starts(with: "You:") {
+                            HStack {
+                                Spacer() // Push to the right
                                 MessageView(message: message)
-                            } else {
-                                MessageView(message: message)
-                                Spacer()
                             }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        } else {
+                            HStack {
+                                MessageView(message: message)
+                                Spacer() // Push to the left
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .id(index)
                     }
                 }
 
@@ -44,8 +47,10 @@ struct ChatHistoryView: View {
                 }
             }
             .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .background(Color.black.opacity(0.5))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
