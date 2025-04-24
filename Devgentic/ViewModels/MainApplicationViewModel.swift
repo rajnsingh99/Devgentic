@@ -1,13 +1,13 @@
-// ViewModels/FloatingWindowViewModel.swift
+// ViewModels/MainApplicationViewModel.swift
 import SwiftUI
 import Combine // Needed for ObservableObject and @Published
 import os     // For logging
 
 // Logger for the ViewModel
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "FloatingWindowViewModel")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationViewModel")
 
 @MainActor // Ensure UI updates happen on the main thread
-class FloatingWindowViewModel: ObservableObject {
+class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Published State Properties
     // ... (rest of properties remain the same) ...
@@ -103,7 +103,7 @@ class FloatingWindowViewModel: ObservableObject {
         selectInitialConversation()
 
         // TODO: Load conversations from a persistent store (e.g., Core Data, UserDefaults, File)
-        logger.info("FloatingWindowViewModel initialized.")
+        logger.info("MainApplicationViewModel initialized.")
     }
 
     private func loadSettings() {

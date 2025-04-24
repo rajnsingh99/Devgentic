@@ -1,6 +1,6 @@
-//  /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/FloatingWindowView.swift
+//  /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/MainApplicationView.swift
 //
-//  ContentView.swift (Adapted for FloatingWindowView)
+//  ContentView.swift (Adapted for MainApplicationView)
 //  AgenticDev
 //
 //  Created by Raj Singh on 19/04/25.
@@ -11,7 +11,7 @@ import AppKit
 import os // Import os for logging
 
 // Logger for better debugging
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "FloatingWindowView")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationView")
 
 // MARK: - Models & Enums (Assumed to be in separate files now)
 // BackendType enum is now defined in Models/BackendType.swift
@@ -25,18 +25,18 @@ struct FloatingWindowView_Previews: PreviewProvider {
     static var previews: some View {
         // Previews now use the ViewModel's default state or can be configured
         // by creating specific ViewModel instances if needed for complex scenarios.
-        FloatingWindowView()
+        MainApplicationView()
             .frame(width: 800, height: 600)
             .previewDisplayName("Default State")
 
         // Example showing settings panel initially (requires ViewModel modification or separate preview setup)
         // You could create a ViewModel instance specifically for the preview:
-        // static var settingsOpenViewModel: FloatingWindowViewModel {
-        //     let vm = FloatingWindowViewModel()
+        // static var settingsOpenViewModel: MainApplicationViewModel {
+        //     let vm = MainApplicationViewModel()
         //     vm.showSettings = true
         //     return vm
         // }
-        // FloatingWindowView(viewModel: settingsOpenViewModel)
+        // MainApplicationView(viewModel: settingsOpenViewModel)
         //    .frame(width: 800, height: 600)
         //    .previewDisplayName("Settings Open")
     }
@@ -44,18 +44,18 @@ struct FloatingWindowView_Previews: PreviewProvider {
 
 
 // MARK: - Main View (Refactored with ViewModel)
-struct FloatingWindowView: View {
+struct MainApplicationView: View {
     // --- ViewModel ---
     // The single source of truth for state and logic
     // Use @StateObject to ensure the ViewModel lifecycle is tied to the View
-    @StateObject private var viewModel = FloatingWindowViewModel()
+    @StateObject private var viewModel = MainApplicationViewModel()
 
     // --- Focus State (Remains in the View) ---
     @FocusState private var isInputFocused: Bool
 
     // --- Initializer (Optional, for injecting ViewModel in previews/tests) ---
     // Use this if you need to provide a specific ViewModel instance, e.g., for previews
-    // init(viewModel: FloatingWindowViewModel = FloatingWindowViewModel()) {
+    // init(viewModel: MainApplicationViewModel = MainApplicationViewModel()) {
     //     _viewModel = StateObject(wrappedValue: viewModel)
     // }
 

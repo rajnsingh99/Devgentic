@@ -6,7 +6,7 @@ import SwiftUI
 struct AgenticDevApp: App {
     var body: some Scene {
         WindowGroup {
-            FloatingWindowView()
+            MainApplicationView()
                 .frame(minWidth: 800, minHeight: 500)
         }
         // --- ONLY apply this modifier for testing ---

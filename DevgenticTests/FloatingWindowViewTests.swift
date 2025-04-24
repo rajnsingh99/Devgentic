@@ -5,7 +5,7 @@ import SwiftUI // Needed for @State etc.
 @MainActor // Run tests on the main actor since UI updates happen there
 final class FloatingWindowViewTests: XCTestCase {
 
-    var view: FloatingWindowView!
+    var view: MainApplicationView!
     var mockAIConnect: MockAIConnect!
 
     // Dates for consistent testing
@@ -28,12 +28,12 @@ final class FloatingWindowViewTests: XCTestCase {
         conversation2 = Conversation(id: UUID(), messages: ["You: What is SwiftUI?", "Agent: A UI framework."], timestamp: dateNow) // Most recent
         conversation3 = Conversation(id: UUID(), messages: [], timestamp: dateFurtherPast)
 
-        // Initialize the view - NOTE: We need to adapt FloatingWindowView to accept the mock
+        // Initialize the view - NOTE: We need to adapt MainApplicationView to accept the mock
         // For now, we assume AIConnect is internal and cannot be easily mocked without modifying the view.
         // A better approach is dependency injection. Let's proceed assuming we can test *around* AIConnect for now,
         // and mock its behavior via the mock object when testing sendMessage.
-        // We will need to modify FloatingWindowView to accept the mock for sendMessage tests.
-        // Let's assume FloatingWindowView is modified like this:
+        // We will need to modify MainApplicationView to accept the mock for sendMessage tests.
+        // Let's assume MainApplicationView is modified like this:
         // init(conversations: [Conversation] = [], selectedConversationID: UUID? = nil, aiConnector: AIConnectProtocol = AIConnect()) { ... }
 
         // For tests NOT involving sendMessage directly, we can use the default init for now.
@@ -52,7 +52,7 @@ final class FloatingWindowViewTests: XCTestCase {
     // MARK: - Initialization & Setup Tests
 
     func testInitialization_Default() {
-        view = FloatingWindowView() // Assumes default init exists
+        view = MainApplicationView() // Assumes default init exists
 
         XCTAssertTrue(view.conversations.isEmpty, "Conversations should be empty initially")
         XCTAssertNil(view.selectedConversationID, "SelectedConversationID should be nil initially")
@@ -65,7 +65,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testInitialization_WithProvidedConversations_NoSelection_SelectsMostRecent() {
-        view = FloatingWindowView(conversations: [conversation1, conversation3, conversation2]) // Deliberately out of order
+        view = MainApplicationView(conversations: [conversation1, conversation3, conversation2]) // Deliberately out of order
 
         // Trigger onAppear logic (simulated - real onAppear might need UI test)
         // For unit tests, we often test the state *after* potential onAppear logic runs.
@@ -78,7 +78,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testInitialization_WithProvidedConversations_WithSelection() {
-        view = FloatingWindowView(conversations: [conversation1, conversation3, conversation2], selectedConversationID: conversation1.id)
+        view = MainApplicationView(conversations: [conversation1, conversation3, conversation2], selectedConversationID: conversation1.id)
 
         view.onAppear() // Simulate
 
@@ -111,7 +111,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testStartNewConversation_FromEmptyState() {
-        view = FloatingWindowView(conversations: [])
+        view = MainApplicationView(conversations: [])
         view.startNewConversation()
 
         XCTAssertEqual(view.conversations.count, 1, "Should add one new conversation")
@@ -123,7 +123,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testStartNewConversation_WithExistingConversations() {
-        view = FloatingWindowView(conversations: [conversation1], selectedConversationID: conversation1.id)
+        view = MainApplicationView(conversations: [conversation1], selectedConversationID: conversation1.id)
         view.startNewConversation()
 
         XCTAssertEqual(view.conversations.count, 2, "Should add a second conversation")
@@ -133,7 +133,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testSelectConversation() {
-        view = FloatingWindowView(conversations: [conversation1, conversation2], selectedConversationID: conversation1.id)
+        view = MainApplicationView(conversations: [conversation1, conversation2], selectedConversationID: conversation1.id)
         // Simulate selection
         view.selectedConversationID = conversation2.id
 
@@ -149,7 +149,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testSortedConversationsComputedProperty() {
-        view = FloatingWindowView(conversations: [conversation3, conversation1, conversation2]) // Out of order
+        view = MainApplicationView(conversations: [conversation3, conversation1, conversation2]) // Out of order
         let sorted = view.sortedConversations
 
         XCTAssertEqual(sorted.count, 3)
@@ -170,7 +170,7 @@ final class FloatingWindowViewTests: XCTestCase {
          //     self.aiConnect = aiConnector // Store the passed connector
          // }
          // Then initialize like this:
-         // view = FloatingWindowView(conversations: conversations, selectedConversationID: selectedID, aiConnector: mockAIConnect)
+         // view = MainApplicationView(conversations: conversations, selectedConversationID: selectedID, aiConnector: mockAIConnect)
 
          // If you cannot modify the init, these tests might be harder or impossible to unit test accurately.
          // For now, we'll write the tests assuming the init is modifiable.
@@ -178,7 +178,7 @@ final class FloatingWindowViewTests: XCTestCase {
          // but couldn't easily verify the call itself or the response handling.
 
          // *** Assuming modified init: ***
-         view = FloatingWindowView(conversations: conversations, selectedConversationID: selectedID, aiConnector: mockAIConnect)
+         view = MainApplicationView(conversations: conversations, selectedConversationID: selectedID, aiConnector: mockAIConnect)
     }
 
     func testSendMessage_ValidInput_ExistingConversation_Success() async throws {
@@ -331,7 +331,7 @@ final class FloatingWindowViewTests: XCTestCase {
     // MARK: - UI State & Settings Tests
 
     func testToggleSettings() {
-        view = FloatingWindowView()
+        view = MainApplicationView()
         XCTAssertFalse(view.showSettings)
 
         // Simulate button tap (directly toggle state)
@@ -343,7 +343,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testChangeTransparency() {
-        view = FloatingWindowView()
+        view = MainApplicationView()
         XCTAssertEqual(view.windowOpacity, 1.0)
 
         // Simulate slider change
@@ -396,7 +396,7 @@ final class FloatingWindowViewTests: XCTestCase {
     // We can test that the state changes which *should* trigger focus/scroll.
 
     func testFocus_Intent_OnNewConversation() {
-         view = FloatingWindowView()
+         view = MainApplicationView()
          // We expect isInputFocused to become true after async dispatch
          let expectation = XCTestExpectation(description: "Focus should be requested after new conversation")
 
@@ -413,7 +413,7 @@ final class FloatingWindowViewTests: XCTestCase {
      }
 
      func testFocus_Intent_OnSelectConversation() {
-         view = FloatingWindowView(conversations: [conversation1, conversation2], selectedConversationID: conversation1.id)
+         view = MainApplicationView(conversations: [conversation1, conversation2], selectedConversationID: conversation1.id)
          let expectation = XCTestExpectation(description: "Focus should be requested after selecting conversation")
 
          // Simulate selection
@@ -429,7 +429,7 @@ final class FloatingWindowViewTests: XCTestCase {
 
     // Test for generateErrorMessage helper
     func testGenerateErrorMessage_UrlErrors() {
-        view = FloatingWindowView() // Need an instance to call the private method
+        view = MainApplicationView() // Need an instance to call the private method
 
         let connError = URLError(.cannotConnectToHost)
         XCTAssertEqual(view.generateErrorMessage(error: connError), "Error: Could not connect to the local AI server (check if running).")
@@ -449,7 +449,7 @@ final class FloatingWindowViewTests: XCTestCase {
     }
 
     func testGenerateErrorMessage_GenericError() {
-        view = FloatingWindowView()
+        view = MainApplicationView()
         let genericError = NSError(domain: "TestDomain", code: 123, userInfo: [NSLocalizedDescriptionKey: "A test error occurred"])
         XCTAssertEqual(view.generateErrorMessage(error: genericError), "Error: A test error occurred")
     }
@@ -457,7 +457,7 @@ final class FloatingWindowViewTests: XCTestCase {
 
 // Helper extension to call onAppear for testing purposes if needed
 // Note: This might not trigger all SwiftUI lifecycle events perfectly.
-extension FloatingWindowView {
+extension MainApplicationView {
     func onAppear() {
         // Manually replicate the logic inside the view's .onAppear modifier
         if selectedConversationID == nil, let mostRecent = sortedConversations.first {
@@ -471,7 +471,7 @@ extension FloatingWindowView {
 
 // Helper extension to access private `generateErrorMessage`
 // (Use sparingly, prefer testing through public interfaces if possible)
-extension FloatingWindowView {
+extension MainApplicationView {
     func generateErrorMessage(error: Error) -> String {
         // Call the private method directly for testing
         return self.generateErrorMessage(error: error)
