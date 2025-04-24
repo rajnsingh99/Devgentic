@@ -17,7 +17,7 @@ struct MessageView: View {
         let prefixLength = isUser ? 4 : (message.starts(with: "Agent:") ? 6 : 0)
         // Get the actual message content, removing prefix and trimming whitespace
         let displayText = message.dropFirst(prefixLength)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         Text(displayText)
             .padding(10) // Padding inside the bubble
