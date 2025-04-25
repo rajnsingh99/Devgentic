@@ -1,13 +1,28 @@
-// AgenticDevApp.swift
-
+// DevgenticApp.swift
 import SwiftUI
 
 @main
-struct AgenticDevApp: App {
+struct DevgenticApp: App {
+    // Use NSApplicationDelegateAdaptor to connect AppDelegate
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var body: some Scene {
         WindowGroup {
+            // Your existing MainApplicationView setup
             MainApplicationView()
-                .frame(minWidth: 800, minHeight: 500)
+                // Add frame modifiers if needed here
         }
+        // Remove .windowStyle(.hiddenTitleBar) if you haven't already
+        // Add any commands or other scene modifiers here
+        .commands {
+            // Example: Keep existing commands if any
+            // CommandGroup(replacing: .newItem) { }
+        }
+
+        // --- Add Settings Scene (Optional but good practice) ---
+        // If you want a dedicated settings window accessible via Cmd+,
+        // Settings {
+        //     SettingsView() // You'd create a dedicated SettingsView
+        // }
     }
 }
