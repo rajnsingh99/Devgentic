@@ -25,10 +25,13 @@ struct QuickAccessOverlayView: View {
         }
         // Apply vertical padding to the main content stack.
         .padding(.vertical)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .animation(.easeInOut(duration: 0.25), value: viewModel.isProcessing)
+        .animation(.easeInOut(duration: 0.25), value: viewModel.results)
+        .animation(.easeInOut(duration: 0.25), value: viewModel.errorMessage)
         // Ensure the VStack tries to fill the available horizontal and vertical space
         // provided by its container (NSPanel).
-        // NOTE: If the view appears collapsed, ensure the hosting NSPanel's size
-        // is set *before* showing it in your AppKit code.
+        // NOTE: Panel position and sizing are managed in OverlayWindowManager.swift, not here.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Use the visual effect background (assuming VisualEffectBlur.swift exists)
         .background(VisualEffectBlur(material: .hudWindow))
@@ -54,6 +57,7 @@ struct QuickAccessOverlayView: View {
     private var inputSection: some View {
         HStack(spacing: 8) {
             TextField("Ask Devgentic...", text: $viewModel.userInput)
+                .font(.title3.bold())
                 .frame(maxWidth: .infinity)        // Allow it to grow
                 .layoutPriority(1)                // Take priority in the HStack
                 .padding(8)
@@ -61,6 +65,7 @@ struct QuickAccessOverlayView: View {
                 .cornerRadius(6)
                 .onSubmit(viewModel.submitQuery)
                 .accessibilityLabel("Query Input")
+                .focused($isInputFocused)
 
             Button {
                 viewModel.submitQuery()
@@ -78,7 +83,6 @@ struct QuickAccessOverlayView: View {
             .accessibilityLabel("Submit Query")
         }
         .frame(minWidth: 600, minHeight: 180)
-        .fixedSize() 
         .padding(.horizontal) // Padding for the input group
     }
 
@@ -112,11 +116,13 @@ struct QuickAccessOverlayView: View {
                         .frame(maxWidth: .infinity, alignment: .leading) // Align left
                         .textSelection(.enabled) // Allow copying results
                 }
+                .transition(.opacity)
             } else {
                 // Render nothing if no status/result/error
                 EmptyView()
             }
         }
+        .padding(.top, 10)
         .frame(minHeight: 40) // Prevent collapse when empty
     }
 
@@ -156,7 +162,7 @@ struct QuickAccessPreviewContainer: View {
     }
 }
 
-/// Provides previews for different states of the overlay view.
+/// Provides previews for different states of the ov erlay view.
 struct QuickAccessOverlayView_Previews: PreviewProvider {
     // Factory methods for creating ViewModels in specific states
     static func createDefaultViewModel() -> QuickAccessViewModel { QuickAccessViewModel() }

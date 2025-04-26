@@ -32,6 +32,7 @@ class OverlayWindowManager: NSObject, GlobalShortcutHandler, NSWindowDelegate { 
 
         // 1. Create the ViewModel instance for the overlay's state.
         let viewModel = QuickAccessViewModel()
+        viewModel.registerDismissalObserver()
         self.quickAccessViewModel = viewModel
 
         // 2. Create the SwiftUI View instance, injecting the ViewModel.
@@ -55,7 +56,7 @@ class OverlayWindowManager: NSObject, GlobalShortcutHandler, NSWindowDelegate { 
             // - .nonactivatingPanel: Prevents the panel from becoming the key window *initially* when shown,
             //   allowing the previously active app to remain active until the user interacts with the panel.
             //   We will explicitly make it key later when showing.
-            styleMask: [.borderless, .hudWindow, .utilityWindow, .nonactivatingPanel],
+            styleMask: [.borderless, .hudWindow, .utilityWindow],
             backing: .buffered, // Standard buffering.
             defer: false)      // Create the window graphics context immediately.
 
@@ -82,11 +83,17 @@ class OverlayWindowManager: NSObject, GlobalShortcutHandler, NSWindowDelegate { 
         panel.delegate = self
 
         // Store the created panel.
+        panel.styleMask.insert(.titled) // or .hudWindow if you prefer
+        panel.isMovableByWindowBackground = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = true
         self.overlayPanel = panel
         // After creating the panel and hostingController:
         // panel.contentView?.frame = panel.contentRect(forFrameRect: panel.frame)
         // hostVC.view.frame = panel.contentView?.bounds ?? panel.frame.size
         panel.contentViewController = hostVC
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         print("Overlay panel created successfully with SwiftUI content.")
     }
 
@@ -132,24 +139,32 @@ class OverlayWindowManager: NSObject, GlobalShortcutHandler, NSWindowDelegate { 
         }
     }
 
-    /// Calculates and sets the position of the panel, typically near the top-center of the main screen.
+    /// Calculates and sets the position of the panel, positioning it near the mouse cursor.
     private func centerPanel(_ panel: NSPanel) {
-        // Get the main screen. Handle potential nil case (though unlikely for main screen).
         guard let screen = NSScreen.main else {
             print("Error: Could not get main screen.")
             return
         }
-        // Use the visibleFrame to account for the menu bar and Dock.
-        let screenRect = screen.visibleFrame
+
+        let mouseLocation = NSEvent.mouseLocation
+        let screenFrame = screen.frame
         let panelSize = panel.frame.size
 
-        // Calculate position: Centered horizontally, offset from the top edge.
-        let xPos = screenRect.origin.x + (screenRect.width - panelSize.width) / 2
-        let yPos = screenRect.maxY - panelSize.height - 100 // 100 points down from top edge
+        let normalizedMouseX = mouseLocation.x
+        let normalizedMouseY = screenFrame.height - mouseLocation.y
 
-        // Set the panel's bottom-left corner origin.
-        panel.setFrameOrigin(NSPoint(x: xPos, y: yPos))
-        print("Panel positioned at (\(xPos), \(yPos))")
+        let targetOrigin = CGPoint(
+            x: normalizedMouseX - panelSize.width / 2,
+            y: normalizedMouseY - panelSize.height / 2
+        )
+
+        let adjustedOrigin = NSPoint(
+            x: max(screenFrame.minX, min(targetOrigin.x, screenFrame.maxX - panelSize.width)),
+            y: max(screenFrame.minY, min(targetOrigin.y, screenFrame.maxY - panelSize.height))
+        )
+
+        panel.setFrameOrigin(adjustedOrigin)
+        print("Panel positioned near mouse at (\(adjustedOrigin.x), \(adjustedOrigin.y))")
     }
 
     // MARK: - NSWindowDelegate Methods
