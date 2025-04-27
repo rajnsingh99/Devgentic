@@ -54,6 +54,11 @@ class QuickAccessViewModel: ObservableObject {
                 self.isProcessing = false
                 switch result {
                 case .success(let response):
+                    if response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        print("Backend returned empty response.")
+                        self.errorMessage = "Received empty response. Please try again."
+                        return
+                    }
                     self.results = response
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                         NotificationCenter.default.post(name: Notification.Name("CloseQuickAccessOverlay"), object: nil)
