@@ -50,6 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         */
         // --- End Optional Configuration ---
 
+        UserDefaults.standard.set(false, forKey: SettingsKeys.isOnboardingComplete)
         print("Overlay setup complete.")
     }
 
