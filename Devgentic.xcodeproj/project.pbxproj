@@ -29,9 +29,22 @@
 		35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		358B8DC82DBF91B500A4D9AB /* Exceptions for "devgentic" folder in "devgentic" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Resources/setup_ollama.py,
+			);
+			target = 35FCBA872DB5526B00D39123 /* devgentic */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		35FCBA8A2DB5526B00D39123 /* devgentic */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				358B8DC82DBF91B500A4D9AB /* Exceptions for "devgentic" folder in "devgentic" target */,
+			);
 			path = devgentic;
 			sourceTree = "<group>";
 		};
