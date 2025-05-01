@@ -205,9 +205,8 @@ class MainApplicationViewModel: ObservableObject {
                 logger.debug("Sending task '\(messageLog.prefix(200))...' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(currentID.uuidString)")
                 // Access instance property aiConnect - needs self.
                 let responseData = try await self.aiConnect.postToLocalServer(
-                    baseURL: backendConfig.url,
-                    endpoint: backendConfig.endpoint,
-                    payload: backendConfig.payload
+                    endpoint: backendConfig.endpoint, // Pass only endpoint
+                    payload: backendConfig.payload   // Pass only payload
                 )
                 // Call instance method - needs self. Access instance property selectedBackend - needs self.
                 agentResponse = self.parseResponse(data: responseData, for: self.selectedBackend)

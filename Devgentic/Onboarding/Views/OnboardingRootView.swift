@@ -6,39 +6,37 @@ struct OnboardingRootView: View {
     var onComplete: () -> Void
 
     var body: some View {
-        VStack {
+        VStack { // Main container for the switching views
             // Switch view based on the ViewModel's current step
             switch viewModel.currentStep {
-            // ... cases welcome, selectCategory, selectMethod ...
-            // ... case configureOllamaLocal, configureOllamaApi ...
-
             case .welcome:
                 OnboardingWelcomeView(onGetStarted: viewModel.goToNextStep)
                     .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+
             case .selectCategory:
                 OnboardingCategorySelectView(viewModel: viewModel)
                     .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+
             case .selectMethod:
                 OnboardingMethodSelectView(viewModel: viewModel)
                     .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+
             case .configureOllamaLocal:
                 OnboardingOllamaLocalSetupView(viewModel: viewModel)
                      .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+
             case .configureOllamaApi:
                 OnboardingOllamaApiSetupView(viewModel: viewModel)
                      .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
 
-            // --- Placeholder Case for Agent Local ---
             case .configureAgentLocal:
-                 Text("Step 4c: Configure Agent Local (View Placeholder)")
+                 Text("Step 4c: Configure Agent Local (View Placeholder)") // Placeholder
                       .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
 
-            // --- UPDATED Case for Step 4d ---
             case .configureAgentApi:
-                OnboardingAgentApiSetupView(viewModel: viewModel) // Instantiate the new view
+                OnboardingAgentApiSetupView(viewModel: viewModel)
                      .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
 
-            // ... case .complete ...
              case .complete:
                  Text("Setup Complete!")
                      .onAppear {
@@ -49,9 +47,14 @@ struct OnboardingRootView: View {
                      .transition(.opacity)
             }
         }
-        .animation(.default, value: viewModel.currentStep)
+        // Apply animation to the transitions between steps
+        // .animation(.default, value: viewModel.currentStep) // Keep animation on container if desired, or remove if causing issues
+        // --- ADJUSTED FRAME ---
+        // Remove fixed/max height to allow vertical resizing based on content
         .frame(minWidth: 450, idealWidth: 500, maxWidth: 600,
-               minHeight: 400, idealHeight: 500, maxHeight: 600)
+               minHeight: 400) // Keep minHeight if needed, remove maxHeight
+        // --- END ADJUSTED FRAME ---
+        // Ensure the onComplete callback is passed to the ViewModel
         .onAppear {
             viewModel.onComplete = self.onComplete
         }
