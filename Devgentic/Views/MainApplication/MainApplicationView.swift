@@ -193,13 +193,8 @@ struct MainApplicationView: View {
             if viewModel.showSettings {
                 // Use the extracted SettingsPanelView, passing bindings to ViewModel properties
                 SettingsPanelView(
-                    showSettings: $viewModel.showSettings, // Binding to allow dismissal from panel
-                    selectedSettingsSection: $viewModel.selectedSettingsSection, // Bind section
-                    // Pass bindings for settings managed by the ViewModel
-                    windowOpacity: $viewModel.windowOpacity,
-                    llmModelName: $viewModel.llmModelName,
-                    agentBaseURL: $viewModel.agentBaseURL,
-                    agentDelegationStrategy: $viewModel.agentDelegationStrategy
+                    viewModel: viewModel, // Pass the ViewModel instance
+                    showSettings: $viewModel.showSettings // Still need this binding to dismiss the panel
                 )
                 // Add transition if desired
                 .transition(.scale.combined(with: .opacity))

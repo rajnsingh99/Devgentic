@@ -1,4 +1,4 @@
-// Views/SettingsPanelView.swift
+// Views/Settings/SettingsPanelView.swift
 import SwiftUI
 import os
 
@@ -6,15 +6,19 @@ import os
 // private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "SettingsPanelView")
 
 struct SettingsPanelView: View {
-    // State and Bindings passed down
+    // Now observing the ViewModel to pass it down to detail views
+    @ObservedObject var viewModel: MainApplicationViewModel // <--- ADD THIS
+
+    // State and Bindings passed down (some might become observed properties from ViewModel)
     @Binding var showSettings: Bool // To allow closing the panel
-    @Binding var selectedSettingsSection: SettingsSection // To manage selection
+    // @Binding var selectedSettingsSection: SettingsSection // This is now in the ViewModel
 
     // Bindings for the actual settings values needed by detail views
-    @Binding var windowOpacity: Double
-    @Binding var llmModelName: String
-    @Binding var agentBaseURL: String
-    @Binding var agentDelegationStrategy: String
+    // These might also become direct references to viewModel properties
+    // @Binding var windowOpacity: Double // This is now in the ViewModel
+    // @Binding var llmModelName: String // This is now in the ViewModel
+    // @Binding var agentBaseURL: String // This is now in the ViewModel
+    // @Binding var agentDelegationStrategy: String // This is now in the ViewModel
 
     // Action passed up (if needed, e.g., for a global reset button)
     // let onResetSettings: (() -> Void)? = nil
@@ -41,12 +45,14 @@ struct SettingsPanelView: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
-                        .background(selectedSettingsSection == section ? Color.white.opacity(0.2) : Color.clear)
-                        .foregroundColor(selectedSettingsSection == section ? .white : .white.opacity(0.7))
+                        // Use viewModel.selectedSettingsSection for highlighting
+                        .background(viewModel.selectedSettingsSection == section ? Color.white.opacity(0.2) : Color.clear)
+                        .foregroundColor(viewModel.selectedSettingsSection == section ? .white : .white.opacity(0.7))
                         .cornerRadius(6)
                         .contentShape(Rectangle()) // Make entire row tappable
                         .onTapGesture {
-                            selectedSettingsSection = section // Update selection
+                            // Update the ViewModel's selected section
+                            viewModel.selectedSettingsSection = section
                         }
                     }
                     Spacer() // Pushes sections to the top
@@ -61,18 +67,18 @@ struct SettingsPanelView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 15) {
                         // Dynamically display the correct settings view based on selection
-                        switch selectedSettingsSection {
+                        switch viewModel.selectedSettingsSection { // Use viewModel's selected section
                         case .general:
-                            // Pass the relevant binding
-                            GeneralSettingsView(windowOpacity: $windowOpacity)
+                            // Pass the relevant binding from the ViewModel
+                            GeneralSettingsView(windowOpacity: $viewModel.windowOpacity)
                         case .localAI:
-                            // Pass the relevant binding
-                            LocalAISettingsView(llmModelName: $llmModelName)
+                            // Pass the ViewModel instance
+                            LocalAISettingsView(viewModel: viewModel) // <--- PASS VIEWMODEL HERE
                         case .agents:
-                            // Pass the relevant bindings
-                            AgentSettingsView(agentBaseURL: $agentBaseURL, agentDelegationStrategy: $agentDelegationStrategy)
+                            // Pass the relevant bindings from the ViewModel
+                            AgentSettingsView(agentBaseURL: $viewModel.agentBaseURL, agentDelegationStrategy: $viewModel.agentDelegationStrategy)
                         case .license:
-                            // This view currently doesn't need bindings
+                            // This view currently doesn't need bindings or ViewModel
                             LicenseSettingsView()
                         }
                         Spacer() // Pushes content to the top if less than scroll view height
@@ -85,12 +91,11 @@ struct SettingsPanelView: View {
             .background(
                 // Use VisualEffectBlur for the main panel background
                  VisualEffectBlur().edgesIgnoringSafeArea(.all)
-                // Or a solid color alternative:
-                // Color.black.opacity(0.6).edgesIgnoringSafeArea(.all)
             )
             .clipShape(RoundedRectangle(cornerRadius: 12)) // Rounded corners for the panel
             .shadow(radius: 10) // Add shadow for depth
-            .frame(width: 1000, height: 650) // Fixed size for the centered panel
+            // REMOVE THE FIXED FRAME was here
+            .padding(20) // Add padding around the settings content
 
             // --- Close Button Overlay ---
             .overlay(alignment: .topTrailing) {
@@ -118,35 +123,18 @@ struct SettingsPanelView: View {
     }
 }
 
-// Preview Provider
+// Update the Preview Provider for SettingsPanelView to pass a mock ViewModel
 struct SettingsPanelView_Previews: PreviewProvider {
-    @State static var show = true
-    @State static var section: SettingsSection = .general
-    @State static var opacity = 0.8
-    @State static var model = "gemma:2b-preview"
-    @State static var url = "http://localhost:8001"
-    @State static var strategy = "auto"
+    @StateObject static var viewModel = MainApplicationViewModel() // Create a mock ViewModel
 
     static var previews: some View {
         SettingsPanelView(
-            showSettings: $show,
-            selectedSettingsSection: $section,
-            windowOpacity: $opacity,
-            llmModelName: $model,
-            agentBaseURL: $url,
-            agentDelegationStrategy: $strategy
+            viewModel: viewModel, // Pass the mock ViewModel
+            showSettings: .constant(true) // Keep open for preview
+            // Bindings like selectedSettingsSection, windowOpacity, etc.
+            // are now managed by the ViewModel and accessed directly
+            // in the view, so you don't pass them as separate bindings here.
         )
-        .previewDisplayName("General Selected")
-
-        // Preview with a different section selected
-        SettingsPanelView(
-            showSettings: .constant(true), // Keep open for preview
-            selectedSettingsSection: .constant(.agents), // Start on Agents section
-            windowOpacity: $opacity,
-            llmModelName: $model,
-            agentBaseURL: $url,
-            agentDelegationStrategy: $strategy
-        )
-        .previewDisplayName("Agents Selected")
+        .previewDisplayName("Settings Panel Preview")
     }
 }

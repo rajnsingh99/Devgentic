@@ -192,7 +192,7 @@ class OnboardingViewModel: ObservableObject {
 
 
     // MARK: - Step 4a: Ollama Local Setup Script Logic (Two-Phase Orchestration)
-
+    // (This section is identical to the user-provided file, including debug logs)
     /// Initiates the *initial phase* of the Ollama setup script.
     func startOllamaSetupScript() {
         // --- Determine the single LLM name to install ---
@@ -643,4 +643,5 @@ extension ScriptRunnerService {
 // enum BackendType: String, Codable, CaseIterable { ... }
 // Assume OllamaModelInfo struct exists in Models/OllamaModelInfo.swift
 // struct OllamaModelInfo: Identifiable, Hashable { ... }
+
 
