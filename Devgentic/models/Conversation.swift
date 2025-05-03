@@ -1,33 +1,35 @@
 // Models/Conversation.swift
-import Foundation // Needed for UUID and Date
+import Foundation
 
-// MARK: - Data Model
 struct Conversation: Identifiable, Equatable {
     let id: UUID
-    var messages: [String]
-    var timestamp: Date // To help sort or display
+    var messages: [ChatMessage] // <--- CHANGED
+    var timestamp: Date
 
-    // Helper to get a display title (e.g., first user message)
+    // Helper to get a display title (Adapt based on ChatMessage)
     var displayTitle: String {
-        // Find the first message starting with "You: "
-        if let firstUserMessage = messages.first(where: { $0.starts(with: "You:") }) {
-            let content = firstUserMessage.dropFirst(4).trimmingCharacters(in: .whitespacesAndNewlines)
-            // Limit title length for display
-            let maxLength = 30
-            return String(content.prefix(maxLength)) + (content.count > maxLength ? "..." : "")
-        }
-        // Fallback if no user message yet or only agent messages
-        if let firstMessage = messages.first {
-            let content = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Limit title length for display
-            let maxLength = 30
-            // Include "Agent:" prefix if it's the first message
-            if content.starts(with: "Agent:") {
-                 return String(content.prefix(maxLength + 7)) + (content.count > (maxLength + 7) ? "..." : "") // Account for "Agent: "
-            } else {
-                 return String(content.prefix(maxLength)) + (content.count > maxLength ? "..." : "")
+        // Find the first user message
+        if let firstUserMessage = messages.first(where: { $0.sender == .user }) {
+            if case .plainText(let text) = firstUserMessage.content { // <-- Check content type
+                let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let maxLength = 30
+                return String(content.prefix(maxLength)) + (content.count > maxLength ? "..." : "")
             }
         }
-        return "New Chat"
+        // Fallback: Use first message of any kind
+        if let firstMessage = messages.first {
+             if case .plainText(let text) = firstMessage.content { // <-- Check content type
+                let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let maxLength = 30
+                // Optionally prepend "Agent: " if needed, but maybe less necessary now
+                return String(content.prefix(maxLength)) + (content.count > maxLength ? "..." : "")
+            }
+        }
+        return "New Chat" // Default title
+    }
+
+     // Implement Equatable based on ID
+    static func == (lhs: Conversation, rhs: Conversation) -> Bool {
+        lhs.id == rhs.id
     }
 }

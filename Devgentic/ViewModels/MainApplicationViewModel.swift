@@ -2,6 +2,8 @@
 import SwiftUI
 import Combine // Needed for ObservableObject and @Published
 import os     // For logging
+import Markdown // <-- IMPORT swift-markdown
+
 
 // Logger for the ViewModel
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationViewModel")
@@ -55,8 +57,9 @@ enum OllamaServerStatus: String, CaseIterable {
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Published State Properties
-    // ... (Existing properties remain the same) ...
+    // --- Using ChatMessage Data Model ---
     @Published var conversations: [Conversation] = []
+    // ------------------------------------
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
     @Published var userInput: String = ""
@@ -128,22 +131,28 @@ class MainApplicationViewModel: ObservableObject {
     private let aiConnect = AIConnect()
 
     // MARK: - Computed Properties (Derived State)
-    // ... (Computed properties remain the same) ...
-    var currentChatHistory: [String] {
+
+    // --- UPDATED to use ChatMessage ---
+    // Renamed from currentChatHistory
+    var currentChatMessages: [ChatMessage] {
         guard let selectedID = selectedConversationID,
               let conversation = conversations.first(where: { $0.id == selectedID }) else {
             return []
         }
+        // Directly return the ChatMessage array from the conversation
         return conversation.messages
     }
+    // ---------------------------------
 
+    // currentConversationTitle uses the updated Conversation struct's displayTitle
     var currentConversationTitle: String {
         guard let conversation = conversations.first(where: { $0.id == selectedConversationID }) else {
             return conversations.isEmpty ? "Devgentic" : "Select Chat"
         }
-        return conversation.displayTitle
+        return conversation.displayTitle // Uses the adapted displayTitle
     }
 
+    // groupedConversations & sortedGroupKeys work on the [Conversation] array, no changes needed
     var groupedConversations: [String: [Conversation]] {
         let calendar = Calendar.current
         let now = Date()
@@ -181,17 +190,13 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Initialization
     init(initialConversations: [Conversation] = []) {
+        // Ensure initialConversations (if provided) conform to the new structure
         self.conversations = initialConversations
         selectInitialConversation()
         logger.info("MainApplicationViewModel initialized.")
     }
 
-    // loadSettings is now redundant for persistence due to @AppStorage
-    private func loadSettings() {
-         logger.debug("loadSettings called (persistence handled by @AppStorage).")
-    }
-
-
+    // selectInitialConversation works on the [Conversation] array, no changes needed
     private func selectInitialConversation() {
         sortConversations()
         if selectedConversationID == nil,
@@ -205,16 +210,19 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Actions / Methods
 
+    // --- UPDATED to use ChatMessage ---
     func startNewConversation() {
         if showSettings { showSettings = false }
         userInput = ""
+        // Create Conversation with an empty [ChatMessage] array
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
         conversations.append(newConversation)
-        sortConversations()
+        sortConversations() // Sort after adding
         selectedConversationID = newConversation.id
         logger.info("Started new conversation with ID: \(newConversation.id.uuidString)")
     }
 
+    // --- UPDATED with Markdown Parsing Logic ---
     func sendMessage() {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), trimmedInput: \(trimmedInput)")
@@ -223,177 +231,192 @@ class MainApplicationViewModel: ObservableObject {
         guard !trimmedInput.isEmpty else { logger.info("sendMessage aborted: Input empty."); userInput = ""; return }
         guard !showSettings else { logger.warning("sendMessage aborted: Settings open."); return }
 
-        // --- Context Integration ---
+        // Context Integration - Prepare the prompt string for the backend
         var contextPrefix = ""
         if showContextArea, let filePath = activeContextFilePath {
-            contextPrefix = "Context File: \(filePath)\n\nUser Message:\n" // Simplified
+            contextPrefix = "Context File: \(filePath)\n\nUser Message:\n"
         }
-        let messageToSend = contextPrefix + trimmedInput
-        // -----------------------------
+        let messageToSendToBackend = contextPrefix + trimmedInput
 
+        // Ensure a conversation is selected or created
         if selectedConversationID == nil {
-            logger.info("No conversation selected. Starting new one.")
+            logger.info("No conversation selected. Starting new one before sending.")
             startNewConversation()
         }
 
+        // Safely get current conversation ID and index
         guard let currentID = selectedConversationID,
               let conversationIndex = conversations.firstIndex(where: { $0.id == currentID }) else {
-            logger.error("CRITICAL: Could not find or create conversation (ID: \(String(describing: self.selectedConversationID))).")
+            logger.error("CRITICAL: Could not find valid conversation (ID: \(String(describing: self.selectedConversationID))) after attempting creation.")
             return
         }
 
-        // Append user message locally
-        let userMessage = "You: \(trimmedInput)"
+        // Create and Append User ChatMessage (as .plainText)
+        let userMessage = ChatMessage(
+            conversationId: currentID,
+            sender: .user,
+            content: .plainText(trimmedInput) // User input as plain text
+        )
         conversations[conversationIndex].messages.append(userMessage)
         conversations[conversationIndex].timestamp = Date()
         sortConversations()
 
-        let messageLog = messageToSend
-        userInput = ""
+        // Prepare for backend call
+        let messageLogForBackend = messageToSendToBackend
+        userInput = "" // Clear input field
         isSending = true
 
-        // --- Refactored Network Call ---
+        // Perform Network Call Asynchronously
         Task {
-            // Check server status before sending message if backend is Ollama
+            // Check server status before sending
             if selectedBackend == .ollama {
-                 // Only check status here if it's not already connected or checking
                  if ollamaServerStatus != .connected && ollamaServerStatus != .checking {
-                      await checkOllamaServerStatus() // Update status
+                      await checkOllamaServerStatus()
                  }
                  guard ollamaServerStatus == .connected else {
                      let errorMsg = "Cannot send message: Ollama server is not connected."
                      logger.error("\(errorMsg)")
-                     self.handleAgentResponse(response: "Error: \(errorMsg)", conversationID: currentID)
-                     return // Stop if server not connected
+                     let errorMessage = ChatMessage( conversationId: currentID, sender: .agent, content: .plainText("Error: \(errorMsg)") )
+                     self.handleAgentResponse(message: errorMessage) // Use the single message handler
+                     self.isSending = false // Explicitly set sending false on early exit
+                     return
                  }
             }
 
-
-            let backendConfig = self.determineBackendConfiguration(message: messageLog)
-            var agentResponse: String
+            let backendConfig = self.determineBackendConfiguration(message: messageLogForBackend)
+            var resultingMessages: [ChatMessage] = [] // Prepare for multiple messages
 
             do {
-                logger.debug("Sending task '\(messageLog.prefix(200))' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(currentID.uuidString)")
-                 let responseData = try await self.aiConnect.postToLocalServer(
-                     endpoint: backendConfig.endpoint,
-                     payload: backendConfig.payload
-                 )
-                agentResponse = self.parseResponse(data: responseData, for: self.selectedBackend)
+                logger.debug("Sending task '\(messageLogForBackend.prefix(200))' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(currentID.uuidString)")
+                let responseData = try await self.aiConnect.postToLocalServer(
+                    endpoint: backendConfig.endpoint,
+                    payload: backendConfig.payload
+                )
+                // Get the raw response string
+                let responseText = self.parseResponse(data: responseData, for: self.selectedBackend)
+
+                // --- PARSE the response string into content blocks ---
+                let parsedContents = self.parseAgentResponseString(responseText)
+                // ----------------------------------------------------
+
+                // --- Create ChatMessage for each parsed content block ---
+                for content in parsedContents {
+                    let agentMessage = ChatMessage(
+                        conversationId: currentID, // Use ID captured before Task
+                        sender: .agent,
+                        content: content // Use the parsed content type
+                    )
+                    resultingMessages.append(agentMessage)
+                }
+                // -------------------------------------------------------
+
             } catch {
                 logger.error("Error during API call or parsing: \(error.localizedDescription)")
-                // If a network error occurs during sendMessage for Ollama, update status
+                let errorText = self.generateErrorMessage(error: error)
+                // --- Create .error content ---
+                let errorMessage = ChatMessage(
+                    conversationId: currentID,
+                    sender: .agent,
+                    content: .error(title: "Processing Error", details: errorText) // <-- USE .error
+                )
+                resultingMessages.append(errorMessage)
+                 // Update Ollama status on network error
                  if selectedBackend == .ollama {
-                     // Assuming disconnected on network error during call,
-                     // but could be more nuanced depending on error type.
                      if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                           self.ollamaServerStatus = .disconnected
-                          logger.error("Setting server status to disconnected due to sendMessage network error.")
-                     } else {
-                         // Other errors might not mean disconnected, keep current status
-                          logger.error("sendMessage received non-network error, keeping current server status.")
                      }
                  }
-                agentResponse = self.generateErrorMessage(error: error)
             }
 
-            self.handleAgentResponse(response: agentResponse, conversationID: currentID)
+            // --- Handle potentially MULTIPLE agent messages ---
+            var messageHandled = false
+            for agentMessage in resultingMessages {
+                 self.handleAgentResponse(message: agentMessage) // Call handler for each message
+                 messageHandled = true
+            }
+            // Ensure sending is false only after handling ALL messages *or* if an error occurred *before* sending
+            if messageHandled || !self.isSending /* Check if already false due to early exit */ {
+                self.isSending = false
+            } else {
+                // If NO messages were generated (e.g., empty response parsed to nothing)
+                // and no early exit occurred, still need to set isSending false.
+                self.isSending = false
+                logger.warning("sendMessage Task finished but generated no messages to handle.")
+            }
+            // ------------------------------------------------
+        }
+    }
+    // --- END UPDATED sendMessage ---
+
+
+    // Handles appending a single message to the correct conversation
+    // IMPORTANT: Does NOT manage the isSending flag anymore.
+    private func handleAgentResponse(message: ChatMessage) {
+        if let updatedIndex = self.conversations.firstIndex(where: { $0.id == message.conversationId }) {
+            self.conversations[updatedIndex].messages.append(message)
+            self.conversations[updatedIndex].timestamp = Date() // Update timestamp for latest activity
+            self.sortConversations()
+            // Use String(describing:) for safe enum logging
+            logger.debug("Appended message ID \(message.id.uuidString) (Sender: \(String(describing: message.sender))) to conversation \(message.conversationId.uuidString)")
+        } else {
+            logger.error("Error: Conversation \(message.conversationId.uuidString) disappeared before message (ID: \(message.id.uuidString)) could be added.")
         }
     }
 
-    func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            isSidebarCollapsed.toggle()
-        }
-    }
-
-    func toggleSettings() {
-         withAnimation {
-            showSettings.toggle()
-        }
-    }
-
+    // --- UI Toggles (No Changes Needed) ---
+    func toggleSidebar() { withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() } }
+    func toggleSettings() { withAnimation { showSettings.toggle() } }
     func toggleContextArea() {
          withAnimation {
             showContextArea.toggle()
         }
         if showContextArea {
+            // Simulate fetching context - Logic remains placeholder for now
+            // activeContextFilePath = "/Users/alice/Documents/project/file.swift"
             logger.info("Context toggled: Showing active file (Simulated).")
         } else {
+            activeContextFilePath = nil
             logger.info("Context toggled: Hiding context area.")
         }
     }
 
-    // MARK: - Ollama Server Status
-
+    // MARK: - Ollama Server Status (Full Implementation)
     /// Checks the connection status of the Ollama server.
     func checkOllamaServerStatus() async {
-        // Only check if backend is Ollama and we are not already checking
         guard selectedBackend == .ollama && ollamaServerStatus != .checking else {
              if selectedBackend != .ollama { self.ollamaServerStatus = .unknown }
              return
          }
-
         self.ollamaServerStatus = .checking
         let ollamaBaseURL = "http://localhost:11434" // TODO: Make configurable
-
         let isConnected = await AIConnect.checkOllamaServerStatus(baseURL: ollamaBaseURL)
-
         if isConnected {
             self.ollamaServerStatus = .connected
-            // Automatically load models if connected and on Local AI settings tab
-             // Only load models if on the Local AI tab
-             if selectedSettingsSection == .localAI {
-                 await loadLocalOllamaModels()
-             }
-
+            if selectedSettingsSection == .localAI { await loadLocalOllamaModels() }
         } else {
             self.ollamaServerStatus = .disconnected
-             self.localOllamaModels = [] // Clear models if disconnected
-             self.modelLoadingError = "Cannot connect to Ollama server." // Set a general loading error
-             logger.error("Ollama server status check failed: Server not reachable.")
+            self.localOllamaModels = []
+            self.modelLoadingError = "Cannot connect to Ollama server."
+            logger.error("Ollama server status check failed: Server not reachable.")
         }
     }
 
-
-    // MARK: - Local AI Model Management Actions
-
+    // MARK: - Local AI Model Management Actions (Full Implementation)
     /// Fetches the list of local Ollama models asynchronously.
     func loadLocalOllamaModels() async {
-        // Only load if the Local AI backend is selected
-        guard selectedBackend == .ollama else {
-            logger.debug("Skipping loadLocalOllamaModels: Backend is not Ollama.")
-            return
-        }
-
-        // Don't start loading if a pull or remove is in progress to avoid race conditions
-         guard !isPullingModel && !isRemovingModel else {
-             logger.debug("Skipping loadLocalOllamaModels: Model action in progress.")
-             return
-         }
-
-        // Only load models if the server is connected
-         guard ollamaServerStatus == .connected else {
-              logger.debug("Skipping loadLocalOllamaModels: Ollama server is not connected.")
-              // modelLoadingError is already set in checkOllamaServerStatus if disconnected
-              self.localOllamaModels = [] // Ensure list is clear
-              return
-          }
-
+         guard selectedBackend == .ollama else { return }
+         guard !isPullingModel && !isRemovingModel else { return }
+         guard ollamaServerStatus == .connected else { self.localOllamaModels = []; return }
 
         isLoadingModels = true
-        modelLoadingError = nil // Clear previous errors (from loading)
-
-        let ollamaBaseURL = "http://localhost:11434" // TODO: Make configurable
-
+        modelLoadingError = nil
+        let ollamaBaseURL = "http://localhost:11434"
         logger.info("Attempting to load local Ollama models from \(ollamaBaseURL)...")
-
         do {
             let models = try await AIConnect.fetchLocalOllamaModels(baseURL: ollamaBaseURL)
-
             self.localOllamaModels = models.sorted()
             self.modelLoadingError = nil
             logger.info("Successfully loaded \(models.count) local Ollama models.")
-
             if !models.contains(self.llmModelName) && !models.isEmpty {
                  logger.warning("Current model '\(self.llmModelName)' not found in fetched list. Setting llmModelName to the first model.")
                  self.llmModelName = models.first!
@@ -401,55 +424,34 @@ class MainApplicationViewModel: ObservableObject {
                  self.llmModelName = ""
                  logger.warning("Local model list is empty. Clearing selected llmModelName.")
             }
-
         } catch {
             let errorMessage = self.generateErrorMessage(error: error)
             self.localOllamaModels = []
-            self.modelLoadingError = "Failed to load models: \(errorMessage)" // Specific loading error
+            self.modelLoadingError = "Failed to load models: \(errorMessage)"
             logger.error("Failed to load local Ollama models: \(error.localizedDescription)")
-            // If loading fails due to network, update server status
-             if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
+            if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                  self.ollamaServerStatus = .disconnected
-                 logger.error("Setting server status to disconnected due to model loading network error.")
-             }
+            }
         }
-
         isLoadingModels = false
     }
 
     /// Initiates the process of pulling a new Ollama model.
-    /// - Parameter modelName: The name of the model to pull.
     func pullModelAction(name modelName: String) async {
         let trimmedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedModelName.isEmpty else {
-            self.modelPullError = "Model name cannot be empty."
-            return
-        }
-         guard !isPullingModel else { logger.warning("Already pulling a model."); return }
-         guard !isRemovingModel else { logger.warning("Attempted to pull model while another model is being removed."); self.modelPullError = "Cannot pull model: Another model is currently being removed."; return }
-         guard selectedBackend == .ollama else { logger.warning("Attempted to pull model but backend is not Ollama."); self.modelPullError = "Cannot pull models when Ollama is not the selected backend."; return }
-         // Check server status before initiating pull
-         guard ollamaServerStatus == .connected else {
-              let errorMsg = "Cannot pull model: Ollama server is not connected."
-              logger.warning("\(errorMsg)")
-              self.modelPullError = errorMsg
-              return
-          }
-
+        guard !trimmedModelName.isEmpty else { self.modelPullError = "Model name cannot be empty."; return }
+        guard !isPullingModel else { return }
+        guard !isRemovingModel else { self.modelPullError = "Cannot pull model: Another model is currently being removed."; return }
+        guard selectedBackend == .ollama else { self.modelPullError = "Cannot pull models when Ollama is not the selected backend."; return }
+        guard ollamaServerStatus == .connected else { self.modelPullError = "Cannot pull model: Ollama server is not connected."; return }
 
         isPullingModel = true
         self.pullStatusMessage = "Starting pull for \(trimmedModelName)..."
         modelPullError = nil
-        pullProgress = 0.0
-        pullStage = "Starting..."
-        pullTotalBytes = nil
-        pullCompletedBytes = nil
+        pullProgress = 0.0; pullStage = "Starting..."; pullTotalBytes = nil; pullCompletedBytes = nil
 
-
-        let ollamaBaseURL = "http://localhost:11434" // TODO: Make configurable
-
+        let ollamaBaseURL = "http://localhost:11434"
         logger.info("Attempting to pull model: \(trimmedModelName) with streaming.")
-
         do {
             try await AIConnect.pullOllamaModel(name: trimmedModelName, baseURL: ollamaBaseURL) { progress in
                 Task { @MainActor in
@@ -457,114 +459,126 @@ class MainApplicationViewModel: ObservableObject {
                     self.pullTotalBytes = progress.total
                     self.pullCompletedBytes = progress.completed
                     self.pullProgress = progress.percentage ?? 0.0
-
-                     if let percentage = progress.percentage {
-                         let percentString = String(format: "%.0f%%", percentage * 100)
-                          self.pullStatusMessage = "\(progress.status.capitalized): \(percentString)"
-                     } else if !progress.status.isEmpty {
-                          self.pullStatusMessage = progress.status.capitalized
-                     } else {
-                         self.pullStatusMessage = "In progress..."
-                     }
-
-                    if let streamedError = progress.error {
-                         self.modelPullError = "Stream Error: \(streamedError)"
-                         logger.error("Received streamed error during pull: \(streamedError). Attempting to cancel pull task.")
-                     }
-
-                    logger.debug("Pull progress: Status=\(progress.status), Completed=\(progress.completed ?? -1), Total=\(progress.total ?? -1), Percentage=\(progress.percentage ?? -1)")
+                    if let percentage = progress.percentage { self.pullStatusMessage = "\(progress.status.capitalized): \(String(format: "%.0f%%", percentage * 100))" }
+                    else if !progress.status.isEmpty { self.pullStatusMessage = progress.status.capitalized }
+                    else { self.pullStatusMessage = "In progress..." }
+                    if let streamedError = progress.error { self.modelPullError = "Stream Error: \(streamedError)"; logger.error("Received streamed error during pull: \(streamedError).") }
                 }
             }
-
             self.pullStatusMessage = "Successfully pulled \(trimmedModelName)."
-            self.modelPullError = nil
-            self.pullProgress = 1.0
-            self.pullStage = "Complete"
-            logger.info("Model \(trimmedModelName) pulled successfully (streaming finished).")
-
+            self.modelPullError = nil; self.pullProgress = 1.0; self.pullStage = "Complete"
+            logger.info("Model \(trimmedModelName) pulled successfully.")
             Task { await loadLocalOllamaModels() }
-
         } catch {
             let errorMessage = self.generateErrorMessage(error: error)
             self.pullStatusMessage = "Failed to pull \(trimmedModelName)."
             self.modelPullError = "Pull failed: \(errorMessage)"
-            self.pullProgress = 0.0
-            self.pullStage = "Error"
+            self.pullProgress = 0.0; self.pullStage = "Error"
             logger.error("Failed to pull model \(trimmedModelName): \(error.localizedDescription)")
-             if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
+            if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                  self.ollamaServerStatus = .disconnected
-                 logger.error("Setting server status to disconnected due to model pull network error.")
-             }
+            }
         }
-
         isPullingModel = false
-
-         try? await Task.sleep(nanoseconds: 2_000_000_000)
-         if modelPullError == nil {
-              self.modelToPull = ""
-         }
-         self.pullStatusMessage = ""
-         self.pullStage = ""
-         self.pullProgress = 0.0
-
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        if modelPullError == nil { self.modelToPull = "" }
+        self.pullStatusMessage = ""; self.pullStage = ""; self.pullProgress = 0.0
     }
 
     /// Initiates the process of removing a local Ollama model.
-    /// - Parameter modelName: The name of the model to remove.
     func removeModelAction(name modelName: String) async {
         let trimmedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedModelName.isEmpty else {
-            self.modelRemoveError = "Model name cannot be empty for removal."
-            return
-        }
-         guard trimmedModelName != self.llmModelName else { logger.warning("Attempted to remove the currently selected model '\(trimmedModelName)'."); self.modelRemoveError = "Cannot remove the currently active model."; return }
-         guard self.localOllamaModels.contains(trimmedModelName) else { logger.warning("Attempted to remove model '\(trimmedModelName)' which is not in the local list."); self.modelRemoveError = "Model '\(trimmedModelName)' not found in local list."; return }
-         guard !isRemovingModel else { logger.warning("Already removing a model."); return }
-         guard !isPullingModel else { logger.warning("Attempted to remove model while another model is being pulled."); self.modelRemoveError = "Cannot remove model: Another model is currently being pulled."; return }
-         guard selectedBackend == .ollama else { logger.warning("Attempted to remove model but backend is not Ollama."); self.modelRemoveError = "Cannot remove models when Ollama is not the selected backend."; return }
-         // Check server status before initiating removal
-         guard ollamaServerStatus == .connected else {
-              let errorMsg = "Cannot remove model: Ollama server is not connected."
-              logger.warning("\(errorMsg)")
-              self.modelRemoveError = errorMsg
-              return
-          }
-
+        guard !trimmedModelName.isEmpty else { self.modelRemoveError = "Model name cannot be empty for removal."; return }
+        guard trimmedModelName != self.llmModelName else { self.modelRemoveError = "Cannot remove the currently active model."; return }
+        guard self.localOllamaModels.contains(trimmedModelName) else { self.modelRemoveError = "Model '\(trimmedModelName)' not found."; return }
+        guard !isRemovingModel else { return }
+        guard !isPullingModel else { self.modelRemoveError = "Cannot remove model: Another model is currently being pulled."; return }
+        guard selectedBackend == .ollama else { self.modelRemoveError = "Cannot remove models when Ollama is not the selected backend."; return }
+        guard ollamaServerStatus == .connected else { self.modelRemoveError = "Cannot remove model: Ollama server is not connected."; return }
 
         isRemovingModel = true
         removingModelName = trimmedModelName
         modelRemoveError = nil
-
-        let ollamaBaseURL = "http://localhost:11434" // TODO: Make configurable
-
+        let ollamaBaseURL = "http://localhost:11434"
         logger.info("Attempting to remove model: \(trimmedModelName)")
-
         do {
             try await AIConnect.removeOllamaModel(name: trimmedModelName, baseURL: ollamaBaseURL)
-
             logger.info("Model \(trimmedModelName) removed successfully.")
-
             Task { await loadLocalOllamaModels() }
-
-             self.removingModelName = nil
-
+            self.removingModelName = nil
         } catch {
             let errorMessage = self.generateErrorMessage(error: error)
             self.modelRemoveError = "Removal failed: \(errorMessage)"
             logger.error("Failed to remove model \(trimmedModelName): \(error.localizedDescription)")
              if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                  self.ollamaServerStatus = .disconnected
-                 logger.error("Setting server status to disconnected due to model removal network error.")
-             }
+            }
         }
-
         isRemovingModel = false
-
-         // Optional: Clear the removal status/error after a delay on success
     }
 
 
-    // MARK: - Private Helper Functions
+    // MARK: - Agent Response Parsing Helper (NEW)
+
+    /// Parses a raw response string from the agent into distinct content blocks.
+    /// Uses swift-markdown to identify code blocks vs other text (treated as markdown).
+    /// - Parameter responseText: The raw string received from the backend.
+    /// - Returns: An array of MessageContent enums representing the parsed blocks.
+    private func parseAgentResponseString(_ responseText: String) -> [MessageContent] {
+        logger.debug("Parsing agent response string...")
+        var contentBlocks: [MessageContent] = []
+        // Use default parsing options unless specific directives are needed
+        let document = Document(parsing: responseText)
+
+        // Iterate through the top-level blocks of the Markdown document
+        for block in document.children {
+            switch block {
+            case let codeBlock as CodeBlock:
+                let codeContent = codeBlock.code.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Only add if content exists after trimming
+                if !codeContent.isEmpty {
+                    logger.trace("Found Code Block, language: \(codeBlock.language ?? "nil")")
+                    contentBlocks.append(.codeBlock(language: codeBlock.language, code: codeContent))
+                } else {
+                    logger.trace("Skipping empty Code Block.")
+                }
+
+            case let blockquote as BlockQuote:
+                 // Format preserves the blockquote markers '>'
+                 let quoteContent = blockquote.format().trimmingCharacters(in: .whitespacesAndNewlines)
+                 if !quoteContent.isEmpty {
+                      logger.trace("Found Block Quote.")
+                      contentBlocks.append(.markdownText(quoteContent))
+                 } else {
+                      logger.trace("Skipping empty Block Quote.")
+                 }
+
+            // Handle other block types (Paragraph, Heading, List, etc.) as Markdown text
+            default:
+                // Format the block back into its Markdown string representation
+                // This preserves list markers, heading syntax, etc. for MarkdownUI
+                let markdownContent = block.format().trimmingCharacters(in: .whitespacesAndNewlines)
+                if !markdownContent.isEmpty {
+                    logger.trace("Found other block type (\(type(of: block))), treating as Markdown.")
+                    contentBlocks.append(.markdownText(markdownContent))
+                } else {
+                     logger.trace("Skipping empty block of type (\(type(of: block))).")
+                }
+            }
+        }
+
+        // Fallback if parsing resulted in no blocks from a non-empty string
+        if contentBlocks.isEmpty && !responseText.isEmpty {
+             logger.warning("Markdown parsing resulted in no content blocks, returning original text as plain.")
+             return [.plainText(responseText)]
+         }
+
+        logger.info("Parsed response into \(contentBlocks.count) content blocks.")
+        return contentBlocks
+    }
+
+
+    // MARK: - Private Helper Functions (Full Implementations)
 
     private func sortConversations() {
         conversations.sort { $0.timestamp > $1.timestamp }
@@ -576,6 +590,7 @@ class MainApplicationViewModel: ObservableObject {
         let payload: [String: Any]
     }
 
+    // determineBackendConfiguration uses local settings
     private func determineBackendConfiguration(message: String) -> BackendConfiguration {
         switch self.selectedBackend {
         case .ollama:
@@ -594,7 +609,7 @@ class MainApplicationViewModel: ObservableObject {
                 payload: [
                     "model": self.llmModelName,
                     "prompt": message,
-                    "stream": false,
+                    "stream": false, // Streaming handled separately if needed
                     "options": advancedOptions
                 ]
             )
@@ -610,40 +625,41 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
+    // parseResponse parses API data into String
     private func parseResponse(data: Data, for backend: BackendType) -> String {
          do {
             switch backend {
             case .agent:
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let resultsArray = json["results"] as? [[String: Any]] else {
-                    logger.warning("Agent response was not the expected JSON structure.")
-                    return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Error: Could not decode non-JSON Agent response."
-                }
+                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let resultsArray = json["results"] as? [[String: Any]] else {
+                     logger.warning("Agent response was not the expected JSON structure.")
+                     return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Error: Could not decode non-JSON Agent response."
+                 }
                  if let completed = resultsArray.first(where: { ($0["status"] as? String) == "completed" }),
                    let result = completed["result"] as? String {
-                    logger.debug("Parsed completed agent result.")
-                    return result.trimmingCharacters(in: .whitespacesAndNewlines)
-                } else if !resultsArray.isEmpty && resultsArray.allSatisfy({ ($0["status"] as? String) != "completed" }) {
-                    let firstError = resultsArray.first?["result"] as? String ?? "Unknown agent error"
-                    logger.warning("All agents failed. First error: \(firstError)")
-                    return "Agent Error: \(firstError)"
-                } else if resultsArray.isEmpty {
-                     logger.warning("Agent returned empty results array.")
-                     return "Error: Received empty results array from agent."
-                } else {
-                     logger.warning("No agent completed successfully in results: \(resultsArray)")
-                     return "Error: No agent completed the task successfully."
-                }
+                     logger.debug("Parsed completed agent result.")
+                     return result.trimmingCharacters(in: .whitespacesAndNewlines)
+                 } else if !resultsArray.isEmpty && resultsArray.allSatisfy({ ($0["status"] as? String) != "completed" }) {
+                     let firstError = resultsArray.first?["result"] as? String ?? "Unknown agent error"
+                     logger.warning("All agents failed. First error: \(firstError)")
+                     return "Agent Error: \(firstError)"
+                 } else if resultsArray.isEmpty {
+                      logger.warning("Agent returned empty results array.")
+                      return "Error: Received empty results array from agent."
+                 } else {
+                      logger.warning("No agent completed successfully in results: \(resultsArray)")
+                      return "Error: No agent completed the task successfully."
+                 }
 
             case .ollama:
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let reply = json["response"] as? String else {
-                    logger.warning("Ollama response was not JSON or missing 'response' key.")
-                     if let rawResponse = String(data: data, encoding: .utf8) {
-                         logger.warning("Ollama JSON response: \(rawResponse)")
-                     }
-                    return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Error: Could not decode non-JSON Ollama response."
-                }
+                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let reply = json["response"] as? String else {
+                     logger.warning("Ollama response was not JSON or missing 'response' key.")
+                      if let rawResponse = String(data: data, encoding: .utf8) {
+                          logger.warning("Ollama JSON response: \(rawResponse)")
+                      }
+                     return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Error: Could not decode non-JSON Ollama response."
+                 }
                  logger.debug("Parsed Ollama response.")
                  return reply.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -657,47 +673,38 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
-    private func handleAgentResponse(response: String, conversationID: UUID) {
-        if let updatedIndex = self.conversations.firstIndex(where: { $0.id == conversationID }) {
-            self.conversations[updatedIndex].messages.append("Agent: \(response)")
-            self.conversations[updatedIndex].timestamp = Date()
-            self.sortConversations()
-        } else {
-            logger.error("Error: Conversation \(conversationID.uuidString) disappeared before agent response could be added.")
-        }
-        self.isSending = false
-    }
-
+    // generateErrorMessage creates String from Error
     private func generateErrorMessage(error: Error) -> String {
         if let urlError = error as? URLError {
             switch urlError.code {
-            case .cannotConnectToHost: return "Error: Could not connect to the server (\(self.selectedBackend.rawValue)). Check if it's running and the URL/Port is correct."
-            case .networkConnectionLost: return "Error: Network connection lost."
-            case .notConnectedToInternet: return "Error: Not connected to the internet."
+            case .cannotConnectToHost: return "Could not connect to the server (\(self.selectedBackend.rawValue)). Check if it's running and the URL/Port is correct."
+            case .networkConnectionLost: return "Network connection lost."
+            case .notConnectedToInternet: return "Not connected to the internet."
             case .badServerResponse:
                  let httpStatusCode = urlError.userInfo["HTTPStatusCode"] as? Int
                  let responseData = urlError.userInfo["ResponseData"] as? Data
                  let responseBody = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? "No response body"
-                 let statusString = httpStatusCode.map { " (\($0))" } ?? "" // Corrected
+                 let statusString = httpStatusCode.map { " (\($0))" } ?? ""
 
                  if let data = responseData, let ollamaError = parseOllamaErrorResponse(data: data) {
                      return "Ollama Error\(statusString): \(ollamaError)"
                  }
 
-                return "Error: Bad server response\(statusString). \(responseBody.prefix(150))"
+                return "Bad server response\(statusString). \(responseBody.prefix(150))"
 
-            case .cannotFindHost: return "Error: Cannot find the server host (\(self.selectedBackend.rawValue)). Check address/DNS."
-            case URLError.Code(rawValue: 1): return "Error: Operation not permitted (check Sandbox/Firewall)."
+            case .cannotFindHost: return "Cannot find the server host (\(self.selectedBackend.rawValue)). Check address/DNS."
+            case URLError.Code(rawValue: 1): return "Operation not permitted (check Sandbox/Firewall)." // Common macOS error code
              case .cancelled: return "Request cancelled."
             default:
                 logger.warning("Unhandled URLError code: \(urlError.code.rawValue) - \(urlError.localizedDescription)")
-                return "Error: Network request failed (\(urlError.localizedDescription))."
+                return "Network request failed (\(urlError.localizedDescription))."
             }
         }
         logger.warning("Unhandled error type: \(type(of: error)) - \(error.localizedDescription)")
         return "Error: \(error.localizedDescription)"
     }
 
+    // parseOllamaErrorResponse creates String from Ollama error data
     private func parseOllamaErrorResponse(data: Data) -> String? {
          guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let error = json["error"] as? String else {
@@ -707,10 +714,8 @@ class MainApplicationViewModel: ObservableObject {
      }
 
 
-    // --- TODO: Implement File Reading ---
+    // --- TODO: Implement File Reading / Persistence ---
     // func readFileContent(at path: String) -> String? { ... }
-
-    // --- TODO: Implement Persistence ---
     // func saveConversations() { ... }
     // func loadConversations() { ... }
 

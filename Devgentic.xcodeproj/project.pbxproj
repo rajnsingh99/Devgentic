@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		352C81DE2DC54CF70029EA59 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = 352C81DD2DC54CF70029EA59 /* Markdown */; };
+		35A144B52DC50543005D476C /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = 35A144B42DC50543005D476C /* MarkdownUI */; };
+		35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 35DB4C1F2DC53B9D002B3BF7 /* Splash */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		35FCBA9A2DB5526B00D39123 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -29,22 +35,9 @@
 		35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		358B8DC82DBF91B500A4D9AB /* Exceptions for "devgentic" folder in "devgentic" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Resources/setup_ollama.py,
-			);
-			target = 35FCBA872DB5526B00D39123 /* devgentic */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		35FCBA8A2DB5526B00D39123 /* devgentic */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				358B8DC82DBF91B500A4D9AB /* Exceptions for "devgentic" folder in "devgentic" target */,
-			);
 			path = devgentic;
 			sourceTree = "<group>";
 		};
@@ -65,6 +58,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				352C81DE2DC54CF70029EA59 /* Markdown in Frameworks */,
+				35A144B52DC50543005D476C /* MarkdownUI in Frameworks */,
+				35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -85,12 +81,20 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		35DB4C1E2DC53B9D002B3BF7 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		35FCBA7F2DB5526B00D39123 = {
 			isa = PBXGroup;
 			children = (
 				35FCBA8A2DB5526B00D39123 /* devgentic */,
 				35FCBA9C2DB5526B00D39123 /* devgenticTests */,
 				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
+				35DB4C1E2DC53B9D002B3BF7 /* Frameworks */,
 				35FCBA892DB5526B00D39123 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -125,6 +129,9 @@
 			);
 			name = devgentic;
 			packageProductDependencies = (
+				35A144B42DC50543005D476C /* MarkdownUI */,
+				35DB4C1F2DC53B9D002B3BF7 /* Splash */,
+				352C81DD2DC54CF70029EA59 /* Markdown */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -208,6 +215,11 @@
 			);
 			mainGroup = 35FCBA7F2DB5526B00D39123;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */,
+				35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */,
+				352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
 			projectDirPath = "";
@@ -556,6 +568,51 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-markdown.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.6.0;
+			};
+		};
+		35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gonzalezreal/MarkdownUI.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.4.1;
+			};
+		};
+		35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/JohnSundell/Splash.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.16.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		352C81DD2DC54CF70029EA59 /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
+		35A144B42DC50543005D476C /* MarkdownUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */;
+			productName = MarkdownUI;
+		};
+		35DB4C1F2DC53B9D002B3BF7 /* Splash */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */;
+			productName = Splash;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 35FCBA802DB5526B00D39123 /* Project object */;
 }

@@ -16,9 +16,17 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 // MARK: - Models & Enums (Assumed to be in separate files now)
 // BackendType enum is now defined in Models/BackendType.swift
 // Conversation struct is now defined in Models/Conversation.swift
-// VisualEffectBlur struct is now defined in Views/VisualEffectBlur.swift
+// ChatMessage struct is now defined in Models/ChatMessage.swift   // ADDED ASSUMPTION
+// MessageContent enum is now defined in Models/MessageContent.swift // ADDED ASSUMPTION
+// SenderRole enum is now defined in Models/SenderRole.swift     // ADDED ASSUMPTION
+// VisualEffectBlur struct is now defined in Views/Shared/VisualEffectBlur.swift
 // SettingsSection enum is now defined in Models/SettingsSection.swift
 // SettingsKeys struct is now defined in Models/SettingsKeys.swift
+// ConversationListView is defined in Views/MainApplication/ConversationListView.swift
+// ChatHeaderView is defined in Views/MainApplication/ChatHeaderView.swift
+// ChatHistoryView is defined in Views/MainApplication/ChatHistoryView.swift
+// ChatInputAreaView is defined in Views/MainApplication/ChatInputAreaView.swift
+// SettingsPanelView is defined in Views/Settings/SettingsPanelView.swift
 
 // MARK: - Previews (Optional)
 struct FloatingWindowView_Previews: PreviewProvider {
@@ -47,14 +55,12 @@ struct FloatingWindowView_Previews: PreviewProvider {
 struct MainApplicationView: View {
     // --- ViewModel ---
     // The single source of truth for state and logic
-    // Use @StateObject to ensure the ViewModel lifecycle is tied to the View
     @StateObject private var viewModel = MainApplicationViewModel()
 
     // --- Focus State (Remains in the View) ---
     @FocusState private var isInputFocused: Bool
 
     // --- Initializer (Optional, for injecting ViewModel in previews/tests) ---
-    // Use this if you need to provide a specific ViewModel instance, e.g., for previews
     // init(viewModel: MainApplicationViewModel = MainApplicationViewModel()) {
     //     _viewModel = StateObject(wrappedValue: viewModel)
     // }
@@ -66,15 +72,14 @@ struct MainApplicationView: View {
             // --- Main Content HStack (Chat UI) ---
             HStack(spacing: 0) {
                 // --- Left Sidebar (Conversations) ---
+                // Logic remains the same, ConversationListView uses the ViewModel
                 if !viewModel.isSidebarCollapsed {
-                    // Use the extracted ConversationListView, passing data/bindings from ViewModel
                     ConversationListView(
-                        groupedConversations: viewModel.groupedConversations, // Read from ViewModel
-                        sortedGroupKeys: viewModel.sortedGroupKeys,         // Read from ViewModel
-                        selectedConversationID: $viewModel.selectedConversationID, // Bind to ViewModel
-                        onNewConversation: viewModel.startNewConversation       // Pass ViewModel action
+                        groupedConversations: viewModel.groupedConversations,
+                        sortedGroupKeys: viewModel.sortedGroupKeys,
+                        selectedConversationID: $viewModel.selectedConversationID,
+                        onNewConversation: viewModel.startNewConversation
                     )
-                    // Add transition if desired
                     .transition(.move(edge: .leading))
                 }
                 // --- End Left Sidebar ---
@@ -86,72 +91,70 @@ struct MainApplicationView: View {
                 // ------------------------------------------------------
 
                 // --- Main Interaction Area (Right Side) ---
-                VStack(alignment: .leading, spacing: 0) { //  *** CORRECT ORDER HERE ***
+                VStack(alignment: .leading, spacing: 0) {
                     // --- Header ---
-                    // Use the extracted ChatHeaderView, passing data/bindings from ViewModel
+                    // Logic remains the same, ChatHeaderView uses the ViewModel
                     ChatHeaderView(
-                        isSidebarCollapsed: $viewModel.isSidebarCollapsed, // Binding for the button state
-                        currentConversationTitle: viewModel.currentConversationTitle, // Read from ViewModel
-                        onToggleSidebar: { // Provide closure for action, apply animation here
+                        isSidebarCollapsed: $viewModel.isSidebarCollapsed,
+                        currentConversationTitle: viewModel.currentConversationTitle,
+                        onToggleSidebar: {
                             withAnimation(.easeInOut(duration: 0.2)) {
-                                viewModel.toggleSidebar() // Call ViewModel action
+                                viewModel.toggleSidebar()
                             }
                         },
-                        onShowSettings: { // Provide closure for action, apply animation here
+                        onShowSettings: {
                             withAnimation {
-                                viewModel.toggleSettings() // Call ViewModel action
+                                viewModel.toggleSettings()
                             }
                         }
                     )
 
                     // --- Chat Message Area ---
-                    // Always include the ScrollViewReader structure
                     ScrollViewReader { scrollProxy in
+                        // --- UPDATED ---
+                        // Pass the [ChatMessage] array from the ViewModel
                         ChatHistoryView(
-                            history: viewModel.currentChatHistory, // Read from ViewModel
-                            isSending: viewModel.isSending,       // Read from ViewModel
-                            hasSelectedConversation: viewModel.selectedConversationID != nil // Derived from ViewModel
+                            messages: viewModel.currentChatMessages, // USE NEW PROPERTY
+                            isSending: viewModel.isSending,
+                            hasSelectedConversation: viewModel.selectedConversationID != nil
                         )
-                        // --- Scrolling Logic (Remains in View, observes ViewModel) ---
-                        .onChange(of: viewModel.currentChatHistory) { _ in
-                            // Scroll when history changes (new message added)
+                        // ---------------
+                        // --- Scrolling Logic (Updated to use ChatMessage array and IDs) ---
+                        .onChange(of: viewModel.currentChatMessages) { newMessages in // Observe the correct property
+                            // Scroll when messages array changes
                             if viewModel.selectedConversationID != nil {
-                                scrollToBottom(scrollProxy: scrollProxy, history: viewModel.currentChatHistory, isSending: viewModel.isSending)
+                                // Pass the new array to the updated helper
+                                scrollToBottom(scrollProxy: scrollProxy, messages: newMessages, isSending: viewModel.isSending)
                             }
                         }
                         .onChange(of: viewModel.isSending) { isNowSending in
-                             // Scroll when sending stops (agent response received)
-                             if viewModel.selectedConversationID != nil && !isNowSending {
-                                 scrollToBottom(scrollProxy: scrollProxy, history: viewModel.currentChatHistory, isSending: false)
+                             // Scroll when sending state changes
+                             if viewModel.selectedConversationID != nil {
+                                 // Pass the *current* message array state to the updated helper
+                                 scrollToBottom(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: isNowSending)
                              }
-                             // Optionally scroll when sending starts if needed (e.g., if thinking indicator is far)
-                             // else if viewModel.selectedConversationID != nil && isNowSending {
-                             //    scrollToBottom(scrollProxy: scrollProxy, history: viewModel.currentChatHistory, isSending: true)
-                             // }
                         }
                         .onChange(of: viewModel.selectedConversationID) { newID in
                             // Scroll when conversation changes, manage focus
                             if newID != nil {
-                                // Scroll immediately without animation when switching conversations
-                                scrollToBottom(scrollProxy: scrollProxy, history: viewModel.currentChatHistory, isSending: viewModel.isSending, animated: false)
-                                // Focus input if settings aren't shown
+                                // Scroll immediately without animation
+                                // Pass the *current* message array state to the updated helper
+                                scrollToBottom(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
+                                // Focus logic remains the same
                                 if !viewModel.showSettings {
-                                    // Delay slightly to ensure UI updates before focusing
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                         isInputFocused = true
                                     }
                                 }
                             } else {
-                                // If selection is cleared, potentially unfocus
                                 isInputFocused = false
                             }
                         }
                         // --- End Scrolling Logic ---
                     }
                     .padding(.bottom, 5) // Space above input area
-                    .frame(maxHeight: .infinity, alignment: .top)  //  *** ADD ALIGNMENT HERE ***
-                    .overlay { // Apply the overlay for placeholder
-                        // Conditionally show the placeholder text based on ViewModel state
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .overlay { // Placeholder logic remains the same
                         if viewModel.selectedConversationID == nil && viewModel.conversations.isEmpty {
                             Text("Type a message or press ⌘N to start a new chat.")
                                 .foregroundColor(.gray)
@@ -161,24 +164,24 @@ struct MainApplicationView: View {
 
 
                     // --- Input Area ---
-                    // Use the extracted ChatInputAreaView, passing data/bindings from ViewModel
+                    // Logic remains the same, ChatInputAreaView uses the ViewModel
                     ChatInputAreaView(
-                        userInput: $viewModel.userInput,                  // Bind to ViewModel
-                        showContextArea: $viewModel.showContextArea,      // Bind to ViewModel
-                        activeContextFilePath: $viewModel.activeContextFilePath, // Bind to ViewModel
-                        isSending: viewModel.isSending,                   // Read from ViewModel
-                        showSettings: viewModel.showSettings,             // Read from ViewModel
-                        isInputFocused: $isInputFocused,                  // Pass FocusState binding
-                        onSendMessage: viewModel.sendMessage,             // Pass ViewModel action
-                        onToggleContext: { // Apply animation here
+                        userInput: $viewModel.userInput,
+                        showContextArea: $viewModel.showContextArea,
+                        activeContextFilePath: $viewModel.activeContextFilePath,
+                        isSending: viewModel.isSending,
+                        showSettings: viewModel.showSettings,
+                        isInputFocused: $isInputFocused,
+                        onSendMessage: viewModel.sendMessage,
+                        onToggleContext: {
                             withAnimation {
-                                viewModel.toggleContextArea() // Call ViewModel action
+                                viewModel.toggleContextArea()
                             }
                         }
                     )
                     // --- End Input Area ---
 
-                    // Hidden Button for Keyboard Shortcut (Cmd+N)
+                    // Hidden Button for Keyboard Shortcut (Cmd+N) - Remains the same
                     Button(action: viewModel.startNewConversation) { EmptyView() }
                         .hidden()
                         .keyboardShortcut("n", modifiers: .command)
@@ -187,51 +190,40 @@ struct MainApplicationView: View {
                 .background(VisualEffectBlur(material: .windowBackground)) // Use the extracted blur view
                 // --- End Main Interaction Area ---
             } // End Main Content HStack
-            .allowsHitTesting(!viewModel.showSettings) // Disable interaction based on ViewModel state
+            .allowsHitTesting(!viewModel.showSettings) // Logic remains the same
 
             // --- Settings Panel Overlay ---
+            // Logic remains the same, SettingsPanelView uses the ViewModel
             if viewModel.showSettings {
-                // Use the extracted SettingsPanelView, passing bindings to ViewModel properties
                 SettingsPanelView(
                     viewModel: viewModel, // Pass the ViewModel instance
-                    showSettings: $viewModel.showSettings // Still need this binding to dismiss the panel
+                    showSettings: $viewModel.showSettings
                 )
-                // Add transition if desired
                 .transition(.scale.combined(with: .opacity))
             }
             // --- End Settings Panel Overlay ---
 
         } // End ZStack
-        .opacity(viewModel.windowOpacity) // Apply overall opacity from ViewModel
+        .opacity(viewModel.windowOpacity) // Logic remains the same
         .frame(minWidth: 800, minHeight: 500) // Keep overall window size constraints
+        // --- Focus Management Logic (Remains the same) ---
         .onAppear {
-            // Initial focus logic (ViewModel handles initial selection)
              if viewModel.conversations.isEmpty && !viewModel.showSettings {
-                 // Focus input if there are no conversations at all and settings aren't shown
                  DispatchQueue.main.async { isInputFocused = true }
              } else if viewModel.selectedConversationID != nil && !viewModel.showSettings {
-                 // Focus if a conversation is selected and settings aren't shown
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
-        // --- Focus Management ---
         .onChange(of: viewModel.showSettings) { showingSettings in
-            // If settings are dismissed and a conversation exists, refocus input
             if !showingSettings && viewModel.selectedConversationID != nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { // Slight delay
-                    isInputFocused = true
-                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             } else if showingSettings {
-                // If settings are shown, ensure input is not focused
                 isInputFocused = false
             }
         }
-        // Refocus when sending completes, if needed and settings aren't open
-        .onChange(of: viewModel.isSending) { isNowSending in
+        .onChange(of: viewModel.isSending) { isNowSending in // Ensure this doesn't conflict unduly with scrolling's onChange
             if !isNowSending && !viewModel.showSettings && viewModel.selectedConversationID != nil {
-                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                     isInputFocused = true
-                 }
+                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
         // --- End Focus Management ---
@@ -239,30 +231,37 @@ struct MainApplicationView: View {
 
     // MARK: - Helper Functions (View-Specific)
 
-    // Scroll helper remains in the View as it uses ScrollViewProxy
-    // It now takes `isSending` as an argument to determine the correct ID
-    private func scrollToBottom(scrollProxy: ScrollViewProxy, history: [String], isSending: Bool, animated: Bool = true) {
-         // ID of the last message or the thinking indicator
-         let lastID: AnyHashable
+    // --- UPDATED ---
+    // Scroll helper updated to accept [ChatMessage] and use message IDs
+    private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
+         let targetID: AnyHashable? // Use optional target ID
+
          if isSending {
-             lastID = "thinkingIndicator" // Use the ID defined in ChatHistoryView
-         } else if let lastIndex = history.indices.last {
-             lastID = lastIndex // Use the index of the last message
+             targetID = "thinkingIndicator" // Target the explicit ID for the indicator
+         } else if let lastMessageId = messages.last?.id { // Target the ID of the last ChatMessage
+             targetID = lastMessageId
          } else {
-             logger.debug("scrollToBottom called but history is empty or no indicator needed.")
-             return // Nothing to scroll to
+             targetID = nil // Nothing to scroll to if not sending and no messages
          }
 
-         logger.trace("Scrolling to ID \(lastID)")
+         // Ensure we have a valid ID before attempting to scroll
+         guard let finalID = targetID else {
+             logger.debug("scrollToBottom called but no target message or indicator found.")
+             return
+         }
+
+         logger.trace("Scrolling to ID \(finalID)")
          if animated {
+             // Perform scrolling with animation
              withAnimation(.easeOut(duration: 0.2)) {
-                 scrollProxy.scrollTo(lastID, anchor: .bottom)
+                 scrollProxy.scrollTo(finalID, anchor: .bottom)
              }
          } else {
-             // Use DispatchQueue to ensure scrolling happens after potential layout changes
+             // Perform scrolling without animation, using DispatchQueue for timing
              DispatchQueue.main.async {
-                 scrollProxy.scrollTo(lastID, anchor: .bottom)
+                 scrollProxy.scrollTo(finalID, anchor: .bottom)
              }
          }
      }
+     // ---------------
 }
