@@ -74,12 +74,9 @@ struct MainApplicationView: View {
                 // --- Left Sidebar (Conversations) ---
                 // Logic remains the same, ConversationListView uses the ViewModel
                 if !viewModel.isSidebarCollapsed {
-                    ConversationListView(
-                        groupedConversations: viewModel.groupedConversations,
-                        sortedGroupKeys: viewModel.sortedGroupKeys,
-                        selectedConversationID: $viewModel.selectedConversationID,
-                        onNewConversation: viewModel.startNewConversation
-                    )
+                    ConversationListView(onNewConversation: viewModel.startNewConversation)
+                                        // Ensure the viewModel is available to ConversationListView and its children
+                    .environmentObject(viewModel)
                     .transition(.move(edge: .leading))
                 }
                 // --- End Left Sidebar ---

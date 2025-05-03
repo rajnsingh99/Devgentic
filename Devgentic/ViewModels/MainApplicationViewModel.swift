@@ -757,4 +757,82 @@ class MainApplicationViewModel: ObservableObject {
       func clearRemoveStatus() {
           modelRemoveError = nil; removingModelName = nil
       }
+    
+    func deleteConversation(conversationID: UUID) {
+        logger.info("Attempting to delete conversation with ID: \(conversationID.uuidString)")
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+            logger.error("Failed to delete: Conversation ID \(conversationID.uuidString) not found.")
+            return
+        }
+
+        let conversationWasSelected = (selectedConversationID == conversationID)
+        let countBeforeDelete = conversations.count
+
+        // Remove the conversation
+        conversations.remove(at: index)
+        logger.info("Successfully removed conversation at index \(index).")
+
+        // Handle selection after deletion
+        if conversationWasSelected {
+            if conversations.isEmpty {
+                // No conversations left, deselect
+                selectedConversationID = nil
+                logger.debug("No conversations left after delete, selection cleared.")
+                // Optional: Automatically start a new one?
+                // startNewConversation()
+            } else if index < conversations.count {
+                // Select the conversation that took the deleted one's place (index is valid)
+                selectedConversationID = conversations[index].id
+                logger.debug("Selected conversation at index \(index) after delete: \(self.conversations[index].id.uuidString)")
+            } else {
+                // Deleted the last item, select the new last item
+                selectedConversationID = conversations.last?.id
+                logger.debug("Deleted the last conversation, selecting new last: \(String(describing: self.conversations.last?.id.uuidString))")
+            }
+        } else {
+            logger.debug("Deleted conversation was not selected, selection remains: \(String(describing: self.selectedConversationID))")
+        }
+
+        // Persist the changes
+        PersistenceService.saveConversations(self.conversations)
+        logger.debug("Saved conversations after deleting one.")
+
+        // Ensure sorting is maintained if needed (shouldn't change order unless sorting key removed)
+        // sortConversations() // Likely not needed unless deletion affects sorting criteria
+    }
+    
+    // >>> START: Added Code Block (Part B) <<<
+        /// Renames the specified conversation with a user-defined title.
+        /// - Parameters:
+        ///   - conversationID: The ID of the conversation to rename.
+        ///   - newTitle: The new title string. If empty or whitespace, the custom title is removed.
+        func renameConversation(conversationID: UUID, newTitle: String) {
+            logger.info("Attempting to rename conversation ID \(conversationID.uuidString) to '\(newTitle)'")
+            guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
+                logger.error("Failed to rename: Conversation ID \(conversationID.uuidString) not found.")
+                return
+            }
+
+            let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Update the title. Set to nil if the new title is empty/whitespace
+            // This allows users to clear a custom title and revert to the default generated one.
+            conversations[index].userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+
+            // Optional: Update timestamp? Usually not needed for rename.
+            // conversations[index].timestamp = Date()
+
+            // Optional: Re-sort? Only if sorting depends on displayTitle, which is unlikely.
+            // sortConversations()
+
+            logger.info("Successfully updated title for conversation \(conversationID.uuidString). New title: '\(self.conversations[index].userDefinedTitle ?? "nil (reverted to default)")'")
+
+            // Persist the changes
+            PersistenceService.saveConversations(self.conversations)
+            logger.debug("Saved conversations after renaming one.")
+
+            // Trigger UI update manually if needed (sometimes necessary for nested properties)
+            // This forces views observing the 'conversations' array to redraw, even if only a property inside changed.
+            objectWillChange.send()
+        }
 }
