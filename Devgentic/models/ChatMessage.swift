@@ -1,19 +1,16 @@
 // Models/ChatMessage.swift
 import Foundation
 
-struct ChatMessage: Identifiable, Equatable {
+// Add Codable conformance (should be synthesized automatically)
+struct ChatMessage: Identifiable, Equatable, Codable {
     let id: UUID
-    let conversationId: UUID // Keep track of which conversation it belongs to
+    let conversationId: UUID
     let timestamp: Date
     let sender: SenderRole
     let content: MessageContent
 
-    // Initializer
-    init(id: UUID = UUID(), // Default values for convenience
-         conversationId: UUID,
-         timestamp: Date = Date(),
-         sender: SenderRole,
-         content: MessageContent) {
+    // Initializer (keep as is)
+    init(id: UUID = UUID(), conversationId: UUID, timestamp: Date = Date(), sender: SenderRole, content: MessageContent) {
         self.id = id
         self.conversationId = conversationId
         self.timestamp = timestamp
@@ -21,7 +18,7 @@ struct ChatMessage: Identifiable, Equatable {
         self.content = content
     }
 
-    // Implement Equatable (based on ID is usually sufficient)
+    // Equatable (keep as is)
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
         lhs.id == rhs.id
     }
