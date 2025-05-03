@@ -9,6 +9,7 @@ struct AgentMessageContainerView: View {
     // ... (Keep styling parameters) ...
     private let textMaxWidth: CGFloat = 600
     private let codeMaxWidth: CGFloat = 700
+    private let maxImageWidth: CGFloat = 350
     private let bubbleCornerRadius: CGFloat = 10
     private let bubblePadding: CGFloat = 10
     private let agentBackgroundColor = Color.gray.opacity(0.15)
@@ -30,6 +31,8 @@ struct AgentMessageContainerView: View {
         case .codeBlock(let language, let code):
             CodeBlockView(language: language, code: code)
                 .frame(maxWidth: codeMaxWidth)
+        case .image:
+            messageContent.frame(maxWidth: maxImageWidth, alignment: .leading) // Align content LTR even in agent bubble
         case .plainText, .markdownText:
              messageContent
                  .padding(bubblePadding)
@@ -71,6 +74,8 @@ struct AgentMessageContainerView: View {
         // --- NEW CASE: Error ---
         case .error(let title, let details):
              ErrorMessageView(title: title, details: details)
+        case .image(let url, let alt): // <<< ADD IMAGE CASE
+                     ImageView(url: url, alt: alt)
              // ErrorMessageView handles internal layout and colors
         // ------------------------
         default:

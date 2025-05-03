@@ -9,6 +9,7 @@ struct UserMessageContainerView: View {
     // Consistent styling parameters
     private let textMaxWidth: CGFloat = 500
     private let codeMaxWidth: CGFloat = 700 // Code blocks can be wider
+    private let maxImageWidth: CGFloat = 350
     private let bubbleCornerRadius: CGFloat = 10
     private let bubblePadding: CGFloat = 10
     private let userBackgroundColor = Color.blue.opacity(0.4)
@@ -33,6 +34,12 @@ struct UserMessageContainerView: View {
             CodeBlockView(language: language, code: code)
                 // Code blocks manage their own background/padding via CodeBlockView itself
                 .frame(maxWidth: codeMaxWidth) // Allow code blocks to be wider
+        case .image: // <<< ADD IMAGE CASE
+                    // Style image without bubble, provide padding directly if needed
+                    messageContent
+                       // Add padding *around* the ImageView if ImageView doesn't include enough
+                       // .padding(.vertical, 4)
+                       .frame(maxWidth: maxImageWidth, alignment: .leading) // Use appropriate width
         case .plainText, .markdownText:
              // Apply standard user bubble styling for text content
              messageContent // Get the Text or Markdown view
@@ -66,6 +73,10 @@ struct UserMessageContainerView: View {
         case .codeBlock:
              // Should not be reached here as CodeBlockView is created in messageContentWithStyling
              EmptyView()
+        case .error(let title, let details): // Handle error case here too
+                     ErrorMessageView(title: title, details: details)
+        case .image(let url, let alt): // <<< ADD IMAGE CASE
+            ImageView(url: url, alt: alt)
         default:
             // Fallback for unhandled or future content types
             Text("Unsupported content")

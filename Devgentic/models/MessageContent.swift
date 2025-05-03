@@ -1,21 +1,22 @@
 // Models/MessageContent.swift
 import Foundation
 
-enum MessageContent: Equatable /* Codable conformance added below */ {
+// Add the new image case
+enum MessageContent: Equatable /* Codable conformance updated below */ {
     case plainText(String)
     case markdownText(String)
     case codeBlock(language: String?, code: String)
     case error(title: String?, details: String)
-    // Future: case image(url: URL, altText: String?)
+    case image(url: URL?, alt: String?) // <<< New Case
 
-    // Add Equatable conformance (as before)
+    // Update Equatable conformance
     static func == (lhs: MessageContent, rhs: MessageContent) -> Bool {
         switch (lhs, rhs) {
         case (.plainText(let lText), .plainText(let rText)): return lText == rText
         case (.markdownText(let lText), .markdownText(let rText)): return lText == rText
         case (.codeBlock(let lLang, let lCode), .codeBlock(let rLang, let rCode)): return lLang == rLang && lCode == rCode
         case (.error(let lTitle, let lDetails), .error(let rTitle, let rDetails)): return lTitle == rTitle && lDetails == rDetails
-        // Add future cases
+        case (.image(let lUrl, let lAlt), .image(let rUrl, let rAlt)): return lUrl == rUrl && lAlt == rAlt // <<< Compare new case
         default: return false
         }
     }
@@ -24,15 +25,17 @@ enum MessageContent: Equatable /* Codable conformance added below */ {
 // --- Manual Codable Conformance for MessageContent ---
 extension MessageContent: Codable {
 
-    // Define coding keys to represent the different cases and their associated values
+    // Define coding keys
     enum CodingKeys: String, CodingKey {
-        case type // To distinguish the case (e.g., "plainText", "codeBlock")
+        case type // To distinguish the case
         // Associated value keys
         case text
         case language
         case code
         case title
         case details
+        case imageUrl // <<< New Key for Image URL
+        case imageAlt // <<< New Key for Image Alt Text
     }
 
     // Decoder implementation
@@ -55,7 +58,12 @@ extension MessageContent: Codable {
             let title = try container.decodeIfPresent(String.self, forKey: .title)
             let details = try container.decode(String.self, forKey: .details)
             self = .error(title: title, details: details)
-        // Add cases for future types here
+        case "image": // <<< Handle new case decoding
+            let urlString = try container.decodeIfPresent(String.self, forKey: .imageUrl)
+            let alt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
+            // Attempt to create URL from string, okay if it remains nil
+            let url = urlString.flatMap { URL(string: $0) }
+            self = .image(url: url, alt: alt)
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Invalid MessageContent type: \(type)")
         }
@@ -80,7 +88,11 @@ extension MessageContent: Codable {
             try container.encode("error", forKey: .type)
             try container.encodeIfPresent(title, forKey: .title)
             try container.encode(details, forKey: .details)
-        // Add cases for future types here
+        case .image(let url, let alt): // <<< Handle new case encoding
+            try container.encode("image", forKey: .type)
+            // Encode URL as its absolute string, handle nil
+            try container.encodeIfPresent(url?.absoluteString, forKey: .imageUrl)
+            try container.encodeIfPresent(alt, forKey: .imageAlt)
         }
     }
 }

@@ -544,38 +544,105 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     // MARK: - Agent Response Parsing Helper
+    /// Parses the raw text response from the agent into distinct content blocks.
+    /// Handles Markdown, Code Blocks, and extracts Image nodes.
+    /// - Parameter responseText: The raw String response from the AI backend.
+    /// - Returns: An array of MessageContent blocks.
     private func parseAgentResponseString(_ responseText: String) -> [MessageContent] {
-        logger.debug("Parsing agent response string...")
-        var contentBlocks: [MessageContent] = []
-        let document = Document(parsing: responseText)
+            logger.debug("Parsing agent response string (length: \(responseText.count))...")
+            var contentBlocks: [MessageContent] = []
+            // Ensure Markdown library is imported at the top of the file: import Markdown
+            let document = Document(parsing: responseText)
 
-        for block in document.children {
+            for block in document.children {
+                // Process each top-level block from the parsed document
+                processMarkdownBlock(block, into: &contentBlocks)
+            }
+
+            // Handle edge case: If parsing yields nothing but the original text wasn't empty,
+            // return the original text as plain text to avoid losing it.
+            if contentBlocks.isEmpty && !responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                 logger.warning("Markdown parsing resulted in no content blocks, returning original text as plain.")
+                 return [.plainText(responseText)]
+             }
+
+            logger.info("Parsed response into \(contentBlocks.count) content blocks.")
+            return contentBlocks
+    }
+
+    private func processMarkdownBlock(_ block: Markup, into contentBlocks: inout [MessageContent]) {
             switch block {
             case let codeBlock as CodeBlock:
-                let codeContent = codeBlock.code.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !codeContent.isEmpty {
-                    logger.trace("Found Code Block, language: \(codeBlock.language ?? "nil")")
-                    contentBlocks.append(.codeBlock(language: codeBlock.language, code: codeContent))
-                } else { logger.trace("Skipping empty Code Block.") }
+                // ... (code block handling remains the same) ...
+                 let codeContent = codeBlock.code.trimmingCharacters(in: .whitespacesAndNewlines)
+                 if !codeContent.isEmpty {
+                     logger.trace("Found Code Block, language: \(codeBlock.language ?? "nil")")
+                     contentBlocks.append(.codeBlock(language: codeBlock.language, code: codeContent))
+                 } else { logger.trace("Skipping empty Code Block.") }
+
+            // <<< START CORRECTED IMAGE HANDLING (Iterator Check) >>>
+            case let paragraph as Paragraph:
+                // Check if the first child is an Image
+                if let imageNode = paragraph.children.first as? Markdown.Image {
+                    // Now check if the sequence *after* the first element is empty
+                    var iterator = paragraph.children.dropFirst().makeIterator()
+                    if iterator.next() == nil {
+                        // If next() is nil immediately, the sequence after the first element was empty.
+                        // This means the paragraph contained exactly one child, which is the imageNode.
+                        logger.trace("Found Paragraph containing only an Image (using iterator check).")
+                        processImageNode(imageNode, into: &contentBlocks)
+                    } else {
+                        // There were more elements after the first one. Treat as regular markdown.
+                        appendAsMarkdown(paragraph, into: &contentBlocks)
+                    }
+                } else {
+                    // The first child wasn't an image (or the paragraph was empty). Treat as regular markdown.
+                    appendAsMarkdown(paragraph, into: &contentBlocks)
+                }
+            // <<< END CORRECTED IMAGE HANDLING (Iterator Check) >>>
+
+            case let imageNode as Markdown.Image:
+                 // Handle image nodes that might appear directly
+                 logger.trace("Found direct Image Node (unexpected?).")
+                 processImageNode(imageNode, into: &contentBlocks)
+
             case let blockquote as BlockQuote:
+                // ... (blockquote handling remains the same) ...
                  let quoteContent = blockquote.format().trimmingCharacters(in: .whitespacesAndNewlines)
                  if !quoteContent.isEmpty { logger.trace("Found Block Quote."); contentBlocks.append(.markdownText(quoteContent)) }
                  else { logger.trace("Skipping empty Block Quote.") }
+
             default:
-                let markdownContent = block.format().trimmingCharacters(in: .whitespacesAndNewlines)
-                if !markdownContent.isEmpty {
-                    logger.trace("Found other block type (\(type(of: block))), treating as Markdown.")
-                    contentBlocks.append(.markdownText(markdownContent))
-                } else { logger.trace("Skipping empty block of type (\(type(of: block))).") }
+                // Default: Format block back to markdown text
+                appendAsMarkdown(block, into: &contentBlocks)
             }
         }
-        if contentBlocks.isEmpty && !responseText.isEmpty {
-             logger.warning("Markdown parsing resulted in no content blocks, returning original text as plain.")
-             return [.plainText(responseText)]
-         }
-        logger.info("Parsed response into \(contentBlocks.count) content blocks.")
-        return contentBlocks
+
+    // Helper to extract info from an Image node
+    private func processImageNode(_ imageNode: Markdown.Image, into contentBlocks: inout [MessageContent]) {
+        let urlString = imageNode.source
+        let altText = imageNode.plainText // Collect alt text from children
+
+        if let urlString = urlString, !urlString.isEmpty {
+            let url = URL(string: urlString) // URL init is failable
+            logger.trace("Found Image Node, url: \(urlString), alt: \(altText)")
+            contentBlocks.append(.image(url: url, alt: altText)) // Add as image block
+            // Note: If URL(string:) fails, url will be nil, handled by ImageView
+        } else {
+            logger.warning("Skipping Image Node with missing or empty source.")
+        }
     }
+
+    // Helper to format a block as markdown and add it
+    private func appendAsMarkdown(_ block: Markup, into contentBlocks: inout [MessageContent]) {
+         let markdownContent = block.format().trimmingCharacters(in: .whitespacesAndNewlines)
+         if !markdownContent.isEmpty {
+             logger.trace("Found block (\(type(of: block))), treating as Markdown.")
+             contentBlocks.append(.markdownText(markdownContent))
+         } else {
+             logger.trace("Skipping empty block (\(type(of: block))).")
+         }
+     }
 
     // MARK: - Private Helper Functions
     private func sortConversations() { conversations.sort { $0.timestamp > $1.timestamp } }
