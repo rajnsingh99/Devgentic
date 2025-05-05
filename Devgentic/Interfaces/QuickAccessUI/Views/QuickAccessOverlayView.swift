@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Represents the main view content for the Quick Access overlay panel.
 /// This view displays a top bar, conversation history, and an input bar.
+/// It dynamically adjusts its height based on the `isExpanded` state.
 struct QuickAccessOverlayView: View {
     /// Observes the ViewModel passed from the NSHostingController or parent view.
     /// @StateObject ensures the ViewModel's lifecycle is tied to this view's lifecycle.
@@ -15,7 +16,7 @@ struct QuickAccessOverlayView: View {
     let inputBackgroundColor = Color(red: 0.2, green: 0.2, blue: 0.22)
     let iconColor = Color.secondary
     let placeholderColor = Color.gray
-    let userMessageBackgroundColor = Color.accentColor.opacity(0.8)
+    let userMessageBackgroundColor = Color.accentColor.opacity(0.8) // Keep for potential future use
     let agentMessageBackgroundColor = Color(red: 0.25, green: 0.25, blue: 0.27)
 
     /// Defines the structure and layout of the overlay UI.
@@ -27,32 +28,36 @@ struct QuickAccessOverlayView: View {
                     .padding(.horizontal)
                     .padding(.top, 10)
                     // Add transition for smoother appearance
-                    .transition(.opacity.combined(with: .move(edge: .top))) // Combine fade and slide
+                    .transition(.opacity.combined(with: .move(edge: .top)))
 
                 conversationHistorySection
-                    // Removed layoutPriority, let VStack manage space
-                    // Add transition for smoother appearance
+                    // Give the history section some minimum height when expanded
+                    // to ensure the container grows sufficiently. Adjust 200 as needed.
+                    .frame(minHeight: 200) // Ensures space for content when expanded
                     .transition(.opacity) // Simple fade for history
-            } else {
-                 // Optional: Add a minimum height spacer when collapsed if needed
-                 // Spacer().frame(height: 1) // Add spacer to prevent complete collapse if needed
             }
+            // No Spacer needed here when collapsed, the frame modifier handles min height
 
             // --- Always Visible Input Bar ---
             newInputBarSection
                 .padding(.horizontal)
                 .padding(.vertical, 10) // Consistent padding
         }
+        // Apply overall frame constraints
+        .frame(
+            idealWidth: 500, // Suggest an ideal width
+            maxWidth: 600,  // Limit max width if needed
+            // Set a minimum height ONLY when expanded to control expanded size
+            minHeight: viewModel.isExpanded ? 500 : nil, // Adjust 300 as desired total expanded height
+            alignment: .top // Align content to the top
+        )
         .background(panelBackgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .frame(maxWidth: .infinity, maxHeight: .infinity) // Let SwiftUI fill the allocated space
-        // Use the isExpanded state for the main animation trigger
+        .clipShape(RoundedRectangle(cornerRadius: 16)) // Apply rounding to the background
         .animation(.easeInOut(duration: 0.3), value: viewModel.isExpanded) // Animate layout changes based on expansion
         .onAppear(perform: handleOnAppear)
         .onChange(of: viewModel.isProcessing) { wasProcessing, isNowProcessing in
-            // Focus logic might need refinement depending on desired behavior during expansion
+            // Re-focus logic after processing (might need adjustment based on final UX)
             if wasProcessing && !isNowProcessing && viewModel.errorMessage == nil {
-                // Re-focus after processing completes successfully
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     self.isInputFocused = true
                 }
@@ -60,8 +65,7 @@ struct QuickAccessOverlayView: View {
         }
         // When the view appears or expansion state changes, ensure focus is set correctly.
         .onChange(of: viewModel.isExpanded) { _, isNowExpanded in
-             // Ensure focus when collapsed (initial state or after reset)
-             // Or ensure focus when it becomes expanded (useful if focus was lost)
+             // Ensure focus when collapsed or when it becomes expanded
              DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { // Slight delay helps
                  self.isInputFocused = true
              }
@@ -75,15 +79,17 @@ struct QuickAccessOverlayView: View {
         HStack {
             Button {
                 print("Close button tapped")
+                // Post notification to request closing the panel
                 NotificationCenter.default.post(name: Notification.Name("CloseQuickAccessOverlay"), object: nil)
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(iconColor)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.plain) // Use plain style for icon-only buttons
 
-            Spacer()
+            Spacer() // Pushes buttons to the sides
 
+            // Add other top bar buttons as needed (Copy, Pin, etc.)
             Button { print("Copy tapped") } label: {
                 Image(systemName: "doc.on.doc")
                     .foregroundColor(iconColor)
@@ -96,8 +102,8 @@ struct QuickAccessOverlayView: View {
             }
             .buttonStyle(.plain)
         }
-        .font(.title3)
-        .padding(.bottom, 8)
+        .font(.title3) // Consistent font size for icons
+        .padding(.bottom, 8) // Spacing below the top bar
     }
 
     /// **Conversation History Section** (Only shown when expanded)
@@ -105,8 +111,9 @@ struct QuickAccessOverlayView: View {
         ScrollViewReader { scrollProxy in
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 15) {
-                    // --- TODO: Replace below with actual data loop ---
-                    // Display mock result if available (temporary until history is implemented)
+                    // --- TODO: Replace below with actual conversation history data loop ---
+
+                    // Display mock result if available (temporary)
                     if let resultText = viewModel.results {
                          AgentMessageBubble(text: resultText)
                     }
@@ -115,7 +122,7 @@ struct QuickAccessOverlayView: View {
                     if viewModel.isProcessing {
                         HStack {
                             Spacer()
-                            ProgressView().scaleEffect(0.8)
+                            ProgressView().scaleEffect(0.8) // Smaller progress indicator
                             Spacer()
                         }.padding(.vertical)
                     } else if let errorMessage = viewModel.errorMessage {
@@ -123,16 +130,17 @@ struct QuickAccessOverlayView: View {
                     }
 
                     // --- Anchor for scrolling ---
+                    // Used to programmatically scroll to the bottom
                     Spacer().frame(height: 1).id("bottomAnchor")
 
                 }
-                .padding(.horizontal)
+                .padding(.horizontal) // Padding inside the scroll view
                 .padding(.top, 10)
                 // Ensure the VStack takes up horizontal space for alignment
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // TODO: Add scroll-to-bottom logic when real history is added
-            // .onChange(of: viewModel.conversationHistory.count) {
+            // TODO: Add scroll-to-bottom logic when real history is implemented
+            // .onChange(of: viewModel.conversationHistory.count) { // Example trigger
             //      withAnimation { scrollProxy.scrollTo("bottomAnchor", anchor: .bottom) }
             // }
         }
@@ -140,70 +148,80 @@ struct QuickAccessOverlayView: View {
 
     /// **Input Bar Section** (Always visible)
     private var newInputBarSection: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 8) { // Vertical stack for TextField and buttons below it
+            // --- Text Input Field ---
             TextField("", text: $viewModel.userInput, prompt: Text("Ask anything").foregroundColor(placeholderColor))
-                .textFieldStyle(.plain)
+                .textFieldStyle(.plain) // Basic text field appearance
                 .font(.body)
-                .foregroundColor(.primary)
-                .frame(height: 25)
-                .focused($isInputFocused)
-                .onSubmit(viewModel.submitQuery)
+                .foregroundColor(.primary) // Standard text color
+                .frame(height: 25) // Define height for the text field
+                .focused($isInputFocused) // Bind focus state
+                .onSubmit(viewModel.submitQuery) // Submit on Enter/Return key
                 .accessibilityLabel("Query Input")
 
+            // --- Action Buttons Row ---
             HStack(spacing: 12) {
+                // Example action buttons
                 Button {} label: { Image(systemName: "plus").foregroundColor(iconColor) }
                     .buttonStyle(.plain)
                 Button {} label: { Image(systemName: "globe").foregroundColor(iconColor) }
                     .buttonStyle(.plain)
-                Button {} label: { Image(systemName: "sparkles.telescope").foregroundColor(iconColor) }
+                Button {} label: { Image(systemName: "sparkles.telescope").foregroundColor(iconColor) } // Example different icon
                     .buttonStyle(.plain)
                 Button {} label: { Image(systemName: "cursorarrow.motionlines").foregroundColor(iconColor) }
                     .buttonStyle(.plain)
-                Spacer()
+
+                Spacer() // Pushes Mic and Submit buttons to the right
+
                 Button {} label: { Image(systemName: "mic").foregroundColor(iconColor) }
                     .buttonStyle(.plain)
+
+                // Submit Button
                 Button {
-                    viewModel.submitQuery()
+                    viewModel.submitQuery() // Call ViewModel action
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .resizable()
                         .scaledToFit()
                         .frame(width: 20, height: 20)
+                        // Change color based on input state
                         .foregroundColor(viewModel.userInput.isEmpty || viewModel.isProcessing ? iconColor : .accentColor)
                 }
                 .buttonStyle(.plain)
-                .disabled(viewModel.userInput.isEmpty || viewModel.isProcessing)
-                .keyboardShortcut(.defaultAction)
-                .contentShape(Rectangle())
+                .disabled(viewModel.userInput.isEmpty || viewModel.isProcessing) // Disable if empty or processing
+                .keyboardShortcut(.defaultAction) // Allow Enter/Return key to trigger this button too
+                .contentShape(Rectangle()) // Ensure the whole area is tappable
                 .accessibilityLabel("Submit Query")
             }
-            .font(.title3)
+            .font(.title3) // Font size for the icons in this row
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 12) // Padding inside the input bar background
         .padding(.vertical, 10)
-        .background(inputBackgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(inputBackgroundColor) // Background for the input area
+        .clipShape(RoundedRectangle(cornerRadius: 12)) // Rounded corners for the input bar
     }
 
-    // MARK: - Message Bubble Views (Unchanged)
+    // MARK: - Message Bubble Views
 
-    private struct UserMessageBubble: View { // Keep for future use
+    // Example User Message Bubble (Keep for future use with history)
+    private struct UserMessageBubble: View {
         let text: String
         var body: some View {
             HStack {
-                Spacer()
+                Spacer() // Push to the right
                 Text(text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color.accentColor.opacity(0.9))
+                    .background(Color.accentColor.opacity(0.9)) // User message color
                     .foregroundColor(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .frame(maxWidth: 400, alignment: .trailing)
-                    .textSelection(.enabled)
+                    .frame(maxWidth: 400, alignment: .trailing) // Limit width, align right
+                    .textSelection(.enabled) // Allow text selection
             }
         }
     }
 
+    // Agent (Response) Message Bubble
     private struct AgentMessageBubble: View {
         let text: String
         var body: some View {
@@ -211,16 +229,17 @@ struct QuickAccessOverlayView: View {
                 Text(text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Color(red: 0.25, green: 0.25, blue: 0.27))
-                    .foregroundColor(.primary)
+                    .background(Color(red: 0.25, green: 0.25, blue: 0.27)) // Agent message color
+                    .foregroundColor(.primary) // Standard text color
                     .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .frame(maxWidth: /*@START_MENU_TOKEN@*/.infinity/*@END_MENU_TOKEN@*/, alignment: .leading) // Allow agent bubble to use more width
-                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading) // Allow agent bubble to use available width
+                    .textSelection(.enabled) // Allow text selection
                 Spacer() // Keep spacer if needed, or remove if text should wrap within max width
             }
         }
     }
 
+    // Error Message View
     private struct ErrorMessageView: View {
         let message: String
         var body: some View {
@@ -230,10 +249,10 @@ struct QuickAccessOverlayView: View {
                 Text(message)
                     .font(.callout)
                     .foregroundColor(.red)
-                Spacer()
+                Spacer() // Push to the left
             }
             .padding(.vertical, 5)
-            .textSelection(.enabled)
+            .textSelection(.enabled) // Allow selecting error text
         }
     }
 
@@ -242,89 +261,81 @@ struct QuickAccessOverlayView: View {
 
     /// Actions to perform when the view first appears.
     private func handleOnAppear() {
-        // Ensure focus is set correctly on appear, especially if starting collapsed
-         if !viewModel.isExpanded {
-             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                 print("QuickAccessOverlayView appeared (collapsed), requesting focus.")
-                 self.isInputFocused = true
-             }
-         } else {
-             // If appearing already expanded (e.g., panel was hidden then shown again without state reset)
-             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                 print("QuickAccessOverlayView appeared (expanded), requesting focus.")
-                 self.isInputFocused = true
-             }
+        // Request focus for the input field shortly after appearing.
+        // This delay helps ensure the view hierarchy is ready.
+         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+             print("QuickAccessOverlayView appeared, requesting focus.")
+             self.isInputFocused = true
          }
     }
 }
 
 // MARK: - Previews
 
-/// Helper container for consistent preview framing.
+/// Helper container for consistent preview framing and ViewModel setup.
 struct QuickAccessPreviewContainer: View {
     @StateObject var viewModel: QuickAccessViewModel
     let displayName: String
     var body: some View {
-        // Use a geometry reader to provide size context for the preview
-        GeometryReader { geometry in
-             QuickAccessOverlayView(viewModel: viewModel)
-                 // Set frame based on expanded state for preview accuracy
-                 // Adjust width to match panel width if needed for preview
-                 .frame(width: 700, height: viewModel.isExpanded ? 450 : 95) // Use heights from OverlayWindowManager
-                 .previewDisplayName(displayName)
-        }
-        // Set a fixed outer frame for the GeometryReader itself
-         .frame(width: 700, height: 450) // Match expanded size for outer frame
-
+        // Use a geometry reader if specific size context is needed, otherwise direct frame is fine.
+        QuickAccessOverlayView(viewModel: viewModel)
+            // Set frame based on expanded state for preview accuracy
+            // Use the new potential expanded height (e.g., 300) and suggested width (500)
+            .frame(width: 500, height: viewModel.isExpanded ? 300 : 95) // Adjusted height for preview
+            .previewDisplayName(displayName)
+            // Set an outer frame for the preview canvas itself
+            .frame(width: 500, height: 300) // Adjusted outer frame height
     }
 }
 
-/// Provides previews for different states of the overlay view.
+/// Provides previews for different states of the overlay view in Xcode Canvas.
 struct QuickAccessOverlayView_Previews: PreviewProvider {
-    // Factory for default (collapsed) state
+    // --- ViewModel Factories for Different States ---
     static func createDefaultViewModel() -> QuickAccessViewModel {
         let vm = QuickAccessViewModel()
         vm.isExpanded = false // Explicitly collapsed
         return vm
     }
-    // Factory for expanded state (e.g., after query)
+
     static func createExpandedViewModel() -> QuickAccessViewModel {
         let vm = QuickAccessViewModel()
         vm.isExpanded = true
-        vm.results = "This is a sample result shown in the expanded view." // Add sample result
+        vm.results = "This is a sample result shown in the expanded view. It might be longer to test scrolling."
         return vm
     }
-     // Factory for expanded processing state
+
     static func createExpandedProcessingViewModel() -> QuickAccessViewModel {
         let vm = QuickAccessViewModel()
-        vm.userInput = "Processing this..."
+        vm.userInput = "Processing this query..." // Show input that led to processing
         vm.isExpanded = true
         vm.isProcessing = true
         return vm
     }
-     // Factory for expanded error state
+
     static func createExpandedErrorViewModel() -> QuickAccessViewModel {
         let vm = QuickAccessViewModel()
+        vm.userInput = "This query caused an error" // Show input that led to error
         vm.isExpanded = true
-        vm.errorMessage = "Error occurred during processing."
+        vm.errorMessage = "Error: Could not connect to the backend service. Please check your connection."
         return vm
     }
 
-
+    // --- Preview Definitions ---
     static var previews: some View {
         Group {
             // Preview the collapsed state
             QuickAccessPreviewContainer(viewModel: createDefaultViewModel(), displayName: "1. Collapsed State")
 
-             // Preview the expanded state
+             // Preview the expanded state with a result
             QuickAccessPreviewContainer(viewModel: createExpandedViewModel(), displayName: "2. Expanded State (With Result)")
 
-             // Preview expanded processing
+             // Preview expanded state during processing
              QuickAccessPreviewContainer(viewModel: createExpandedProcessingViewModel(), displayName: "3. Expanded Processing")
 
-             // Preview expanded error
+             // Preview expanded state with an error message
              QuickAccessPreviewContainer(viewModel: createExpandedErrorViewModel(), displayName: "4. Expanded Error")
         }
-        .background(Color(red: 0.18, green: 0.18, blue: 0.19))
+        // Set a background for the preview group for better visibility
+        .background(Color(red: 0.3, green: 0.3, blue: 0.3)) // Slightly lighter background for contrast
     }
 }

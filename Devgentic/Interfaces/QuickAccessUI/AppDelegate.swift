@@ -1,90 +1,100 @@
-// AppDelegate.swift
 import Cocoa
 import SwiftUI
-import Carbon // Import Carbon for HotKeys
+import Carbon // Keep if GlobalShortcutService uses it
 
+// This AppDelegate sets up the application to run as a menu bar extra.
+// It manages the NSStatusItem, integrates the existing OverlayWindowManager,
+// and the GlobalShortcutService.
 class AppDelegate: NSObject, NSApplicationDelegate {
 
-    // Properties to hold references to our custom services
-    var globalShortcutService: GlobalShortcutService?
+    // MARK: Properties
+
+    // The Status Bar Item object
+    private var statusItem: NSStatusItem?
+
+    // The manager for the overlay panel window
+    // Kept from the original AppDelegate
     var overlayWindowManager: OverlayWindowManager?
 
-    // Called automatically after the app finishes launching
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        print("App finished launching. Setting up overlay...")
+    // The service for managing global keyboard shortcuts
+    // Kept from the original AppDelegate
+    var globalShortcutService: GlobalShortcutService?
 
-        // 1. Initialize the OverlayWindowManager
+
+    // MARK: - NSApplicationDelegate Methods
+
+    func applicationDidFinishLaunching(_ aNotification: Notification) {
+        print("Application finished launching. Setting up status item, overlay manager, and shortcut service.")
+
+        // 1. Initialize the Overlay Window Manager
         // This object will be responsible for creating and managing the floating panel.
         overlayWindowManager = OverlayWindowManager()
+        // Setup observer for the explicit close button notification (if OverlayWindowManager has this method)
+        overlayWindowManager?.setupCloseNotificationObserver()
+
 
         // 2. Initialize and setup the GlobalShortcutService
         // Pass the overlayWindowManager as the handler that will be notified when the shortcut is pressed.
-        // The force unwrap (!) is generally safe here because we just created overlayWindowManager on the line above.
-        // In more complex scenarios, you might use optional chaining or guard statements.
-        globalShortcutService = GlobalShortcutService(handler: overlayWindowManager!)
-
-        // 3. Register the global hotkey (e.g., Option+Space)
-        // This tells the system to start listening for the shortcut.
-        globalShortcutService?.register()
-
-        // --- Optional Configuration ---
-
-        // Optional: Hide the Dock icon if you want Devgentic to run primarily as a menu bar/overlay app.
-        // This makes the app behave more like a background utility. Accessing the main window
-        // would typically require a menu bar item or another way to trigger it.
-        // Uncomment the line below to enable this:
-        // NSApp.setActivationPolicy(.accessory)
-
-        // Optional: Prevent the main application window (defined in DevgenticApp.swift)
-        // from opening automatically when the app starts. Useful if the overlay
-        // is the primary way users interact initially.
-        // Uncomment the block below to enable this:
-        /*
-        if let window = NSApplication.shared.windows.first(where: {
-            // Attempt to identify the main window by its SwiftUI content view type
-            ($0.contentViewController as? NSHostingController<MainApplicationView>) != nil
-        }) {
-            print("Closing initial main application window.")
-            window.close()
+        // Ensure OverlayWindowManager conforms to the handler protocol expected by GlobalShortcutService.
+        if let manager = overlayWindowManager {
+            // Assuming GlobalShortcutService initializer takes a handler argument
+            globalShortcutService = GlobalShortcutService(handler: manager)
+            // Register the global hotkey (e.g., Option+Space)
+            globalShortcutService?.register()
+            print("Global shortcut service initialized and shortcut registered.")
+        } else {
+            print("Error: OverlayWindowManager failed to initialize. Cannot set up shortcut service.")
         }
-        */
-        // --- End Optional Configuration ---
 
-        UserDefaults.standard.set(false, forKey: SettingsKeys.isOnboardingComplete)
-        print("Overlay setup complete.")
+
+        // 3. Set up the Status Bar Item
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+
+        if let button = statusItem?.button {
+            // Set an icon for the status bar item (replace "YourIconName" or use SFSymbol)
+            button.image = NSImage(systemSymbolName: "bubble.middle.bottom.fill", accessibilityDescription: "DevGentic Overlay") // Example SFSymbol
+             // Set the action to be called when the status item button is clicked
+            button.action = #selector(statusBarButtonClicked(_:))
+            button.target = self // Action is defined in this AppDelegate
+            print("Status bar item created and configured.")
+        } else {
+            print("Error: Could not create status bar button.")
+            // Consider quitting or logging a fatal error if the status item is essential
+            // NSApp.terminate(nil)
+        }
+
+        // Note: The optional configurations from your original AppDelegate
+        // (like hiding Dock icon or closing main window) are now handled differently:
+        // - Hiding Dock icon: Done via LSUIElement=true in Info.plist (as per previous instructions).
+        // - Closing main window: Achieved by removing the WindowGroup from the SwiftUI App struct.
+
+        // The UserDefaults line seems unrelated to the overlay/status item setup, keep if needed elsewhere.
+        // UserDefaults.standard.set(false, forKey: SettingsKeys.isOnboardingComplete)
+
+        print("AppDelegate setup complete.")
     }
 
-    // Called automatically just before the app terminates
-    func applicationWillTerminate(_ notification: Notification) {
-        // Clean up: Unregister the hotkey to release it for other applications.
-        print("App will terminate. Unregistering hotkey...")
+    // MARK: - Actions
+
+    /// Called when the status bar item's button is clicked.
+    @objc func statusBarButtonClicked(_ sender: AnyObject?) {
+        print("Status bar button clicked.")
+        // Toggle the overlay window using the manager
+        // This provides an alternative way to show/hide besides the shortcut.
+        overlayWindowManager?.toggleOverlayWindow()
+    }
+
+    // Note: If GlobalShortcutService calls a handler method directly on the object
+    // passed to its initializer (i.e., overlayWindowManager), then AppDelegate
+    // doesn't need to conform to GlobalShortcutHandler itself. Ensure OverlayWindowManager
+    // has the necessary `handleShortcutActivation` method (or similar).
+
+
+    func applicationWillTerminate(_ aNotification: Notification) {
+        // Clean up resources
+        print("Application will terminate. Unregistering shortcut.")
+        // Unregister the global hotkey
         globalShortcutService?.unregister()
     }
 
-    // Optional: Handle reopening the app (e.g., clicking the Dock icon)
-    // This is mainly relevant if the app's activation policy is `.regular` (shows in Dock)
-    // and the main window might have been closed by the user.
-    // Uncomment the function below to enable this behavior:
-    /*
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        print("Application reopen requested. Has visible windows: \(flag)")
-        if !flag {
-            // If there are no visible windows, try to find and show the main one.
-            if let window = NSApplication.shared.windows.first(where: {
-                ($0.contentViewController as? NSHostingController<MainApplicationView>) != nil
-            }) {
-                print("Found existing main window. Making key and ordering front.")
-                window.makeKeyAndOrderFront(nil)
-            } else {
-                // If the main window instance doesn't exist anymore (less common with SwiftUI's WindowGroup),
-                // you might need logic here to create a new one. This depends heavily on your app's structure.
-                // For a standard WindowGroup, often just activating the app is enough,
-                // or you might need to manually manage window creation/presentation.
-                print("Main window not found. App activation might reopen it, or manual creation needed.")
-                // Consider NSApp.activate(ignoringOtherApps: true) or specific window creation logic.
-            }
-        }
-        return true // Return true to indicate the app handled the reopen request.
-    }
-    */
 }

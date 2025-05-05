@@ -17,7 +17,7 @@ class QuickAccessViewModel: ObservableObject {
 
     // --- Dependencies ---
     private let backend: QuickAccessBackendProtocol
-    private var cancellables = Set<AnyCancellable>() // To hold observer subscriptions
+    var cancellables = Set<AnyCancellable>() // To hold observer subscriptions
 
     // --- Initialization ---
     init(backend: QuickAccessBackendProtocol = MockBackendService()) {
@@ -91,18 +91,15 @@ class QuickAccessViewModel: ObservableObject {
         }
         print("QuickAccessViewModel state reset. isExpanded: \(isExpanded)")
     }
-
-    /// Sets up an observer to automatically call resetState when the window resigns key status.
-    func registerDismissalObserver() {
-        NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)
-            .sink { [weak self] notification in
-                // Check if the notification object is the correct panel window if possible,
-                // although often the object might be nil or difficult to verify reliably here.
-                // Resetting state on any resign key might be acceptable for this overlay.
-                print("Window did resign key notification received. Resetting state.")
-                self?.resetState()
-            }
-            .store(in: &cancellables) // Store the subscription
+    
+    // Add this function inside the QuickAccessViewModel class definition
+    func resetStateWithoutAnimation() {
+        userInput = ""
+        isProcessing = false
+        results = nil
+        errorMessage = nil
+        isExpanded = false // Reset directly without withAnimation
+        print("QuickAccessViewModel state reset (without animation). isExpanded: \(isExpanded)")
     }
 
     // Deinit to clear subscriptions
