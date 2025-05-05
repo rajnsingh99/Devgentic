@@ -229,15 +229,58 @@ class MainApplicationViewModel: ObservableObject {
         logger.debug("Saved conversations after starting new one.")
         // ------------------------
     }
+    
+    // MARK: - Actions / Methods
 
-    // --- UPDATED with Markdown Parsing & Persistence Saving ---
+        // Renamed for clarity, now only creates the object and selects it. Saving happens elsewhere.
+        // Returns the ID of the newly created conversation.
+        @discardableResult // Indicate the return value isn't always needed
+        func createAndSelectNewConversation() -> UUID {
+            if showSettings { showSettings = false } // Close settings if open
+            // userInput = "" // Don't clear user input here, might be needed for first message
+
+            // Create Conversation with an empty [ChatMessage] array
+            let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
+            conversations.append(newConversation)
+            sortConversations() // Sort after adding
+            selectedConversationID = newConversation.id // Select the new conversation
+            logger.info("Created and selected new conversation with ID: \(newConversation.id.uuidString)")
+            // --- SAVE Conversations --- (Save immediately upon creation)
+            PersistenceService.saveConversations(self.conversations)
+            logger.debug("Saved conversations after creating new one.")
+            // ------------------------
+            return newConversation.id // Return the ID
+        }
+
+    // --- *** UPDATED sendMessage Logic *** ---
     func sendMessage() {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), trimmedInput: \(trimmedInput)")
 
         guard !isSending else { logger.warning("sendMessage aborted: Already sending."); return }
         guard !trimmedInput.isEmpty else { logger.info("sendMessage aborted: Input empty."); userInput = ""; return }
-        guard !showSettings else { logger.warning("sendMessage aborted: Settings open."); return }
+        // Allow sending even if settings are technically open, as layout might change
+        // guard !showSettings else { logger.warning("sendMessage aborted: Settings open."); return }
+
+        // --- NEW: Create conversation IF needed ---
+        var conversationIDToUse: UUID
+        if let currentID = selectedConversationID {
+            // Use existing selected conversation ID
+            conversationIDToUse = currentID
+            logger.debug("Sending message to existing conversation: \(conversationIDToUse.uuidString)")
+        } else {
+            // No conversation selected, create a new one NOW
+            logger.info("No conversation selected. Creating new one before sending.")
+            conversationIDToUse = createAndSelectNewConversation() // Creates, selects, and saves
+            // selectedConversationID is now set
+        }
+        // --- END NEW ---
+
+        // Safely get the index for the conversation (should always exist now)
+        guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationIDToUse }) else {
+            logger.error("CRITICAL: Could not find conversation index for ID: \(conversationIDToUse.uuidString) even after creation check.")
+            return // Exit if index somehow not found
+        }
 
         // Context Integration - Prepare the prompt string for the backend
         var contextPrefix = ""
@@ -246,29 +289,16 @@ class MainApplicationViewModel: ObservableObject {
         }
         let messageToSendToBackend = contextPrefix + trimmedInput
 
-        // Ensure a conversation is selected or created
-        if selectedConversationID == nil {
-            logger.info("No conversation selected. Starting new one before sending.")
-            startNewConversation()
-        }
-
-        // Safely get current conversation ID and index
-        guard let currentID = selectedConversationID,
-              let conversationIndex = conversations.firstIndex(where: { $0.id == currentID }) else {
-            logger.error("CRITICAL: Could not find valid conversation (ID: \(String(describing: self.selectedConversationID))) after attempting creation.")
-            return
-        }
-
-        // Create and Append User ChatMessage (as .plainText)
+        // Create and Append User ChatMessage
         let userMessage = ChatMessage(
-            conversationId: currentID,
+            conversationId: conversationIDToUse, // Use the determined ID
             sender: .user,
-            content: .plainText(trimmedInput) // User input as plain text
+            content: .plainText(trimmedInput)
         )
         conversations[conversationIndex].messages.append(userMessage)
-        conversations[conversationIndex].timestamp = Date()
+        conversations[conversationIndex].timestamp = Date() // Update timestamp
         sortConversations()
-        // Note: Not saving after user message, only after agent response
+        // Note: Saving happens after agent response
 
         // Prepare for backend call
         let messageLogForBackend = messageToSendToBackend
@@ -278,73 +308,63 @@ class MainApplicationViewModel: ObservableObject {
         // Perform Network Call Asynchronously
         Task {
             var resultingMessages: [ChatMessage] = []
-            var earlyExit = false // Flag to check if we exited before API call
+            // Removed earlyExit flag
 
-            // Check server status before sending
+            // Check server status before sending (Ollama specific)
             if selectedBackend == .ollama {
                  if ollamaServerStatus != .connected && ollamaServerStatus != .checking {
                       await checkOllamaServerStatus()
                  }
+                // --- MODIFIED GUARD ---
                 guard ollamaServerStatus == .connected else {
                     let errorMsg = "Cannot send message: Ollama server is not connected."
                     logger.error("\(errorMsg)")
-                    let errorMessage = ChatMessage( conversationId: currentID, sender: .agent, content: .error(title: "Connection Error", details: errorMsg) )
-                    // --- Directly handle the error, update state, save, and exit Task ---
-                    self.handleAgentResponse(message: errorMessage) // Add error message to UI
-                    self.isSending = false                           // Update sending state
-                    PersistenceService.saveConversations(self.conversations) // Save the state with the error
-                    return // Exit the Task scope as required by guard
-                    // ------------------------------------------------------------------
+                    let errorMessage = ChatMessage( conversationId: conversationIDToUse, sender: .agent, content: .error(title: "Connection Error", details: errorMsg) )
+                    self.handleAgentResponse(message: errorMessage) // Add error to UI
+                    self.isSending = false                           // Reset sending state
+                    PersistenceService.saveConversations(self.conversations) // Save state with error
+                    return // *** EXIT Task immediately ***
                 }
+                // --- END MODIFIED GUARD ---
             }
 
-            // Only proceed with API call if we didn't fail the server check
-            if !earlyExit {
-                let backendConfig = self.determineBackendConfiguration(message: messageLogForBackend)
-                do {
-                    logger.debug("Sending task '\(messageLogForBackend.prefix(200))' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(currentID.uuidString)")
-                    let responseData = try await self.aiConnect.postToLocalServer(
-                        endpoint: backendConfig.endpoint,
-                        payload: backendConfig.payload
-                    )
-                    // Get the raw response string
-                    let responseText = self.parseResponse(data: responseData, for: self.selectedBackend)
+            // Proceed with API call (no need for !earlyExit check)
+            let backendConfig = self.determineBackendConfiguration(message: messageLogForBackend)
+            do {
+                logger.debug("Sending task '\(messageLogForBackend.prefix(200))' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(conversationIDToUse.uuidString)")
+                let responseData = try await self.aiConnect.postToLocalServer(
+                    endpoint: backendConfig.endpoint,
+                    payload: backendConfig.payload
+                )
+                let responseText = self.parseResponse(data: responseData, for: self.selectedBackend)
+                let parsedContents = self.parseAgentResponseString(responseText)
 
-                    // --- PARSE the response string into content blocks ---
-                    let parsedContents = self.parseAgentResponseString(responseText)
-                    // ----------------------------------------------------
-
-                    // --- Create ChatMessage for each parsed content block ---
-                    for content in parsedContents {
-                        let agentMessage = ChatMessage(
-                            conversationId: currentID, // Use ID captured before Task
-                            sender: .agent,
-                            content: content // Use the parsed content type
-                        )
-                        resultingMessages.append(agentMessage)
-                    }
-                    // -------------------------------------------------------
-
-                } catch {
-                    logger.error("Error during API call or parsing: \(error.localizedDescription)")
-                    let errorText = self.generateErrorMessage(error: error)
-                    // Create .error message
-                    let errorMessage = ChatMessage(
-                        conversationId: currentID, // Use ID captured before Task
+                for content in parsedContents {
+                    let agentMessage = ChatMessage(
+                        conversationId: conversationIDToUse, // Use the determined ID
                         sender: .agent,
-                        content: .error(title: "Processing Error", details: errorText)
+                        content: content
                     )
-                    resultingMessages.append(errorMessage)
-                     // Update Ollama status on network error
-                     if selectedBackend == .ollama {
-                         if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
-                              self.ollamaServerStatus = .disconnected
-                         }
-                     }
+                    resultingMessages.append(agentMessage)
                 }
+
+            } catch {
+                logger.error("Error during API call or parsing: \(error.localizedDescription)")
+                let errorText = self.generateErrorMessage(error: error)
+                let errorMessage = ChatMessage(
+                    conversationId: conversationIDToUse, // Use the determined ID
+                    sender: .agent,
+                    content: .error(title: "Processing Error", details: errorText)
+                )
+                resultingMessages.append(errorMessage)
+                 if selectedBackend == .ollama {
+                     if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
+                          self.ollamaServerStatus = .disconnected
+                     }
+                 }
             }
 
-            // --- Handle potentially MULTIPLE agent/error messages ---
+            // Handle potentially MULTIPLE agent/error messages
             var messageHandled = false
             for resultMessage in resultingMessages {
                  self.handleAgentResponse(message: resultMessage) // Append each message
@@ -353,25 +373,17 @@ class MainApplicationViewModel: ObservableObject {
 
             // Save conversations *after* all messages from this response/error are appended
             if messageHandled {
-                 PersistenceService.saveConversations(self.conversations) // <-- SAVE HERE
+                 PersistenceService.saveConversations(self.conversations)
                  logger.debug("Saved conversations after processing agent response.")
             }
 
             // Manage sending state
-            if messageHandled || earlyExit { // If we added messages OR exited early due to error
-                self.isSending = false
-            } else if !self.isSending {
-                // Already false, do nothing (e.g. if error happened *before* setting isSending true - unlikely now)
-            } else {
-                // No messages handled and no early exit, but task finished
-                self.isSending = false
-                logger.warning("sendMessage Task finished but generated no messages to handle.")
+            self.isSending = false // Always set sending to false when task completes
+            if !messageHandled { // Simplified check (no earlyExit needed)
+                 logger.warning("sendMessage Task finished but generated no messages to handle.")
             }
-            // ------------------------------------------------------
-        }
+        } // End Task
     }
-    // --- END UPDATED sendMessage ---
-
 
     // Handles appending a single message to the correct conversation
     // Does NOT manage isSending flag or saving.
