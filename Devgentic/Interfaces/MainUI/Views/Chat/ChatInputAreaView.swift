@@ -70,7 +70,18 @@ struct ChatInputAreaView: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 .disabled(isSending || showSettings)
-
+                
+                Button {
+                    // No action for now, just log
+                    logger.info("Internet Search (globe) icon tapped - No functionality")
+                } label: {
+                    Image(systemName: "globe") // Using globe icon
+                        .resizable().aspectRatio(contentMode: .fit).frame(width: iconSize, height: iconSize)
+                        .foregroundColor(.secondary) // Consistent styling
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(isSending || showSettings)
+                
                 // Context Button (Paperclip)
                 Button(action: onToggleContext) {
                     Image(systemName: "paperclip")

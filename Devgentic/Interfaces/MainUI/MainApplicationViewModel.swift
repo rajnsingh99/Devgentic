@@ -129,6 +129,14 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
     private let aiConnect = AIConnect()
+    // --- Date Formatter for Grouping ---
+    // Make it static or lazy var for efficiency if used frequently
+    private let groupDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMMM d, yyyy" // Changed format slightly for clarity
+        return formatter
+    }()
+    // -----------------------------------
 
     // MARK: - Computed Properties (Derived State)
 
@@ -151,35 +159,30 @@ class MainApplicationViewModel: ObservableObject {
 
     // Grouping/Sorting logic remains the same
     var groupedConversations: [String: [Conversation]] {
-        let calendar = Calendar.current
-        let now = Date()
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "MMMM d,yyyy"
-
         let grouped = conversations.reduce(into: [String: [Conversation]]()) { result, conversation in
-            let timestamp = conversation.timestamp
-            let groupKey: String
-            if calendar.isDateInToday(timestamp) { groupKey = "Today" }
-            else if calendar.isDateInYesterday(timestamp) { groupKey = "Yesterday" }
-            else { groupKey = dateFormatter.string(from: timestamp) }
+            // Use the new helper function here
+            let groupKey = self.groupKey(for: conversation.timestamp)
             result[groupKey, default: []].append(conversation)
         }
+        // Sort conversations within each group by timestamp descending
         return grouped.mapValues { $0.sorted { $0.timestamp > $1.timestamp } }
     }
 
     var sortedGroupKeys: [String] {
-        let calendar = Calendar.current
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "MMMM d,yyyy"
+        // Use the same date formatter as groupKey(for:)
+        let dateFormatter = self.groupDateFormatter
 
         return groupedConversations.keys.sorted { key1, key2 in
+            // Custom sorting logic: Today > Yesterday > Other Dates (descending)
             if key1 == "Today" { return true }
             if key2 == "Today" { return false }
             if key1 == "Yesterday" { return true }
             if key2 == "Yesterday" { return false }
+            // Try parsing other keys as dates
             if let date1 = dateFormatter.date(from: key1), let date2 = dateFormatter.date(from: key2) {
-                return date1 > date2
+                return date1 > date2 // Sort dates descending (most recent first)
             }
+            // Fallback for keys that aren't Today, Yesterday, or parseable dates
             return key1 > key2
         }
     }
@@ -229,7 +232,7 @@ class MainApplicationViewModel: ObservableObject {
         logger.debug("Saved conversations after starting new one.")
         // ------------------------
     }
-    
+
     // MARK: - Actions / Methods
 
         // Renamed for clarity, now only creates the object and selects it. Saving happens elsewhere.
@@ -769,48 +772,75 @@ class MainApplicationViewModel: ObservableObject {
       func clearRemoveStatus() {
           modelRemoveError = nil; removingModelName = nil
       }
-    
+
     func deleteConversation(conversationID: UUID) {
-        logger.info("Attempting to delete conversation with ID: \(conversationID.uuidString)")
-        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
-            logger.error("Failed to delete: Conversation ID \(conversationID.uuidString) not found.")
+            logger.info("Attempting to delete single conversation with ID: \(conversationID.uuidString)")
+            // Use the new multi-delete function for consistency
+            deleteMultipleConversations(ids: [conversationID])
+    }
+
+    // --- NEW: Function to delete multiple conversations ---
+    /// Deletes multiple conversations based on a set of provided IDs.
+    /// - Parameter ids: A `Set` of `UUID`s representing the conversations to delete.
+    func deleteMultipleConversations(ids: Set<UUID>) {
+        guard !ids.isEmpty else {
+            logger.info("deleteMultipleConversations called with empty ID set.")
+            return
+        }
+        logger.info("Attempting to delete \(ids.count) conversations.")
+
+        let initialCount = conversations.count
+        let selectionBeforeDelete = selectedConversationID
+
+        // Remove conversations whose IDs are in the provided set
+        conversations.removeAll { ids.contains($0.id) }
+
+        let countAfterDelete = conversations.count
+        let numDeleted = initialCount - countAfterDelete
+        logger.info("Deleted \(numDeleted) conversations.")
+
+        // Handle selection if the currently selected conversation was deleted
+        if let currentSelection = selectionBeforeDelete, ids.contains(currentSelection) {
+            logger.debug("Selected conversation (\(currentSelection.uuidString)) was deleted.")
+            // Select the first conversation if any remain, otherwise clear selection
+            selectedConversationID = conversations.first?.id
+            if let newSelection = selectedConversationID {
+                logger.debug("New selection set to first remaining conversation: \(newSelection.uuidString)")
+            } else {
+                logger.debug("No conversations remain, selection cleared.")
+            }
+        } else {
+             logger.debug("Selected conversation was not among those deleted, selection remains: \(String(describing: selectionBeforeDelete))")
+        }
+
+        // Persist the changes if any conversations were actually deleted
+        if numDeleted > 0 {
+            PersistenceService.saveConversations(self.conversations)
+            logger.debug("Saved conversations after deleting multiple.")
+            // Optional: Re-sort if needed, though removeAll shouldn't change order
+            // sortConversations()
+        }
+    }
+    // ---------------------------------------------------
+
+    // --- NEW: Function to delete conversations by group key ---
+    /// Deletes all conversations belonging to a specific date group (e.g., "Today", "May 6, 2025").
+    /// - Parameter groupKey: The string key representing the date group.
+    func deleteConversationsInGroup(groupKey: String) {
+        logger.info("Attempting to delete all conversations in group: \(groupKey)")
+
+        // Find all conversation IDs belonging to this group
+        // We need to recalculate the grouping based on the current state
+        let idsToDelete = conversations.filter { self.groupKey(for: $0.timestamp) == groupKey }.map { $0.id }
+
+        if idsToDelete.isEmpty {
+            logger.warning("No conversations found for group key '\(groupKey)'. Nothing to delete.")
             return
         }
 
-        let conversationWasSelected = (selectedConversationID == conversationID)
-        let countBeforeDelete = conversations.count
-
-        // Remove the conversation
-        conversations.remove(at: index)
-        logger.info("Successfully removed conversation at index \(index).")
-
-        // Handle selection after deletion
-        if conversationWasSelected {
-            if conversations.isEmpty {
-                // No conversations left, deselect
-                selectedConversationID = nil
-                logger.debug("No conversations left after delete, selection cleared.")
-                // Optional: Automatically start a new one?
-                // startNewConversation()
-            } else if index < conversations.count {
-                // Select the conversation that took the deleted one's place (index is valid)
-                selectedConversationID = conversations[index].id
-                logger.debug("Selected conversation at index \(index) after delete: \(self.conversations[index].id.uuidString)")
-            } else {
-                // Deleted the last item, select the new last item
-                selectedConversationID = conversations.last?.id
-                logger.debug("Deleted the last conversation, selecting new last: \(String(describing: self.conversations.last?.id.uuidString))")
-            }
-        } else {
-            logger.debug("Deleted conversation was not selected, selection remains: \(String(describing: self.selectedConversationID))")
-        }
-
-        // Persist the changes
-        PersistenceService.saveConversations(self.conversations)
-        logger.debug("Saved conversations after deleting one.")
-
-        // Ensure sorting is maintained if needed (shouldn't change order unless sorting key removed)
-        // sortConversations() // Likely not needed unless deletion affects sorting criteria
+        logger.debug("Found \(idsToDelete.count) conversations to delete in group '\(groupKey)'.")
+        // Call the multi-delete function with the found IDs
+        deleteMultipleConversations(ids: Set(idsToDelete))
     }
     
     // >>> START: Added Code Block (Part B) <<<
@@ -847,4 +877,21 @@ class MainApplicationViewModel: ObservableObject {
             // This forces views observing the 'conversations' array to redraw, even if only a property inside changed.
             objectWillChange.send()
         }
+
+    // --- ADDED: Function to determine group key ---
+    /// Determines the grouping key string (e.g., "Today", "Yesterday", "May 6, 2025") for a given date.
+    /// - Parameter date: The timestamp of the conversation.
+    /// - Returns: A string representing the date group.
+    func groupKey(for date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "Today"
+        } else if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        } else {
+            // Use the shared date formatter instance
+            return self.groupDateFormatter.string(from: date)
+        }
+    }
+    // --------------------------------------------
 }
