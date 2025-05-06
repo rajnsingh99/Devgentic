@@ -1,4 +1,4 @@
-// Views/Sidebar/VSCodifiedSidebarContainerView.swift (Corrected Binding)
+// Views/Sidebar/VSCodifiedSidebarContainerView.swift (Pane Animation)
 import SwiftUI
 import Combine
 import os
@@ -12,8 +12,7 @@ struct VSCodifiedSidebarContainerView: View {
     // Selected tab remains internal state
     @State private var selectedTab: SidebarTab? = .conversations
 
-    // *** CORRECTED: Use @Binding for isSidebarVisible ***
-    // This allows the parent view (MainApplicationView) to control visibility
+    // *** Use @Binding for isSidebarVisible ***
     @Binding var isSidebarVisible: Bool
 
     // Access to the shared ViewModel (assuming it's passed via environment)
@@ -24,7 +23,7 @@ struct VSCodifiedSidebarContainerView: View {
     var body: some View {
         HStack(spacing: 0) {
             // --- Activity Bar (Icon Bar) ---
-            // Pass the bindings down
+            // Always present, provides its own background
             ActivityBarView(selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
 
             // --- Side Bar Pane (Content Area) ---
@@ -32,14 +31,19 @@ struct VSCodifiedSidebarContainerView: View {
             if isSidebarVisible {
                 SideBarPaneView(selectedTab: $selectedTab)
                     .frame(minWidth: 240, idealWidth: 280, maxWidth: 400)
+                    // Apply transition directly to the pane for slide effect
                     .transition(.move(edge: .leading))
+                    // *** Apply animation directly to the pane ***
+                    // This controls the timing of the transition for this specific view
+                    .animation(.easeInOut(duration: 0.3), value: isSidebarVisible)
             }
         }
-        // Animation remains the same
-        .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
+        // *** REMOVED Animation modifier from HStack ***
+        // The animation is now handled directly by the SideBarPaneView
+        // .animation(.easeInOut(duration: 0.3), value: isSidebarVisible)
         .frame(maxHeight: .infinity)
-        // Ensure the background is set correctly, especially when pane is hidden
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.9)) // Background for Activity Bar area
+        // Background is handled by ActivityBarView and SideBarPaneView individually
+        .background(Color(NSColor.windowBackgroundColor).opacity(0.9)) // Keep background for Activity Bar area when pane is hidden
     }
 }
 
@@ -51,14 +55,30 @@ struct VSCodifiedSidebarContainerView: View {
         @StateObject var vm = MainApplicationViewModel() // Dummy VM
 
         var body: some View {
-            // Now the call matches the expected initializer
-            VSCodifiedSidebarContainerView(isSidebarVisible: $sidebarVisible)
-                .environmentObject(vm)
+             HStack { // Add HStack for button + sidebar preview
+                 VStack { // Buttons to toggle visibility
+                      Button("Toggle Sidebar") {
+                           // Use withAnimation here to trigger the transition smoothly in preview
+                           // Match the duration used in the main view's animation modifier
+                           // IMPORTANT: withAnimation block is needed here to trigger the transition/animation
+                           withAnimation(.easeInOut(duration: 0.3)) {
+                                sidebarVisible.toggle()
+                           }
+                      }
+                      Spacer()
+                 }
+                 .padding()
+
+                 VSCodifiedSidebarContainerView(isSidebarVisible: $sidebarVisible)
+                     .environmentObject(vm)
+                     // Add a background to the *preview* container for visibility
+                     .background(Color.gray.opacity(0.3))
+             }
         }
     }
     return PreviewWrapper()
-        .frame(width: 400, height: 600)
-        .previewDisplayName("Sidebar Container (Corrected Binding)")
+        .frame(width: 500, height: 600) // Wider frame to see effect
+        .previewDisplayName("Sidebar Container (Pane Animation)")
 }
 
 // Assume SidebarTab, ActivityBarView, SideBarPaneView are defined elsewhere correctly.

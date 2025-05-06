@@ -39,8 +39,8 @@ struct MainApplicationView: View {
         ZStack(alignment: .leading) { // Align content to the leading edge
 
             // --- Layer 1: Main Interaction Area (Chat Content) ---
-            VStack(alignment: .leading, spacing: 0) {
-                
+            VStack(alignment: .center, spacing: 0) { // <<-- Changed alignment to .center
+
                 // --- Chat Message Area ---
                 ScrollViewReader { scrollProxy in
                     ChatHistoryView(
@@ -48,6 +48,8 @@ struct MainApplicationView: View {
                         isSending: viewModel.isSending,
                         hasSelectedConversation: viewModel.selectedConversationID != nil
                     )
+                    // Ensure ChatHistoryView still takes full width within its container
+                    .frame(maxWidth: .infinity) // <<-- Explicitly set maxWidth for history
                     // --- Scrolling Logic (Remains the same) ---
                     .onChange(of: viewModel.currentChatMessages) { newMessages in
                         if viewModel.selectedConversationID != nil {
@@ -74,7 +76,7 @@ struct MainApplicationView: View {
                     // --- End Scrolling Logic ---
                 }
                 .padding(.bottom, 5)
-                .frame(maxHeight: .infinity, alignment: .top)
+                .frame(maxHeight: .infinity, alignment: .top) // History takes available height
                 .overlay {
                     if viewModel.selectedConversationID == nil { // Show placeholder when no chat selected
                         Text("Select a conversation or start a new one.")
@@ -97,6 +99,10 @@ struct MainApplicationView: View {
                         withAnimation { viewModel.toggleContextArea() }
                     }
                 )
+                // *** ADDED MAX WIDTH CONSTRAINT ***
+                // This limits the input area's width and centers it within the parent VStack
+                .frame(maxWidth: 1050) // <<-- APPLIED CONSTRAINT (Adjust value as needed)
+                // *** END ADDED CONSTRAINT ***
                 // --- End Input Area ---
 
                 // Hidden Button for Keyboard Shortcut (Cmd+N) - Remains the same
@@ -115,6 +121,7 @@ struct MainApplicationView: View {
                     .keyboardShortcut("n", modifiers: .command)
 
             } // End Main Interaction VStack
+            .frame(maxWidth: .infinity) // Ensure the VStack takes full available width
             .background(VisualEffectBlur(material: .windowBackground)) // Apply background blur
             // *** ADD CONDITIONAL PADDING ***
             .padding(.leading, isSidebarVisible ? totalSidebarWidth : activityBarWidth) // Use activityBarWidth padding when hidden

@@ -46,7 +46,8 @@ struct ChatHistoryView: View {
                     .id("thinkingIndicator") // ID for scrolling remains
                 }
             }
-            .padding() // Keep overall padding for the VStack content
+            .padding(.vertical, 20)
+            .padding(.horizontal, 50) // Keep overall padding for the VStack content
             .frame(maxWidth: .infinity, alignment: .topLeading) // Ensure VStack takes width
         }
         // Keep background and frame for the ScrollView container
