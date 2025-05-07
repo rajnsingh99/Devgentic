@@ -14,43 +14,46 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationView")
 
 // Assume VSCodifiedSidebarContainerView and its dependencies are defined correctly elsewhere
-// Assume ChatHeaderView definition is updated elsewhere to remove the settings button and closure.
 
-// MARK: - Main View (Refactored with ZStack Layout)
+// MARK: - Main View (Refactored with ZStack Layout for Chat Area)
 struct MainApplicationView: View {
     // --- ViewModel ---
     @StateObject private var viewModel = MainApplicationViewModel()
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
-    // State to control sidebar visibility, passed as binding to the container
     @State private var isSidebarVisible: Bool = true
-    // Define sidebar width constants for padding calculation
     private let activityBarWidth: CGFloat = 50
-    private let sideBarPaneIdealWidth: CGFloat = 280 // Use ideal width for padding calculation
+    private let sideBarPaneIdealWidth: CGFloat = 280
     private var totalSidebarWidth: CGFloat {
         activityBarWidth + sideBarPaneIdealWidth
     }
 
+    // --- Constants for UI adjustments ---
+    // Estimate the typical height of the ChatInputAreaView to use for bottom padding
+    private let chatHistoryBottomPadding: CGFloat = 130 // Adjusted for potentially taller input area
+    // Corner radius for the floating input area's background
+    private let inputAreaCornerRadius: CGFloat = 12 // Should match ChatInputAreaView's internal cornerRadiusValue
 
     // MARK: - Body
     var body: some View {
         // --- ZStack for Layering Sidebar and Content ---
-        ZStack(alignment: .leading) { // Align content to the leading edge
+        ZStack(alignment: .leading) {
 
-            // --- Layer 1: Main Interaction Area (Chat Content) ---
-            VStack(alignment: .center, spacing: 0) { // <<-- Changed alignment to .center
-
+            // --- Layer 1: Main Interaction Area (Chat Content and Floating Input) ---
+            ZStack(alignment: .bottom) {
+                
                 // --- Chat Message Area ---
                 ScrollViewReader { scrollProxy in
                     ChatHistoryView(
                         messages: viewModel.currentChatMessages,
                         isSending: viewModel.isSending,
-                        hasSelectedConversation: viewModel.selectedConversationID != nil
+                        hasSelectedConversation: viewModel.selectedConversationID != nil,
+                        // Pass the bottom padding value to ChatHistoryView
+                        chatHistoryBottomPadding: chatHistoryBottomPadding
                     )
-                    // Ensure ChatHistoryView still takes full width within its container
-                    .frame(maxWidth: .infinity) // <<-- Explicitly set maxWidth for history
-                    // --- Scrolling Logic (Remains the same) ---
+                    // REMOVED: .padding(.bottom, chatHistoryBottomPadding) from here
+                    .frame(maxWidth: .infinity)
                     .onChange(of: viewModel.currentChatMessages) { newMessages in
                         if viewModel.selectedConversationID != nil {
                             scrollToBottom(scrollProxy: scrollProxy, messages: newMessages, isSending: viewModel.isSending)
@@ -70,62 +73,48 @@ struct MainApplicationView: View {
                                 }
                             }
                         } else {
-                            isInputFocused = false // Defocus if no chat selected
+                            isInputFocused = false
                         }
                     }
-                    // --- End Scrolling Logic ---
                 }
-                .padding(.bottom, 5)
-                .frame(maxHeight: .infinity, alignment: .top) // History takes available height
+                .frame(maxHeight: .infinity, alignment: .top)
                 .overlay {
-                    if viewModel.selectedConversationID == nil { // Show placeholder when no chat selected
+                    if viewModel.selectedConversationID == nil {
                         Text("Select a conversation or start a new one.")
                             .foregroundColor(.gray)
                     }
                 }
                 // --- End Chat Message Area ---
 
-
-                // --- Input Area ---
-                ChatInputAreaView(
-                    userInput: $viewModel.userInput,
-                    showContextArea: $viewModel.showContextArea,
-                    activeContextFilePath: $viewModel.activeContextFilePath,
-                    isSending: viewModel.isSending,
-                    showSettings: viewModel.showSettings,
-                    isInputFocused: $isInputFocused,
-                    onSendMessage: viewModel.sendMessage,
-                    onToggleContext: {
-                        withAnimation { viewModel.toggleContextArea() }
-                    }
+                // --- Floating Input Area Wrapper ---
+                VStack(spacing: 0) {
+                    ChatInputAreaView( // ChatInputAreaView will no longer have its own outer padding
+                        userInput: $viewModel.userInput,
+                        showContextArea: $viewModel.showContextArea,
+                        activeContextFilePath: $viewModel.activeContextFilePath,
+                        isSending: viewModel.isSending,
+                        showSettings: viewModel.showSettings,
+                        isInputFocused: $isInputFocused,
+                        onSendMessage: viewModel.sendMessage,
+                        onToggleContext: {
+                            withAnimation { viewModel.toggleContextArea() }
+                        }
+                    )
+                }
+                .padding(.horizontal) // Apply horizontal padding to the wrapper
+                .padding(.bottom, 8)   // Apply bottom padding to the wrapper
+                .background(
+                    VisualEffectBlur(material: .hudWindow)
+                        .opacity(0.9) // Slightly increased opacity for better separation
+                        .cornerRadius(inputAreaCornerRadius) // Apply corner radius to the blur background
                 )
-                // *** ADDED MAX WIDTH CONSTRAINT ***
-                // This limits the input area's width and centers it within the parent VStack
-                .frame(maxWidth: 1050) // <<-- APPLIED CONSTRAINT (Adjust value as needed)
-                // *** END ADDED CONSTRAINT ***
-                // --- End Input Area ---
+                .frame(maxWidth: 1050) // Maintain the max width for the input area content
+                // --- End Floating Input Area Wrapper ---
 
-                // Hidden Button for Keyboard Shortcut (Cmd+N) - Remains the same
-                Button(action: {
-                    // Action for Cmd+N should now match the New Chat button behavior
-                    if viewModel.selectedConversationID != nil {
-                         viewModel.selectedConversationID = nil
-                         logger.debug("Cleared selected conversation ID via Cmd+N.")
-                     }
-                     if isSidebarVisible {
-                          isSidebarVisible = false
-                          logger.debug("Hid sidebar pane via Cmd+N.")
-                     }
-                }) { EmptyView() }
-                    .hidden()
-                    .keyboardShortcut("n", modifiers: .command)
-
-            } // End Main Interaction VStack
-            .frame(maxWidth: .infinity) // Ensure the VStack takes full available width
-            .background(VisualEffectBlur(material: .windowBackground)) // Apply background blur
-            // *** ADD CONDITIONAL PADDING ***
-            .padding(.leading, isSidebarVisible ? totalSidebarWidth : activityBarWidth) // Use activityBarWidth padding when hidden
-            // Animate the padding change along with the sidebar animation
+            } // End Main Interaction ZStack (ChatHistory + Input)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(VisualEffectBlur(material: .windowBackground))
+            .padding(.leading, isSidebarVisible ? totalSidebarWidth : activityBarWidth)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
             // --- End Main Interaction Area ---
 
@@ -133,8 +122,8 @@ struct MainApplicationView: View {
             // --- Layer 2: VS Code Style Sidebar ---
             VSCodifiedSidebarContainerView(isSidebarVisible: $isSidebarVisible)
                 .environmentObject(viewModel)
-                .frame(width: isSidebarVisible ? totalSidebarWidth : activityBarWidth) // Adjust frame width
-                .zIndex(1) // Ensure sidebar is visually on top
+                .frame(width: isSidebarVisible ? totalSidebarWidth : activityBarWidth)
+                .zIndex(1)
             // --- End Sidebar ---
 
 
@@ -145,14 +134,26 @@ struct MainApplicationView: View {
                     showSettings: $viewModel.showSettings
                 )
                 .transition(.scale.combined(with: .opacity))
-                .zIndex(2) // Ensure settings are on top of sidebar and chat
+                .zIndex(2)
             }
             // --- End Settings Panel Overlay ---
 
-        } // End ZStack
-        .opacity(viewModel.windowOpacity) // Apply overall window opacity
-        .frame(minWidth: 800, minHeight: 500) // Keep overall window size constraints
-        // --- Focus Management Logic (Adjustments might be needed based on testing) ---
+            Button(action: {
+                if viewModel.selectedConversationID != nil {
+                     viewModel.selectedConversationID = nil
+                     logger.debug("Cleared selected conversation ID via Cmd+N.")
+                 }
+                 if isSidebarVisible {
+                      isSidebarVisible = false
+                      logger.debug("Hid sidebar pane via Cmd+N.")
+                 }
+            }) { EmptyView() }
+                .hidden()
+                .keyboardShortcut("n", modifiers: .command)
+
+        } // End Overall ZStack
+        .opacity(viewModel.windowOpacity)
+        .frame(minWidth: 800, minHeight: 500)
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings {
                  DispatchQueue.main.async { isInputFocused = true }
@@ -170,12 +171,9 @@ struct MainApplicationView: View {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
-        // --- End Focus Management ---
     }
 
     // MARK: - Helper Functions (View-Specific)
-
-    // Scroll helper function remains unchanged
     private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
          let targetID: AnyHashable?
 
@@ -206,12 +204,10 @@ struct MainApplicationView: View {
 }
 
 // MARK: - Previews
-struct MainApplicationView_ZStack_Previews: PreviewProvider { // Renamed preview struct
+struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
         MainApplicationView()
-            .frame(width: 900, height: 600) // Adjusted width for new sidebar
-            .previewDisplayName("ZStack Layout")
+            .frame(width: 900, height: 600)
+            .previewDisplayName("ZStack Layout with Floating Input")
     }
 }
-
-// Assume ChatHeaderView definition is updated elsewhere to remove the settings button and closure.

@@ -6,64 +6,81 @@ import os
 // private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatHistoryView")
 
 struct ChatHistoryView: View {
-    // --- UPDATED ---
-    // Data passed down is now an array of ChatMessage objects
     let messages: [ChatMessage]
-    // ---------------
     let isSending: Bool
-    let hasSelectedConversation: Bool // To know if we should show the "thinking" indicator
+    let hasSelectedConversation: Bool
+    let chatHistoryBottomPadding: CGFloat // <<-- NEW parameter
+
+    // Define a subtle color for the divider, adaptable to light/dark mode
+    private var dividerColor: Color {
+        #if os(macOS)
+        return Color(NSColor.separatorColor)
+        #else
+        return Color(UIColor.separator)
+        #endif
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 0) { // Set spacing to 0, manage with padding
                 if hasSelectedConversation {
-                    // --- UPDATED ---
-                    // Iterate over the Identifiable ChatMessage objects
-                    ForEach(messages) { message in // No need for indices anymore
-                        // Dispatch to the appropriate container view based on sender
+                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                        if index > 0 {
+                            let previousMessage = messages[index - 1]
+                            if message.sender != previousMessage.sender {
+                                Divider()
+                                    .background(dividerColor)
+                                    .padding(.vertical, 15)
+                            }
+                        }
+
                         if message.sender == .user {
                             UserMessageContainerView(message: message)
+                                .padding(.vertical, 10)
                         } else { // message.sender == .agent
                             AgentMessageContainerView(message: message)
+                                .padding(.vertical, 10)
                         }
                     }
-                    // ---------------
                 }
 
-                // "Thinking" indicator logic remains the same, driven by isSending
                 if isSending && hasSelectedConversation {
+                    if let lastMessage = messages.last, lastMessage.sender == .user {
+                        Divider()
+                            .background(dividerColor)
+                            .padding(.vertical, 15)
+                    }
                     HStack {
-                        // Display thinking indicator (consider making this an AgentMessageContainerView with .loading content later)
                         Text("Agent is thinking...")
                             .font(.caption)
                             .foregroundColor(.gray)
                             .padding(10)
-                            .background(Color.gray.opacity(0.15)) // Consistent background
+                            .background(Color.gray.opacity(0.15))
                             .cornerRadius(10)
                         Spacer()
                     }
-                    .padding(.leading) // Keep padding consistent with message bubbles
-                    .id("thinkingIndicator") // ID for scrolling remains
+                    .padding(.leading)
+                    .padding(.vertical, 10)
+                    .id("thinkingIndicator")
                 }
             }
-            .padding(.vertical, 20)
-            .padding(.horizontal, 50) // Keep overall padding for the VStack content
-            .frame(maxWidth: .infinity, alignment: .topLeading) // Ensure VStack takes width
+            .padding(.top, 20) // Keep original top padding
+            .padding(.bottom, chatHistoryBottomPadding) // <<-- APPLY PADDING HERE
+            .padding(.horizontal, 50) // Keep original horizontal padding
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        // Keep background and frame for the ScrollView container
-        .background(Color.clear) // Make ScrollView background clear, parent provides blur
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.clear) // Make ScrollView background clear
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading) // ScrollView takes full available space
     }
 }
 
-// --- UPDATED ---
-// Preview Provider needs sample ChatMessage data
+// --- UPDATED Preview Provider ---
 struct ChatHistoryView_Previews: PreviewProvider {
-    // Create sample ChatMessage data
     static let sampleConversationId = UUID()
     static let sampleMessages: [ChatMessage] = [
         ChatMessage(conversationId: sampleConversationId, sender: .user, content: .plainText("Hello there!")),
-        ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .markdownText("Hi! How can I help?")),
+        ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .markdownText("Hi! How can I help? This is the first agent message.")),
+        ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .codeBlock(language: "swift", code: "let a = 10")),
         ChatMessage(conversationId: sampleConversationId, sender: .user, content: .plainText("Tell me about SwiftUI.")),
         ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .markdownText("It's a declarative UI framework from Apple, great for building interfaces across Apple platforms."))
     ]
@@ -72,47 +89,27 @@ struct ChatHistoryView_Previews: PreviewProvider {
          ChatMessage(conversationId: sampleConversationId, sender: .user, content: .plainText("Thanks!"))
     ]
 
-
     static var previews: some View {
         ChatHistoryView(
-            messages: sampleMessages, // Use sample ChatMessage array
+            messages: sampleMessages,
             isSending: false,
-            hasSelectedConversation: true
+            hasSelectedConversation: true,
+            chatHistoryBottomPadding: 120 // Provide a value for the preview
+        )
+        .previewLayout(.sizeThatFits)
+        .frame(height: 500)
+        .background(Color.gray.opacity(0.5))
+        .previewDisplayName("Standard History with Dividers")
+
+        ChatHistoryView(
+            messages: sampleMessagesAgentFirst,
+            isSending: true,
+            hasSelectedConversation: true,
+            chatHistoryBottomPadding: 120 // Provide a value for the preview
         )
         .previewLayout(.sizeThatFits)
         .frame(height: 300)
-        .background(Color.gray.opacity(0.5)) // Add background for preview visibility
-        .previewDisplayName("Standard History")
-
-        ChatHistoryView(
-            messages: sampleMessagesAgentFirst, // Use sample ChatMessage array
-            isSending: true, // Show thinking indicator
-            hasSelectedConversation: true
-        )
-        .previewLayout(.sizeThatFits)
-        .frame(height: 200)
         .background(Color.gray.opacity(0.5))
-        .previewDisplayName("Agent Thinking")
-
-        ChatHistoryView(
-            messages: [], // Empty history
-            isSending: false,
-            hasSelectedConversation: true
-        )
-        .previewLayout(.sizeThatFits)
-        .frame(height: 200)
-        .background(Color.gray.opacity(0.5))
-        .previewDisplayName("Empty History")
-
-        ChatHistoryView(
-            messages: [], // No history
-            isSending: false,
-            hasSelectedConversation: false // No selection (should show nothing)
-        )
-        .previewLayout(.sizeThatFits)
-        .frame(height: 200)
-        .background(Color.gray.opacity(0.5))
-        .previewDisplayName("No Selection")
+        .previewDisplayName("Agent Thinking with Dividers")
     }
 }
-// ---------------

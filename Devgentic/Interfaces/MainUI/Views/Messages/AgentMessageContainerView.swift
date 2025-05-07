@@ -6,20 +6,13 @@ import Splash
 struct AgentMessageContainerView: View {
     let message: ChatMessage
 
-    // ... (Keep styling parameters) ...
-    private let textMaxWidth: CGFloat = 600
-    private let codeMaxWidth: CGFloat = 700
     private let maxImageWidth: CGFloat = 350
-    private let bubbleCornerRadius: CGFloat = 10
-    private let bubblePadding: CGFloat = 10
-    private let agentBackgroundColor = Color.gray.opacity(0.15)
     private let agentForegroundColor = Color.primary // Adapts light/dark
     // Define error specific styling if needed, or let ErrorMessageView handle foreground
     // private let errorBackgroundColor = Color.red.opacity(0.1) // Alternative BG?
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 0) { // Use .bottom or .top based on preference
-            Spacer()
             messageContentWithStyling // Apply styling conditionally
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -30,32 +23,23 @@ struct AgentMessageContainerView: View {
         switch message.content {
         case .codeBlock(let language, let code):
             CodeBlockView(language: language, code: code)
-                .frame(maxWidth: codeMaxWidth)
+                .frame(maxWidth: .infinity)
         case .image:
             messageContent.frame(maxWidth: maxImageWidth, alignment: .leading) // Align content LTR even in agent bubble
         case .plainText, .markdownText:
              messageContent
-                 .padding(bubblePadding)
-                 .background(agentBackgroundColor)
                  .foregroundColor(agentForegroundColor)
-                 .cornerRadius(bubbleCornerRadius)
-                 .frame(maxWidth: textMaxWidth, alignment: .leading)
+                 .frame(maxWidth: .infinity, alignment: .leading)
+                 .padding(.bottom, 15)
         // --- NEW CASE: Error ---
         case .error:
-             messageContent // Get the ErrorMessageView
-                 .padding(bubblePadding) // Apply standard bubble padding
-                 .background(agentBackgroundColor) // Use standard agent background for consistency
-                 // ErrorMessageView sets its own foreground colors (red icon etc)
-                 .cornerRadius(bubbleCornerRadius)
-                 .frame(maxWidth: textMaxWidth, alignment: .leading) // Use standard text width
+             messageContent
+                 .frame(maxWidth: .infinity, alignment: .leading) // Use standard text width
         // ------------------------
         default: // For future unsupported types
              messageContent
-                 .padding(bubblePadding)
-                 .background(Color.orange.opacity(0.2))
                  .foregroundColor(agentForegroundColor)
-                 .cornerRadius(bubbleCornerRadius)
-                 .frame(maxWidth: textMaxWidth, alignment: .leading)
+                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
