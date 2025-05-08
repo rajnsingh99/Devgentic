@@ -57,9 +57,7 @@ enum OllamaServerStatus: String, CaseIterable {
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Published State Properties
-    // --- Initialize conversations by LOADING them ---
-    @Published var conversations: [Conversation] = [] // Initial value set in init
-    // ----------------------------------------------
+    @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
     @Published var userInput: String = ""
@@ -67,33 +65,31 @@ class MainApplicationViewModel: ObservableObject {
     @Published var showSettings: Bool = false
     @Published var selectedSettingsSection: SettingsSection = .general {
         didSet {
-            // When the Local AI settings section is selected and the backend is Ollama,
-            // first check the server status, then load models if connected.
             if selectedSettingsSection == .localAI && selectedBackend == .ollama {
                 Task {
-                    await checkOllamaServerStatus() // Check status first
-                    // loadLocalOllamaModels will be called internally if status is connected
+                    await checkOllamaServerStatus()
                 }
             } else {
-                // Reset Ollama status if not on the Local AI tab
                  self.ollamaServerStatus = .unknown
-                 self.localOllamaModels = [] // Clear models if not on the tab
-                 self.modelLoadingError = nil // Clear model loading error
-                 self.clearModelActionStatus() // Clear any pending model action status
+                 self.localOllamaModels = []
+                 self.modelLoadingError = nil
+                 self.clearModelActionStatus()
             }
         }
     }
     @Published var showContextArea: Bool = false
     @Published var activeContextFilePath: String? = nil
 
+    // --- NEW: State for filtering messages ---
+    @Published var isUserMessagesOnlyFilterActive: Bool = false
+    // -----------------------------------------
+
     // --- Settings Properties (loaded/saved via @AppStorage) ---
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .ollama
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
-    @AppStorage(SettingsKeys.llmModelName) var llmModelName: String = "gemma:2b"
+    @AppStorage(SettingsKeys.llmModelName) var llmModelName: String = "gemma:2b" // Default model
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
     @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
-
-    // --- @AppStorage Properties for Ollama Advanced Parameters ---
     @AppStorage(SettingsKeys.ollamaTemperature) var ollamaTemperature: Double = 0.8
     @AppStorage(SettingsKeys.ollamaTopK) var ollamaTopK: Int = 40
     @AppStorage(SettingsKeys.ollamaTopP) var ollamaTopP: Double = 0.9
@@ -101,109 +97,90 @@ class MainApplicationViewModel: ObservableObject {
     @AppStorage(SettingsKeys.ollamaContextWindowSize) var ollamaContextWindowSize: Int = 4096
     @AppStorage(SettingsKeys.ollamaGpuLayers) var ollamaGpuLayers: Int = -1
 
-    // --- Existing Published Properties for Local AI Model Management (Fetching) ---
     @Published var localOllamaModels: [String] = []
     @Published var isLoadingModels: Bool = false
     @Published var modelLoadingError: String? = nil
-
-    // --- Existing Published Properties for Local AI Model Pulling ---
     @Published var modelToPull: String = ""
     @Published var isPullingModel: Bool = false
     @Published var pullStatusMessage: String = ""
     @Published var modelPullError: String? = nil
-
-    // --- Existing Published Properties for Streaming Pull Progress ---
     @Published var pullProgress: Double = 0.0
     @Published var pullStage: String = ""
     @Published var pullTotalBytes: Int64? = nil
     @Published var pullCompletedBytes: Int64? = nil
-
-    // --- Published Properties for Local AI Model Removal ---
     @Published var isRemovingModel: Bool = false
     @Published var removingModelName: String? = nil
     @Published var modelRemoveError: String? = nil
-
-    // --- New Published Property for Ollama Server Status ---
     @Published var ollamaServerStatus: OllamaServerStatus = .unknown
 
 
     // MARK: - Dependencies
     private let aiConnect = AIConnect()
-    // --- Date Formatter for Grouping ---
-    // Make it static or lazy var for efficiency if used frequently
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM d, yyyy" // Changed format slightly for clarity
+        formatter.dateFormat = "MMMM d, yyyy"
         return formatter
     }()
-    // -----------------------------------
 
     // MARK: - Computed Properties (Derived State)
 
-    // Returns the [ChatMessage] for the currently selected conversation
+    // --- UPDATED: currentChatMessages now respects the filter ---
     var currentChatMessages: [ChatMessage] {
         guard let selectedID = selectedConversationID,
               let conversation = conversations.first(where: { $0.id == selectedID }) else {
             return []
         }
-        return conversation.messages
+        
+        if isUserMessagesOnlyFilterActive {
+            // Filter to show only user messages
+            return conversation.messages.filter { $0.sender == .user }
+        } else {
+            // Show all messages
+            return conversation.messages
+        }
     }
+    // -----------------------------------------------------------
 
-    // Uses the updated Conversation struct's displayTitle
     var currentConversationTitle: String {
         guard let conversation = conversations.first(where: { $0.id == selectedConversationID }) else {
             return conversations.isEmpty ? "Devgentic" : "Select Chat"
         }
-        return conversation.displayTitle // Uses the adapted displayTitle
+        return conversation.displayTitle
     }
 
-    // Grouping/Sorting logic remains the same
     var groupedConversations: [String: [Conversation]] {
         let grouped = conversations.reduce(into: [String: [Conversation]]()) { result, conversation in
-            // Use the new helper function here
             let groupKey = self.groupKey(for: conversation.timestamp)
             result[groupKey, default: []].append(conversation)
         }
-        // Sort conversations within each group by timestamp descending
         return grouped.mapValues { $0.sorted { $0.timestamp > $1.timestamp } }
     }
 
     var sortedGroupKeys: [String] {
-        // Use the same date formatter as groupKey(for:)
         let dateFormatter = self.groupDateFormatter
-
         return groupedConversations.keys.sorted { key1, key2 in
-            // Custom sorting logic: Today > Yesterday > Other Dates (descending)
             if key1 == "Today" { return true }
             if key2 == "Today" { return false }
             if key1 == "Yesterday" { return true }
             if key2 == "Yesterday" { return false }
-            // Try parsing other keys as dates
             if let date1 = dateFormatter.date(from: key1), let date2 = dateFormatter.date(from: key2) {
-                return date1 > date2 // Sort dates descending (most recent first)
+                return date1 > date2
             }
-            // Fallback for keys that aren't Today, Yesterday, or parseable dates
             return key1 > key2
         }
     }
 
-
-    // MARK: - Initialization (Loads from PersistenceService)
+    // MARK: - Initialization
     init() {
-        // --- Load conversations on initialization ---
         self.conversations = PersistenceService.loadConversations()
-        // ------------------------------------------
-        selectInitialConversation() // Select first conversation after loading
+        selectInitialConversation()
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
-        // Note: loadSettings() removed as @AppStorage handles settings persistence automatically.
     }
 
     private func selectInitialConversation() {
-        // Sort is handled by loadConversations now, but sorting again doesn't hurt
         sortConversations()
         if selectedConversationID == nil || !conversations.contains(where: { $0.id == selectedConversationID }) {
-             // Select first conversation if nothing valid is selected
-            selectedConversationID = conversations.first?.id // Directly get ID of first sorted convo
+            selectedConversationID = conversations.first?.id
             if let id = selectedConversationID {
                 logger.debug("Selected initial/first conversation: \(id.uuidString)")
             } else {
@@ -214,124 +191,108 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
-
     // MARK: - Actions / Methods
 
-    // --- UPDATED: Save after creating ---
+    // --- NEW: Method to toggle the message filter ---
+    func toggleUserMessagesFilter() {
+        isUserMessagesOnlyFilterActive.toggle()
+        logger.info("User messages filter toggled. Active: \(self.isUserMessagesOnlyFilterActive)")
+    }
+    // -----------------------------------------------
+    
     func startNewConversation() {
         if showSettings { showSettings = false }
         userInput = ""
-        // Create Conversation with an empty [ChatMessage] array
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
         conversations.append(newConversation)
-        sortConversations() // Sort after adding
+        sortConversations()
         selectedConversationID = newConversation.id
         logger.info("Started new conversation with ID: \(newConversation.id.uuidString)")
-        // --- SAVE Conversations ---
         PersistenceService.saveConversations(self.conversations)
         logger.debug("Saved conversations after starting new one.")
-        // ------------------------
+        isUserMessagesOnlyFilterActive = false // Reset filter for new conversation
     }
 
-    // MARK: - Actions / Methods
+    @discardableResult
+    func createAndSelectNewConversation() -> UUID {
+        if showSettings { showSettings = false }
+        let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
+        conversations.append(newConversation)
+        sortConversations()
+        selectedConversationID = newConversation.id
+        logger.info("Created and selected new conversation with ID: \(newConversation.id.uuidString)")
+        PersistenceService.saveConversations(self.conversations)
+        logger.debug("Saved conversations after creating new one.")
+        isUserMessagesOnlyFilterActive = false // Reset filter
+        return newConversation.id
+    }
 
-        // Renamed for clarity, now only creates the object and selects it. Saving happens elsewhere.
-        // Returns the ID of the newly created conversation.
-        @discardableResult // Indicate the return value isn't always needed
-        func createAndSelectNewConversation() -> UUID {
-            if showSettings { showSettings = false } // Close settings if open
-            // userInput = "" // Don't clear user input here, might be needed for first message
-
-            // Create Conversation with an empty [ChatMessage] array
-            let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
-            conversations.append(newConversation)
-            sortConversations() // Sort after adding
-            selectedConversationID = newConversation.id // Select the new conversation
-            logger.info("Created and selected new conversation with ID: \(newConversation.id.uuidString)")
-            // --- SAVE Conversations --- (Save immediately upon creation)
-            PersistenceService.saveConversations(self.conversations)
-            logger.debug("Saved conversations after creating new one.")
-            // ------------------------
-            return newConversation.id // Return the ID
-        }
-
-    // --- *** UPDATED sendMessage Logic *** ---
     func sendMessage() {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), trimmedInput: \(trimmedInput)")
 
         guard !isSending else { logger.warning("sendMessage aborted: Already sending."); return }
         guard !trimmedInput.isEmpty else { logger.info("sendMessage aborted: Input empty."); userInput = ""; return }
-        // Allow sending even if settings are technically open, as layout might change
-        // guard !showSettings else { logger.warning("sendMessage aborted: Settings open."); return }
 
-        // --- NEW: Create conversation IF needed ---
         var conversationIDToUse: UUID
         if let currentID = selectedConversationID {
-            // Use existing selected conversation ID
             conversationIDToUse = currentID
             logger.debug("Sending message to existing conversation: \(conversationIDToUse.uuidString)")
         } else {
-            // No conversation selected, create a new one NOW
             logger.info("No conversation selected. Creating new one before sending.")
-            conversationIDToUse = createAndSelectNewConversation() // Creates, selects, and saves
-            // selectedConversationID is now set
+            conversationIDToUse = createAndSelectNewConversation()
         }
-        // --- END NEW ---
 
-        // Safely get the index for the conversation (should always exist now)
         guard let conversationIndex = conversations.firstIndex(where: { $0.id == conversationIDToUse }) else {
-            logger.error("CRITICAL: Could not find conversation index for ID: \(conversationIDToUse.uuidString) even after creation check.")
-            return // Exit if index somehow not found
+            logger.error("CRITICAL: Could not find conversation index for ID: \(conversationIDToUse.uuidString)")
+            return
         }
 
-        // Context Integration - Prepare the prompt string for the backend
         var contextPrefix = ""
         if showContextArea, let filePath = activeContextFilePath {
             contextPrefix = "Context File: \(filePath)\n\nUser Message:\n"
         }
         let messageToSendToBackend = contextPrefix + trimmedInput
 
-        // Create and Append User ChatMessage
         let userMessage = ChatMessage(
-            conversationId: conversationIDToUse, // Use the determined ID
+            conversationId: conversationIDToUse,
             sender: .user,
             content: .plainText(trimmedInput)
         )
         conversations[conversationIndex].messages.append(userMessage)
-        conversations[conversationIndex].timestamp = Date() // Update timestamp
+        conversations[conversationIndex].timestamp = Date()
         sortConversations()
-        // Note: Saving happens after agent response
+        
+        // If filter is active, temporarily turn it off to show the user's new message and agent's response
+        // It will be re-applied by the user if they wish.
+        if isUserMessagesOnlyFilterActive {
+            // isUserMessagesOnlyFilterActive = false // Consider if this is desired UX
+            // logger.info("Temporarily deactivated user messages filter to show new exchange.")
+        }
 
-        // Prepare for backend call
+
         let messageLogForBackend = messageToSendToBackend
-        userInput = "" // Clear input field
+        userInput = ""
         isSending = true
 
-        // Perform Network Call Asynchronously
         Task {
             var resultingMessages: [ChatMessage] = []
-            // Removed earlyExit flag
-
-            // Check server status before sending (Ollama specific)
+            
             if selectedBackend == .ollama {
                  if ollamaServerStatus != .connected && ollamaServerStatus != .checking {
                       await checkOllamaServerStatus()
                  }
-                // --- MODIFIED GUARD ---
                 guard ollamaServerStatus == .connected else {
                     let errorMsg = "Cannot send message: Ollama server is not connected."
                     logger.error("\(errorMsg)")
                     let errorMessage = ChatMessage( conversationId: conversationIDToUse, sender: .agent, content: .error(title: "Connection Error", details: errorMsg) )
-                    self.handleAgentResponse(message: errorMessage) // Add error to UI
-                    self.isSending = false                           // Reset sending state
-                    PersistenceService.saveConversations(self.conversations) // Save state with error
-                    return // *** EXIT Task immediately ***
+                    self.handleAgentResponse(message: errorMessage)
+                    self.isSending = false
+                    PersistenceService.saveConversations(self.conversations)
+                    return
                 }
-                // --- END MODIFIED GUARD ---
             }
 
-            // Proceed with API call (no need for !earlyExit check)
             let backendConfig = self.determineBackendConfiguration(message: messageLogForBackend)
             do {
                 logger.debug("Sending task '\(messageLogForBackend.prefix(200))' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(conversationIDToUse.uuidString)")
@@ -344,7 +305,7 @@ class MainApplicationViewModel: ObservableObject {
 
                 for content in parsedContents {
                     let agentMessage = ChatMessage(
-                        conversationId: conversationIDToUse, // Use the determined ID
+                        conversationId: conversationIDToUse,
                         sender: .agent,
                         content: content
                     )
@@ -355,7 +316,7 @@ class MainApplicationViewModel: ObservableObject {
                 logger.error("Error during API call or parsing: \(error.localizedDescription)")
                 let errorText = self.generateErrorMessage(error: error)
                 let errorMessage = ChatMessage(
-                    conversationId: conversationIDToUse, // Use the determined ID
+                    conversationId: conversationIDToUse,
                     sender: .agent,
                     content: .error(title: "Processing Error", details: errorText)
                 )
@@ -367,42 +328,35 @@ class MainApplicationViewModel: ObservableObject {
                  }
             }
 
-            // Handle potentially MULTIPLE agent/error messages
             var messageHandled = false
             for resultMessage in resultingMessages {
-                 self.handleAgentResponse(message: resultMessage) // Append each message
+                 self.handleAgentResponse(message: resultMessage)
                  messageHandled = true
             }
 
-            // Save conversations *after* all messages from this response/error are appended
             if messageHandled {
                  PersistenceService.saveConversations(self.conversations)
                  logger.debug("Saved conversations after processing agent response.")
             }
 
-            // Manage sending state
-            self.isSending = false // Always set sending to false when task completes
-            if !messageHandled { // Simplified check (no earlyExit needed)
+            self.isSending = false
+            if !messageHandled {
                  logger.warning("sendMessage Task finished but generated no messages to handle.")
             }
-        } // End Task
+        }
     }
 
-    // Handles appending a single message to the correct conversation
-    // Does NOT manage isSending flag or saving.
     private func handleAgentResponse(message: ChatMessage) {
         if let updatedIndex = self.conversations.firstIndex(where: { $0.id == message.conversationId }) {
             self.conversations[updatedIndex].messages.append(message)
-            self.conversations[updatedIndex].timestamp = Date() // Update timestamp for latest activity
+            self.conversations[updatedIndex].timestamp = Date()
             self.sortConversations()
-            // Use String(describing:) for safe enum logging
             logger.debug("Appended message ID \(message.id.uuidString) (Sender: \(String(describing: message.sender))) to conversation \(message.conversationId.uuidString)")
         } else {
             logger.error("Error: Conversation \(message.conversationId.uuidString) disappeared before message (ID: \(message.id.uuidString)) could be added.")
         }
     }
 
-    // --- UI Toggles ---
     func toggleSidebar() { withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() } }
     func toggleSettings() { withAnimation { showSettings.toggle() } }
     func toggleContextArea() {
@@ -411,14 +365,13 @@ class MainApplicationViewModel: ObservableObject {
          else { activeContextFilePath = nil; logger.info("Context toggled: Hiding.") }
     }
 
-    // MARK: - Ollama Server Status (Full Implementation)
     func checkOllamaServerStatus() async {
         guard selectedBackend == .ollama && ollamaServerStatus != .checking else {
              if selectedBackend != .ollama { self.ollamaServerStatus = .unknown }
              return
          }
         self.ollamaServerStatus = .checking
-        let ollamaBaseURL = "http://localhost:11434" // TODO: Make configurable
+        let ollamaBaseURL = "http://localhost:11434"
         let isConnected = await AIConnect.checkOllamaServerStatus(baseURL: ollamaBaseURL)
         if isConnected {
             self.ollamaServerStatus = .connected
@@ -431,7 +384,6 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Local AI Model Management Actions (Full Implementations)
     func loadLocalOllamaModels() async {
         guard selectedBackend == .ollama else { return }
         guard !isPullingModel && !isRemovingModel else { return }
@@ -469,8 +421,8 @@ class MainApplicationViewModel: ObservableObject {
         let trimmedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else { self.modelPullError = "Model name cannot be empty."; return }
         guard !isPullingModel else { logger.warning("Already pulling a model."); return }
-        guard !isRemovingModel else { logger.warning("Attempted to pull model while another model is being removed."); self.modelPullError = "Cannot pull model: Another model is currently being removed."; return }
-        guard selectedBackend == .ollama else { logger.warning("Attempted to pull model but backend is not Ollama."); self.modelPullError = "Cannot pull models when Ollama is not the selected backend."; return }
+        guard !isRemovingModel else { self.modelPullError = "Cannot pull model: Another model is currently being removed."; return }
+        guard selectedBackend == .ollama else { self.modelPullError = "Cannot pull models when Ollama is not the selected backend."; return }
         guard ollamaServerStatus == .connected else {
              let errorMsg = "Cannot pull model: Ollama server is not connected."
              logger.warning("\(errorMsg)")
@@ -496,7 +448,6 @@ class MainApplicationViewModel: ObservableObject {
                     else if !progress.status.isEmpty { self.pullStatusMessage = progress.status.capitalized }
                     else { self.pullStatusMessage = "In progress..." }
                     if let streamedError = progress.error { self.modelPullError = "Stream Error: \(streamedError)"; logger.error("Received streamed error during pull: \(streamedError).") }
-                    logger.debug("Pull progress: Status=\(progress.status), Completed=\(progress.completed ?? -1), Total=\(progress.total ?? -1), Percentage=\(progress.percentage ?? -1)")
                 }
             }
             self.pullStatusMessage = "Successfully pulled \(trimmedModelName)."
@@ -511,11 +462,10 @@ class MainApplicationViewModel: ObservableObject {
             logger.error("Failed to pull model \(trimmedModelName): \(error.localizedDescription)")
             if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                  self.ollamaServerStatus = .disconnected
-                 logger.error("Setting server status to disconnected due to model pull network error.")
             }
         }
         isPullingModel = false
-        try? await Task.sleep(nanoseconds: 2_000_000_000) // Delay before clearing status
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
         if modelPullError == nil { self.modelToPull = "" }
         self.pullStatusMessage = ""; self.pullStage = ""; self.pullProgress = 0.0
     }
@@ -523,14 +473,13 @@ class MainApplicationViewModel: ObservableObject {
     func removeModelAction(name modelName: String) async {
         let trimmedModelName = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else { self.modelRemoveError = "Model name cannot be empty for removal."; return }
-        guard trimmedModelName != self.llmModelName else { logger.warning("Attempted to remove the currently selected model '\(trimmedModelName)'."); self.modelRemoveError = "Cannot remove the currently active model."; return }
-        guard self.localOllamaModels.contains(trimmedModelName) else { logger.warning("Attempted to remove model '\(trimmedModelName)' which is not in the local list."); self.modelRemoveError = "Model '\(trimmedModelName)' not found in local list."; return }
+        guard trimmedModelName != self.llmModelName else { self.modelRemoveError = "Cannot remove the currently active model."; return }
+        guard self.localOllamaModels.contains(trimmedModelName) else { self.modelRemoveError = "Model '\(trimmedModelName)' not found in local list."; return }
         guard !isRemovingModel else { logger.warning("Already removing a model."); return }
-        guard !isPullingModel else { logger.warning("Attempted to remove model while another model is being pulled."); self.modelRemoveError = "Cannot remove model: Another model is currently being pulled."; return }
-        guard selectedBackend == .ollama else { logger.warning("Attempted to remove model but backend is not Ollama."); self.modelRemoveError = "Cannot remove models when Ollama is not the selected backend."; return }
+        guard !isPullingModel else { self.modelRemoveError = "Cannot remove model: Another model is currently being pulled."; return }
+        guard selectedBackend == .ollama else { self.modelRemoveError = "Cannot remove models when Ollama is not the selected backend."; return }
         guard ollamaServerStatus == .connected else {
              let errorMsg = "Cannot remove model: Ollama server is not connected."
-             logger.warning("\(errorMsg)")
              self.modelRemoveError = errorMsg
              return
          }
@@ -551,31 +500,20 @@ class MainApplicationViewModel: ObservableObject {
             logger.error("Failed to remove model \(trimmedModelName): \(error.localizedDescription)")
              if let urlError = error as? URLError, (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                  self.ollamaServerStatus = .disconnected
-                 logger.error("Setting server status to disconnected due to model removal network error.")
             }
         }
         isRemovingModel = false
-        // Optionally clear status after delay
     }
 
-    // MARK: - Agent Response Parsing Helper
-    /// Parses the raw text response from the agent into distinct content blocks.
-    /// Handles Markdown, Code Blocks, and extracts Image nodes.
-    /// - Parameter responseText: The raw String response from the AI backend.
-    /// - Returns: An array of MessageContent blocks.
     private func parseAgentResponseString(_ responseText: String) -> [MessageContent] {
             logger.debug("Parsing agent response string (length: \(responseText.count))...")
             var contentBlocks: [MessageContent] = []
-            // Ensure Markdown library is imported at the top of the file: import Markdown
             let document = Document(parsing: responseText)
 
             for block in document.children {
-                // Process each top-level block from the parsed document
                 processMarkdownBlock(block, into: &contentBlocks)
             }
 
-            // Handle edge case: If parsing yields nothing but the original text wasn't empty,
-            // return the original text as plain text to avoid losing it.
             if contentBlocks.isEmpty && !responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                  logger.warning("Markdown parsing resulted in no content blocks, returning original text as plain.")
                  return [.plainText(responseText)]
@@ -588,67 +526,52 @@ class MainApplicationViewModel: ObservableObject {
     private func processMarkdownBlock(_ block: Markup, into contentBlocks: inout [MessageContent]) {
             switch block {
             case let codeBlock as CodeBlock:
-                // ... (code block handling remains the same) ...
                  let codeContent = codeBlock.code.trimmingCharacters(in: .whitespacesAndNewlines)
                  if !codeContent.isEmpty {
                      logger.trace("Found Code Block, language: \(codeBlock.language ?? "nil")")
                      contentBlocks.append(.codeBlock(language: codeBlock.language, code: codeContent))
                  } else { logger.trace("Skipping empty Code Block.") }
 
-            // <<< START CORRECTED IMAGE HANDLING (Iterator Check) >>>
             case let paragraph as Paragraph:
-                // Check if the first child is an Image
                 if let imageNode = paragraph.children.first as? Markdown.Image {
-                    // Now check if the sequence *after* the first element is empty
                     var iterator = paragraph.children.dropFirst().makeIterator()
                     if iterator.next() == nil {
-                        // If next() is nil immediately, the sequence after the first element was empty.
-                        // This means the paragraph contained exactly one child, which is the imageNode.
                         logger.trace("Found Paragraph containing only an Image (using iterator check).")
                         processImageNode(imageNode, into: &contentBlocks)
                     } else {
-                        // There were more elements after the first one. Treat as regular markdown.
                         appendAsMarkdown(paragraph, into: &contentBlocks)
                     }
                 } else {
-                    // The first child wasn't an image (or the paragraph was empty). Treat as regular markdown.
                     appendAsMarkdown(paragraph, into: &contentBlocks)
                 }
-            // <<< END CORRECTED IMAGE HANDLING (Iterator Check) >>>
 
             case let imageNode as Markdown.Image:
-                 // Handle image nodes that might appear directly
                  logger.trace("Found direct Image Node (unexpected?).")
                  processImageNode(imageNode, into: &contentBlocks)
 
             case let blockquote as BlockQuote:
-                // ... (blockquote handling remains the same) ...
                  let quoteContent = blockquote.format().trimmingCharacters(in: .whitespacesAndNewlines)
                  if !quoteContent.isEmpty { logger.trace("Found Block Quote."); contentBlocks.append(.markdownText(quoteContent)) }
                  else { logger.trace("Skipping empty Block Quote.") }
 
             default:
-                // Default: Format block back to markdown text
                 appendAsMarkdown(block, into: &contentBlocks)
             }
         }
 
-    // Helper to extract info from an Image node
     private func processImageNode(_ imageNode: Markdown.Image, into contentBlocks: inout [MessageContent]) {
         let urlString = imageNode.source
-        let altText = imageNode.plainText // Collect alt text from children
+        let altText = imageNode.plainText
 
         if let urlString = urlString, !urlString.isEmpty {
-            let url = URL(string: urlString) // URL init is failable
+            let url = URL(string: urlString)
             logger.trace("Found Image Node, url: \(urlString), alt: \(altText)")
-            contentBlocks.append(.image(url: url, alt: altText)) // Add as image block
-            // Note: If URL(string:) fails, url will be nil, handled by ImageView
+            contentBlocks.append(.image(url: url, alt: altText))
         } else {
             logger.warning("Skipping Image Node with missing or empty source.")
         }
     }
 
-    // Helper to format a block as markdown and add it
     private func appendAsMarkdown(_ block: Markup, into contentBlocks: inout [MessageContent]) {
          let markdownContent = block.format().trimmingCharacters(in: .whitespacesAndNewlines)
          if !markdownContent.isEmpty {
@@ -659,7 +582,6 @@ class MainApplicationViewModel: ObservableObject {
          }
      }
 
-    // MARK: - Private Helper Functions
     private func sortConversations() { conversations.sort { $0.timestamp > $1.timestamp } }
     private struct BackendConfiguration { let url: String; let endpoint: String; let payload: [String: Any] }
     private func determineBackendConfiguration(message: String) -> BackendConfiguration {
@@ -721,9 +643,6 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
-    // Removing the duplicate handleAgentResponse function that used [String]
-    // private func handleAgentResponse(response: String, conversationID: UUID) { ... }
-
     private func generateErrorMessage(error: Error) -> String {
         if let urlError = error as? URLError {
             switch urlError.code {
@@ -734,7 +653,7 @@ class MainApplicationViewModel: ObservableObject {
                  let httpStatusCode = urlError.userInfo["HTTPStatusCode"] as? Int
                  let responseData = urlError.userInfo["ResponseData"] as? Data
                  let responseBody = responseData.flatMap { String(data: $0, encoding: .utf8) } ?? "No response body"
-                 let statusString = httpStatusCode.map { " (\($0))" } ?? "" // Corrected
+                 let statusString = httpStatusCode.map { " (\($0))" } ?? ""
                  if let data = responseData, let ollamaError = parseOllamaErrorResponse(data: data) { return "Ollama Error\(statusString): \(ollamaError)" }
                  return "Error: Bad server response\(statusString). \(responseBody.prefix(150))"
             case .cannotFindHost: return "Error: Cannot find the server host (\(self.selectedBackend.rawValue)). Check address/DNS."
@@ -753,14 +672,6 @@ class MainApplicationViewModel: ObservableObject {
          return error.trimmingCharacters(in: .whitespacesAndNewlines)
      }
 
-    // Removing outdated TODO comments for Persistence
-    // --- TODO: Implement File Reading ---
-    // func readFileContent(at path: String) -> String? { ... }
-    // --- TODO: Implement Persistence ---
-    // func saveConversations() { ... }
-    // func loadConversations() { ... }
-
-    // MARK: - State Reset / Cleanup
      func clearModelActionStatus() {
          pullStatusMessage = ""; modelPullError = nil; pullProgress = 0.0; pullStage = ""
          pullTotalBytes = nil; pullCompletedBytes = nil; modelRemoveError = nil; removingModelName = nil
@@ -775,13 +686,9 @@ class MainApplicationViewModel: ObservableObject {
 
     func deleteConversation(conversationID: UUID) {
             logger.info("Attempting to delete single conversation with ID: \(conversationID.uuidString)")
-            // Use the new multi-delete function for consistency
             deleteMultipleConversations(ids: [conversationID])
     }
 
-    // --- NEW: Function to delete multiple conversations ---
-    /// Deletes multiple conversations based on a set of provided IDs.
-    /// - Parameter ids: A `Set` of `UUID`s representing the conversations to delete.
     func deleteMultipleConversations(ids: Set<UUID>) {
         guard !ids.isEmpty else {
             logger.info("deleteMultipleConversations called with empty ID set.")
@@ -792,17 +699,14 @@ class MainApplicationViewModel: ObservableObject {
         let initialCount = conversations.count
         let selectionBeforeDelete = selectedConversationID
 
-        // Remove conversations whose IDs are in the provided set
         conversations.removeAll { ids.contains($0.id) }
 
         let countAfterDelete = conversations.count
         let numDeleted = initialCount - countAfterDelete
         logger.info("Deleted \(numDeleted) conversations.")
 
-        // Handle selection if the currently selected conversation was deleted
         if let currentSelection = selectionBeforeDelete, ids.contains(currentSelection) {
             logger.debug("Selected conversation (\(currentSelection.uuidString)) was deleted.")
-            // Select the first conversation if any remain, otherwise clear selection
             selectedConversationID = conversations.first?.id
             if let newSelection = selectedConversationID {
                 logger.debug("New selection set to first remaining conversation: \(newSelection.uuidString)")
@@ -813,75 +717,38 @@ class MainApplicationViewModel: ObservableObject {
              logger.debug("Selected conversation was not among those deleted, selection remains: \(String(describing: selectionBeforeDelete))")
         }
 
-        // Persist the changes if any conversations were actually deleted
         if numDeleted > 0 {
             PersistenceService.saveConversations(self.conversations)
             logger.debug("Saved conversations after deleting multiple.")
-            // Optional: Re-sort if needed, though removeAll shouldn't change order
-            // sortConversations()
         }
     }
-    // ---------------------------------------------------
 
-    // --- NEW: Function to delete conversations by group key ---
-    /// Deletes all conversations belonging to a specific date group (e.g., "Today", "May 6, 2025").
-    /// - Parameter groupKey: The string key representing the date group.
     func deleteConversationsInGroup(groupKey: String) {
         logger.info("Attempting to delete all conversations in group: \(groupKey)")
-
-        // Find all conversation IDs belonging to this group
-        // We need to recalculate the grouping based on the current state
         let idsToDelete = conversations.filter { self.groupKey(for: $0.timestamp) == groupKey }.map { $0.id }
 
         if idsToDelete.isEmpty {
             logger.warning("No conversations found for group key '\(groupKey)'. Nothing to delete.")
             return
         }
-
         logger.debug("Found \(idsToDelete.count) conversations to delete in group '\(groupKey)'.")
-        // Call the multi-delete function with the found IDs
         deleteMultipleConversations(ids: Set(idsToDelete))
     }
     
-    // >>> START: Added Code Block (Part B) <<<
-        /// Renames the specified conversation with a user-defined title.
-        /// - Parameters:
-        ///   - conversationID: The ID of the conversation to rename.
-        ///   - newTitle: The new title string. If empty or whitespace, the custom title is removed.
-        func renameConversation(conversationID: UUID, newTitle: String) {
+    func renameConversation(conversationID: UUID, newTitle: String) {
             logger.info("Attempting to rename conversation ID \(conversationID.uuidString) to '\(newTitle)'")
             guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else {
                 logger.error("Failed to rename: Conversation ID \(conversationID.uuidString) not found.")
                 return
             }
-
             let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Update the title. Set to nil if the new title is empty/whitespace
-            // This allows users to clear a custom title and revert to the default generated one.
             conversations[index].userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
-
-            // Optional: Update timestamp? Usually not needed for rename.
-            // conversations[index].timestamp = Date()
-
-            // Optional: Re-sort? Only if sorting depends on displayTitle, which is unlikely.
-            // sortConversations()
-
             logger.info("Successfully updated title for conversation \(conversationID.uuidString). New title: '\(self.conversations[index].userDefinedTitle ?? "nil (reverted to default)")'")
-
-            // Persist the changes
             PersistenceService.saveConversations(self.conversations)
             logger.debug("Saved conversations after renaming one.")
-
-            // Trigger UI update manually if needed (sometimes necessary for nested properties)
-            // This forces views observing the 'conversations' array to redraw, even if only a property inside changed.
             objectWillChange.send()
         }
 
-    // --- ADDED: Function to determine group key ---
-    /// Determines the grouping key string (e.g., "Today", "Yesterday", "May 6, 2025") for a given date.
-    /// - Parameter date: The timestamp of the conversation.
-    /// - Returns: A string representing the date group.
     func groupKey(for date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) {
@@ -889,9 +756,7 @@ class MainApplicationViewModel: ObservableObject {
         } else if calendar.isDateInYesterday(date) {
             return "Yesterday"
         } else {
-            // Use the shared date formatter instance
             return self.groupDateFormatter.string(from: date)
         }
     }
-    // --------------------------------------------
 }
