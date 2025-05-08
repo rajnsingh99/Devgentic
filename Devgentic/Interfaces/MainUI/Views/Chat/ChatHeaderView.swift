@@ -11,12 +11,20 @@ struct ChatHeaderView: View {
     // Action to perform when the eye button is tapped
     let onEyeButtonTapped: () -> Void
     
+    // --- NEW: Action for the transfer button ---
+    /// Action to perform when the transfer button is tapped. Optional because it might not always be available/enabled.
+    let onTransferButtonTapped: (() -> Void)?
+    /// Flag indicating if a conversation is selected (to enable/disable the transfer button).
+    let isConversationSelected: Bool
+    // --- END NEW ---
+    
     // A subtle color for the bottom border, adaptable to light/dark mode
     private var borderColor: Color {
         #if os(macOS)
         return Color(NSColor.separatorColor).opacity(0.6)
         #else
-        return Color(UIColor.separator).opacity(0.6)
+        // Placeholder for potential iOS adaptation
+        return Color(.systemGray4).opacity(0.6)
         #endif
     }
 
@@ -29,24 +37,32 @@ struct ChatHeaderView: View {
                 .lineLimit(1) // Prevent title from wrapping
                 .truncationMode(.tail) // Truncate if too long
 
-            Spacer() // Pushes the title left and the button right
+            Spacer() // Pushes the title left and the buttons right
 
-            // Eye icon button on the right
-            Button(action: onEyeButtonTapped) {
-                // Dynamically change the icon based on the filter state
-                Image(systemName: isFilterActive ? "eye.slash.fill" : "eye.fill") // Using filled icons for better visibility
-                    .font(.title3) // Adjust icon size if needed
+            // --- NEW: Transfer to Overlay Button ---
+            Button(action: {
+                onTransferButtonTapped?() // Call the closure if it exists
+            }) {
+                Image(systemName: "arrow.up.forward.app") // Icon suggesting sending to another app/panel
+                    .font(.title3) // Match eye icon size
             }
-            .buttonStyle(.plain) // Removes default button styling
-            // Change color to indicate active state (e.g., blue when active)
+            .buttonStyle(.plain)
+            .foregroundColor(isConversationSelected ? .secondary : .gray.opacity(0.5)) // Use secondary color, gray out if disabled
+            .help(isConversationSelected ? "Continue this chat in Quick Access overlay" : "Select a chat to transfer")
+            .disabled(!isConversationSelected) // Disable if no conversation is selected
+            // --- END NEW ---
+            
+            // Existing Eye icon button
+            Button(action: onEyeButtonTapped) {
+                Image(systemName: isFilterActive ? "eye.slash.fill" : "eye.fill")
+                    .font(.title3)
+            }
+            .buttonStyle(.plain)
             .foregroundColor(isFilterActive ? .blue : .secondary)
-            // Change tooltip based on state
             .help(isFilterActive ? "Show all messages" : "Show only my messages")
         }
         .padding(.horizontal) // Horizontal padding for content
-        .padding(.vertical, 12) // Vertical padding (as updated per your request)
-        // Optional background - uncomment if you want a blurred header background
-        // .background(VisualEffectBlur(material: .headerView)) // Example material
+        .padding(.vertical, 12) // Vertical padding
         .overlay( // Draw the bottom border
             Rectangle()
                 .frame(height: 0.5) // Thin border
@@ -59,34 +75,33 @@ struct ChatHeaderView: View {
 // MARK: - Preview Provider
 struct ChatHeaderView_Previews: PreviewProvider {
     static var previews: some View {
-        VStack(spacing: 20) { // Add spacing for preview clarity
-            // Preview when filter is inactive
+        VStack(spacing: 20) {
             ChatHeaderView(
                 chatTitle: "Standard Conversation Title",
                 isFilterActive: false,
-                onEyeButtonTapped: {
-                    print("Eye button tapped (filter inactive)")
-                }
+                onEyeButtonTapped: { print("Eye tapped") },
+                onTransferButtonTapped: { print("Transfer tapped") }, // Provide action for preview
+                isConversationSelected: true // Enable transfer button in preview
             )
             
-            // Preview when filter is active
             ChatHeaderView(
                 chatTitle: "Filtered User Messages View",
                 isFilterActive: true,
-                onEyeButtonTapped: {
-                    print("Eye button tapped (filter active)")
-                }
+                onEyeButtonTapped: { print("Eye tapped") },
+                onTransferButtonTapped: { print("Transfer tapped") },
+                isConversationSelected: true
             )
 
-            // Preview with a very long title
-             ChatHeaderView(
-                 chatTitle: "This is an Example of a Very Long Conversation Title That Needs Truncation",
+            ChatHeaderView(
+                 chatTitle: "No Conversation Selected",
                  isFilterActive: false,
-                 onEyeButtonTapped: {}
+                 onEyeButtonTapped: {},
+                 onTransferButtonTapped: nil, // Can be nil
+                 isConversationSelected: false // Disable transfer button
              )
         }
-        .padding() // Padding around the VStack for preview
-        .background(Color(NSColor.windowBackgroundColor)) // Simulate window background
-        .previewLayout(.sizeThatFits) // Adjust preview layout
+        .padding()
+        .background(Color(NSColor.windowBackgroundColor))
+        .previewLayout(.sizeThatFits)
     }
 }
