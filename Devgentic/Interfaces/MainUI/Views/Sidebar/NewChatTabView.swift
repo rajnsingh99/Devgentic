@@ -1,13 +1,15 @@
-// Views/Sidebar/NewChatTabView.swift (Simplified)
+// Views/Sidebar/NewChatTabView.swift
 import SwiftUI
 import os
 
 // Logger (Optional)
-// private let logger = Logger(...)
+// private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "NewChatTabView")
 
 // MARK: - New Chat Tab View
 struct NewChatTabView: View {
-    // No longer needs EnvironmentObject for viewModel action
+
+    // Explicit initializer to resolve potential ambiguity for the #Preview macro.
+    init() {}
 
     var body: some View {
         VStack {
@@ -29,10 +31,6 @@ struct NewChatTabView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
-
-            // Removed the "New Conversation" button
-            // The action is now handled by clicking the Activity Bar icon
-            // (clearing selection) and sending the first message (creating the conversation).
 
             Spacer() // Push content to center vertically
         }

@@ -1,9 +1,9 @@
-// Views/Sidebar/SideBarPaneView.swift (Updated)
+// Views/Sidebar/SideBarPaneView.swift
 import SwiftUI
 import os
 
 // Logger (Optional)
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "SideBarPaneView")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SideBarPaneView")
 
 // MARK: - Side Bar Pane View
 /// The wider pane displayed to the right of the Activity Bar.
@@ -13,110 +13,113 @@ struct SideBarPaneView: View {
     @Binding var selectedTab: SidebarTab?
 
     // Access to the shared ViewModel (passed via environment from container)
+    // This viewModel instance now contains an ollamaService property.
     @EnvironmentObject var viewModel: MainApplicationViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) { // Use a VStack for vertical layout
             // --- Header ---
-            // Display the title of the currently selected tab
             if let tab = selectedTab {
                 Text(tab.title)
-                    .font(.title3) // Slightly smaller title
+                    .font(.title3)
                     .fontWeight(.semibold)
                     .padding(.horizontal)
-                    .padding(.top, 12) // Add padding top/bottom
+                    .padding(.top, 12)
                     .padding(.bottom, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading) // Align left
-                Divider() // Separator below the header
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
             }
 
             // --- Content Area ---
-            // Use a switch statement to display the appropriate view based on the selected tab
-            // Wrap the content in a frame that takes maximum available space
-             VStack { // Added VStack to contain the switched content
+             VStack {
                 switch selectedTab {
                 case .newChat:
-                    // Keep the NewChatTabView placeholder/implementation
-                    NewChatTabView()
-                        .environmentObject(viewModel) // Ensure it gets the ViewModel
+                    NewChatTabView() // Assuming this view uses EnvironmentObject or is self-contained
+                        .environmentObject(viewModel)
+
 
                 case .conversations:
-                    // *** INTEGRATED: Use the modified ConversationListView ***
-                    // Ensure the modified ConversationListView doesn't have its own
-                    // background or fixed frame anymore.
-                    ConversationListView()
-                        // It already uses @EnvironmentObject, so it should pick up the viewModel
-                        // No need to pass onNewConversation
+                    ConversationListView() // Assuming this view uses EnvironmentObject
+                                           // and doesn't need ollamaService directly.
 
                 case .localModels:
-                    // *** INTEGRATED: Use the new LocalModelDiscoveryGridView ***
-                    LocalModelDiscoveryGridView()
-                        // It also uses @EnvironmentObject
+                    // *** UPDATED: Pass MainApplicationViewModel's OllamaService instance ***
+                    LocalModelDiscoveryGridView(
+                        ollamaService: viewModel.ollamaService, // Pass the service from MainViewModel
+                        mainViewModel: viewModel                // Pass the MainViewModel itself
+                    )
+                    // No need to .environmentObject(viewModel) here if LocalModelDiscoveryGridView
+                    // takes viewModel as an @ObservedObject as designed.
 
                 case .agents:
-                    // Keep the AgentsTabView placeholder
-                    AgentsTabView()
+                    AgentsTabView() // Assuming this view uses EnvironmentObject or is self-contained
 
                 case .settings:
-                    // Keep the SettingsTabView placeholder
-                    SettingsTabView()
+                    SettingsTabView() // Assuming this view uses EnvironmentObject or is self-contained
 
                 case .user:
-                    // Keep the UserTabView placeholder
-                    UserTabView()
+                    UserTabView() // Assuming this view uses EnvironmentObject or is self-contained
 
                 case .none:
-                    // View to display if no tab is selected (e.g., when sidebar is hidden)
                     Spacer() // Fill space if nothing is selected
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity) // Ensure content area fills space
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
         }
-        // Use a standard control background color that adapts to light/dark mode
         .background(Color(NSColor.controlBackgroundColor))
-        // Ensure the pane takes the full available height
         .frame(maxHeight: .infinity)
     }
 }
 
-// MARK: - Placeholder Content Views (Keep remaining placeholders)
-// These views (NewChatTabView, AgentsTabView, SettingsTabView, UserTabView)
-// remain as defined in Phase 1 for now, unless already implemented.
-
-// Assuming NewChatTabView, AgentsTabView, SettingsTabView, UserTabView
-// are defined as in the previous step (Phase 1 code block).
-// If not, they would need to be included here as well.
-
+// Assuming ConversationListView is defined elsewhere and uses @EnvironmentObject var viewModel: MainApplicationViewModel
+// Assuming LocalModelDiscoveryGridView is defined as per the refactored version.
 
 // MARK: - Preview Provider
-#Preview {
-    // Container to manage state and ViewModel creation *inside* the struct
-    // This resolves the "cannot close over value" error.
+struct SideBarPaneView_Previews: PreviewProvider {
+    // Define a simple SidebarTab enum for preview context if not globally available
+    enum PreviewSidebarTab: String, CaseIterable, Identifiable {
+        case newChat, conversations, localModels, agents, settings, user
+        var id: String { self.rawValue }
+        var title: String { self.rawValue.capitalized }
+    }
+    
+    // Container to manage state and ViewModel creation for preview
     struct PreviewContainer: View {
-        @State var selectedTab: SidebarTab? = .conversations // Start with conversations tab
+        @State var selectedTab: SidebarTab? = .conversations
 
-        // Define ViewModels *inside* the PreviewContainer struct
-        let convoViewModel: MainApplicationViewModel = {
-            let vm = MainApplicationViewModel()
-            vm.conversations = [
+        // Create OllamaService instances for different preview scenarios
+        static let defaultOllamaService: OllamaService = {
+            let service = OllamaService()
+            // Configure service for default/conversation view if needed
+            return service
+        }()
+
+        static let modelsOllamaService: OllamaService = {
+            let service = OllamaService()
+            service.localModels = ["mistral:7b", "phi3:mini"]
+            service.serverStatus = .connected
+            return service
+        }()
+
+        // Create MainApplicationViewModel instances, injecting the appropriate OllamaService
+        let convoViewModel: MainApplicationViewModel = MainApplicationViewModel(ollamaService: defaultOllamaService)
+        let modelsViewModel: MainApplicationViewModel = MainApplicationViewModel(ollamaService: modelsOllamaService)
+        
+        init() {
+            // Further configure convoViewModel if needed for conversation previews
+            convoViewModel.conversations = [
                 Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Preview Chat 1"),
                 Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Preview Chat 2")
             ]
-            vm.selectedConversationID = vm.conversations[0].id
-            return vm
-        }()
+            if !convoViewModel.conversations.isEmpty {
+                convoViewModel.selectedConversationID = convoViewModel.conversations[0].id
+            }
+        }
 
-        let modelsViewModel: MainApplicationViewModel = {
-            let vm = MainApplicationViewModel()
-            vm.localOllamaModels = ["mistral:7b"]
-            vm.ollamaServerStatus = .connected
-            return vm
-        }()
 
         var body: some View {
             HStack(spacing: 0) {
-                // Mock Activity Bar to change selection
                 VStack {
                     ForEach(SidebarTab.allCases) { tab in
                         Button(tab.title) { selectedTab = tab }
@@ -127,19 +130,18 @@ struct SideBarPaneView: View {
                 .frame(width: 100)
                 .padding()
 
-                // The SideBarPaneView being previewed
                 SideBarPaneView(selectedTab: $selectedTab)
-                    // Provide the appropriate ViewModel based on selected tab for preview
-                    // Use the ViewModels defined within this struct
+                    // Provide the MainApplicationViewModel. It holds the correct OllamaService.
+                    // The views inside SideBarPaneView will then receive the correct instances.
                     .environmentObject(selectedTab == .localModels ? modelsViewModel : convoViewModel)
-                    .frame(width: 300) // Simulate pane width
+                    .frame(width: 350) // Simulate pane width
             }
+            .frame(height: 600)
         }
     }
 
-    // Return the PreviewContainer instance
-    return PreviewContainer()
-        .frame(height: 600)
-        .previewDisplayName("Side Bar Pane (Interactive)")
-
+    static var previews: some View {
+        PreviewContainer()
+            .previewDisplayName("Side Bar Pane (Interactive)")
+    }
 }

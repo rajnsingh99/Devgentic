@@ -1,21 +1,20 @@
-// Views/LocalAISettingsView.swift
+// Views/Settings/LocalAISettingsView.swift
 import SwiftUI
-import os // Import os for logging
+import os
 
 // Logger (Optional)
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "LocalAISettingsView")
-
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LocalAISettingsView")
 
 // MARK: - Local AI Settings Detail View
 struct LocalAISettingsView: View {
-    // Now observing the ViewModel directly to access its state
-    @ObservedObject var viewModel: MainApplicationViewModel
+    // Observe OllamaService for Ollama-specific state and actions
+    @ObservedObject var ollamaService: OllamaService
+    // Observe MainApplicationViewModel for general settings like advanced parameters
+    @ObservedObject var mainViewModel: MainApplicationViewModel
 
     // --- State for Confirmation Dialog ---
     @State private var showingRemovalConfirmation = false
-    @State private var modelToRemove: String? = nil
-    // -------------------------------------
-
+    @State private var modelToRemoveFromName: String? = nil // Store the name of the model to remove
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -26,435 +25,324 @@ struct LocalAISettingsView: View {
             Divider()
 
             // --- Displaying and Selecting Models ---
-            VStack(alignment: .leading, spacing: 10) { // Group model selection controls
-                Text("Available Models:") // Add a label for the section
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Available Models:")
                     .font(.headline)
 
                 HStack {
                     Text("Ollama Model:")
-                        .frame(width: 150, alignment: .leading) // Consistent label width
+                        .frame(width: 150, alignment: .leading)
 
-                    // Show loading indicator if models are being fetched
-                    if viewModel.isLoadingModels {
+                    if ollamaService.isLoadingModels {
                         ProgressView("Loading Models...")
                             .controlSize(.small)
-                            .frame(maxWidth: .infinity, alignment: .leading) // Take available space
-                    } else if let error = viewModel.modelLoadingError {
-                        // Show error message if fetching failed
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if let error = ollamaService.modelLoadingError {
                         Text("Error: \(error)")
                             .foregroundColor(.red)
-                            .frame(maxWidth: .infinity, alignment: .leading) // Take available space
-                    } else if viewModel.localOllamaModels.isEmpty {
-                         // Message if no models are found
-                        Text("No models found. Make sure Ollama is running and you have downloaded models.")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if ollamaService.localModels.isEmpty {
+                        Text("No models found. Ensure Ollama is running and models are downloaded.")
                              .foregroundColor(.gray)
                              .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    else {
-                        // Use a Picker to select from available models
-                        // Bind selection directly to viewModel.llmModelName (@AppStorage)
-                        Picker("Select a model", selection: $viewModel.llmModelName) {
-                            // Ensure the currently selected model is in the list,
-                            // otherwise Picker might show a blank or default.
-                            // We handle setting a default in the ViewModel if needed.
-                            ForEach(viewModel.localOllamaModels, id: \.self) { modelName in
-                                Text(modelName).tag(modelName) // Use model name as the tag
+                    } else {
+                        // Bind selection to ollamaService.llmModelName (@AppStorage via OllamaService)
+                        Picker("Select a model", selection: $ollamaService.llmModelName) {
+                            ForEach(ollamaService.localModels, id: \.self) { modelName in
+                                Text(modelName).tag(modelName)
                             }
                         }
-                        .labelsHidden() // Hide the redundant "Select a model" label
-                        .frame(maxWidth: .infinity, alignment: .leading) // Allow picker to expand
-                        // onChange is now on viewModel.llmModelName
-                        .onChange(of: viewModel.llmModelName) { newValue in
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onChange(of: ollamaService.llmModelName) { newValue, _ in // Updated for iOS 17+
                              logger.debug("Ollama model selected: \(newValue)")
-                             // llmModelName is @AppStorage, changes are auto-saved.
-                             // No need to manually update llmModelName here.
+                             // llmModelName in OllamaService is @AppStorage, changes are auto-saved.
                          }
                     }
                 }
                 .controlSize(.regular)
 
-                 // Display the list of models below the picker to add remove buttons
-                 if !viewModel.isLoadingModels && viewModel.modelLoadingError == nil && !viewModel.localOllamaModels.isEmpty {
-                     Divider() // Optional divider
+                 if !ollamaService.isLoadingModels && ollamaService.modelLoadingError == nil && !ollamaService.localModels.isEmpty {
+                     Divider()
                      Text("Installed Models:")
                          .font(.headline)
 
-                     // Use a List or ForEach to display models with remove buttons
-                     // Using ForEach in a VStack for simpler styling within settings panel
                      VStack(alignment: .leading) {
-                         ForEach(viewModel.localOllamaModels, id: \.self) { modelName in
+                         ForEach(ollamaService.localModels, id: \.self) { modelName in
                              HStack {
-                                 Text(modelName) // Display the model name
-                                     .frame(maxWidth: .infinity, alignment: .leading) // Take available space
+                                 Text(modelName)
+                                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                                 // --- Remove Button ---
                                  Button {
-                                     // Action: Set the model to remove and show the confirmation dialog
-                                     modelToRemove = modelName // Store the model name
-                                     showingRemovalConfirmation = true // Show the dialog
+                                     modelToRemoveFromName = modelName
+                                     showingRemovalConfirmation = true
                                  } label: {
-                                     // Show a spinner if THIS model is being removed
-                                     if viewModel.isRemovingModel && viewModel.removingModelName == modelName {
-                                         ProgressView()
-                                              .controlSize(.small)
+                                     if ollamaService.isRemovingModel && ollamaService.removingModelName == modelName {
+                                         ProgressView().controlSize(.small)
                                      } else {
-                                         Image(systemName: "trash") // Trash icon
+                                         Image(systemName: "trash")
                                      }
                                  }
-                                 // Disable button if:
-                                 // - A pull is in progress
-                                 // - Any removal action is in progress
-                                 // - This model is the currently selected model
-                                 // Check against viewModel.llmModelName
-                                 .disabled(viewModel.isPullingModel ||
-                                           viewModel.isRemovingModel || // Disable all delete buttons if any removal is in progress
-                                           viewModel.llmModelName == modelName) // Cannot remove the active model
-                                 .foregroundColor(.red) // Style the trash icon in red
-                                 .buttonStyle(PlainButtonStyle()) // Use plain style for icon button
-                                 .help("Remove \(modelName)") // Add a tooltip
-                                 // --- End Remove Button ---
+                                 .disabled(ollamaService.isPullingModel ||
+                                           ollamaService.isRemovingModel ||
+                                           ollamaService.llmModelName == modelName) // Cannot remove active model
+                                 .foregroundColor(.red)
+                                 .buttonStyle(PlainButtonStyle())
+                                 .help("Remove \(modelName)")
                              }
-                             .padding(.vertical, 2) // Add vertical padding between model rows
+                             .padding(.vertical, 2)
                          }
                      }
                      .padding(.top, 5)
                  }
 
-
-                 // Add suggestion to pull if no models found and not loading/errored
-                if !viewModel.isLoadingModels && viewModel.modelLoadingError == nil && viewModel.localOllamaModels.isEmpty {
+                if !ollamaService.isLoadingModels && ollamaService.modelLoadingError == nil && ollamaService.localModels.isEmpty {
                     Text("Try downloading a model below!")
                          .font(.callout)
                          .foregroundColor(.gray)
                 }
             }
-            // --- End Displaying and Selecting Models ---
 
-            Divider() // Add a divider before the Pull Model section
+            Divider()
 
             // --- Pull Model Section ---
-            VStack(alignment: .leading, spacing: 10) { // Group pull model controls
-                 Text("Download New Model:") // Add a label for the section
+            VStack(alignment: .leading, spacing: 10) {
+                 Text("Download New Model:")
                      .font(.headline)
 
                  HStack {
                      Text("Model Name:")
-                          .frame(width: 150, alignment: .leading) // Consistent label width
-
-                     TextField("e.g., llama2:7b, mistral:latest", text: $viewModel.modelToPull)
+                          .frame(width: 150, alignment: .leading)
+                     // Bind to ollamaService.modelToPull
+                     TextField("e.g., llama2:7b, mistral:latest", text: $ollamaService.modelToPull)
                          .textFieldStyle(RoundedBorderTextFieldStyle())
-                         .disabled(viewModel.isPullingModel || viewModel.isRemovingModel) // Disable input while any action is pulling/removing
-                         // Optional: Clear status/error when user starts typing again
-                         .onChange(of: viewModel.modelToPull) { _ in
-                              viewModel.clearPullStatus() // Clear pull specific status/error
-                              viewModel.clearRemoveStatus() // Clear remove specific status/error
+                         .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel)
+                         .onChange(of: ollamaService.modelToPull) { _, _ in // Updated for iOS 17+
+                              ollamaService.clearPullActionStatus()
+                              // ollamaService.clearRemoveActionStatus() // Not strictly needed here, pull status is enough
                           }
 
                      Button {
-                         // Trigger the pull action in the ViewModel
                          Task {
-                             await viewModel.pullModelAction(name: viewModel.modelToPull)
+                             // Call action on ollamaService
+                             await ollamaService.pullModel(name: ollamaService.modelToPull)
                          }
                      } label: {
-                         // Change button label based on state
-                         if viewModel.isPullingModel {
-                             ProgressView() // Show spinner while pulling
-                                 .controlSize(.small)
-                         } else if viewModel.modelPullError == nil && viewModel.pullStage == "Complete" {
-                             // Show a checkmark after successful pull completion (using pullStage as a final state indicator)
-                             Image(systemName: "checkmark.circle.fill")
-                                 .foregroundColor(.green)
-                         }
-                         else {
-                              Image(systemName: "arrow.down.circle") // Default download icon
+                         if ollamaService.isPullingModel {
+                             ProgressView().controlSize(.small)
+                         } else if ollamaService.modelPullError == nil && ollamaService.pullStage == "Complete" {
+                             Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                         } else {
+                              Image(systemName: "arrow.down.circle")
                          }
                      }
-                     // Disable the button if input is empty or already pulling/removing
-                     .disabled(viewModel.modelToPull.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                               viewModel.isPullingModel ||
-                               viewModel.isRemovingModel)
+                     .disabled(ollamaService.modelToPull.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                               ollamaService.isPullingModel ||
+                               ollamaService.isRemovingModel)
                  }
                  .controlSize(.regular)
 
-                // --- Display Streaming Pull Progress ---
-                 if viewModel.isPullingModel {
-                     // Show the progress bar while pulling
-                     ProgressView(value: viewModel.pullProgress) // Bind to pullProgress (0.0 to 1.0)
+                 if ollamaService.isPullingModel {
+                     ProgressView(value: ollamaService.pullProgress)
                          .progressViewStyle(.linear)
                          .frame(maxWidth: .infinity, alignment: .leading)
-
-                     // Show the detailed status message
                      HStack {
-                          Text(viewModel.pullStage) // e.g., "downloading", "extracting"
+                          Text(ollamaService.pullStage)
                               .font(.callout)
                               .foregroundColor(.gray)
-
-                          Spacer() // Push percentage to the right
-
-                          // Display percentage while pulling is in progress
-                          // Use pullProgress directly as it's a non-optional Double
-                           if viewModel.isPullingModel { // Condition to show the percentage text
-                              Text(String(format: "%.0f%%", viewModel.pullProgress * 100))
+                          Spacer()
+                           if ollamaService.isPullingModel {
+                              Text(String(format: "%.0f%%", ollamaService.pullProgress * 100))
                                    .font(.callout)
                                    .foregroundColor(.gray)
                            }
                      }
-
                  } else {
-                      // Show final pull success status message if no error and stage is complete
-                      // Use pullStage == "Complete" and check for no error
-                      if viewModel.modelPullError == nil && viewModel.pullStage == "Complete" {
-                          // Show success message including the name of the model that was pulled (stored in ViewModel.modelToPull initially)
-                          Text("Successfully pulled \(viewModel.modelToPull.isEmpty ? "model" : "'\(viewModel.modelToPull)'").")
+                      if ollamaService.modelPullError == nil && ollamaService.pullStage == "Complete" && !ollamaService.modelToPull.isEmpty {
+                          Text("Successfully pulled '\(ollamaService.modelToPull)'.")
                               .foregroundColor(.green)
+                              .font(.callout)
                       }
-                      // Note: If there was a pull error, modelPullError will be non-nil and displayed below
                  }
-                 // --- End Display Streaming Pull Progress ---
-
-                 // Display specific pull error message if one exists
-                 if let error = viewModel.modelPullError {
-                     Text("Pull Error: \(error)") // Clarify it's a pull error
-                         .foregroundColor(.red)
-                         .font(.callout) // Use callout font for error details
-                 }
-
-                // --- Display Removal Error Message ---
-                 if let error = viewModel.modelRemoveError {
-                     Text("Removal Error: \(error)") // Display removal errors
+                 if let error = ollamaService.modelPullError {
+                     Text("Pull Error: \(error)")
                          .foregroundColor(.red)
                          .font(.callout)
                  }
-                // --- End Display Removal Error Message ---
-
+                 if let error = ollamaService.modelRemoveError { // Display removal errors from OllamaService
+                     Text("Removal Error: \(error)")
+                         .foregroundColor(.red)
+                         .font(.callout)
+                 }
              }
-            // --- End Pull Model Section ---
 
-            Divider() // Add a divider before the Advanced Parameters section
+            Divider()
 
             // --- Advanced Generation Parameters Section ---
+            // These parameters are still bound to MainApplicationViewModel's @AppStorage properties
              VStack(alignment: .leading, spacing: 10) {
                  Text("Advanced Generation Parameters:")
                      .font(.headline)
                      .padding(.bottom, 5)
+                 .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel) // Use ollamaService state
 
-                 // Disable all advanced controls while a model action is in progress
-                 .disabled(viewModel.isPullingModel || viewModel.isRemovingModel)
-
-                 // Temperature
                  HStack {
                      Text("Temperature:")
                          .frame(width: 150, alignment: .leading)
-                         .help("Controls randomness (higher = more creative). Typical: 0.0 to 1.0+") // Tooltip
-
-                     Slider(value: $viewModel.ollamaTemperature, in: 0.0...2.0) { // Provide a range (adjust as needed)
-                         Text("Temperature") // Accessibility label
-                     }
+                         .help("Controls randomness. Higher is more creative.")
+                     Slider(value: $mainViewModel.ollamaTemperature, in: 0.0...2.0) { Text("Temperature") }
                      .controlSize(.regular)
-                      // Display current value
-                     Text("\(viewModel.ollamaTemperature, format: .number.precision(.fractionLength(2)))")
-                         .frame(width: 40, alignment: .trailing) // Align value
-
+                     Text("\(mainViewModel.ollamaTemperature, format: .number.precision(.fractionLength(2)))")
+                         .frame(width: 40, alignment: .trailing)
                  }
-
-                 // Top K
                  HStack {
                      Text("Top K:")
                           .frame(width: 150, alignment: .leading)
-                          .help("Limits sampling to the top K most likely tokens. Typical: 0 to 100+") // Tooltip
-
-                     // Using Stepper for integer values with a range
-                     Stepper(value: $viewModel.ollamaTopK, in: 0...200) { // Provide a range
-                         Text("Top K") // Accessibility label
-                     }
+                          .help("Limits sampling to top K tokens.")
+                     Stepper(value: $mainViewModel.ollamaTopK, in: 0...200) { Text("Top K") }
                      .controlSize(.regular)
-                      // Display current value
-                     Text("\(viewModel.ollamaTopK)")
-                          .frame(width: 40, alignment: .trailing) // Align value
-
+                     Text("\(mainViewModel.ollamaTopK)")
+                          .frame(width: 40, alignment: .trailing)
                  }
-
-                 // Top P
                  HStack {
                       Text("Top P:")
                           .frame(width: 150, alignment: .leading)
-                           .help("Limits sampling based on cumulative probability. Typical: 0.0 to 1.0") // Tooltip
-
-                      Slider(value: $viewModel.ollamaTopP, in: 0.0...1.0) { // Range 0.0 to 1.0
-                           Text("Top P") // Accessibility label
-                      }
+                           .help("Limits sampling based on cumulative probability.")
+                      Slider(value: $mainViewModel.ollamaTopP, in: 0.0...1.0) { Text("Top P") }
                       .controlSize(.regular)
-                       // Display current value
-                      Text("\(viewModel.ollamaTopP, format: .number.precision(.fractionLength(2)))")
-                           .frame(width: 40, alignment: .trailing) // Align value
+                      Text("\(mainViewModel.ollamaTopP, format: .number.precision(.fractionLength(2)))")
+                           .frame(width: 40, alignment: .trailing)
                  }
-
-                 // Repeat Penalty
                  HStack {
                       Text("Repeat Penalty:")
                           .frame(width: 150, alignment: .leading)
-                           .help("Penalizes repeated tokens. Typical: 1.0 to 2.0") // Tooltip
-
-                      Slider(value: $viewModel.ollamaRepeatPenalty, in: 1.0...2.0) { // Provide a range
-                           Text("Repeat Penalty") // Accessibility label
-                      }
+                           .help("Penalizes repeated tokens.")
+                      Slider(value: $mainViewModel.ollamaRepeatPenalty, in: 1.0...2.0) { Text("Repeat Penalty") }
                       .controlSize(.regular)
-                       // Display current value
-                      Text("\(viewModel.ollamaRepeatPenalty, format: .number.precision(.fractionLength(2)))")
-                           .frame(width: 40, alignment: .trailing) // Align value
+                      Text("\(mainViewModel.ollamaRepeatPenalty, format: .number.precision(.fractionLength(2)))")
+                           .frame(width: 40, alignment: .trailing)
                  }
-
-                 // Context Window Size
                  HStack {
                       Text("Context Window:")
                            .frame(width: 150, alignment: .leading)
-                           .help("Sets the model's context window size (tokens).") // Tooltip
-
-                     // Using TextField with formatter or Stepper for potentially large int
-                     // Let's use Stepper with a larger range or TextField
-                     // Using TextField for flexibility, could add validation later
-                      TextField("e.g., 4096, 8192", value: $viewModel.ollamaContextWindowSize, format: .number)
+                           .help("Model's context window size (tokens).")
+                      TextField("e.g., 4096", value: $mainViewModel.ollamaContextWindowSize, format: .number)
                           .textFieldStyle(RoundedBorderTextFieldStyle())
-                          .frame(width: 80) // Fixed width for input
+                          .frame(width: 80)
                           .controlSize(.regular)
-                          // Display current value (redundant with TextField, but can show formatting)
-                          // Text("\(viewModel.ollamaContextWindowSize)") // Optional display outside TextField
-
                  }
-
-                 // Number of GPU Layers
                  HStack {
                       Text("GPU Layers:")
                            .frame(width: 150, alignment: .leading)
-                           .help("Number of layers to offload to the GPU (-1 for all).") // Tooltip
-
-                     // Using Stepper for integer value, -1 is a special case
-                      Stepper(value: $viewModel.ollamaGpuLayers, in: -1...100) { // Adjust max value as needed
-                           Text("GPU Layers") // Accessibility label
-                      }
+                           .help("Number of layers to offload to GPU (-1 for all).")
+                      Stepper(value: $mainViewModel.ollamaGpuLayers, in: -1...100) { Text("GPU Layers") }
                       .controlSize(.regular)
-                       // Display current value
-                      Text(viewModel.ollamaGpuLayers == -1 ? "All" : "\(viewModel.ollamaGpuLayers)") // Display "All" for -1
-                           .frame(width: 40, alignment: .trailing) // Align value
+                      Text(mainViewModel.ollamaGpuLayers == -1 ? "All" : "\(mainViewModel.ollamaGpuLayers)")
+                           .frame(width: 40, alignment: .trailing)
                  }
              }
-            // --- End Advanced Generation Parameters Section ---
-
-
-            Spacer() // Push content to top
+            Spacer()
         }
-        // Add the confirmation dialog to the view
         .confirmationDialog("Confirm Model Removal",
                             isPresented: $showingRemovalConfirmation,
-                            presenting: modelToRemove) { modelName in // Use 'presenting' to pass the model name to the dialog
-            // Dialog buttons
-            Button("Remove '\(modelName)'", role: .destructive) {
-                // Action to perform when 'Remove' is tapped in the dialog
+                            presenting: modelToRemoveFromName) { modelNameInDialog in
+            Button("Remove '\(modelNameInDialog)'", role: .destructive) {
                 Task {
-                    await viewModel.removeModelAction(name: modelName)
+                    // Call action on ollamaService
+                    await ollamaService.removeModel(name: modelNameInDialog)
                 }
             }
-            Button("Cancel", role: .cancel) {
-                // Action to perform when 'Cancel' is tapped
-                // No action needed, dialog dismisses automatically
-            }
-        } message: { modelName in // Message content, also receives the presenting value
-            Text("Are you sure you want to remove the model '\(modelName)'? This action cannot be undone.")
+            Button("Cancel", role: .cancel) {}
+        } message: { modelNameInDialog in
+            Text("Are you sure you want to remove the model '\(modelNameInDialog)'? This action cannot be undone.")
         }
-         // Add a simple onAppear to log when the view appears (optional but helpful for debugging)
         .onAppear {
             logger.debug("LocalAISettingsView appeared.")
-             // The loading of models is triggered by the selectedSettingsSection observer in the ViewModel
-             // Ensure model action status is clear when the view appears initially
-             viewModel.clearModelActionStatus()
-             // Also clear dialog state
-             showingRemovalConfirmation = false
-             modelToRemove = nil
+            // Initial status/model load is typically handled by MainApplicationViewModel's selectedSettingsSection didSet
+            // or by OllamaService's init or a specific trigger.
+            // Ensure statuses are clear on appear if navigating back to this tab.
+            ollamaService.clearAllModelActionStatuses()
+            showingRemovalConfirmation = false
+            modelToRemoveFromName = nil
         }
-        // Add an onDisappear to clear status messages and dialog state when leaving the tab
         .onDisappear {
-             viewModel.clearModelActionStatus()
+             ollamaService.clearAllModelActionStatuses()
              showingRemovalConfirmation = false
-             modelToRemove = nil
+             modelToRemoveFromName = nil
         }
     }
 }
 
 // MARK: - Preview Provider
 struct LocalAISettingsView_Previews: PreviewProvider {
-     // Create a mock ViewModel for previews
-     // Note: ViewModel state for previews is typically set here directly or in a helper
-    static var mockViewModel: MainApplicationViewModel {
-        let vm = MainApplicationViewModel()
-        // Simulate loaded models for the Picker and List
-        vm.localOllamaModels = ["llama3:8b", "mistral:7b", "gemma:2b", "codellama:7b", "llama2:7b"]
-        // vm.selectedOllamaModelName is replaced by llmModelName which is @AppStorage
-        vm.llmModelName = "mistral:7b" // Set a default selection
-
-        // Set up other ViewModel states for specific preview configurations if needed
-
-        // Example: Set some advanced parameters to non-default values for preview
-         vm.ollamaTemperature = 0.5
-         vm.ollamaTopK = 50
-         vm.ollamaTopP = 0.95
-         vm.ollamaRepeatPenalty = 1.2
-         vm.ollamaContextWindowSize = 8192
-         vm.ollamaGpuLayers = 0 // Use CPU
-
-        // For example, to preview the pulling state:
-        // vm.modelToPull = "phi3:latest"
-        // vm.isPullingModel = true
-        // vm.pullStage = "downloading"
-        // vm.pullProgress = 0.45
-
-        return vm
+    static var mockOllamaService: OllamaService {
+        let service = OllamaService()
+        service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
+        service.llmModelName = "mistral:7b" // This is @AppStorage in OllamaService
+        service.serverStatus = .connected
+        return service
     }
 
-     // The main 'previews' static variable is required by the PreviewProvider protocol
-     static var previews: some View {
-         Group { // Use a Group to include multiple preview configurations
+    static var mockMainViewModel: MainApplicationViewModel {
+        // MainApplicationViewModel's init now takes OllamaService
+        let vm = MainApplicationViewModel(ollamaService: mockOllamaService)
+        // Set other mainViewModel properties if needed for preview
+        vm.ollamaTemperature = 0.5
+        vm.ollamaTopK = 50
+        return vm
+    }
+    
+    // Preview helper for confirmation dialog
+    struct ConfirmationDialogPreviewWrapper: View {
+        @ObservedObject var ollamaService: OllamaService
+        @ObservedObject var mainViewModel: MainApplicationViewModel
+        @State private var showingConfirmation = true // Start with dialog shown
+        @State private var modelToRemove: String? = "gemma:2b"
 
-             // --- Preview 1: Default State ---
-             LocalAISettingsView(viewModel: mockViewModel)
+        var body: some View {
+            LocalAISettingsView(ollamaService: ollamaService, mainViewModel: mainViewModel)
                  .padding()
-                 .frame(width: 500) // Adjust frame for the new content
-                 .previewLayout(.sizeThatFits)
-                 .previewDisplayName("Default State")
+                 .frame(width: 500)
+                 .confirmationDialog("Confirm Model Removal",
+                                     isPresented: $showingConfirmation,
+                                     presenting: modelToRemove) { name in
+                     Button("Remove '\(name)'", role: .destructive) {}
+                     Button("Cancel", role: .cancel) {}
+                 } message: { name in
+                     Text("Are you sure you want to remove '\(name)'?")
+                 }
+        }
+    }
 
-             // --- Preview 2: Confirmation Dialog Showing ---
-             // Use a helper struct that holds @State for the dialog
-              ConfirmationDialogPreviewWrapper(viewModel: mockViewModel) // Pass the mock ViewModel here
-                  .previewDisplayName("Confirmation Dialog Showing")
 
-         }
-     }
-}
+    static var previews: some View {
+        Group {
+            LocalAISettingsView(ollamaService: mockOllamaService, mainViewModel: mockMainViewModel)
+                .padding()
+                .frame(width: 500)
+                .previewLayout(.sizeThatFits)
+                .previewDisplayName("Default State")
 
-// MARK: - Preview Helper for Confirmation Dialog
-// This helper struct is used to hold the @State variables needed
-// to manually control the visibility of the confirmation dialog in a preview.
-struct ConfirmationDialogPreviewWrapper: View {
-    // Accept the ViewModel as an ObservedObject parameter
-    @ObservedObject var viewModel: MainApplicationViewModel // Accept ViewModel here
-
-    // @State variables to control the dialog's presentation for this preview
-    @State private var showingRemovalConfirmation = true // Start with dialog shown
-    @State private var modelToRemove: String? = "gemma:2b" // Simulate removing this model
-
-    var body: some View {
-        LocalAISettingsView(viewModel: viewModel) // Pass the received ViewModel
-             .padding()
-             .frame(width: 500)
-             // Apply the confirmation dialog here as well,
-             // bound to the State variables in THIS helper struct.
-             .confirmationDialog("Confirm Model Removal", // Add the dialog here too
-                                 isPresented: $showingRemovalConfirmation,
-                                 presenting: modelToRemove) { modelName in
-                 // Use dummy actions for preview buttons
-                 Button("Remove '\(modelName)'", role: .destructive) { }
-                 Button("Cancel", role: .cancel) { }
-             } message: { modelName in
-                 Text("Are you sure you want to remove the model '\(modelName)'? This action cannot be undone.")
-             }
+            // To preview pulling state:
+            let pullingOllamaService: OllamaService = {
+                let service = OllamaService()
+                service.serverStatus = .connected
+                service.localModels = ["mistral:7b"]
+                service.llmModelName = "mistral:7b"
+                service.isPullingModel = true
+                service.modelToPull = "phi3:mini"
+                service.pullStage = "downloading manifest"
+                service.pullProgress = 0.45
+                return service
+            }()
+            LocalAISettingsView(ollamaService: pullingOllamaService, mainViewModel: MainApplicationViewModel(ollamaService: pullingOllamaService))
+                .padding()
+                .frame(width: 500)
+                .previewLayout(.sizeThatFits)
+                .previewDisplayName("Pulling State")
+                
+            ConfirmationDialogPreviewWrapper(ollamaService: mockOllamaService, mainViewModel: mockMainViewModel)
+                 .previewDisplayName("Confirmation Dialog")
+        }
     }
 }
