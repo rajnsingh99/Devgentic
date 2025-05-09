@@ -1,113 +1,94 @@
-// Views/Sidebar/ActivityBarButton.swift (Updated)
+// Views/Sidebar/ActivityBarButton.swift
 import SwiftUI
 import os
 
-// Logger (Optional) - Assuming logger is defined elsewhere or remove if not used here
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ActivityBarButton")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ActivityBarButton")
 
-// MARK: - Activity Bar Button View
-/// A reusable button component for the Activity Bar icons.
 struct ActivityBarButton: View {
-    let tab: SidebarTab // The specific tab this button represents
-    // Binding to the selected tab state
-    @Binding var selectedTab: SidebarTab?
-    // Binding to the sidebar visibility state
-    @Binding var isSidebarVisible: Bool
+    let tab: SidebarTab
+    @Binding var selectedTab: SidebarTab? // For sidebar pane selection
+    @Binding var isSidebarVisible: Bool   // For sidebar pane visibility
 
-    // Access the ViewModel from the environment to modify selection state
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @EnvironmentObject var viewModel: MainApplicationViewModel // For panel toggles
+
+    // Computed property to determine if this button should appear "active"
+    // This is true if its the selected tab for a pane, OR if its corresponding panel is shown
+    private var isActive: Bool {
+        if tab == .settings {
+            return viewModel.showSettings
+        } else if tab == .promptLibrary {
+            return viewModel.showPromptLibrary
+        } else {
+            return selectedTab == tab && isSidebarVisible
+        }
+    }
 
     var body: some View {
         Button {
-            // --- Action performed when the button is clicked ---
+            handleButtonTap()
+        } label: {
+            Image(systemName: tab.iconName)
+                .font(.title2)
+                .frame(width: 40, height: 40)
+                .foregroundColor(isActive ? Color.accentColor : Color.secondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(tab.title)
+        .padding(.vertical, 5)
+    }
 
-            // ** Special handling for the New Chat tab (Clear View / Hide Sidebar) **
-            if tab == .newChat {
-                if viewModel.selectedConversationID != nil {
-                     viewModel.selectedConversationID = nil
-                     logger.debug("Cleared selected conversation ID via New Chat button.")
-                 }
-                 if isSidebarVisible {
-                      isSidebarVisible = false
-                      logger.debug("Hid sidebar pane via New Chat button.")
-                 }
+    private func handleButtonTap() {
+        switch tab {
+        case .newChat:
+            // Clears selected conversation and hides sidebar pane
+            if viewModel.selectedConversationID != nil {
+                 viewModel.selectedConversationID = nil
+                 logger.debug("Cleared selected conversation ID via New Chat button.")
+             }
+             if isSidebarVisible {
+                  isSidebarVisible = false // Hide the VSCodifiedSidebar's pane
+                  logger.debug("Hid sidebar pane via New Chat button.")
+             }
+            // Ensure other panels are closed
+            if viewModel.showSettings { viewModel.showSettings = false }
+            if viewModel.showPromptLibrary { viewModel.showPromptLibrary = false }
+            selectedTab = nil // Clear pane selection
 
-            // *** Special handling for the Settings tab ***
-            } else if tab == .settings {
-                // 1. Toggle the main settings panel overlay directly
-                viewModel.toggleSettings() // Use the existing ViewModel function
-                logger.debug("Toggled settings panel overlay via Settings button. Show: \(viewModel.showSettings)")
+        case .settings:
+            // Toggles the settings panel overlay
+            viewModel.toggleSettings()
+            logger.debug("Toggled settings panel via Settings button. Show: \(viewModel.showSettings)")
+            // Do not change selectedTab for sidebar pane, settings is a panel
 
-                // 2. Hide the sidebar pane if it's open when settings are shown
-                if viewModel.showSettings && isSidebarVisible {
-                    isSidebarVisible = false
-                    logger.debug("Hid sidebar pane because settings panel was opened.")
-                }
-                // 3. Do NOT change the selectedTab state.
+        // MARK: - Handling for Prompt Library Button
+        case .promptLibrary:
+            // Toggles the prompt library panel overlay
+            viewModel.togglePromptLibrary()
+            logger.debug("Toggled prompt library panel via button. Show: \(viewModel.showPromptLibrary)")
+            // Do not change selectedTab for sidebar pane, prompt library is a panel
 
-            // ** Handling for all other tabs **
+        default: // For tabs that open the sidebar pane (.conversations, .localModels, .agents, .user)
+            if selectedTab == tab {
+                // If clicking the already selected tab, toggle the sidebar pane's visibility
+                isSidebarVisible.toggle()
+                logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
             } else {
-                if selectedTab == tab {
-                    // If clicking the already selected tab (and it's not .settings or .newChat),
-                    // toggle the sidebar pane's visibility
-                    isSidebarVisible.toggle()
-                    logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
-                } else {
-                    // If clicking a different tab (not .settings or .newChat), select it
-                    // and ensure the sidebar pane is visible
-                    selectedTab = tab
-                    isSidebarVisible = true
-                    logger.debug("Selected tab \(tab.title) via button. Sidebar forced visible.")
+                // If clicking a different tab, select it and ensure the sidebar pane is visible
+                selectedTab = tab
+                isSidebarVisible = true
+                logger.debug("Selected tab \(tab.title) via button. Sidebar pane forced visible.")
 
-                    // Ensure settings panel is hidden if a main sidebar tab is selected
-                    if viewModel.showSettings {
-                        viewModel.showSettings = false
-                        logger.debug("Hid settings panel because another sidebar tab was selected.")
-                    }
+                // Ensure overlay panels are hidden if a main sidebar pane tab is selected
+                if viewModel.showSettings {
+                    viewModel.showSettings = false
+                    logger.debug("Hid settings panel because sidebar tab '\(tab.title)' was selected.")
+                }
+                if viewModel.showPromptLibrary {
+                    viewModel.showPromptLibrary = false
+                    logger.debug("Hid prompt library panel because sidebar tab '\(tab.title)' was selected.")
                 }
             }
-        } label: {
-            // Button label content (the icon)
-            Image(systemName: tab.iconName)
-                .font(.title2) // Control icon size
-                .frame(width: 40, height: 40) // Define tappable area size
-                // Icon color is secondary unless its tab is selected AND sidebar is visible
-                // For settings, it should only be highlighted if the *panel* is open (which we don't track here directly)
-                // Let's keep it simple: highlight only if its tab is selected and pane is visible. Settings won't highlight this way.
-                .foregroundColor(selectedTab == tab && isSidebarVisible ? Color.accentColor : Color.secondary)
-                .contentShape(Rectangle()) // Make the entire frame tappable
         }
-        .buttonStyle(.plain) // Use plain button style to remove default background/border
-        .help(tab.title) // Add a tooltip showing the tab's title on hover
-        .padding(.vertical, 5) // Add some vertical padding around each button
     }
 }
-
-// Note: The PreviewProvider for ActivityBarButton might need adjustment
-// as it now requires a MainApplicationViewModel in the environment.
-// You might need to wrap it in a container that provides the environment object.
-
-/* Example Preview Update:
- #Preview {
-     // Create a container that provides the necessary environment object
-     struct ButtonPreviewContainer: View {
-         @State var selectedTab: SidebarTab? = .conversations
-         @State var isSidebarVisible: Bool = true
-         @StateObject var viewModel = MainApplicationViewModel() // Create a dummy VM
-
-         var body: some View {
-             VStack {
-                 ActivityBarButton(tab: .newChat, selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
-                 ActivityBarButton(tab: .conversations, selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
-                 Spacer()
-                 ActivityBarButton(tab: .settings, selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible) // Add settings button
-             }
-             .environmentObject(viewModel) // Provide the VM
-             .padding()
-             .background(Color.gray.opacity(0.2))
-             .frame(width: 80, height: 300) // Simulate Activity Bar size
-         }
-     }
-     return ButtonPreviewContainer()
- }
- */

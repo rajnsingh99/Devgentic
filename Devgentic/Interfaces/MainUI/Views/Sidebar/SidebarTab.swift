@@ -3,9 +3,7 @@ import Combine // For potential future use with ViewModel state
 import os     // For logging (optional here, but good practice)
 
 // Logger (Optional)
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "Sidebar")
-
-// --- Phase 1: Core Sidebar Structure ---
+// private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "Sidebar")
 
 // MARK: - SidebarTab Enum
 /// Represents the different tabs available in the Activity Bar.
@@ -13,6 +11,8 @@ enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations
     case localModels
+    // MARK: - New Tab for Prompt Library
+    case promptLibrary // Added new case
     case agents
     case settings
     case user
@@ -23,23 +23,24 @@ enum SidebarTab: CaseIterable, Identifiable {
     var iconName: String {
         switch self {
         case .newChat:
-            // Use a placeholder icon for Devgentic for now
-            // Replace "brain.head.profile" with your actual app icon if available as an SF Symbol or asset
-            return "plus.bubble" // Changed to a more "new chat" like icon
+            return "plus.bubble"
         case .conversations:
-            return "message" // Standard chat bubble icon
+            return "message"
         case .localModels:
-            return "cpu" // Icon representing processing or models
+            return "cpu"
+        // MARK: - Icon for Prompt Library
+        case .promptLibrary:
+            return "books.vertical" // Example icon, choose one that fits
         case .agents:
-            return "figure.walk.motion" // Icon representing agents or actions
+            return "figure.walk.motion"
         case .settings:
-            return "gearshape" // Standard settings icon
+            return "gearshape"
         case .user:
-            return "person.crop.circle" // Standard user profile icon
+            return "person.crop.circle"
         }
     }
 
-    /// Provides a title/tooltip for each tab, used in the Side Bar Pane header.
+    /// Provides a title/tooltip for each tab, used in the Side Bar Pane header or for panel titles.
     var title: String {
         switch self {
         case .newChat:
@@ -48,57 +49,16 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "Conversations"
         case .localModels:
             return "Local AI Models"
+        // MARK: - Title for Prompt Library
+        case .promptLibrary:
+            return "Prompt Library"
         case .agents:
             return "Agents"
         case .settings:
             return "Settings"
         case .user:
-            return "Account" // Changed from "User Account" for brevity
+            return "Account"
         }
-    }
-}
-
-// MARK: - Activity Bar View
-/// The thin vertical bar on the far left, displaying icons for different sections.
-struct ActivityBarView: View {
-    // Binding to the selected tab state in the container view
-    @Binding var selectedTab: SidebarTab?
-    // Binding to the sidebar visibility state in the container view
-    @Binding var isSidebarVisible: Bool
-
-    var body: some View {
-        VStack(spacing: 0) { // No vertical space between buttons initially
-            // --- Top Icons (New Chat, Conversations, Models, Agents) ---
-            // Filter out settings and user tabs for the top section
-            ForEach(SidebarTab.allCases.filter { $0 != .settings && $0 != .user }) { tab in
-                ActivityBarButton(
-                    tab: tab,
-                    selectedTab: $selectedTab,
-                    isSidebarVisible: $isSidebarVisible
-                )
-            }
-
-            Spacer() // Pushes the bottom icons down
-
-            // --- Bottom Icons (Settings, User) ---
-            // Explicitly add buttons for settings and user tabs
-            ActivityBarButton(
-                tab: .settings,
-                selectedTab: $selectedTab,
-                isSidebarVisible: $isSidebarVisible
-            )
-            ActivityBarButton(
-                tab: .user,
-                selectedTab: $selectedTab,
-                isSidebarVisible: $isSidebarVisible
-            )
-        }
-        .frame(width: 50) // Fixed width for the Activity Bar
-        .padding(.vertical, 10) // Add some padding at the top and bottom
-        // Use a standard system background color that adapts to light/dark mode
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.9))
-        // Ensure the bar takes the full available height
-        .frame(maxHeight: .infinity)
     }
 }
 

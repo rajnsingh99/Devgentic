@@ -9,29 +9,26 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 // MARK: - Main View
 struct MainApplicationView: View {
     // --- ViewModel ---
-    // Assuming MainApplicationViewModel is already integrated with ConversationStore
     @StateObject private var viewModel = MainApplicationViewModel()
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
-    @State private var isSidebarVisible: Bool = true
+    @State private var isSidebarVisible: Bool = true // Default to true to show sidebar initially
     private let activityBarWidth: CGFloat = 50
     private let sideBarPaneIdealWidth: CGFloat = 280
-    private var totalSidebarWidth: CGFloat { activityBarWidth + sideBarPaneIdealWidth }
+    private var totalSidebarWidth: CGFloat { activityBarWidth + (isSidebarVisible ? sideBarPaneIdealWidth : 0) }
+
 
     // --- Constants for UI adjustments ---
-    private let chatHistoryBottomPadding: CGFloat = 130 // Padding for content above floating input
-    private let inputAreaCornerRadius: CGFloat = 12 // Corner radius for input area background
+    private let chatHistoryBottomPadding: CGFloat = 130
+    private let inputAreaCornerRadius: CGFloat = 12
 
     // MARK: - Body
     var body: some View {
-        // --- Overall ZStack for Layering Sidebar and Main Content Area ---
         ZStack(alignment: .leading) {
 
             // --- Main Content Area (Header, Chat History + Input) ---
             VStack(spacing: 0) {
-                
-                // --- Chat Header View (MODIFIED) ---
                 ChatHeaderView(
                     chatTitle: viewModel.currentConversationTitle,
                     isFilterActive: viewModel.isUserMessagesOnlyFilterActive,
@@ -39,19 +36,13 @@ struct MainApplicationView: View {
                         viewModel.toggleUserMessagesFilter()
                         logger.info("Header eye button tapped. Filter active: \(viewModel.isUserMessagesOnlyFilterActive)")
                     },
-                    // --- NEW: Pass transfer action ---
                     onTransferButtonTapped: {
-                        viewModel.transferSelectedConversationToOverlay() // Call new ViewModel method
+                        viewModel.transferSelectedConversationToOverlay()
                     },
-                    isConversationSelected: viewModel.selectedConversationID != nil // Pass selection state
-                    // --- END NEW ---
+                    isConversationSelected: viewModel.selectedConversationID != nil
                 )
-                // --- End Chat Header View ---
 
-                // --- ZStack for ChatHistory and Floating Input ---
                 ZStack(alignment: .bottom) {
-                    
-                    // --- Chat Message History ---
                     ScrollViewReader { scrollProxy in
                         ChatHistoryView(
                             messages: viewModel.currentChatMessages,
@@ -79,7 +70,7 @@ struct MainApplicationView: View {
                                     logger.info("Reset user messages filter due to conversation change.")
                                 }
                                 scrollToBottom(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
-                                if !viewModel.showSettings {
+                                if !viewModel.showSettings && !viewModel.showPromptLibrary { // Ensure panels aren't open
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                         isInputFocused = true
                                     }
@@ -105,16 +96,14 @@ struct MainApplicationView: View {
                                 .foregroundColor(.gray.opacity(0.7))
                         }
                     }
-                    // --- End Chat Message History ---
 
-                    // --- Floating Input Area Wrapper ---
                     VStack(spacing: 0) {
                         ChatInputAreaView(
                             userInput: $viewModel.userInput,
                             showContextArea: $viewModel.showContextArea,
                             activeContextFilePath: $viewModel.activeContextFilePath,
                             isSending: viewModel.isSending,
-                            showSettings: viewModel.showSettings,
+                            showSettings: viewModel.showSettings, // Pass this
                             isInputFocused: $isInputFocused,
                             onSendMessage: viewModel.sendMessage,
                             onToggleContext: {
@@ -124,27 +113,23 @@ struct MainApplicationView: View {
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 8)
-                    .frame(maxWidth: 1050)
+                    .frame(maxWidth: 1050) // Max width for input area
                     .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
-                    // --- End Floating Input Area Wrapper ---
-
-                } // End ZStack for ChatHistory and Input
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(VisualEffectBlur(material: .windowBackground))
-                // --- End ZStack for ChatHistory and Input ---
-
-            } // End Main Content VStack (Header + Chat ZStack)
-            .padding(.leading, isSidebarVisible ? totalSidebarWidth : activityBarWidth)
+            }
+            // Adjust padding based on the actual width of the sidebar being displayed
+            .padding(.leading, isSidebarVisible ? (activityBarWidth + sideBarPaneIdealWidth) : activityBarWidth)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
-            // --- End Main Content Area ---
 
 
             // --- Layer 2: VS Code Style Sidebar ---
             VSCodifiedSidebarContainerView(isSidebarVisible: $isSidebarVisible)
                 .environmentObject(viewModel)
-                .frame(width: isSidebarVisible ? totalSidebarWidth : activityBarWidth)
-                .zIndex(1)
-            // --- End Sidebar ---
+                // The width of the container should be dynamic based on isSidebarVisible
+                .frame(width: isSidebarVisible ? (activityBarWidth + sideBarPaneIdealWidth) : activityBarWidth)
+                .zIndex(1) // Ensure sidebar is above main content if overlapping during animation, but below panels
 
 
             // --- Layer 3: Settings Panel Overlay ---
@@ -154,15 +139,24 @@ struct MainApplicationView: View {
                     showSettings: $viewModel.showSettings
                 )
                 .transition(.scale.combined(with: .opacity))
-                .zIndex(2)
+                .zIndex(2) // Settings panel on top
             }
             // --- End Settings Panel Overlay ---
 
-            // Hidden Button for Keyboard Shortcut (Cmd+N)
+            // MARK: - Layer 4: Prompt Library Panel Overlay (Added)
+            if viewModel.showPromptLibrary {
+                PromptLibraryPanelView(showPromptLibrary: $viewModel.showPromptLibrary)
+                    .environmentObject(viewModel) // Pass MainApplicationViewModel
+                    .transition(.scale.combined(with: .opacity)) // Similar transition
+                    .zIndex(3) // Prompt Library on top of settings if both could be true (though logic prevents it)
+            }
+            // --- End Prompt Library Panel Overlay ---
+
+
             Button(action: {
-                viewModel.startNewConversation() // Use the method that handles empty chat reuse
+                viewModel.startNewConversation()
                  logger.debug("Triggered new conversation via Cmd+N.")
-                 if isSidebarVisible {
+                 if isSidebarVisible { // If sidebar pane is open, close it
                       isSidebarVisible = false
                       logger.debug("Hid sidebar pane via Cmd+N.")
                  }
@@ -170,33 +164,36 @@ struct MainApplicationView: View {
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
 
-        } // End Overall ZStack
+        }
         .opacity(viewModel.windowOpacity)
         .frame(minWidth: 800, minHeight: 500)
-        // --- Focus Management ---
         .onAppear {
-             if viewModel.selectedConversationID != nil && !viewModel.showSettings {
+             if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
         .onChange(of: viewModel.showSettings) { showingSettings in
-            if !showingSettings && viewModel.selectedConversationID != nil {
+            if !showingSettings && viewModel.selectedConversationID != nil && !viewModel.showPromptLibrary {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             } else if showingSettings {
                 isInputFocused = false
             }
         }
+        // MARK: - Added onChange for showPromptLibrary for focus management
+        .onChange(of: viewModel.showPromptLibrary) { showingPromptLibrary in
+            if !showingPromptLibrary && viewModel.selectedConversationID != nil && !viewModel.showSettings {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
+            } else if showingPromptLibrary {
+                isInputFocused = false
+            }
+        }
         .onChange(of: viewModel.isSending) { isNowSending in
-            if !isNowSending && !viewModel.showSettings && viewModel.selectedConversationID != nil {
+            if !isNowSending && !viewModel.showSettings && !viewModel.showPromptLibrary && viewModel.selectedConversationID != nil {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
-        // --- End Focus Management ---
     }
 
-    // MARK: - Helper Functions (View-Specific)
-
-    // Scroll helper function (remains the same)
     private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
          let targetID: AnyHashable?
          if isSending && !viewModel.isUserMessagesOnlyFilterActive {
@@ -220,11 +217,8 @@ struct MainApplicationView: View {
      }
 }
 
-// MARK: - Previews
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
-        // Ensure the preview uses the updated ViewModel if necessary
-        // For now, the basic init should work.
         MainApplicationView()
             .frame(width: 900, height: 600)
             .previewDisplayName("Main View with Header and Filter")

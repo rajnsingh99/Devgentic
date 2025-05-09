@@ -19,7 +19,8 @@ struct SideBarPaneView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) { // Use a VStack for vertical layout
             // --- Header ---
-            if let tab = selectedTab {
+            // Show header only if a tab meant for this pane is selected
+            if let tab = selectedTab, tab != .promptLibrary, tab != .settings {
                 Text(tab.title)
                     .font(.title3)
                     .fontWeight(.semibold)
@@ -34,64 +35,68 @@ struct SideBarPaneView: View {
              VStack {
                 switch selectedTab {
                 case .newChat:
-                    NewChatTabView() // Assuming this view uses EnvironmentObject or is self-contained
+                    NewChatTabView()
                         .environmentObject(viewModel)
 
-
                 case .conversations:
-                    ConversationListView() // Assuming this view uses EnvironmentObject
-                                           // and doesn't need ollamaService directly.
+                    // Assuming ConversationListView is defined and uses EnvironmentObject
+                    ConversationListView()
 
                 case .localModels:
-                    // *** UPDATED: Pass MainApplicationViewModel's OllamaService instance ***
                     LocalModelDiscoveryGridView(
-                        ollamaService: viewModel.ollamaService, // Pass the service from MainViewModel
-                        mainViewModel: viewModel                // Pass the MainViewModel itself
+                        ollamaService: viewModel.ollamaService,
+                        mainViewModel: viewModel
                     )
-                    // No need to .environmentObject(viewModel) here if LocalModelDiscoveryGridView
-                    // takes viewModel as an @ObservedObject as designed.
+                
+                // MARK: - Added case for promptLibrary
+                // This case should ideally not be hit if ActivityBarButton logic is correct,
+                // as .promptLibrary opens a panel, not this pane.
+                // Adding it to make the switch exhaustive.
+                case .promptLibrary:
+                    Spacer() // Or EmptyView(). The prompt library is a separate panel.
+                    Text("Prompt Library is open in a separate panel.") // Placeholder if needed
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
 
                 case .agents:
-                    AgentsTabView() // Assuming this view uses EnvironmentObject or is self-contained
+                    AgentsTabView()
 
                 case .settings:
-                    SettingsTabView() // Assuming this view uses EnvironmentObject or is self-contained
+                    // Settings also opens as a separate panel.
+                    // This case in SideBarPaneView might be redundant if selectedTab is never set to .settings.
+                    Spacer() // Or EmptyView(). Settings is a separate panel.
+                    Text("Settings are open in a separate panel.") // Placeholder if needed
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
 
                 case .user:
-                    UserTabView() // Assuming this view uses EnvironmentObject or is self-contained
+                    UserTabView()
 
                 case .none:
-                    Spacer() // Fill space if nothing is selected
+                    Spacer() // Fill space if nothing is selected (sidebar pane is hidden)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
         }
         .background(Color(NSColor.controlBackgroundColor))
         .frame(maxHeight: .infinity)
     }
 }
 
-// Assuming ConversationListView is defined elsewhere and uses @EnvironmentObject var viewModel: MainApplicationViewModel
-// Assuming LocalModelDiscoveryGridView is defined as per the refactored version.
+// Assuming ConversationListView, NewChatTabView, AgentsTabView, UserTabView are defined
+// and use @EnvironmentObject var viewModel: MainApplicationViewModel where needed.
+// LocalModelDiscoveryGridView is passed viewModel and ollamaService directly.
 
 // MARK: - Preview Provider
 struct SideBarPaneView_Previews: PreviewProvider {
-    // Define a simple SidebarTab enum for preview context if not globally available
-    enum PreviewSidebarTab: String, CaseIterable, Identifiable {
-        case newChat, conversations, localModels, agents, settings, user
-        var id: String { self.rawValue }
-        var title: String { self.rawValue.capitalized }
-    }
-    
     // Container to manage state and ViewModel creation for preview
     struct PreviewContainer: View {
         @State var selectedTab: SidebarTab? = .conversations
 
-        // Create OllamaService instances for different preview scenarios
         static let defaultOllamaService: OllamaService = {
             let service = OllamaService()
-            // Configure service for default/conversation view if needed
             return service
         }()
 
@@ -102,12 +107,10 @@ struct SideBarPaneView_Previews: PreviewProvider {
             return service
         }()
 
-        // Create MainApplicationViewModel instances, injecting the appropriate OllamaService
         let convoViewModel: MainApplicationViewModel = MainApplicationViewModel(ollamaService: defaultOllamaService)
         let modelsViewModel: MainApplicationViewModel = MainApplicationViewModel(ollamaService: modelsOllamaService)
         
         init() {
-            // Further configure convoViewModel if needed for conversation previews
             convoViewModel.conversations = [
                 Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Preview Chat 1"),
                 Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Preview Chat 2")
@@ -116,7 +119,6 @@ struct SideBarPaneView_Previews: PreviewProvider {
                 convoViewModel.selectedConversationID = convoViewModel.conversations[0].id
             }
         }
-
 
         var body: some View {
             HStack(spacing: 0) {
@@ -127,14 +129,12 @@ struct SideBarPaneView_Previews: PreviewProvider {
                     }
                     Spacer()
                 }
-                .frame(width: 100)
+                .frame(width: 120) // Increased width for better readability of tab titles
                 .padding()
 
                 SideBarPaneView(selectedTab: $selectedTab)
-                    // Provide the MainApplicationViewModel. It holds the correct OllamaService.
-                    // The views inside SideBarPaneView will then receive the correct instances.
                     .environmentObject(selectedTab == .localModels ? modelsViewModel : convoViewModel)
-                    .frame(width: 350) // Simulate pane width
+                    .frame(width: 350)
             }
             .frame(height: 600)
         }

@@ -21,7 +21,6 @@ class MainApplicationViewModel: ObservableObject {
     
     @ObservedObject var ollamaService: OllamaService
 
-
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
@@ -29,8 +28,12 @@ class MainApplicationViewModel: ObservableObject {
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
     @Published var userInput: String = ""
-    @Published var isSidebarCollapsed: Bool = true
+    @Published var isSidebarCollapsed: Bool = true // This refers to the VSCodifiedSidebar's content pane
     @Published var showSettings: Bool = false
+    
+    // MARK: - New State for Prompt Library Panel
+    @Published var showPromptLibrary: Bool = false
+
     @Published var selectedSettingsSection: SettingsSection = .general {
         didSet {
             if selectedSettingsSection == .localAI && selectedBackend == .ollama {
@@ -61,7 +64,7 @@ class MainApplicationViewModel: ObservableObject {
     // Group Date Formatter
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM d, articol"
+        formatter.dateFormat = "MMMM d, yyyy" // Corrected format
         return formatter
     }()
 
@@ -129,7 +132,6 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("MainApplicationViewModel initialized with default OllamaService.")
     }
 
-
     deinit {
         logger.info("MainApplicationViewModel deinitialized.")
         cancellables.forEach { $0.cancel() }
@@ -172,6 +174,7 @@ class MainApplicationViewModel: ObservableObject {
     
     func startNewConversation() {
         if showSettings { showSettings = false }
+        if showPromptLibrary { showPromptLibrary = false } // Close prompt library if open
         userInput = ""
         
         let currentConversations = store.getAllConversations()
@@ -193,6 +196,7 @@ class MainApplicationViewModel: ObservableObject {
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
         if showSettings { showSettings = false }
+        if showPromptLibrary { showPromptLibrary = false } // Close prompt library if open
         
         let currentConversations = store.getAllConversations()
         if let mostRecentConv = currentConversations.first, mostRecentConv.messages.isEmpty {
@@ -213,6 +217,11 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Message Sending Logic
     func sendMessage() {
+        // ... (existing sendMessage logic) ...
+        // Ensure panels are closed if open when sending a message
+        if showSettings { showSettings = false }
+        if showPromptLibrary { showPromptLibrary = false }
+        
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), userInput: \"\(trimmedInput.prefix(50))...\"")
 
@@ -258,13 +267,11 @@ class MainApplicationViewModel: ObservableObject {
             
             if selectedBackend == .ollama {
                  if ollamaService.serverStatus != .connected && ollamaService.serverStatus != .checking {
-                      // Corrected Logger Call
                       logger.info("Ollama status is \(self.ollamaService.serverStatus.rawValue), re-checking before sending.")
                       await ollamaService.checkServerStatusAndUpdateModels()
                  }
                  if ollamaService.serverStatus != .connected {
                     let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(self.ollamaService.serverStatus.rawValue)"
-                    // Corrected Logger Call
                     logger.error("\(errorMsg)")
                     let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg)
                     let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
@@ -292,7 +299,6 @@ class MainApplicationViewModel: ObservableObject {
                     }
 
                 } catch {
-                    // Corrected Logger Call (error.localizedDescription is a String)
                     logger.error("Error during API call or parsing: \(error.localizedDescription)")
                     let errorText = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
                     let errorMessageContent = MessageContent.error(title: "Processing Error", details: errorText)
@@ -329,6 +335,7 @@ class MainApplicationViewModel: ObservableObject {
             self.isSending = false
         }
     }
+
 
     // MARK: - Conversation Management (Delete, Rename, Transfer)
     func transferSelectedConversationToOverlay() {
@@ -376,8 +383,41 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     // MARK: - UI Toggles
-    func toggleSidebar() { withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() } }
-    func toggleSettings() { withAnimation { showSettings.toggle() } }
+    func toggleSidebar() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isSidebarCollapsed.toggle()
+            // If opening sidebar, ensure panels are closed
+            if !isSidebarCollapsed {
+                if showSettings { showSettings = false }
+                if showPromptLibrary { showPromptLibrary = false }
+            }
+        }
+    }
+
+    func toggleSettings() {
+        withAnimation {
+            let becomingVisible = !showSettings
+            showSettings.toggle()
+            if becomingVisible {
+                if showPromptLibrary { showPromptLibrary = false } // Close other panel
+                if !isSidebarCollapsed { isSidebarCollapsed = true } // Collapse sidebar pane
+            }
+        }
+    }
+
+    // MARK: - New Toggle for Prompt Library
+    func togglePromptLibrary() {
+        withAnimation {
+            let becomingVisible = !showPromptLibrary
+            showPromptLibrary.toggle()
+            if becomingVisible {
+                if showSettings { showSettings = false } // Close other panel
+                if !isSidebarCollapsed { isSidebarCollapsed = true } // Collapse sidebar pane
+            }
+        }
+        logger.info("Prompt Library panel toggled. Showing: \(self.showPromptLibrary)")
+    }
+
     func toggleContextArea() {
          withAnimation { showContextArea.toggle() }
          if !showContextArea { activeContextFilePath = nil }
