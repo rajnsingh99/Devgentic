@@ -11,6 +11,7 @@ enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations
     case localModels
+    case explorer
     // MARK: - New Tab for Prompt Library
     case promptLibrary // Added new case
     case agents
@@ -37,6 +38,8 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "gearshape"
         case .user:
             return "person.crop.circle"
+        case .explorer:
+            return "folder"
         }
     }
 
@@ -58,6 +61,8 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "Settings"
         case .user:
             return "Account"
+        case .explorer:
+            return "Explorer"
         }
     }
 }

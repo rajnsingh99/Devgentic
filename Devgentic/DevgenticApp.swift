@@ -11,6 +11,7 @@ struct DevgenticApp: App {
     @AppStorage(SettingsKeys.isOnboardingComplete) private var isOnboardingComplete: Bool = false
 
     var body: some Scene {
+        // MARK: - Main Application Window
         WindowGroup {
             // --- Conditional Root View ---
             // Check the onboarding status flag
@@ -39,7 +40,47 @@ struct DevgenticApp: App {
         // Keep existing commands if any
         .commands {
             // CommandGroup(replacing: .newItem) { }
+            // You can add app-specific commands here, for example, for the file viewer window
+            CommandMenu("File") { // Example: Adding a "Close" command to the File menu
+                Button("Close File Viewer Window") {
+                    // This is a generic way to try and close the key window.
+                    // Specific window closing might need more targeted logic if multiple windows are key.
+                    NSApp.keyWindow?.close()
+                }
+                .keyboardShortcut("w", modifiers: .command) // Standard shortcut for close window
+            }
         }
+
+        // MARK: - File Viewer Window
+        // This new WindowGroup will handle opening files in a separate, resizable window.
+        WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
+            // $fileURL is an optional binding to the URL passed when openWindow(id:value:) is called.
+            if let url = fileURL {
+                // FileViewerWindowView is the new view we will create in Phase 2.
+                // It will be responsible for loading and displaying the content of the given URL.
+                FileViewerWindowView(fileURL: url)
+                    .frame(minWidth: 500, idealWidth: 800, maxWidth: .infinity,
+                           minHeight: 400, idealHeight: 700, maxHeight: .infinity)
+                    // You might want to set a default title for the window here,
+                    // or have FileViewerWindowView set its own title dynamically.
+                    // .navigationTitle(url.lastPathComponent) // Example if FileViewerWindowView is in a NavigationView
+            } else {
+                // Fallback content if for some reason the URL is nil when the window is opened.
+                // This case should ideally not be hit if openWindow is called correctly with a valid URL.
+                VStack {
+                    Text("Error: No file URL provided.")
+                        .font(.title)
+                    Text("This window cannot display a file without a valid path.")
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .frame(minWidth: 400, minHeight: 200)
+            }
+        }
+        // You can customize the default behavior of this window group
+        // .defaultSize(width: 800, height: 700)
+        // .windowResizability(.automatic) // .automatic or .contentSize
+        // .windowStyle(.documentBrowser) // Or .plain, .titleBar, etc. depending on desired look
 
         // Optional: Settings scene if you have one
         // Settings {
@@ -47,4 +88,3 @@ struct DevgenticApp: App {
         // }
     }
 }
-

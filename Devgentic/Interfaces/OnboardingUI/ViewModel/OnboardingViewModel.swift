@@ -69,7 +69,7 @@ class OnboardingViewModel: ObservableObject {
     /// Stores any error message resulting from script execution or privilege escalation.
     @Published var scriptErrorMessage: String? = nil
     /// Flag indicating if the *entire* script-based setup (both phases) completed successfully.
-    @Published var isSetupComplete: Bool = false
+    @Published var isSetupComplete: Bool = true
 
     // --- State for Step 4b (Ollama API Setup) ---
     /// URL entered by the user for an existing Ollama API.

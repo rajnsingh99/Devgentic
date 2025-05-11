@@ -37,6 +37,10 @@ struct SideBarPaneView: View {
                 case .newChat:
                     NewChatTabView()
                         .environmentObject(viewModel)
+                
+                case .explorer:
+                    ExplorerView() // Add the new ExplorerView
+                        .environmentObject(viewModel)
 
                 case .conversations:
                     // Assuming ConversationListView is defined and uses EnvironmentObject
