@@ -23,11 +23,11 @@ class PromptLibraryViewModel: ObservableObject {
     @Published var showingCreateOrEditPromptSheet: Bool = false
     
     // Properties for the create/edit sheet
-    @Published var promptToEdit: Prompt? // If this is non-nil, we are editing
+    @Published var promptToEdit: Prompt?
     @Published var editablePromptTitle: String = ""
     @Published var editablePromptText: String = ""
-    @Published var editablePromptCategory: String = "General" // Default category
-    @Published var editablePromptTagsString: String = "" // Comma-separated tags
+    @Published var editablePromptCategory: String = "General"
+    @Published var editablePromptTagsString: String = ""
 
     // MARK: - Initialization
     init() {
@@ -35,7 +35,7 @@ class PromptLibraryViewModel: ObservableObject {
         
         // Subscribe to changes in searchText
         $searchText
-            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main) // Add a small delay to avoid filtering on every keystroke
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.filterPrompts()
             }
@@ -44,12 +44,47 @@ class PromptLibraryViewModel: ObservableObject {
         // Subscribe to changes in prompts from the store
         promptStore.$prompts
             .sink { [weak self] _ in
-                self?.filterPrompts() // Re-filter when the underlying store changes
+                self?.filterPrompts()
             }
             .store(in: &cancellables)
         
         // Initial load/filter
         filterPrompts()
+
+        // MARK: - Observe for external edit requests
+        // Ensure this uses the AppNotifications struct
+        logger.debug("Attempting to register observer for notification name: \(AppNotifications.editPromptRequestedFromBriefView.rawValue)")
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleExternalEditRequest(_:)),
+            name: AppNotifications.editPromptRequestedFromBriefView, // Use the AppNotifications struct
+            object: nil
+        )
+        logger.debug("Registered observer for editPromptRequestedFromBriefView notification.")
+    }
+
+    deinit {
+        logger.info("PromptLibraryViewModel deinitialized.")
+        // Ensure this uses the AppNotifications struct
+        NotificationCenter.default.removeObserver(self, name: AppNotifications.editPromptRequestedFromBriefView, object: nil)
+    }
+
+    // MARK: - Notification Handler
+    /// Handles requests to edit a prompt that originate from outside this view model (e.g., brief view popover).
+    @objc private func handleExternalEditRequest(_ notification: Notification) {
+        guard let promptToEditExternally = notification.object as? Prompt else {
+            logger.warning("Received editPromptRequestedFromBriefView notification without a valid Prompt object.")
+            return
+        }
+        
+        logger.info("Handling external request to edit prompt: '\(promptToEditExternally.title)' (ID: \(promptToEditExternally.id.uuidString))")
+        
+        if let freshPromptFromStore = promptStore.getPrompt(withId: promptToEditExternally.id) {
+            self.prepareToEditPrompt(freshPromptFromStore)
+        } else {
+            logger.warning("Prompt \(promptToEditExternally.id.uuidString) for external edit not found in store. Using the passed object directly.")
+            self.prepareToEditPrompt(promptToEditExternally)
+        }
     }
 
     // MARK: - Filtering Logic
@@ -57,7 +92,7 @@ class PromptLibraryViewModel: ObservableObject {
         let allPrompts = promptStore.getAllPrompts()
         
         if searchText.isEmpty {
-            filteredPrompts = allPrompts.sorted { $0.title.lowercased() < $1.title.lowercased() } // Default sort by title
+            filteredPrompts = allPrompts.sorted { $0.title.lowercased() < $1.title.lowercased() }
         } else {
             let lowercasedSearchText = searchText.lowercased()
             filteredPrompts = allPrompts.filter { prompt in
@@ -67,7 +102,6 @@ class PromptLibraryViewModel: ObservableObject {
                 (prompt.tags?.contains(where: { $0.lowercased().contains(lowercasedSearchText) }) ?? false)
             }.sorted { $0.title.lowercased() < $1.title.lowercased() }
         }
-        logger.debug("Filtered prompts. Count: \(self.filteredPrompts.count) for search term: '\(self.searchText)'")
     }
 
     // MARK: - Prompt Selection
@@ -82,18 +116,16 @@ class PromptLibraryViewModel: ObservableObject {
 
     // MARK: - CRUD Operations & Sheet Management
 
-    /// Prepares the ViewModel for creating a new prompt and shows the sheet.
     func prepareForCreateNewPrompt() {
-        promptToEdit = nil // Ensure we are in "create" mode
+        promptToEdit = nil
         editablePromptTitle = ""
         editablePromptText = ""
-        editablePromptCategory = "General" // Reset to default
+        editablePromptCategory = "General"
         editablePromptTagsString = ""
         showingCreateOrEditPromptSheet = true
         logger.info("Preparing to create a new prompt.")
     }
 
-    /// Prepares the ViewModel for editing an existing prompt and shows the sheet.
     func prepareToEditPrompt(_ prompt: Prompt) {
         promptToEdit = prompt
         editablePromptTitle = prompt.title
@@ -101,17 +133,16 @@ class PromptLibraryViewModel: ObservableObject {
         editablePromptCategory = prompt.category
         editablePromptTagsString = prompt.tags?.joined(separator: ", ") ?? ""
         showingCreateOrEditPromptSheet = true
-        logger.info("Preparing to edit prompt: '\(prompt.title)'")
+        logger.info("Preparing to edit prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
     }
 
-    /// Saves the prompt being created or edited.
     func savePromptFromSheet() {
         let tagsArray = editablePromptTagsString
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        if var editingPrompt = promptToEdit { // Editing existing prompt
+        if var editingPrompt = promptToEdit {
             editingPrompt.title = editablePromptTitle
             editingPrompt.text = editablePromptText
             editingPrompt.category = editablePromptCategory
@@ -119,22 +150,21 @@ class PromptLibraryViewModel: ObservableObject {
             
             promptStore.updatePrompt(editingPrompt)
             logger.info("Updated prompt: '\(editingPrompt.title)'")
-            if selectedPrompt?.id == editingPrompt.id { // Reselect if it was the selected one
+            if selectedPrompt?.id == editingPrompt.id {
                 selectPrompt(editingPrompt)
             }
-        } else { // Creating new prompt
+        } else {
             let newPrompt = Prompt(
                 title: editablePromptTitle,
                 text: editablePromptText,
                 category: editablePromptCategory,
-                isUserDefined: true, // All prompts created via UI are user-defined
+                isUserDefined: true,
                 tags: tagsArray.isEmpty ? nil : tagsArray
             )
             promptStore.addPrompt(newPrompt)
             logger.info("Created new prompt: '\(newPrompt.title)'")
         }
         showingCreateOrEditPromptSheet = false
-        // Reset fields after saving
         promptToEdit = nil
         editablePromptTitle = ""
         editablePromptText = ""
@@ -142,7 +172,6 @@ class PromptLibraryViewModel: ObservableObject {
         editablePromptTagsString = ""
     }
     
-    /// Deletes the currently selected prompt.
     func deleteSelectedPrompt() {
         guard let promptToDelete = selectedPrompt else {
             logger.warning("Delete requested but no prompt is selected.")
@@ -150,10 +179,9 @@ class PromptLibraryViewModel: ObservableObject {
         }
         logger.info("Attempting to delete selected prompt: '\(promptToDelete.title)'")
         promptStore.deletePrompt(withId: promptToDelete.id)
-        selectedPrompt = nil // Clear selection after deletion
+        selectedPrompt = nil
     }
     
-    /// Deletes a specific prompt.
     func deletePrompt(_ prompt: Prompt) {
         logger.info("Attempting to delete prompt: '\(prompt.title)' by direct call.")
         promptStore.deletePrompt(withId: prompt.id)
@@ -164,8 +192,6 @@ class PromptLibraryViewModel: ObservableObject {
 
     // MARK: - Prompt Usage
     
-    /// Updates the last used timestamp for a given prompt.
-    /// This is important for the future "#" quick access feature.
     func updatePromptUsage(prompt: Prompt) {
         var mutablePrompt = prompt
         mutablePrompt.lastUsedAt = Date()

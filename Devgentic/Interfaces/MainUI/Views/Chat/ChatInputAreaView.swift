@@ -1,10 +1,18 @@
+// ChatInputAreaView.swift
 // Views/ChatInputAreaView.swift
 import SwiftUI
 import os
 import Combine
+import AppKit // Ensure AppKit is imported
 
 // Logger (Optional)
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatInputAreaView")
+
+// Assuming NSAttributedString.Key.promptID is defined globally, e.g.:
+// extension NSAttributedString.Key {
+//     static let promptID = NSAttributedString.Key("promptID_unique_key")
+// }
+// If not, ensure it's consistently defined and used.
 
 struct ChatInputAreaView: View {
     // Bindings and State passed down
@@ -24,41 +32,49 @@ struct ChatInputAreaView: View {
     @State private var suggestionQuery: String = ""
     @State private var filteredPrompts: [Prompt] = []
     @State private var activePromptTriggerRange: NSRange? = nil
-    
     @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
+
+    // MARK: - State for Prompt Tag Brief View Popover
+    @State private var tappedPromptDetail: Prompt? = nil       // Holds the prompt for the brief view
+    // The tappedLinkAnchorRect was part of a previous feature for positioning.
+    // If that feature was reverted as per "Code is now working, So I have reverted the both the file changes",
+    // then this might not be needed, or its usage would depend on the "baseline" version of CustomTextEditor.
+    // For now, I'll assume the popover is item-based as per the baseline ChatInputAreaView.swift provided.
+    // If anchor-based positioning is still desired, tappedLinkAnchorRect would be re-introduced.
+    // @State private var tappedLinkAnchorRect: CGRect? = nil // Example if anchor-based positioning was kept
 
     // --- Constants for Styling ---
     private let iconSize: CGFloat = 18
     private let sendButtonSize: CGFloat = 26
     private let cornerRadiusValue: CGFloat = 12
-    // These define the desired content height of the text editor itself (the NSTextView)
     private let textEditorMinHeight: CGFloat = 24
-    private let textEditorMaxHeight: CGFloat = 200 // Max height for NSTextView content before it scrolls internally
+    private let textEditorMaxHeight: CGFloat = 200
 
-    private let promptStore = PromptStore.shared // Assuming PromptStore is defined
+    private let promptStore = PromptStore.shared // Direct access to PromptStore
+    
+    // The MainApplicationViewModel is no longer directly used by the popover's edit action,
+    // but might be used by other parts of this view or its parent.
+    // If it was removed from the environment of this view's hierarchy, this would cause an issue.
+    // Assuming it's still provided if other functionalities depend on it.
+    // @EnvironmentObject var mainViewModel: MainApplicationViewModel
+
 
     // MARK: - Body
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) { // Outermost VStack
-            promptSuggestionsArea // Extracted Helper View
-            mainInputArea         // Extracted Helper View
+        VStack(alignment: .leading, spacing: 0) {
+            promptSuggestionsArea
+            mainInputArea
         }
-        // This allows the entire ChatInputAreaView (the outermost VStack) to grow vertically
-        // based on its content (Suggestions + InputBox).
         .fixedSize(horizontal: false, vertical: true)
         .onChange(of: suggestionQuery) { oldValue, newValue in
-            // logger.debug("Suggestion query changed from '\(oldValue)' to: '\(newValue)'. Filtering prompts.")
             performPromptFiltering(query: newValue)
         }
         .onChange(of: showPromptSuggestions) { oldValue, newValue in
-            // logger.debug("showPromptSuggestions changed from \(oldValue) to: \(newValue). Current query: '\(suggestionQuery)'")
             if newValue {
-                performPromptFiltering(query: suggestionQuery) // Filter when suggestions become visible
+                performPromptFiltering(query: suggestionQuery)
             } else {
-                // Clear filtered prompts if suggestions are hidden and there were results
                 if !filteredPrompts.isEmpty {
                     self.filteredPrompts = []
-                    // logger.debug("showPromptSuggestions became false. Cleared filtered prompts.")
                 }
             }
         }
@@ -68,9 +84,7 @@ struct ChatInputAreaView: View {
 
     @ViewBuilder
     private var promptSuggestionsArea: some View {
-        // Conditionally show PromptSuggestionView
         if showPromptSuggestions {
-            // Assuming PromptSuggestionView is defined correctly
             PromptSuggestionView(
                 prompts: filteredPrompts,
                 suggestionQuery: suggestionQuery,
@@ -79,7 +93,6 @@ struct ChatInputAreaView: View {
                     
                     guard let rangeToReplace = activePromptTriggerRange else {
                         logger.error("Cannot insert prompt tag: activePromptTriggerRange is nil.")
-                        // Fallback: append to current text if range is lost
                         let currentText = userInput
                         let separator = currentText.isEmpty || currentText.last == " " ? "" : " "
                         userInput += "\(separator)#\(selectedPrompt.title) "
@@ -88,93 +101,134 @@ struct ChatInputAreaView: View {
                     }
 
                     let tagText = "#\(selectedPrompt.title)"
-                    // Define attributes for the tag
+                    // Ensure .promptID is correctly defined and accessible
                     let attributes: [NSAttributedString.Key: Any] = [
-                        .foregroundColor: NSColor.systemBlue, // Example: Blue color for the tag
-                        .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium) // Example: Medium weight
+                        .foregroundColor: NSColor.systemBlue,
+                        .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium),
+                        // REMOVED: .link attribute to prevent system pop-up
+                        // .link: URL(string: "prompt://\(selectedPrompt.id)") ?? URL(string: "about:blank")!,
+                        NSAttributedString.Key.promptID: selectedPrompt.id // Assuming .promptID is defined
                     ]
                     let attributedTag = NSAttributedString(string: tagText, attributes: attributes)
                     
-                    // Create a mutable attributed string to append a trailing space with default attributes
                     let finalAttributedString = NSMutableAttributedString(attributedString: attributedTag)
-                    // Ensure trailing space has default attributes to avoid continuing tag style
                     let defaultAttributes: [NSAttributedString.Key: Any] = [
-                        .font: NSFont.systemFont(ofSize: NSFont.systemFontSize), // Match editor's default font
-                        .foregroundColor: NSColor.labelColor // Match editor's default text color
+                        .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                        .foregroundColor: NSColor.labelColor
                     ]
                     let trailingSpace = NSAttributedString(string: " ", attributes: defaultAttributes)
                     finalAttributedString.append(trailingSpace)
 
-                    // Request the insertion in CustomTextEditor
                     self.attributedTextInsertionRequest = .init(
                         range: rangeToReplace,
                         attributedString: finalAttributedString
                     )
                     
-                    self.clearSuggestionStates() // Hide suggestions panel
+                    self.clearSuggestionStates()
                     
-                    // Ensure focus returns to the editor after selection
                     DispatchQueue.main.async {
                         self.isInputFocused.wrappedValue = true
                     }
                 }
             )
-            .padding(.bottom, 4) // Spacing between suggestions and input box
+            .padding(.bottom, 4)
         }
     }
 
     private var mainInputArea: some View {
-        // VStack for the main input box (background, border, etc.)
-        VStack(spacing: 3) { // Spacing within the input box (e.g., between editor and toolbar)
-            editorAndPlaceholderArea // Extracted Helper View
-            toolbarArea              // Extracted Helper View
+        VStack(spacing: 3) {
+            editorAndPlaceholderArea
+            toolbarArea
         }
-        // Styling for the entire input box container
-        .background(VisualEffectBlur(material: .hudWindow)) // Assuming VisualEffectBlur is defined
+        .background(VisualEffectBlur(material: .hudWindow))
         .cornerRadius(cornerRadiusValue)
-        .overlay( // Border
+        .overlay(
             RoundedRectangle(cornerRadius: cornerRadiusValue)
                 .stroke(Color.gray.opacity(0.4), lineWidth: 1)
         )
     }
 
     private var editorAndPlaceholderArea: some View {
-        ZStack(alignment: .topLeading) { // ZStack for editor and placeholder
-            // Assuming CustomTextEditor is defined correctly
+        ZStack(alignment: .topLeading) {
             CustomTextEditor(
                 text: $userInput,
                 onCommit: onSendMessage,
-                minHeight: textEditorMinHeight,     // Pass min height for the text content
-                maxHeight: textEditorMaxHeight,   // Pass max height for the text content
+                minHeight: textEditorMinHeight,
+                maxHeight: textEditorMaxHeight,
                 showPromptSuggestions: $showPromptSuggestions,
                 suggestionQuery: $suggestionQuery,
                 activePromptTriggerRange: $activePromptTriggerRange,
-                attributedTextInsertion: $attributedTextInsertionRequest
+                attributedTextInsertion: $attributedTextInsertionRequest,
+                onPromptTagTapped: { promptID in // Assuming CustomTextEditor's onPromptTagTapped provides only UUID based on baseline
+                    logger.debug("ChatInputAreaView: Received tap on promptID: \(promptID.uuidString)")
+                    if let prompt = promptStore.getPrompt(withId: promptID) {
+                        self.tappedPromptDetail = prompt
+                        // If anchor-based positioning was reverted, tappedLinkAnchorRect is not set here.
+                        // self.tappedLinkAnchorRect = anchorRect // This line would be active if anchorRect was passed and used
+                        // self.showPromptBriefViewPopover = true // This would be used with anchor-based popover
+                        logger.debug("ChatInputAreaView: Set prompt '\(prompt.title)' for brief view.")
+                    } else {
+                        logger.error("ChatInputAreaView: Tapped prompt with ID \(promptID.uuidString) not found in store.")
+                        self.tappedPromptDetail = nil
+                        // self.tappedLinkAnchorRect = nil
+                        // self.showPromptBriefViewPopover = false
+                    }
+                }
             )
-            // VERY IMPORTANT: Allows the CustomTextEditor (NSScrollView) to grow based on its intrinsicContentSize
             .fixedSize(horizontal: false, vertical: true)
-            // This frame modifier constrains the CustomTextEditor's NSScrollView in SwiftUI's layout.
-            // The NSScrollView's intrinsicContentSize (now clamped by min/maxHeight) will drive this.
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
+            // MARK: - Updated popover modifier to use onSave
+            .popover(item: $tappedPromptDetail) { promptToShow in // Uses Identifiable nature of Prompt
+                // Ensure PromptTagBriefView is correctly initialized with the new 'onSave'
+                PromptTagBriefView(
+                    prompt: promptToShow,
+                    onSave: { updatedPrompt in // Use the new onSave closure
+                        logger.info("Save requested for prompt: '\(updatedPrompt.title)' from brief view.")
+                        promptStore.updatePrompt(updatedPrompt) // Update in the store
+                        
+                        // Update local state to reflect changes immediately in the popover if it were to re-render
+                        // before dismissal, or if other UI elements depend on this specific instance.
+                        self.tappedPromptDetail = updatedPrompt
+                        
+                        // Dismiss the popover after save.
+                        // For item-based popover, setting tappedPromptDetail to nil dismisses it.
+                        // However, since we just updated it, we might need to explicitly nil it out *after* the update
+                        // if the update itself doesn't cause a re-evaluation that closes it.
+                        // The most straightforward way to dismiss an item-based popover is to set its item to nil.
+                        // Let's ensure it's dismissed.
+                        DispatchQueue.main.async { // Ensure dismissal happens after current update cycle
+                           self.tappedPromptDetail = nil
+                        }
+                        logger.info("Prompt '\(updatedPrompt.title)' updated and popover closed.")
+                    },
+                    onClose: {
+                        self.tappedPromptDetail = nil // Dismiss popover by nilling out the item
+                        logger.debug("ChatInputAreaView: Popover closed via PromptTagBriefView's onClose.")
+                    }
+                )
+                .onAppear {
+                    logger.debug("ChatInputAreaView: PromptTagBriefView appeared for \(promptToShow.title)")
+                }
+            }
 
-            // Placeholder Text
+
             if userInput.isEmpty && !isInputFocused.wrappedValue {
                 Text("Ask Devgentic...")
                     .font(Font.system(size: NSFont.systemFontSize))
                     .foregroundColor(Color(NSColor.placeholderTextColor))
-                    .padding(.leading, 5) // Standard NSTextView horizontal padding
+                    .padding(.leading, 5)
                     .padding(.top, 3)
-                    .allowsHitTesting(false) // Placeholder should not intercept clicks
+                    .allowsHitTesting(false)
             }
         }
-        // Padding for the text editor area within its bordered container
         .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
-        .focused(isInputFocused) // Manage focus state
-        .disabled(isSending || showSettings) // Disable input when sending or settings are shown
+        .focused(isInputFocused)
+        .disabled(isSending || showSettings)
     }
 
     private var toolbarArea: some View {
-        // Toolbar HStack for action buttons
+        // Toolbar area remains the same as your baseline version.
+        // For brevity, I'll include it as it was in your provided baseline.
         HStack(spacing: 12) {
             Button { logger.info("Plus icon tapped") } label: {
                 Image(systemName: "plus")
@@ -224,7 +278,6 @@ struct ChatInputAreaView: View {
             .disabled(isSending || showSettings)
             .help("Voice Input (Not Implemented)")
 
-            // Send Button
             Button(action: onSendMessage) {
                 if isSending {
                     ProgressView().controlSize(.small).frame(width: sendButtonSize, height: sendButtonSize)
@@ -232,9 +285,9 @@ struct ChatInputAreaView: View {
                     ZStack {
                         Circle().fill(userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || showSettings ? Color.gray.opacity(0.3) : Color(NSColor.controlAccentColor))
                         Image(systemName: "arrow.up")
-                            .resizable() // Apply .resizable() first
+                            .resizable()
                             .scaledToFit()
-                            .fontWeight(.semibold) // Apply fontWeight after resizable and scaledToFit
+                            .fontWeight(.semibold)
                             .frame(width: sendButtonSize * 0.5, height: sendButtonSize * 0.5)
                             .foregroundColor(Color.white)
                     }
@@ -260,13 +313,13 @@ struct ChatInputAreaView: View {
             return
         }
 
-        let allPrompts = promptStore.getAllPrompts() // Assuming promptStore is correctly populated
+        let allPrompts = promptStore.getAllPrompts()
         if query.isEmpty {
             self.filteredPrompts = Array(allPrompts.sorted { $0.title.lowercased() < $1.title.lowercased() }.prefix(10))
         } else {
             let lowercasedQuery = query.lowercased()
             self.filteredPrompts = allPrompts.filter {
-                $0.title.lowercased().contains(lowercasedQuery)
+                $0.title.lowercased().contains(lowercasedQuery) // Only searching title for simplicity here, can be expanded
             }
             .sorted { $0.title.lowercased() < $1.title.lowercased() }
             .prefix(10)
@@ -282,22 +335,49 @@ struct ChatInputAreaView: View {
 }
 
 // MARK: - Preview Provider
-struct ChatInputAreaView_Previews_ResizableFix: PreviewProvider { // Renamed Preview
+// The preview provider from your baseline ChatInputAreaView.swift is used here.
+// It might need adjustments to fully test the new onSave behavior if desired.
+struct ChatInputAreaView_Previews_Phase2: PreviewProvider { // Renaming to avoid conflict if old one exists
     @FocusState static var isFocused: Bool
-    @State static var text = ""
-    @State static var showCtx = false
-    @State static var ctxPath: String? = nil
+    
+    // Using the actual PromptStore for previews to test saving.
+    static var localPromptStore = PromptStore.shared
+    
+    // Sample MainApplicationViewModel for preview (though not directly used for edit in this flow)
+    // static var mainViewModelPreview: MainApplicationViewModel = MainApplicationViewModel() // Assuming MainApplicationViewModel is defined
 
-    struct ChatInputAreaWithSuggestionsPreview: View {
-        @State private var userInputPreview: String = "This is some initial text.\nTry adding more lines using Alt+Enter."
+    struct ChatInputAreaInteractivePreview: View {
+        @State private var userInputPreview: String = "Initial text. Try #Example" // Example might be from Prompt.examplePrompts
         @FocusState private var isInputFocusedPreview: Bool
         
+        // Example prompt to use for testing
+        // Ensure PromptStore has this prompt or add it.
+        static var examplePromptID: UUID? = Prompt.examplePrompts.first?.id
+
+        init() {
+            // Ensure sample prompts exist in the shared store for preview consistency
+            if let id = Self.examplePromptID, localPromptStore.getPrompt(withId: id) == nil, !Prompt.examplePrompts.isEmpty {
+                localPromptStore.addPrompt(Prompt.examplePrompts.first!)
+            } else if Prompt.examplePrompts.isEmpty {
+                // Add a default if examplePrompts is empty
+                let defaultExample = Prompt(title: "Example", text: "This is an example prompt.", category: "General", isUserDefined: true)
+                localPromptStore.addPrompt(defaultExample)
+                Self.examplePromptID = defaultExample.id
+            } else if Self.examplePromptID == nil && !Prompt.examplePrompts.isEmpty {
+                 Self.examplePromptID = Prompt.examplePrompts.first!.id
+                 if localPromptStore.getPrompt(withId: Self.examplePromptID!) == nil {
+                     localPromptStore.addPrompt(Prompt.examplePrompts.first!)
+                 }
+            }
+        }
+
         var body: some View {
             VStack(alignment: .leading) {
-                 Text("Type text. Use Alt+Enter for newlines. Shift+Return to 'send'.")
+                 Text("Type text. Try a #tag. Tapping a tag should show popover with inline edit.")
                      .font(.caption)
                      .foregroundColor(.gray)
                      .padding(.bottom, 5)
+
                 ChatInputAreaView(
                     userInput: $userInputPreview,
                     showContextArea: .constant(false),
@@ -308,13 +388,32 @@ struct ChatInputAreaView_Previews_ResizableFix: PreviewProvider { // Renamed Pre
                     onSendMessage: { print("Preview: Send Tapped. Current input: \(userInputPreview)") },
                     onToggleContext: { print("Preview: Toggle Context Tapped") }
                 )
+                // .environmentObject(mainViewModelPreview) // Not strictly needed for this preview's focus
+                .environmentObject(localPromptStore) // Provide PromptStore if any subview uses it via @EnvironmentObject
+
+                Text("Try tapping a #tag if one is inserted. For example, if 'Summarize Text' is a prompt, type #Summarize Text, select it, then tap the blue tag.")
+                    .font(.caption2)
+                    .padding(.top)
+                
+                // Display current prompt details from store for verification
+                if let id = Self.examplePromptID, let testPrompt = localPromptStore.getPrompt(withId: id) {
+                    Text("Store version of '\(testPrompt.title)': \(testPrompt.text)")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .padding(.top)
+                }
             }
             .onAppear {
                  // Ensure PromptStore is populated for previews
-                 if PromptStore.shared.getAllPrompts().isEmpty {
-                     // Manually add some example prompts if your Prompt/PromptStore structure allows
-                     // This is a placeholder; adapt to your actual Prompt/PromptStore implementation
-                     // Example: PromptStore.shared.addPrompt(Prompt(title: "Example", text: "Example prompt text"))
+                 if localPromptStore.getAllPrompts().isEmpty {
+                     Prompt.examplePrompts.forEach { localPromptStore.addPrompt($0) }
+                     if !Prompt.examplePrompts.isEmpty && Self.examplePromptID == nil {
+                         Self.examplePromptID = Prompt.examplePrompts.first!.id
+                     } else if Prompt.examplePrompts.isEmpty && Self.examplePromptID == nil {
+                         let defaultExample = Prompt(title: "Example", text: "This is an example prompt.", category: "General", isUserDefined: true)
+                         localPromptStore.addPrompt(defaultExample)
+                         Self.examplePromptID = defaultExample.id
+                     }
                  }
             }
         }
@@ -323,44 +422,24 @@ struct ChatInputAreaView_Previews_ResizableFix: PreviewProvider { // Renamed Pre
     static var previews: some View {
         ScrollView {
             VStack(spacing: 30) {
-                Text("Chat Input Area (Resizable Fix Previews)")
+                Text("Chat Input Area (Inline Edit Popover Test)")
                     .font(.largeTitle)
                     .padding(.bottom)
 
                 VStack(alignment: .leading) {
-                    Text("Default Input (Empty)")
+                    Text("Interactive Input")
                         .font(.headline)
-                    ChatInputAreaView(
-                        userInput: $text,
-                        showContextArea: $showCtx,
-                        activeContextFilePath: $ctxPath,
-                        isSending: false,
-                        showSettings: false,
-                        isInputFocused: $isFocused,
-                        onSendMessage: { print("Preview: Send Tapped. Input: \(text)") },
-                        onToggleContext: { showCtx.toggle(); if showCtx { ctxPath = "/preview/file.swift"} else { ctxPath = nil } }
-                    )
+                    ChatInputAreaInteractivePreview()
                 }
                 .padding()
-                .background(Color.black.opacity(0.1))
+                .background(Color.gray.opacity(0.1))
                 .cornerRadius(10)
-                .previewDisplayName("Default (Empty)")
-                
-                Divider().padding(.vertical)
-                
-                VStack(alignment: .leading) {
-                    Text("Multiline & Suggestions Test")
-                        .font(.headline)
-                    ChatInputAreaWithSuggestionsPreview()
-                }
-                .padding()
-                .background(Color.black.opacity(0.1))
-                .cornerRadius(10)
-                .previewDisplayName("Multiline Test")
+                .previewDisplayName("Interactive Input with Inline Edit")
             }
             .padding()
-            .frame(width: 480)
+            .frame(width: 480, height: 700) // Increased height for preview content
         }
         .background(Color(NSColor.windowBackgroundColor))
+        .environmentObject(localPromptStore)
     }
 }
