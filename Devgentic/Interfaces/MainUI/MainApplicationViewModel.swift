@@ -2,7 +2,7 @@
 import SwiftUI
 import Combine
 import os
-import AppKit // For NSApplication
+import AppKit // For NSApplication, NSAttributedString
 
 // Logger for the ViewModel
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MainApplicationViewModel")
@@ -10,16 +10,21 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 // Assuming SettingsSection, BackendType, SettingsKeys, Conversation,
 // ChatMessage, MessageContent, ConversationStore, AppDelegate, OllamaService,
 // AIConnect, AgentResponseHandler, ErrorHandling are defined elsewhere.
+// Also assuming AttributedStringKeys.devgenticFileURL is globally available.
+// extension NSAttributedString.Key {
+//     static let devgenticFileURL = NSAttributedString.Key("devgentic_fileURL_key")
+// }
+
 
 @MainActor // Ensure UI updates happen on the main thread
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
-    private let store = ConversationStore.shared // Assuming ConversationStore.shared exists
-    private let aiConnect = AIConnect() // Assuming AIConnect() is initializable
-    private let responseHandler = AgentResponseHandler() // Assuming AgentResponseHandler() is initializable
+    private let store = ConversationStore.shared
+    private let aiConnect = AIConnect()
+    private let responseHandler = AgentResponseHandler()
     
-    @ObservedObject var ollamaService: OllamaService // Assuming OllamaService is passed or initialized
+    @ObservedObject var ollamaService: OllamaService
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -27,16 +32,15 @@ class MainApplicationViewModel: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
-    @Published var userInput: String = ""
+    @Published var userInput: String = "" // This will be cleared by setting it to "" after send. CustomTextEditor binds to this for its plain text representation.
     @Published var isSidebarCollapsed: Bool = true
     @Published var showSettings: Bool = false
     
-    // MARK: - State for Prompt Library Panel
     @Published var showPromptLibrary: Bool = false
 
-    @Published var selectedSettingsSection: SettingsSection = .general { // Assuming SettingsSection enum exists
+    @Published var selectedSettingsSection: SettingsSection = .general {
         didSet {
-            if selectedSettingsSection == .localAI && selectedBackend == .ollama { // Assuming .localAI and .ollama exist
+            if selectedSettingsSection == .localAI && selectedBackend == .ollama {
                 Task { await ollamaService.checkServerStatusAndUpdateModels() }
             } else if selectedSettingsSection != .localAI {
                 ollamaService.clearAllModelActionStatuses()
@@ -47,8 +51,7 @@ class MainApplicationViewModel: ObservableObject {
     @Published var activeContextFilePath: String? = nil
     @Published var isUserMessagesOnlyFilterActive: Bool = false
 
-    // --- Settings Properties (loaded/saved via @AppStorage) ---
-    // Assuming SettingsKeys and BackendType enums are defined
+    // --- Settings Properties ---
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .ollama
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
@@ -62,22 +65,21 @@ class MainApplicationViewModel: ObservableObject {
     @AppStorage(SettingsKeys.ollamaGpuLayers) var ollamaGpuLayers: Int = -1
 
 
-    // Group Date Formatter
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM d, yyyy" // Completed date format
+        formatter.dateFormat = "MMMM d, yyyy"
         return formatter
     }()
 
     // MARK: - Computed Properties
-    var currentChatMessages: [ChatMessage] { // Assuming ChatMessage struct/class exists
+    var currentChatMessages: [ChatMessage] {
         guard let selectedID = selectedConversationID,
               let conversation = self.conversations.first(where: { $0.id == selectedID }) else {
             return []
         }
         let messagesToDisplay = conversation.messages.sorted { $0.timestamp < $1.timestamp }
         if isUserMessagesOnlyFilterActive {
-            return messagesToDisplay.filter { $0.sender == .user } // Assuming sender property and .user case exist
+            return messagesToDisplay.filter { $0.sender == .user }
         } else {
             return messagesToDisplay
         }
@@ -87,12 +89,12 @@ class MainApplicationViewModel: ObservableObject {
         guard let conversation = self.conversations.first(where: { $0.id == selectedConversationID }) else {
             return self.conversations.isEmpty ? "Devgentic" : "Select Chat"
         }
-        return conversation.displayTitle // Assuming displayTitle property exists
+        return conversation.displayTitle
     }
 
-    var groupedConversations: [String: [Conversation]] { // Assuming Conversation struct/class exists
+    var groupedConversations: [String: [Conversation]] {
         let grouped = self.conversations.reduce(into: [String: [Conversation]]()) { result, conversation in
-            let groupKey = self.groupKey(for: conversation.timestamp) // Assuming timestamp property exists
+            let groupKey = self.groupKey(for: conversation.timestamp)
             result[groupKey, default: []].append(conversation)
         }
         return grouped.mapValues { $0.sorted { $0.timestamp > $1.timestamp } }
@@ -118,19 +120,14 @@ class MainApplicationViewModel: ObservableObject {
         self.conversations = store.getAllConversations()
         validateSelectedConversation()
         observeConversationStoreChanges()
-
         logger.info("MainApplicationViewModel initialized with injected OllamaService. Synced with ConversationStore. Loaded \(self.conversations.count) conversations.")
-        
         if selectedBackend == .ollama {
-            Task {
-                await self.ollamaService.checkServerStatusAndUpdateModels()
-            }
+            Task { await self.ollamaService.checkServerStatusAndUpdateModels() }
         }
     }
 
-    // Convenience initializer if OllamaService can be default-initialized
     convenience init() {
-        self.init(ollamaService: OllamaService()) // Assuming OllamaService() is a valid initializer
+        self.init(ollamaService: OllamaService())
         logger.info("MainApplicationViewModel initialized with default OllamaService.")
     }
 
@@ -141,7 +138,7 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func observeConversationStoreChanges() {
-        store.$conversations // Assuming ConversationStore has a @Published var conversations
+        store.$conversations
             .receive(on: DispatchQueue.main)
             .sink { [weak self] updatedConversationsFromStore in
                 guard let self = self else { return }
@@ -158,10 +155,9 @@ class MainApplicationViewModel: ObservableObject {
                 logger.warning("Previously selected conversation \(currentSelectedID.uuidString) no longer exists. Selecting first available.")
                 selectedConversationID = conversations.first?.id
             }
-        } else if !conversations.isEmpty { // Select first conversation if none is selected and list is not empty
+        } else if !conversations.isEmpty {
             selectedConversationID = conversations.first?.id
         }
-        
         if let id = selectedConversationID {
              logger.debug("Validated selection. Current selected ID: \(id.uuidString)")
         } else {
@@ -179,18 +175,15 @@ class MainApplicationViewModel: ObservableObject {
     func startNewConversation() {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
-        userInput = ""
+        userInput = "" // Clear input field
         
         let currentConversations = store.getAllConversations()
-        if let mostRecentConv = currentConversations.first(where: {$0.messages.isEmpty}) { // Prefer truly empty one
-            logger.info("Found existing empty conversation (\(mostRecentConv.id.uuidString)). Selecting it instead of creating a new one.")
+        if let mostRecentConv = currentConversations.first(where: {$0.messages.isEmpty}) {
+            logger.info("Found existing empty conversation (\(mostRecentConv.id.uuidString)). Selecting it.")
             selectedConversationID = mostRecentConv.id
         } else {
             logger.info("No suitable empty conversation found. Creating a new one.")
-            let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
-            store.addConversation(newConversation) // Assuming ConversationStore handles persistence
-            selectedConversationID = newConversation.id
-            logger.info("Started new conversation with ID: \(newConversation.id.uuidString) via store.")
+            _ = createAndSelectNewConversation() // Call the version that returns UUID
         }
         isUserMessagesOnlyFilterActive = false
     }
@@ -209,15 +202,21 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     // MARK: - Message Sending Logic
-    func sendMessage() {
+    // MODIFIED: sendMessage now accepts NSAttributedString
+    func sendMessage(attributedString: NSAttributedString) {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
         
-        let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), userInput: \"\(trimmedInput.prefix(50))...\"")
+        // The plain string version of the input, used for some checks and logging
+        let plainUserInputFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), attributedInput (plain): \"\(plainUserInputFromEditor.prefix(50))...\"")
 
         guard !isSending else { logger.warning("sendMessage aborted: Already sending."); return }
-        guard !trimmedInput.isEmpty else { logger.info("sendMessage aborted: Input empty."); userInput = ""; return }
+        guard !plainUserInputFromEditor.isEmpty else {
+            logger.info("sendMessage aborted: Input (from attributedString) empty.")
+            if !self.userInput.isEmpty { self.userInput = "" } // Clear editor if it had non-empty plain text
+            return
+        }
 
         var conversationIDToUse: UUID
         if let currentID = selectedConversationID, store.getConversation(withId: currentID) != nil {
@@ -227,32 +226,88 @@ class MainApplicationViewModel: ObservableObject {
             conversationIDToUse = createAndSelectNewConversation()
         }
         
-        // Ensure targetConversationForUserMessage is mutable if Conversation is a struct
-        // Or ensure Conversation is a class. Assuming Conversation is a struct for this example.
         guard var targetConversationForUserMessage = store.getConversation(withId: conversationIDToUse) else {
             logger.error("CRITICAL: Could not find conversation object for ID: \(conversationIDToUse.uuidString) before sending user message.")
             isSending = false
             return
         }
 
-        var contextPrefix = ""
-        if showContextArea, let filePath = activeContextFilePath {
-            contextPrefix = "Context File: \(filePath)\n\nUser Message:\n"
-        }
-        let messageToSendToBackend = contextPrefix + trimmedInput
+        // --- NEW: Process NSAttributedString to extract text and file contents ---
+        var plainTextForLLM = ""
+        var attachedFileContents: [String] = []
+        
+        attributedString.enumerateAttributes(in: NSRange(location: 0, length: attributedString.length), options: []) { attrs, range, stop in
+            let segmentString = attributedString.attributedSubstring(from: range).string
 
-        let userMessage = ChatMessage( // Assuming ChatMessage struct/class exists
+            if let fileURL = attrs[NSAttributedString.Key.devgenticFileURL] as? URL {
+                // This segment is a file tag. Append its text representation (e.g., "@filename.ext")
+                // or a placeholder to the main message.
+                plainTextForLLM += segmentString // Or: plainTextForLLM += "[file: \(fileURL.lastPathComponent)]"
+                logger.debug("Found file tag: \(segmentString) for URL: \(fileURL.path)")
+
+                // Start security-scoped access
+                let didStartAccess = fileURL.startAccessingSecurityScopedResource()
+                defer {
+                    if didStartAccess {
+                        fileURL.stopAccessingSecurityScopedResource()
+                        logger.trace("Stopped security-scoped access for \(fileURL.lastPathComponent)")
+                    }
+                }
+
+                if didStartAccess {
+                    logger.trace("Started security-scoped access for \(fileURL.lastPathComponent)")
+                    do {
+                        let content = try String(contentsOf: fileURL, encoding: .utf8)
+                        let fileContext = """
+                        --- Content of file: \(fileURL.lastPathComponent) ---
+                        \(content)
+                        --- End of file: \(fileURL.lastPathComponent) ---
+                        """
+                        attachedFileContents.append(fileContext)
+                        logger.debug("Successfully read and appended content for file: \(fileURL.lastPathComponent)")
+                    } catch {
+                        logger.error("Error reading file \(fileURL.lastPathComponent): \(error.localizedDescription)")
+                        attachedFileContents.append("--- Error reading file: \(fileURL.lastPathComponent): \(error.localizedDescription) ---")
+                    }
+                } else {
+                    logger.error("Could not start security-scoped access for file: \(fileURL.lastPathComponent)")
+                    attachedFileContents.append("--- Could not access file: \(fileURL.lastPathComponent) ---")
+                }
+            } else {
+                // This segment is plain text (or another type of attributed text like a #prompt)
+                plainTextForLLM += segmentString
+            }
+        }
+        // --- End of NEW processing block ---
+
+        // Construct the final message to send to the backend
+        var messageToSendToBackend = plainTextForLLM
+        if !attachedFileContents.isEmpty {
+            messageToSendToBackend += "\n\n" + attachedFileContents.joined(separator: "\n\n")
+        }
+        
+        // Add context prefix if active
+        var finalMessageWithContextPrefix = messageToSendToBackend
+        if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
+            finalMessageWithContextPrefix = "Context File: \(filePath)\n\nUser Message and Attached Files:\n" + messageToSendToBackend
+            logger.debug("Prepended active context file path: \(filePath)")
+        }
+
+        // Create the user message for display in the chat UI.
+        // For rich display, ChatMessage content should ideally support NSAttributedString.
+        // If it only supports plain text, plainUserInputFromEditor is used.
+        let userMessageForDisplay = ChatMessage(
             conversationId: conversationIDToUse,
-            sender: .user, // Assuming .user case exists
-            content: .plainText(trimmedInput) // Assuming .plainText case exists
+            sender: .user,
+            content: .plainText(plainUserInputFromEditor) // Or: .attributedString(attributedString) if ChatMessage supports it
         )
         
-        targetConversationForUserMessage.messages.append(userMessage)
-        targetConversationForUserMessage.timestamp = Date() // Update timestamp on new message
+        targetConversationForUserMessage.messages.append(userMessageForDisplay)
+        targetConversationForUserMessage.timestamp = Date()
         store.updateConversation(targetConversationForUserMessage)
 
-        let messageLogForBackend = messageToSendToBackend // Use the potentially prefixed message
-        userInput = ""
+        // Clear the input editor via the plain text binding
+        self.userInput = "" // This will trigger updateNSView in CustomTextEditor to clear its content
         isSending = true
 
         Task {
@@ -266,34 +321,29 @@ class MainApplicationViewModel: ObservableObject {
                  if ollamaService.serverStatus != .connected {
                     let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(self.ollamaService.serverStatus.rawValue)"
                     logger.error("\(errorMsg)")
-                    let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg) // Assuming MessageContent.error exists
+                    let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg)
                     let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
                     agentMessagesForThisTurn.append(errorChatMessage)
                  }
             }
 
-            if agentMessagesForThisTurn.isEmpty { // Only proceed if no connection error occurred
-                let backendConfig = self.determineBackendConfiguration(message: messageLogForBackend)
+            if agentMessagesForThisTurn.isEmpty {
+                // Use `finalMessageWithContextPrefix` for the backend call
+                let backendConfig = self.determineBackendConfiguration(message: finalMessageWithContextPrefix)
                 do {
-                    logger.debug("Sending task '\(messageLogForBackend.prefix(200))' to \(backendConfig.url)\(backendConfig.endpoint) for conversation \(conversationIDToUse.uuidString)")
+                    logger.debug("Sending task to \(backendConfig.url)\(backendConfig.endpoint). Message (first 200 chars): '\(finalMessageWithContextPrefix.prefix(200))'")
                     
                     let responseData = try await self.aiConnect.postToLocalServer(endpoint: backendConfig.endpoint, payload: backendConfig.payload)
-                    
                     let responseText = try responseHandler.parseInitialResponse(data: responseData, for: self.selectedBackend)
-                    let parsedContents = responseHandler.parseTextToMessageContent(responseText) // Assuming this returns [MessageContent]
+                    let parsedContents = responseHandler.parseTextToMessageContent(responseText)
 
                     for content in parsedContents {
-                        let agentMessage = ChatMessage(
-                            conversationId: conversationIDToUse,
-                            sender: .agent, // Assuming .agent case exists
-                            content: content
-                        )
+                        let agentMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: content)
                         agentMessagesForThisTurn.append(agentMessage)
                     }
-
                 } catch {
                     logger.error("Error during API call or parsing: \(error.localizedDescription)")
-                    let errorText = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend) // Assuming ErrorHandling exists
+                    let errorText = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
                     let errorMessageContent = MessageContent.error(title: "Processing Error", details: errorText)
                     let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
                     agentMessagesForThisTurn.append(errorChatMessage)
@@ -301,30 +351,24 @@ class MainApplicationViewModel: ObservableObject {
                      if selectedBackend == .ollama {
                          if let urlError = error as? URLError,
                             (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
-                             ollamaService.serverStatus = .disconnected // Assuming .disconnected case exists
+                             ollamaService.serverStatus = .disconnected
                          }
                      }
                 }
             }
 
-            // Update conversation with agent messages
             if !agentMessagesForThisTurn.isEmpty {
-                // Re-fetch conversation in case it was modified elsewhere or if it's a struct
                 guard var targetConversationForAgentMessages = store.getConversation(withId: conversationIDToUse) else {
                     logger.error("CRITICAL: Could not find conversation for ID: \(conversationIDToUse.uuidString) to add agent messages.")
                     self.isSending = false
                     return
                 }
-                
-                for msg in agentMessagesForThisTurn {
-                    targetConversationForAgentMessages.messages.append(msg)
-                }
-                targetConversationForAgentMessages.timestamp = Date() // Update timestamp
-                
+                for msg in agentMessagesForThisTurn { targetConversationForAgentMessages.messages.append(msg) }
+                targetConversationForAgentMessages.timestamp = Date()
                 store.updateConversation(targetConversationForAgentMessages)
                 logger.debug("Appended \(agentMessagesForThisTurn.count) agent message(s) to conversation \(conversationIDToUse.uuidString) via store.")
-            } else if isSending { // Only log if we were actually trying to send and got nothing back (excluding initial errors)
-                 logger.warning("sendMessage Task finished but generated no agent messages to handle (and no initial errors were logged for this turn).")
+            } else if isSending {
+                 logger.warning("sendMessage Task finished but generated no agent messages to handle.")
             }
             
             self.isSending = false
@@ -339,17 +383,15 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
         logger.info("Attempting to transfer conversation \(conversationID.uuidString) to Quick Access overlay.")
-        // Assuming SettingsKeys.quickAccessOverlayConversationId and SettingsKeys.showQuickAccessPanelNotification are defined
         UserDefaults.standard.set(conversationID.uuidString, forKey: SettingsKeys.quickAccessOverlayConversationId)
         let userInfo = ["forceExpand": true]
         NotificationCenter.default.post(name: SettingsKeys.showQuickAccessPanelNotification, object: nil, userInfo: userInfo)
-        self.selectedConversationID = nil // Deselect after transferring
+        self.selectedConversationID = nil
     }
     
     func deleteConversation(conversationID: UUID) {
         logger.info("Attempting to delete single conversation with ID: \(conversationID.uuidString) via store.")
         store.deleteConversation(withId: conversationID)
-        // If the deleted conversation was selected, select another one or none
         if selectedConversationID == conversationID {
             selectedConversationID = conversations.first(where: { $0.id != conversationID })?.id
         }
@@ -371,7 +413,7 @@ class MainApplicationViewModel: ObservableObject {
             logger.warning("No conversations found for group key '\(groupKey)'. Nothing to delete.")
             return
         }
-        deleteMultipleConversations(ids: idsToDelete) // Reuse existing logic
+        deleteMultipleConversations(ids: idsToDelete)
     }
     
     func renameConversation(conversationID: UUID, newTitle: String) {
@@ -381,7 +423,7 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
         let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        conversationToRename.userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle // Assuming userDefinedTitle property exists
+        conversationToRename.userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
         store.updateConversation(conversationToRename)
     }
 
@@ -389,7 +431,7 @@ class MainApplicationViewModel: ObservableObject {
     func toggleSidebar() {
         withAnimation(.easeInOut(duration: 0.2)) {
             isSidebarCollapsed.toggle()
-            if !isSidebarCollapsed { // If opening sidebar
+            if !isSidebarCollapsed {
                 if showSettings { showSettings = false }
                 if showPromptLibrary { showPromptLibrary = false }
             }
@@ -425,28 +467,20 @@ class MainApplicationViewModel: ObservableObject {
          logger.info("Context area toggled. Showing: \(self.showContextArea). Path: \(self.activeContextFilePath ?? "nil")")
     }
 
-    // MARK: - Method to Request Prompt Edit (Using AppNotifications)
     func requestEditPrompt(_ prompt: Prompt) {
         logger.info("Requesting to edit prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
-        
         if !showPromptLibrary {
             togglePromptLibrary()
         } else {
-            if showSettings {
-                showSettings = false
-            }
+            if showSettings { showSettings = false }
         }
-        
         DispatchQueue.main.async {
-            // Use the AppNotifications struct for the notification name
             NotificationCenter.default.post(name: AppNotifications.editPromptRequestedFromBriefView, object: prompt)
             logger.debug("Posted notification to edit prompt: '\(prompt.title)' using AppNotifications")
         }
     }
 
-
     // MARK: - Private Helper Methods
-
     private struct BackendConfiguration { let url: String; let endpoint: String; let payload: [String: Any] }
     private func determineBackendConfiguration(message: String) -> BackendConfiguration {
         switch self.selectedBackend {
@@ -456,38 +490,27 @@ class MainApplicationViewModel: ObservableObject {
                 "top_p": self.ollamaTopP, "repeat_penalty": self.ollamaRepeatPenalty,
                 "num_ctx": self.ollamaContextWindowSize, "num_gpu": self.ollamaGpuLayers
             ]
-            // Ensure ollamaService.llmModelName is available and correct
             let modelName = ollamaService.llmModelName.isEmpty ? "default_model" : ollamaService.llmModelName
             return BackendConfiguration(
-                url: "http://127.0.0.1:11434", // Standard Ollama URL
+                url: "http://127.0.0.1:11434",
                 endpoint: "/api/generate",
                 payload: [
-                    "model": modelName,
-                    "prompt": message,
-                    "stream": false, // Assuming non-streaming for this setup
-                    "options": advancedOptions
+                    "model": modelName, "prompt": message, "stream": false, "options": advancedOptions
                 ]
             )
         case .agent:
             return BackendConfiguration(
                 url: self.agentBaseURL,
-                endpoint: "/execute_task", // Example endpoint
-                payload: [
-                    "main_task": message,
-                    "strategy": self.agentDelegationStrategy
-                ]
+                endpoint: "/execute_task",
+                payload: [ "main_task": message, "strategy": self.agentDelegationStrategy ]
             )
         }
     }
     
     func groupKey(for date: Date) -> String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(date) {
-            return "Today"
-        } else if calendar.isDateInYesterday(date) {
-            return "Yesterday"
-        } else {
-            return self.groupDateFormatter.string(from: date)
-        }
+        if calendar.isDateInToday(date) { return "Today" }
+        else if calendar.isDateInYesterday(date) { return "Yesterday" }
+        else { return self.groupDateFormatter.string(from: date) }
     }
 }

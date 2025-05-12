@@ -8,9 +8,9 @@ struct ActivityBarView: View {
     @Binding var isSidebarVisible: Bool
 
     // Define the order of top icons explicitly
-    private let topTabs: [SidebarTab] = [.newChat, .explorer, .conversations, .localModels, .promptLibrary, .agents]
+    private let topTabs: [SidebarTab] = [.newChat, .conversations, .explorer, .localModels, .agents]
     // Define the order of bottom icons explicitly
-    private let bottomTabs: [SidebarTab] = [.settings, .user]
+    private let bottomTabs: [SidebarTab] = [.promptLibrary, .settings, .user]
 
 
     var body: some View {

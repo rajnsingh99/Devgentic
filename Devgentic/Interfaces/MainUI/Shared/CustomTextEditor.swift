@@ -1,21 +1,33 @@
 // CustomTextEditor.swift
 import SwiftUI
 import AppKit
-import os // For logging
+import os
 
 struct CustomTextEditor: NSViewRepresentable {
     // MARK: - Bindings and Properties
-    @Binding var text: String
-    var onCommit: () -> Void
+    @Binding var text: String // Plain text representation
+    // NEW: Callback to pass the NSAttributedString when committing
+    var onCommit: (NSAttributedString) -> Void
     var minHeight: CGFloat
     var maxHeight: CGFloat
 
+    // --- Prompt Suggestion Properties ---
     @Binding var showPromptSuggestions: Bool
     @Binding var suggestionQuery: String
     @Binding var activePromptTriggerRange: NSRange?
+    var onPromptTagTapped: ((UUID) -> Void)?
+
+    // --- File Mention Suggestion Properties ---
+    @Binding var showFileSuggestions: Bool
+    @Binding var fileSuggestionQuery: String
+    @Binding var activeFileMentionTriggerRange: NSRange?
+    var onFileTagTapped: ((URL) -> Void)?
+
+    // --- Common Attributed Text Insertion ---
     @Binding var attributedTextInsertion: AttributedTextInsertionAction?
 
-    var onPromptTagTapped: ((UUID) -> Void)?
+    // NEW: Callback to expose the NSTextView instance
+    var textViewRef: ((CustomTextEditor.CustomNSTextView?) -> Void)?
 
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.CustomTextEditor", category: "CustomTextEditorRefactored")
 
@@ -28,21 +40,16 @@ struct CustomTextEditor: NSViewRepresentable {
         }
     }
     
-    // Defines the default style for normal text.
-    // Crucially, .promptID is omitted here.
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
         [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
             .foregroundColor: NSColor.labelColor
-            // Any other default attributes like .paragraphStyle can be added here.
-            // .promptID is intentionally omitted to ensure it's not part of default typing.
         ]
     }
 
     // MARK: - NSViewRepresentable Methods
     func makeNSView(context: Context) -> NSScrollView {
         let textView = CustomNSTextView(coordinator: context.coordinator)
-
         textView.isRichText = true
         textView.allowsImageEditing = false
         textView.isEditable = true
@@ -50,21 +57,15 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.importsGraphics = false
         textView.drawsBackground = false
         textView.backgroundColor = NSColor.clear
-        textView.textColor = NSColor.labelColor // Default text color for the view
+        textView.textColor = NSColor.labelColor
         textView.insertionPointColor = NSColor.labelColor
         
         textView.textContainerInset = NSSize(width: 0, height: 3)
         textView.textContainer?.lineFragmentPadding = 5
-
-        // Set initial typing attributes to default.
         textView.typingAttributes = defaultTypingAttributes
-        
         textView.delegate = context.coordinator
         
-        // Initial text setup from binding
         if !text.isEmpty {
-             // If initial text might contain attributes, it should be an NSAttributedString.
-             // For plain text, this is fine.
              textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: 0), with: text)
         } else {
             textView.string = ""
@@ -85,8 +86,9 @@ struct CustomTextEditor: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         
         context.coordinator.textView = textView
-
+        
         DispatchQueue.main.async {
+            self.textViewRef?(textView)
             textView.invalidateIntrinsicContentSize()
             scrollView.invalidateIntrinsicContentSize()
         }
@@ -99,20 +101,23 @@ struct CustomTextEditor: NSViewRepresentable {
             logger.error("Failed to get CustomNSTextView from scrollView in updateNSView.")
             return
         }
+        
+        if context.coordinator.lastKnownTextViewInstance !== textView {
+            self.textViewRef?(textView)
+            context.coordinator.lastKnownTextViewInstance = textView
+        }
 
-        // 1. Handle Attributed Text Insertion
         if let action = self.attributedTextInsertion {
             let actionToProcess = action
-            self.attributedTextInsertion = nil // Nil out binding immediately
+            self.attributedTextInsertion = nil
 
-            // Check if this action was already processed
             if context.coordinator.lastProcessedInsertionID == actionToProcess.id {
                 logger.warning("NSTextView: Attributed text insertion ID \(actionToProcess.id) was already processed. Skipping.")
                 return
             }
 
             logger.debug("NSTextView: Processing attributed text insertion. ID: \(actionToProcess.id)")
-            context.coordinator.lastProcessedInsertionID = actionToProcess.id // Mark as processed
+            context.coordinator.lastProcessedInsertionID = actionToProcess.id
             
             if let textStorage = textView.textStorage {
                 context.coordinator.isProgrammaticallyChangingText = true
@@ -126,40 +131,40 @@ struct CustomTextEditor: NSViewRepresentable {
                 let newCursorPosition = actualRangeToReplace.location + actionToProcess.attributedString.length
                 textView.setSelectedRange(NSRange(location: newCursorPosition, length: 0))
                 
-                // CRITICAL: Reset typing attributes to default after insertion.
                 textView.typingAttributes = defaultTypingAttributes
                 
                 context.coordinator.isProgrammaticallyChangingText = false
+                
+                // The textDidChange delegate method will update the plain text binding.
             } else {
                 logger.error("NSTextView: textStorage is nil for attributed insertion ID: \(actionToProcess.id).")
             }
-            // Return to ensure this pass only handles the insertion.
-            // Subsequent sync of `text` binding will happen in a new `updateNSView` call.
             return
         } else {
-            // If no insertion request is active, clear the last processed ID.
             if context.coordinator.lastProcessedInsertionID != nil {
                  context.coordinator.lastProcessedInsertionID = nil
             }
         }
 
-        // 2. Synchronize NSTextView with the `text` binding if it changed externally
-        if textView.string != self.text && !context.coordinator.isTyping {
-             logger.debug("Updating NSTextView from binding. Current: \"\(textView.string.prefix(50))\", New: \"\(self.text.prefix(50))\"")
+        // Synchronize plain text if changed externally (e.g., programmatic clear after send)
+        // This condition ensures that we only update the NSTextView from the `text` binding
+        // if the change didn't originate from the NSTextView itself (isTyping) or from another
+        // programmatic change within this component (isProgrammaticallyChangingText).
+        if textView.string != self.text && !context.coordinator.isTyping && !context.coordinator.isProgrammaticallyChangingText {
+             logger.debug("Updating NSTextView from plain text binding. Current NSTextView: \"\(textView.string.prefix(50))\", New binding value: \"\(self.text.prefix(50))\"")
              let currentSelectedRange = textView.selectedRange()
              context.coordinator.isProgrammaticallyChangingText = true
-             // This replaces the entire content. If `self.text` is plain, attributes are lost.
-             // If `self.text` needs to preserve attributes, it should be an NSAttributedString binding.
+             
+             // Replace the entire content of the textStorage.
+             // Use textView.string.count for the length of the current string in NSTextView.
              textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: textView.string.count), with: self.text)
+                                                                                                // ^^^^^ Corrected here
              context.coordinator.isProgrammaticallyChangingText = false
              
-             // Restore selection
-             if currentSelectedRange.location <= self.text.count {
-                 textView.setSelectedRange(NSRange(location: currentSelectedRange.location, length: currentSelectedRange.length))
-             } else {
-                 textView.setSelectedRange(NSRange(location: self.text.count, length: 0))
-             }
-             // After this kind of full replacement, ensure typing attributes are default.
+             // Try to restore selection or set to end of the new text.
+             let newLocation = min(currentSelectedRange.location, self.text.count)
+             textView.setSelectedRange(NSRange(location: newLocation, length: 0)) // Length 0 for cursor
+             
              textView.typingAttributes = defaultTypingAttributes
         }
     }
@@ -174,21 +179,21 @@ struct CustomTextEditor: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        // Pass the defaultTypingAttributes to the Coordinator
         Coordinator(self, defaultTypingAttributes: defaultTypingAttributes)
     }
 
-    // MARK: - Custom NSTextView Subclass
     class CustomNSTextView: NSTextView {
         weak var coordinator: Coordinator?
-
+        
         init(coordinator: Coordinator?) {
             self.coordinator = coordinator
             let textStorage = NSTextStorage()
             let layoutManager = NSLayoutManager()
             textStorage.addLayoutManager(layoutManager)
             let textContainer = NSTextContainer(size: NSSize(width: 100, height: CGFloat.greatestFiniteMagnitude))
+            textContainer.widthTracksTextView = true
             layoutManager.addTextContainer(textContainer)
+            
             super.init(frame: .zero, textContainer: textContainer)
             commonInit()
         }
@@ -200,40 +205,66 @@ struct CustomTextEditor: NSViewRepresentable {
         }
         
         private func commonInit() {
-            self.isVerticallyResizable = true; self.isHorizontallyResizable = false
-            self.autoresizingMask = [.width]; self.textContainer?.widthTracksTextView = true
-            self.textContainer?.heightTracksTextView = false; self.minSize = .zero
+            self.isVerticallyResizable = true
+            self.isHorizontallyResizable = false
+            self.autoresizingMask = [.width]
+            
+            self.textContainer?.lineFragmentPadding = 5
+            self.textContainer?.widthTracksTextView = true
+            self.textContainer?.heightTracksTextView = false
+
+            self.minSize = NSSize(width: 0, height: 0)
             self.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         }
 
         override var intrinsicContentSize: NSSize {
-            guard let tc = textContainer, let lm = layoutManager else {
+            guard let textContainer = self.textContainer, let layoutManager = self.layoutManager else {
                 return NSSize(width: NSView.noIntrinsicMetric, height: coordinator?.parent.minHeight ?? super.intrinsicContentSize.height)
             }
-            lm.ensureLayout(for: tc); let usedRect = lm.usedRect(for: tc)
-            let idealHeight = ceil(usedRect.height + (textContainerInset.height * 2))
-            return NSSize(width: NSView.noIntrinsicMetric, height: max(coordinator?.parent.minHeight ?? 0, idealHeight))
+            layoutManager.ensureLayout(for: textContainer)
+            let usedRect = layoutManager.usedRect(for: textContainer)
+            let idealHeight = ceil(usedRect.height + self.textContainerInset.height * 2)
+            let finalHeight = max(coordinator?.parent.minHeight ?? 0, idealHeight)
+            return NSSize(width: NSView.noIntrinsicMetric, height: finalHeight)
         }
 
         override func didChangeText() {
-            super.didChangeText(); invalidateIntrinsicContentSize(); enclosingScrollView?.invalidateIntrinsicContentSize()
-            DispatchQueue.main.async { if self.window != nil { self.scrollRangeToVisible(self.selectedRange()) } }
+            super.didChangeText()
+            invalidateIntrinsicContentSize()
+            enclosingScrollView?.invalidateIntrinsicContentSize()
+            DispatchQueue.main.async {
+                if self.window != nil {
+                    self.scrollRangeToVisible(self.selectedRange())
+                }
+            }
         }
         
         override func setFrameSize(_ newSize: NSSize) {
             if textContainer?.widthTracksTextView == true {
-                let hInset = (textContainerInset.width*2) + (textContainer?.lineFragmentPadding ?? 0)*2
-                let cWidth = max(0, newSize.width - hInset)
-                if textContainer?.containerSize.width != cWidth { textContainer?.containerSize = NSSize(width: cWidth, height: .greatestFiniteMagnitude) }
+                let horizontalInsetsAndPadding = (textContainerInset.width * 2) + (textContainer?.lineFragmentPadding ?? 0) * 2
+                let containerWidth = max(0, newSize.width - horizontalInsetsAndPadding)
+                if textContainer?.containerSize.width != containerWidth {
+                    textContainer?.containerSize = NSSize(width: containerWidth, height: CGFloat.greatestFiniteMagnitude)
+                }
             }
             super.setFrameSize(newSize)
         }
         
         override func keyDown(with event: NSEvent) {
-            if event.modifierFlags.contains(.option), event.keyCode == 36 { insertNewline(nil); return }
-            if event.modifierFlags.contains(.shift), event.keyCode == 36 { coordinator?.parent.onCommit(); return }
+            let suggestionsActive = coordinator?.parent.showPromptSuggestions == true || coordinator?.parent.showFileSuggestions == true
+            
+            if event.modifierFlags.contains(.option), event.keyCode == 36 {
+                insertNewline(nil); return
+            }
+            if event.modifierFlags.contains(.shift), event.keyCode == 36 {
+                coordinator?.parent.onCommit(self.attributedString()); return
+            }
             if event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty, event.keyCode == 36 {
-                if coordinator?.parent.showPromptSuggestions == true { super.keyDown(with: event) } else { coordinator?.parent.onCommit() }
+                if suggestionsActive {
+                    super.keyDown(with: event)
+                } else {
+                    coordinator?.parent.onCommit(self.attributedString())
+                }
                 return
             }
             super.keyDown(with: event)
@@ -242,29 +273,36 @@ struct CustomTextEditor: NSViewRepresentable {
         override func mouseDown(with event: NSEvent) {
             super.mouseDown(with: event)
             let pointInView = self.convert(event.locationInWindow, from: nil)
-            if let layoutManager = self.layoutManager,
-               let textContainer = self.textContainer,
-               let textStorage = self.textStorage {
-                let charIndex = layoutManager.characterIndex(for: pointInView, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
-                if charIndex < textStorage.length {
-                    if let promptID = textStorage.attribute(.promptID, at: charIndex, effectiveRange: nil) as? UUID {
-                        coordinator?.parent.logger.debug("Clicked on text with promptID: \(promptID.uuidString)")
-                        coordinator?.promptTagTapped(with: promptID)
-                        return
-                    }
+            guard let layoutManager = self.layoutManager,
+                  let textContainer = self.textContainer,
+                  let textStorage = self.textStorage else { return }
+
+            let charIndex = layoutManager.characterIndex(for: pointInView, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
+            
+            if charIndex < textStorage.length {
+                if let promptID = textStorage.attribute(.promptID, at: charIndex, effectiveRange: nil) as? UUID {
+                    coordinator?.parent.logger.debug("Clicked on text with promptID: \(promptID.uuidString)")
+                    coordinator?.promptTagTapped(with: promptID)
+                    return
+                }
+                if let fileURL = textStorage.attribute(.devgenticFileURL, at: charIndex, effectiveRange: nil) as? URL {
+                    coordinator?.parent.logger.debug("Clicked on text with devgenticFileURL: \(fileURL.path)")
+                    coordinator?.fileTagTapped(with: fileURL)
+                    return
                 }
             }
         }
     }
 
-    // MARK: - Coordinator Class
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CustomTextEditor
         weak var textView: CustomNSTextView?
+        weak var lastKnownTextViewInstance: CustomNSTextView?
+
         var isTyping: Bool = false
         var isProgrammaticallyChangingText: Bool = false
         var lastProcessedInsertionID: UUID?
-        let defaultTypingAttributes: [NSAttributedString.Key: Any] // Store default attributes
+        let defaultTypingAttributes: [NSAttributedString.Key: Any]
 
         init(_ parent: CustomTextEditor, defaultTypingAttributes: [NSAttributedString.Key: Any]) {
             self.parent = parent
@@ -274,142 +312,244 @@ struct CustomTextEditor: NSViewRepresentable {
         func textDidBeginEditing(_ notification: Notification) { isTyping = true }
         func textDidEndEditing(_ notification: Notification) {
             isTyping = false
-            if let tv = notification.object as? NSTextView, parent.text != tv.string { parent.text = tv.string }
+            if let tv = notification.object as? NSTextView, parent.text != tv.string {
+                 parent.text = tv.string
+            }
         }
         
-        // Handles atomic deletion of prompt tags and normal text input.
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
             guard let textStorage = textView.textStorage else { return true }
-
-            // Check for atomic deletion of prompt tags
-            if replacementString?.isEmpty ?? false && affectedCharRange.length == 1 { // Indicates a single character deletion (Backspace/Delete)
+            if replacementString?.isEmpty ?? false && affectedCharRange.length == 1 {
                 let deletionLocation = affectedCharRange.location
-                
-                // Check if the character being deleted is part of a prompt tag
                 if deletionLocation >= 0 && deletionLocation < textStorage.length {
-                    var effectiveRange = NSRange() // Will be filled with the range of the attribute
-                    // Check for the .promptID attribute specifically
-                    if let _ = textStorage.attribute(.promptID, at: deletionLocation, effectiveRange: &effectiveRange) {
-                        // If a promptID attribute exists, delete the entire effective range of that attribute
+                    var effectiveRange = NSRange()
+                    if textStorage.attribute(.promptID, at: deletionLocation, effectiveRange: &effectiveRange) != nil {
                         parent.logger.debug("Atomic deletion triggered for prompt tag at range: \(effectiveRange)")
-                        
-                        isProgrammaticallyChangingText = true
-                        textStorage.replaceCharacters(in: effectiveRange, with: "")
-                        textView.setSelectedRange(NSRange(location: effectiveRange.location, length: 0)) // Move cursor to start of deleted range
-                        textView.typingAttributes = defaultTypingAttributes // Reset typing attributes
-                        isProgrammaticallyChangingText = false
-                        
-                        // Manually update the parent's text binding
-                        // as returning false prevents the normal textDidChange flow for this specific change.
-                        parent.text = textStorage.string
-                        return false // Prevent default character-by-character deletion
+                        performAtomicDeletion(for: effectiveRange, in: textStorage, textView: textView)
+                        return false
+                    }
+                    effectiveRange = NSRange()
+                    if textStorage.attribute(.devgenticFileURL, at: deletionLocation, effectiveRange: &effectiveRange) != nil {
+                        parent.logger.debug("Atomic deletion triggered for file tag at range: \(effectiveRange)")
+                        performAtomicDeletion(for: effectiveRange, in: textStorage, textView: textView)
+                        return false
                     }
                 }
             }
-            // For all other cases (typing, non-atomic deletion, etc.), allow the change.
             return true
         }
 
-        // Called after text has changed.
+        private func performAtomicDeletion(for range: NSRange, in textStorage: NSTextStorage, textView: NSTextView) {
+            isProgrammaticallyChangingText = true
+            textStorage.replaceCharacters(in: range, with: "")
+            textView.setSelectedRange(NSRange(location: range.location, length: 0))
+            textView.typingAttributes = defaultTypingAttributes
+            isProgrammaticallyChangingText = false
+            parent.text = textStorage.string
+        }
+
         func textDidChange(_ notification: Notification) {
-            guard let textView = self.textView else { return }
+            guard let textView = self.textView, !isProgrammaticallyChangingText else { return }
             
-            let currentText = textView.string
+            let currentPlainText = textView.string
+            let currentSelectedRange = textView.selectedRange()
             
-            // Update SwiftUI binding if text differs.
-            // This needs to be on main thread for UI updates.
             DispatchQueue.main.async {
-                if self.parent.text != currentText {
-                    self.parent.text = currentText
+                if self.parent.text != currentPlainText {
+                    self.parent.text = currentPlainText
                 }
             }
 
-            // Logic to reset typingAttributes if cursor is not within a prompt tag.
-            let currentSelectedRange = textView.selectedRange()
-            if currentSelectedRange.length == 0 { // Only if it's a cursor, not a selection
-                var cursorIsInsidePromptTag = false
-                
-                // Check character to the left of the cursor
-                if currentSelectedRange.location > 0 {
-                    if textView.textStorage?.attribute(.promptID, at: currentSelectedRange.location - 1, effectiveRange: nil) != nil {
-                        cursorIsInsidePromptTag = true
-                    }
-                }
-                // Check character at the cursor location (if not at the end of text and not already confirmed inside)
-                if !cursorIsInsidePromptTag && currentSelectedRange.location < textView.string.count {
-                     if textView.textStorage?.attribute(.promptID, at: currentSelectedRange.location, effectiveRange: nil) != nil {
-                        cursorIsInsidePromptTag = true
-                    }
-                }
+            if !parent.showFileSuggestions {
+                handlePromptSuggestionLogic(currentText: currentPlainText, cursorPosition: currentSelectedRange.location)
+            } else {
+                if parent.showPromptSuggestions { clearPromptSuggestions() }
+            }
 
-                if !cursorIsInsidePromptTag {
-                    // If cursor is not inside a prompt tag, check if current typing attributes need reset.
+            if !parent.showPromptSuggestions {
+                handleFileMentionSuggestionLogic(currentText: currentPlainText, cursorPosition: currentSelectedRange.location)
+            } else {
+                if parent.showFileSuggestions { clearFileMentionSuggestions() }
+            }
+            
+            if !parent.showPromptSuggestions && !parent.showFileSuggestions {
+                resetTypingAttributesIfNeeded(at: currentSelectedRange, in: textView)
+            }
+        }
+        
+        private func handlePromptSuggestionLogic(currentText: String, cursorPosition: Int) {
+            if cursorPosition > 0 {
+                let charBeforeCursorIndex = currentText.index(currentText.startIndex, offsetBy: cursorPosition - 1)
+                if currentText[charBeforeCursorIndex] == "#" {
+                    let isAtStart = (cursorPosition - 1 == 0)
+                    var isPrecededBySpaceOrNewline = false
+                    if cursorPosition - 2 >= 0 {
+                        let preCharIdx = currentText.index(currentText.startIndex, offsetBy: cursorPosition - 2)
+                        if currentText[preCharIdx].isWhitespace || currentText[preCharIdx].isNewline {
+                            isPrecededBySpaceOrNewline = true
+                        }
+                    }
+                    if isAtStart || isPrecededBySpaceOrNewline {
+                        let triggerRange = NSRange(location: cursorPosition - 1, length: 1)
+                        if !parent.showPromptSuggestions || parent.activePromptTriggerRange != triggerRange {
+                            parent.logger.debug("Activating prompt suggestions for '#'. Range: \(triggerRange)")
+                            parent.showPromptSuggestions = true
+                            parent.suggestionQuery = ""
+                            parent.activePromptTriggerRange = triggerRange
+                            if parent.showFileSuggestions { clearFileMentionSuggestions() }
+                            return
+                        }
+                    }
+                }
+            }
+            if parent.showPromptSuggestions, var activeRange = parent.activePromptTriggerRange {
+                guard activeRange.location < currentText.count,
+                      currentText[currentText.index(currentText.startIndex, offsetBy: activeRange.location)] == "#" else {
+                    parent.logger.debug("Dismissing prompt suggestions: '#' removed or changed.")
+                    clearPromptSuggestions()
+                    return
+                }
+                if cursorPosition < activeRange.location {
+                    parent.logger.debug("Dismissing prompt suggestions: Cursor moved before '#'.")
+                    clearPromptSuggestions()
+                    return
+                }
+                let queryLength = cursorPosition - (activeRange.location + 1)
+                if queryLength < 0 {
+                    if parent.suggestionQuery != "" { parent.suggestionQuery = "" }
+                    activeRange.length = 1
+                    parent.activePromptTriggerRange = activeRange
+                    return
+                }
+                activeRange.length = queryLength + 1
+                parent.activePromptTriggerRange = activeRange
+                let queryStartIndex = currentText.index(currentText.startIndex, offsetBy: activeRange.location + 1)
+                let queryEndIndex = currentText.index(queryStartIndex, offsetBy: queryLength)
+                let query = (queryLength > 0) ? String(currentText[queryStartIndex..<queryEndIndex]) : ""
+                if query.contains(" ") || query.contains("\n") {
+                    parent.logger.debug("Dismissing prompt suggestions: Query contains space/newline.")
+                    clearPromptSuggestions()
+                    return
+                }
+                if parent.suggestionQuery != query {
+                    parent.suggestionQuery = query
+                    parent.logger.trace("Prompt suggestion query updated: '\(query)'")
+                }
+            } else if parent.showPromptSuggestions {
+                clearPromptSuggestions()
+            }
+        }
+
+        private func handleFileMentionSuggestionLogic(currentText: String, cursorPosition: Int) {
+            if cursorPosition > 0 {
+                let charBeforeCursorIndex = currentText.index(currentText.startIndex, offsetBy: cursorPosition - 1)
+                if currentText[charBeforeCursorIndex] == "@" {
+                    let isAtStart = (cursorPosition - 1 == 0)
+                    var isPrecededBySpaceOrNewline = false
+                    if cursorPosition - 2 >= 0 {
+                        let preCharIdx = currentText.index(currentText.startIndex, offsetBy: cursorPosition - 2)
+                        if currentText[preCharIdx].isWhitespace || currentText[preCharIdx].isNewline {
+                            isPrecededBySpaceOrNewline = true
+                        }
+                    }
+                    if isAtStart || isPrecededBySpaceOrNewline {
+                        let triggerRange = NSRange(location: cursorPosition - 1, length: 1)
+                        if !parent.showFileSuggestions || parent.activeFileMentionTriggerRange != triggerRange {
+                            parent.logger.debug("Activating file suggestions for '@'. Range: \(triggerRange)")
+                            parent.showFileSuggestions = true
+                            parent.fileSuggestionQuery = ""
+                            parent.activeFileMentionTriggerRange = triggerRange
+                            if parent.showPromptSuggestions { clearPromptSuggestions() }
+                            return
+                        }
+                    }
+                }
+            }
+            if parent.showFileSuggestions, var activeRange = parent.activeFileMentionTriggerRange {
+                guard activeRange.location < currentText.count,
+                      currentText[currentText.index(currentText.startIndex, offsetBy: activeRange.location)] == "@" else {
+                    parent.logger.debug("Dismissing file suggestions: '@' removed or changed.")
+                    clearFileMentionSuggestions()
+                    return
+                }
+                if cursorPosition < activeRange.location {
+                    parent.logger.debug("Dismissing file suggestions: Cursor moved before '@'.")
+                    clearFileMentionSuggestions()
+                    return
+                }
+                let queryLength = cursorPosition - (activeRange.location + 1)
+                if queryLength < 0 {
+                    if parent.fileSuggestionQuery != "" { parent.fileSuggestionQuery = "" }
+                    activeRange.length = 1
+                    parent.activeFileMentionTriggerRange = activeRange
+                    return
+                }
+                activeRange.length = queryLength + 1
+                parent.activeFileMentionTriggerRange = activeRange
+                let queryStartIndex = currentText.index(currentText.startIndex, offsetBy: activeRange.location + 1)
+                let queryEndIndex = currentText.index(queryStartIndex, offsetBy: queryLength)
+                let query = (queryLength > 0) ? String(currentText[queryStartIndex..<queryEndIndex]) : ""
+                if query.contains(" ") || query.contains("\n") {
+                    parent.logger.debug("Dismissing file suggestions: Query contains space/newline.")
+                    clearFileMentionSuggestions()
+                    return
+                }
+                if parent.fileSuggestionQuery != query {
+                    parent.fileSuggestionQuery = query
+                    parent.logger.trace("File suggestion query updated: '\(query)'")
+                }
+            } else if parent.showFileSuggestions {
+                 clearFileMentionSuggestions()
+            }
+        }
+        
+        private func resetTypingAttributesIfNeeded(at range: NSRange, in textView: NSTextView) {
+            if range.length == 0 {
+                var cursorIsInsideTaggedSegment = false
+                if range.location > 0 {
+                    if textView.textStorage?.attribute(.promptID, at: range.location - 1, effectiveRange: nil) != nil ||
+                       textView.textStorage?.attribute(.devgenticFileURL, at: range.location - 1, effectiveRange: nil) != nil {
+                        cursorIsInsideTaggedSegment = true
+                    }
+                }
+                if !cursorIsInsideTaggedSegment && range.location < textView.string.count {
+                     if textView.textStorage?.attribute(.promptID, at: range.location, effectiveRange: nil) != nil ||
+                        textView.textStorage?.attribute(.devgenticFileURL, at: range.location, effectiveRange: nil) != nil {
+                        cursorIsInsideTaggedSegment = true
+                    }
+                }
+                if !cursorIsInsideTaggedSegment {
                     let currentTypingAttrs = textView.typingAttributes
                     var needsReset = false
-                    if currentTypingAttrs[.promptID] != nil { // If .promptID is somehow set
+                    if currentTypingAttrs[.promptID] != nil || currentTypingAttrs[.devgenticFileURL] != nil {
                         needsReset = true
                     } else if (currentTypingAttrs[.font] as? NSFont) != (defaultTypingAttributes[.font] as? NSFont) {
                         needsReset = true
                     } else if (currentTypingAttrs[.foregroundColor] as? NSColor) != (defaultTypingAttributes[.foregroundColor] as? NSColor) {
                         needsReset = true
                     }
-                    // Add checks for other attributes if necessary
-
                     if needsReset {
-                        // parent.logger.debug("Resetting typingAttributes in textDidChange at location \(currentSelectedRange.location)")
                         textView.typingAttributes = defaultTypingAttributes
                     }
                 }
             }
-            
-            // --- Logic for showing/updating prompt suggestions (remains largely the same) ---
-            let cursorPosition = currentSelectedRange.location
-            // (Suggestion logic as previously provided - condensed for brevity here, ensure it's complete in your file)
-            if cursorPosition > 0 {
-                let charBeforeCursorIndex = currentText.index(currentText.startIndex, offsetBy: cursorPosition - 1)
-                if currentText[charBeforeCursorIndex] == "#" {
-                    let isAtStart = (cursorPosition - 1 == 0)
-                    var isPrecededBySpace = false
-                    if cursorPosition - 2 >= 0 {
-                        let preCharIdx = currentText.index(currentText.startIndex, offsetBy: cursorPosition - 2)
-                        if currentText[preCharIdx].isWhitespace || currentText[preCharIdx].isNewline { isPrecededBySpace = true }
-                    }
-                    let triggerRange = NSRange(location: cursorPosition - 1, length: 1)
-                    if isAtStart || isPrecededBySpace {
-                        if !parent.showPromptSuggestions || parent.activePromptTriggerRange != triggerRange {
-                            parent.showPromptSuggestions = true; parent.suggestionQuery = ""; parent.activePromptTriggerRange = triggerRange
-                            return
-                        }
-                    }
-                }
-            }
-
-            if parent.showPromptSuggestions, var activeRange = parent.activePromptTriggerRange {
-                if activeRange.location >= currentText.count || currentText[currentText.index(currentText.startIndex, offsetBy: activeRange.location)] != "#" {
-                    clearSuggestions(); return
-                }
-                if cursorPosition < activeRange.location { clearSuggestions(); return }
-
-                let queryLen = cursorPosition - (activeRange.location + 1)
-                if queryLen < 0 {
-                    if parent.suggestionQuery != "" { parent.suggestionQuery = "" }
-                    activeRange.length = 1; parent.activePromptTriggerRange = activeRange
-                    return
-                }
-                activeRange.length = queryLen + 1; parent.activePromptTriggerRange = activeRange
-                let queryStartIdx = currentText.index(currentText.startIndex, offsetBy: activeRange.location + 1)
-                let queryEndIdx = currentText.index(queryStartIdx, offsetBy: queryLen)
-                let query = (queryLen > 0) ? String(currentText[queryStartIdx..<queryEndIdx]) : ""
-                if query.contains(" ") || query.contains("\n") { clearSuggestions(); return }
-                if parent.suggestionQuery != query { parent.suggestionQuery = query }
-                return
-            }
-            if parent.showPromptSuggestions { clearSuggestions() }
         }
-        
-        func clearSuggestions() {
+
+        func clearPromptSuggestions() {
             if parent.showPromptSuggestions || parent.activePromptTriggerRange != nil || !parent.suggestionQuery.isEmpty {
-                parent.showPromptSuggestions = false; parent.suggestionQuery = ""; parent.activePromptTriggerRange = nil
+                parent.logger.debug("Clearing prompt suggestions.")
+                parent.showPromptSuggestions = false
+                parent.suggestionQuery = ""
+                parent.activePromptTriggerRange = nil
+            }
+        }
+
+        func clearFileMentionSuggestions() {
+            if parent.showFileSuggestions || parent.activeFileMentionTriggerRange != nil || !parent.fileSuggestionQuery.isEmpty {
+                parent.logger.debug("Clearing file mention suggestions.")
+                parent.showFileSuggestions = false
+                parent.fileSuggestionQuery = ""
+                parent.activeFileMentionTriggerRange = nil
             }
         }
 
@@ -417,30 +557,45 @@ struct CustomTextEditor: NSViewRepresentable {
             parent.logger.debug("Coordinator: Prompt tag tapped with ID: \(id.uuidString)")
             parent.onPromptTagTapped?(id)
         }
+
+        func fileTagTapped(with url: URL) {
+            parent.logger.debug("Coordinator: File tag tapped with URL: \(url.path)")
+            parent.onFileTagTapped?(url)
+        }
     }
 }
 
-
-
-// MARK: - Preview (Simplified for brevity)
-struct CustomTextEditor_Previews_RefactoredSizing: PreviewProvider {
-    @State static var textContent: String = "Test #SampleTag here."
-    @State static var showSuggestions: Bool = false
-    @State static var query: String = ""
-    @State static var range: NSRange? = nil
+// MARK: - Preview
+struct CustomTextEditor_Previews_Phase5_Corrected: PreviewProvider { // Renamed preview struct
+    @State static var textContent: String = "Test #SampleTag and @FileMention.txt here."
+    @State static var showPrompts: Bool = false
+    @State static var promptQuery: String = ""
+    @State static var promptRange: NSRange? = nil
+    @State static var showFiles: Bool = false
+    @State static var fileQuery: String = ""
+    @State static var fileRange: NSRange? = nil
     @State static var insertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
     
     static var previews: some View {
         CustomTextEditor(
             text: $textContent,
-            onCommit: { print("Commit") },
+            onCommit: { attrString in print("Commit with attributed string: \(attrString.string.prefix(30))") },
             minHeight: 40, maxHeight: 120,
-            showPromptSuggestions: $showSuggestions,
-            suggestionQuery: $query,
-            activePromptTriggerRange: $range,
-            attributedTextInsertion: $insertionRequest
+            showPromptSuggestions: $showPrompts,
+            suggestionQuery: $promptQuery,
+            activePromptTriggerRange: $promptRange,
+            onPromptTagTapped: { uuid in print("Tapped prompt: \(uuid)") },
+            showFileSuggestions: $showFiles,
+            fileSuggestionQuery: $fileQuery,
+            activeFileMentionTriggerRange: $fileRange,
+            onFileTagTapped: { url in print("Tapped file: \(url)") },
+            attributedTextInsertion: $insertionRequest,
+            textViewRef: { nsTextView in
+                print("NSTextView instance received in preview: \(nsTextView != nil)")
+            }
         )
         .padding()
-        .frame(width: 300, height: 100)
+        .frame(width: 350, height: 100)
+        .previewDisplayName("CustomTextEditor with Attributed Commit (Corrected)")
     }
 }

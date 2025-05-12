@@ -9,12 +9,16 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 // MARK: - Main View
 struct MainApplicationView: View {
     // --- ViewModel ---
-    // MainApplicationViewModel is instantiated here and will be injected into the environment.
     @StateObject private var viewModel = MainApplicationViewModel()
+    // NEW: Instantiate ExplorerViewModel here.
+    // This instance will be shared with views that need it, like ChatInputAreaView (for @ file suggestions)
+    // and your VSCodifiedSidebarContainerView (for displaying the file explorer).
+    @StateObject private var explorerViewModel = ExplorerViewModel()
+
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
-    @State private var isSidebarVisible: Bool = true // Default to true to show sidebar initially
+    @State private var isSidebarVisible: Bool = true
     private let activityBarWidth: CGFloat = 50
     private let sideBarPaneIdealWidth: CGFloat = 280
     private var totalSidebarWidth: CGFloat { activityBarWidth + (isSidebarVisible ? sideBarPaneIdealWidth : 0) }
@@ -26,13 +30,12 @@ struct MainApplicationView: View {
 
     // MARK: - Body
     var body: some View {
-        // The top-level ZStack. Injecting the viewModel here makes it available
+        // The top-level ZStack.
+        // Inject both viewModels into the environment here, making them available
         // to all child views within this ZStack.
         ZStack(alignment: .leading) {
 
             // --- Main Content Area (Header, Chat History + Input) ---
-            // This VStack and its children will now have access to 'viewModel'
-            // from the environment.
             VStack(spacing: 0) {
                 ChatHeaderView(
                     chatTitle: viewModel.currentConversationTitle,
@@ -75,7 +78,7 @@ struct MainApplicationView: View {
                                     logger.info("Reset user messages filter due to conversation change.")
                                 }
                                 scrollToBottom(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
-                                if !viewModel.showSettings && !viewModel.showPromptLibrary { // Ensure panels aren't open
+                                if !viewModel.showSettings && !viewModel.showPromptLibrary {
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                         isInputFocused = true
                                     }
@@ -102,8 +105,6 @@ struct MainApplicationView: View {
                         }
                     }
 
-                    // ChatInputAreaView is a child of this ZStack, so it will inherit
-                    // the viewModel from the environment.
                     VStack(spacing: 0) {
                         ChatInputAreaView(
                             userInput: $viewModel.userInput,
@@ -112,13 +113,12 @@ struct MainApplicationView: View {
                             isSending: viewModel.isSending,
                             showSettings: viewModel.showSettings,
                             isInputFocused: $isInputFocused,
-                            onSendMessage: viewModel.sendMessage,
+                            onSendMessage: viewModel.sendMessage, // sendMessage in ViewModel needs to accept NSAttributedString
                             onToggleContext: {
                                 withAnimation { viewModel.toggleContextArea() }
                             }
                         )
-                        // Note: ChatInputAreaView itself declares @EnvironmentObject var mainViewModel: MainApplicationViewModel
-                        // This will now correctly pick up the viewModel injected into the ZStack above.
+                        // ChatInputAreaView will now find explorerViewModel in its environment
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 8)
@@ -133,9 +133,9 @@ struct MainApplicationView: View {
 
 
             // --- Layer 2: VS Code Style Sidebar ---
-            // This view also needs the viewModel if it or its children use it.
+            // This view also needs the explorerViewModel if it's responsible for displaying files
             VSCodifiedSidebarContainerView(isSidebarVisible: $isSidebarVisible)
-                // .environmentObject(viewModel) // No longer strictly needed here if injected at ZStack, but harmless.
+                // The .environmentObject(explorerViewModel) modifier on the ZStack will provide it here too.
                 .frame(width: isSidebarVisible ? (activityBarWidth + sideBarPaneIdealWidth) : activityBarWidth)
                 .zIndex(1)
 
@@ -143,10 +143,9 @@ struct MainApplicationView: View {
             // --- Layer 3: Settings Panel Overlay ---
             if viewModel.showSettings {
                 SettingsPanelView(
-                    viewModel: viewModel, // Pass as observed or environment object if needed by SettingsPanelView
+                    viewModel: viewModel,
                     showSettings: $viewModel.showSettings
                 )
-                // .environmentObject(viewModel) // If SettingsPanelView uses @EnvironmentObject
                 .transition(.scale.combined(with: .opacity))
                 .zIndex(2)
             }
@@ -154,7 +153,6 @@ struct MainApplicationView: View {
             // MARK: - Layer 4: Prompt Library Panel Overlay
             if viewModel.showPromptLibrary {
                 PromptLibraryPanelView(showPromptLibrary: $viewModel.showPromptLibrary)
-                    // .environmentObject(viewModel) // No longer strictly needed here if injected at ZStack
                     .transition(.scale.combined(with: .opacity))
                     .zIndex(3)
             }
@@ -172,7 +170,8 @@ struct MainApplicationView: View {
                 .keyboardShortcut("n", modifiers: .command)
 
         }
-        .environmentObject(viewModel) // <<<< KEY FIX: Inject viewModel into the environment for all children of ZStack
+        .environmentObject(viewModel) // For MainApplicationViewModel
+        .environmentObject(explorerViewModel) // NEW: Inject ExplorerViewModel for all children of ZStack
         .opacity(viewModel.windowOpacity)
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
@@ -201,11 +200,10 @@ struct MainApplicationView: View {
         }
     }
 
-    // Helper function to scroll to the bottom of the chat.
     private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
          let targetID: AnyHashable?
          if isSending && !viewModel.isUserMessagesOnlyFilterActive {
-            targetID = "thinkingIndicator" // Assuming you have an ID for a thinking indicator
+            targetID = "thinkingIndicator"
          } else if let lastMessageId = messages.last?.id {
              targetID = lastMessageId
          } else {
@@ -218,20 +216,19 @@ struct MainApplicationView: View {
                  scrollProxy.scrollTo(finalID, anchor: .bottom)
              }
          } else {
-             DispatchQueue.main.async { // Ensure UI updates are on the main thread
+             DispatchQueue.main.async {
                  scrollProxy.scrollTo(finalID, anchor: .bottom)
              }
          }
      }
 }
 
-// Preview provider for MainApplicationView
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
-        // It's good practice for previews to also provide environment objects
-        // if the view or its children depend on them.
         MainApplicationView()
-            // .environmentObject(MainApplicationViewModel()) // For preview consistency if needed
+            // The @StateObject wrappers in MainApplicationView will create instances for the preview.
+            // No explicit .environmentObject needed here for MainApplicationViewModel or ExplorerViewModel
+            // because they are @StateObject within MainApplicationView itself now.
             .frame(width: 900, height: 600)
             .previewDisplayName("Main View with Header and Filter")
     }
