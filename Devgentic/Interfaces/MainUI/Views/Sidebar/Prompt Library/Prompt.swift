@@ -5,8 +5,7 @@
 //  Created by Raj Singh on 10/05/25.
 //
 
-import Foundation
-import AppKit // Required for NSAttributedString.Key
+import AppKit 
 
 /// Represents a reusable prompt in the Prompt Library.
 struct Prompt: Identifiable, Codable, Hashable {
@@ -67,18 +66,4 @@ extension Prompt {
                isUserDefined: false,
                tags: ["ideation", "brainstorming"])
     ]
-}
-
-// MARK: - Custom Attributed String Keys for Prompt Interaction
-extension NSAttributedString.Key {
-    /// Custom attribute key to store the UUID of an inserted prompt tag.
-    static let promptID = NSAttributedString.Key("devgentic.promptID")
-}
-
-// MARK: - App Notification Names
-/// Contains custom notification names used throughout the application.
-public struct AppNotifications { // Made public
-    /// Notification posted when an edit is requested for a prompt from the brief view (e.g., popover).
-    /// The `object` of the notification will be the `Prompt` to edit.
-    public static let editPromptRequestedFromBriefView = Notification.Name("devgentic.editPromptRequestedFromBriefView") // Made public
 }

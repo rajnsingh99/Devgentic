@@ -3,6 +3,8 @@ import SwiftUI
 import Combine
 import os
 import AppKit // For NSApplication, NSAttributedString
+import Speech // Import Speech framework for SFSpeechRecognizerAuthorizationStatus
+import AVFoundation // Required for AVCaptureDevice
 
 // Logger for the ViewModel
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MainApplicationViewModel")
@@ -10,11 +12,6 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 // Assuming SettingsSection, BackendType, SettingsKeys, Conversation,
 // ChatMessage, MessageContent, ConversationStore, AppDelegate, OllamaService,
 // AIConnect, AgentResponseHandler, ErrorHandling are defined elsewhere.
-// Also assuming AttributedStringKeys.devgenticFileURL is globally available.
-// extension NSAttributedString.Key {
-//     static let devgenticFileURL = NSAttributedString.Key("devgentic_fileURL_key")
-// }
-
 
 @MainActor // Ensure UI updates happen on the main thread
 class MainApplicationViewModel: ObservableObject {
@@ -26,13 +23,17 @@ class MainApplicationViewModel: ObservableObject {
     
     @ObservedObject var ollamaService: OllamaService
 
+    // MARK: - Voice Input Services
+    private let audioEngineService: AudioEngineService
+    private let speechRecognitionService: NativeSpeechRecognitionService
+    
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
-    @Published var userInput: String = "" // This will be cleared by setting it to "" after send. CustomTextEditor binds to this for its plain text representation.
+    @Published var userInput: String = ""
     @Published var isSidebarCollapsed: Bool = true
     @Published var showSettings: Bool = false
     
@@ -51,6 +52,36 @@ class MainApplicationViewModel: ObservableObject {
     @Published var activeContextFilePath: String? = nil
     @Published var isUserMessagesOnlyFilterActive: Bool = false
 
+    // MARK: - Voice Input State
+    enum VoiceInputState: Equatable {
+        case idle
+        case requestingPermissions
+        case permissionsDeniedMic
+        case permissionsDeniedSpeech
+        case speechRecognitionUnavailable
+        case available
+        case recording
+        case processing
+        case error(String)
+        
+        // Custom description for logging purposes
+        var description: String {
+            switch self {
+            case .idle: return "idle"
+            case .requestingPermissions: return "requestingPermissions"
+            case .permissionsDeniedMic: return "permissionsDeniedMic"
+            case .permissionsDeniedSpeech: return "permissionsDeniedSpeech"
+            case .speechRecognitionUnavailable: return "speechRecognitionUnavailable"
+            case .available: return "available"
+            case .recording: return "recording"
+            case .processing: return "processing"
+            case .error(let msg): return "error(\(msg.prefix(30)))" // Truncate error for brevity in logs
+            }
+        }
+    }
+    @Published var voiceInputState: VoiceInputState = .idle
+    private var textInEditorBeforeVoiceInput: String = ""
+
     // --- Settings Properties ---
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .ollama
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
@@ -67,7 +98,7 @@ class MainApplicationViewModel: ObservableObject {
 
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM d, yyyy"
+        formatter.dateFormat = "MMMM d, yy"
         return formatter
     }()
 
@@ -115,26 +146,59 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     // MARK: - Initialization
-    init(ollamaService: OllamaService) {
+    init(ollamaService: OllamaService,
+         audioEngineService: AudioEngineService = AudioEngineService(),
+         speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService()) {
         self.ollamaService = ollamaService
+        self.audioEngineService = audioEngineService
+        self.speechRecognitionService = speechRecognitionService
+        
         self.conversations = store.getAllConversations()
         validateSelectedConversation()
         observeConversationStoreChanges()
-        logger.info("MainApplicationViewModel initialized with injected OllamaService. Synced with ConversationStore. Loaded \(self.conversations.count) conversations.")
+        
+        logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
         if selectedBackend == .ollama {
             Task { await self.ollamaService.checkServerStatusAndUpdateModels() }
         }
+        
+        checkVoiceInputPermissionsAndAvailability()
+        
+        self.speechRecognitionService.$speechRecognizerAvailable
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] available in
+                guard let self = self else { return }
+                logger.info("Speech Recognizer availability changed to: \(available) (from sink)")
+                if !available {
+                    if self.voiceInputState == .recording || self.voiceInputState == .processing {
+                        self.stopVoiceCaptureAndFinalize(customError: "Speech recognizer became unavailable.")
+                    }
+                    self.voiceInputState = .speechRecognitionUnavailable
+                } else {
+                    if self.voiceInputState == .speechRecognitionUnavailable || self.voiceInputState == .idle {
+                         logger.info("Speech recognizer became available. Re-checking permissions and overall availability.")
+                         self.checkVoiceInputPermissionsAndAvailability()
+                    }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     convenience init() {
         self.init(ollamaService: OllamaService())
-        logger.info("MainApplicationViewModel initialized with default OllamaService.")
     }
 
     deinit {
         logger.info("MainApplicationViewModel deinitialized.")
         cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
+        
+        if audioEngineService.isRecording {
+            Task { [weak self] in
+                await self?.stopVoiceCaptureAndFinalize(customError: "ViewModel deinitializing")
+            }
+        }
     }
 
     private func observeConversationStoreChanges() {
@@ -142,7 +206,6 @@ class MainApplicationViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] updatedConversationsFromStore in
                 guard let self = self else { return }
-                logger.info("ConversationStore reported changes. Updating MainApplicationViewModel's conversations.")
                 self.conversations = updatedConversationsFromStore
                 self.validateSelectedConversation()
             }
@@ -152,38 +215,28 @@ class MainApplicationViewModel: ObservableObject {
     private func validateSelectedConversation() {
         if let currentSelectedID = selectedConversationID {
             if !conversations.contains(where: { $0.id == currentSelectedID }) {
-                logger.warning("Previously selected conversation \(currentSelectedID.uuidString) no longer exists. Selecting first available.")
                 selectedConversationID = conversations.first?.id
             }
         } else if !conversations.isEmpty {
             selectedConversationID = conversations.first?.id
         }
-        if let id = selectedConversationID {
-             logger.debug("Validated selection. Current selected ID: \(id.uuidString)")
-        } else {
-            logger.debug("Validated selection. No conversation selected (list might be empty).")
-        }
     }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)
-
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
-        logger.info("User messages filter toggled. Active: \(self.isUserMessagesOnlyFilterActive)")
     }
     
     func startNewConversation() {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
-        userInput = "" // Clear input field
+        userInput = ""
         
         let currentConversations = store.getAllConversations()
         if let mostRecentConv = currentConversations.first(where: {$0.messages.isEmpty}) {
-            logger.info("Found existing empty conversation (\(mostRecentConv.id.uuidString)). Selecting it.")
             selectedConversationID = mostRecentConv.id
         } else {
-            logger.info("No suitable empty conversation found. Creating a new one.")
-            _ = createAndSelectNewConversation() // Call the version that returns UUID
+            _ = createAndSelectNewConversation()
         }
         isUserMessagesOnlyFilterActive = false
     }
@@ -196,25 +249,22 @@ class MainApplicationViewModel: ObservableObject {
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
         store.addConversation(newConversation)
         selectedConversationID = newConversation.id
-        logger.info("Created and selected new conversation with ID: \(newConversation.id.uuidString) via store.")
         isUserMessagesOnlyFilterActive = false
         return newConversation.id
     }
 
     // MARK: - Message Sending Logic
-    // MODIFIED: sendMessage now accepts NSAttributedString
     func sendMessage(attributedString: NSAttributedString) {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
         
-        // The plain string version of the input, used for some checks and logging
         let plainUserInputFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.debug("sendMessage called. Backend: \(self.selectedBackend.rawValue), isSending: \(self.isSending), attributedInput (plain): \"\(plainUserInputFromEditor.prefix(50))...\"")
+        logger.debug("sendMessage called. Backend: \(String(describing: self.selectedBackend.rawValue)), isSending: \(self.isSending), attributedInput (plain): \"\(plainUserInputFromEditor.prefix(50))...\"")
 
         guard !isSending else { logger.warning("sendMessage aborted: Already sending."); return }
         guard !plainUserInputFromEditor.isEmpty else {
             logger.info("sendMessage aborted: Input (from attributedString) empty.")
-            if !self.userInput.isEmpty { self.userInput = "" } // Clear editor if it had non-empty plain text
+            if !self.userInput.isEmpty { self.userInput = "" }
             return
         }
 
@@ -232,7 +282,6 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
-        // --- NEW: Process NSAttributedString to extract text and file contents ---
         var plainTextForLLM = ""
         var attachedFileContents: [String] = []
         
@@ -240,12 +289,9 @@ class MainApplicationViewModel: ObservableObject {
             let segmentString = attributedString.attributedSubstring(from: range).string
 
             if let fileURL = attrs[NSAttributedString.Key.devgenticFileURL] as? URL {
-                // This segment is a file tag. Append its text representation (e.g., "@filename.ext")
-                // or a placeholder to the main message.
-                plainTextForLLM += segmentString // Or: plainTextForLLM += "[file: \(fileURL.lastPathComponent)]"
+                plainTextForLLM += segmentString
                 logger.debug("Found file tag: \(segmentString) for URL: \(fileURL.path)")
 
-                // Start security-scoped access
                 let didStartAccess = fileURL.startAccessingSecurityScopedResource()
                 defer {
                     if didStartAccess {
@@ -274,40 +320,32 @@ class MainApplicationViewModel: ObservableObject {
                     attachedFileContents.append("--- Could not access file: \(fileURL.lastPathComponent) ---")
                 }
             } else {
-                // This segment is plain text (or another type of attributed text like a #prompt)
                 plainTextForLLM += segmentString
             }
         }
-        // --- End of NEW processing block ---
 
-        // Construct the final message to send to the backend
         var messageToSendToBackend = plainTextForLLM
         if !attachedFileContents.isEmpty {
             messageToSendToBackend += "\n\n" + attachedFileContents.joined(separator: "\n\n")
         }
         
-        // Add context prefix if active
         var finalMessageWithContextPrefix = messageToSendToBackend
         if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
             finalMessageWithContextPrefix = "Context File: \(filePath)\n\nUser Message and Attached Files:\n" + messageToSendToBackend
             logger.debug("Prepended active context file path: \(filePath)")
         }
 
-        // Create the user message for display in the chat UI.
-        // For rich display, ChatMessage content should ideally support NSAttributedString.
-        // If it only supports plain text, plainUserInputFromEditor is used.
         let userMessageForDisplay = ChatMessage(
             conversationId: conversationIDToUse,
             sender: .user,
-            content: .plainText(plainUserInputFromEditor) // Or: .attributedString(attributedString) if ChatMessage supports it
+            content: .plainText(plainUserInputFromEditor)
         )
         
         targetConversationForUserMessage.messages.append(userMessageForDisplay)
         targetConversationForUserMessage.timestamp = Date()
         store.updateConversation(targetConversationForUserMessage)
 
-        // Clear the input editor via the plain text binding
-        self.userInput = "" // This will trigger updateNSView in CustomTextEditor to clear its content
+        self.userInput = ""
         isSending = true
 
         Task {
@@ -315,11 +353,11 @@ class MainApplicationViewModel: ObservableObject {
             
             if selectedBackend == .ollama {
                  if ollamaService.serverStatus != .connected && ollamaService.serverStatus != .checking {
-                      logger.info("Ollama status is \(self.ollamaService.serverStatus.rawValue), re-checking before sending.")
+                      logger.info("Ollama status is \(String(describing: self.ollamaService.serverStatus.rawValue)), re-checking before sending.")
                       await ollamaService.checkServerStatusAndUpdateModels()
                  }
                  if ollamaService.serverStatus != .connected {
-                    let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(self.ollamaService.serverStatus.rawValue)"
+                    let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(String(describing: self.ollamaService.serverStatus.rawValue))"
                     logger.error("\(errorMsg)")
                     let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg)
                     let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
@@ -328,7 +366,6 @@ class MainApplicationViewModel: ObservableObject {
             }
 
             if agentMessagesForThisTurn.isEmpty {
-                // Use `finalMessageWithContextPrefix` for the backend call
                 let backendConfig = self.determineBackendConfiguration(message: finalMessageWithContextPrefix)
                 do {
                     logger.debug("Sending task to \(backendConfig.url)\(backendConfig.endpoint). Message (first 200 chars): '\(finalMessageWithContextPrefix.prefix(200))'")
@@ -375,22 +412,283 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Voice Input Methods
+    func checkVoiceInputPermissionsAndAvailability() {
+        logger.info("Checking voice input permissions and availability...")
+        self.voiceInputState = .requestingPermissions
 
-    // MARK: - Conversation Management (Delete, Rename, Transfer)
-    func transferSelectedConversationToOverlay() {
-        guard let conversationID = selectedConversationID else {
-            logger.warning("Transfer to overlay requested, but no conversation is selected.")
+        let currentMicStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        logger.debug("Current microphone permission status (synchronous check): \(String(describing: currentMicStatus.rawValue))")
+
+        switch currentMicStatus {
+        case .authorized:
+            logger.info("Microphone permission is already granted.")
+            checkSpeechRecognitionPermission()
+
+        case .denied:
+            logger.warning("Microphone permission was previously denied by user or policy.")
+            self.voiceInputState = .permissionsDeniedMic
+        
+        case .restricted:
+            logger.warning("Microphone permission is restricted.")
+            self.voiceInputState = .permissionsDeniedMic
+
+        case .notDetermined:
+            logger.info("Microphone permission is .notDetermined. Requesting via audioEngineService...")
+            audioEngineService.requestMicrophonePermission { [weak self] grantedByRequestCallback in
+                guard let self = self else { return }
+                if grantedByRequestCallback {
+                    logger.info("audioEngineService.requestMicrophonePermission callback returned: \(grantedByRequestCallback). Re-checking speech permission.")
+                    self.checkSpeechRecognitionPermission()
+                } else {
+                    logger.warning("Microphone permission denied by user or system (from callback).")
+                    self.voiceInputState = .permissionsDeniedMic
+                }
+            }
+        @unknown default:
+            logger.error("Unknown microphone permission status: \(String(describing: currentMicStatus.rawValue))")
+            self.voiceInputState = .error("Unknown microphone permission state.")
+        }
+    }
+
+    private func checkSpeechRecognitionPermission() {
+        logger.info("Checking speech recognition permission...")
+        let currentSpeechAuthStatus = SFSpeechRecognizer.authorizationStatus()
+        logger.debug("Current speech recognition status (synchronous check): \(String(describing: currentSpeechAuthStatus.rawValue))")
+
+        switch currentSpeechAuthStatus {
+        case .authorized:
+            logger.info("Speech recognition permission already authorized.")
+            if self.speechRecognitionService.speechRecognizerAvailable {
+                logger.info("Speech recognizer is available. Setting state to .available.")
+                self.voiceInputState = .available
+            } else {
+                logger.warning("Speech recognizer is NOT available.")
+                self.voiceInputState = .speechRecognitionUnavailable
+            }
+        case .denied:
+            logger.warning("Speech recognition permission previously denied.")
+            self.voiceInputState = .permissionsDeniedSpeech
+        case .restricted:
+            logger.warning("Speech recognition permission restricted.")
+            self.voiceInputState = .error("Speech recognition restricted.")
+        case .notDetermined:
+            logger.info("Speech recognition permission .notDetermined. Requesting via speechRecognitionService...")
+            if self.voiceInputState != .requestingPermissions { self.voiceInputState = .requestingPermissions }
+            
+            speechRecognitionService.requestSpeechRecognitionPermission { [weak self] statusAfterRequestCallback in
+                guard let self = self else { return }
+                logger.info("Callback from speechRecognitionService.requestSpeechRecognitionPermission. New status: \(String(describing: statusAfterRequestCallback.rawValue))")
+                switch statusAfterRequestCallback {
+                case .authorized:
+                    if self.speechRecognitionService.speechRecognizerAvailable {
+                        self.voiceInputState = .available
+                    } else {
+                        self.voiceInputState = .speechRecognitionUnavailable
+                    }
+                case .denied:
+                    self.voiceInputState = .permissionsDeniedSpeech
+                case .restricted:
+                    self.voiceInputState = .error("Speech recognition restricted.")
+                case .notDetermined:
+                    self.voiceInputState = .error("Could not determine speech permission after request.")
+                @unknown default:
+                    self.voiceInputState = .error("Unknown speech permission state post-request.")
+                }
+            }
+        @unknown default:
+            logger.error("Unknown initial speech recognition authorization status: \(String(describing: currentSpeechAuthStatus.rawValue))")
+            self.voiceInputState = .error("Unknown speech permission state.")
+        }
+    }
+
+    func toggleVoiceInput() {
+        logger.info("Toggle voice input button tapped. Current voiceInputState: \(self.voiceInputState.description)")
+        
+        switch self.voiceInputState {
+        case .idle, .available:
+            logger.info("Attempting to start voice capture.")
+            startVoiceCapture()
+        case .recording:
+            logger.info("Attempting to stop voice capture.")
+            stopVoiceCaptureAndFinalize(customError: nil)
+        case .requestingPermissions, .processing:
+            logger.info("Voice input busy (\(self.voiceInputState.description)). Ignoring toggle.")
+            break
+        case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error:
+            logger.info("Permissions issue or error state (\(self.voiceInputState.description)). Re-checking permissions.")
+            checkVoiceInputPermissionsAndAvailability()
+        }
+    }
+
+    private func startVoiceCapture() {
+        logger.info("startVoiceCapture: Entered method.")
+        
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        let speechStatus = SFSpeechRecognizer.authorizationStatus()
+
+        guard micStatus == .authorized else {
+            logger.error("startVoiceCapture: Aborted. Microphone permission not .authorized (is \(String(describing: micStatus.rawValue))).")
+            checkVoiceInputPermissionsAndAvailability()
             return
         }
-        logger.info("Attempting to transfer conversation \(conversationID.uuidString) to Quick Access overlay.")
+        guard speechStatus == .authorized else {
+            logger.error("startVoiceCapture: Aborted. Speech recognition not .authorized (is \(String(describing: speechStatus.rawValue))).")
+            checkVoiceInputPermissionsAndAvailability()
+            return
+        }
+        guard speechRecognitionService.speechRecognizerAvailable else {
+            logger.error("startVoiceCapture: Aborted. Speech recognizer not available.")
+            self.voiceInputState = .speechRecognitionUnavailable
+            return
+        }
+        
+        logger.info("startVoiceCapture: All permissions and availability checks passed.")
+        textInEditorBeforeVoiceInput = userInput
+        logger.info("startVoiceCapture: Stored textInEditorBeforeVoiceInput: '\(self.textInEditorBeforeVoiceInput.prefix(30))'")
+
+        do {
+            logger.info("startVoiceCapture: Attempting to start audio engine...")
+            try audioEngineService.startStreamingAudio { [weak self] (buffer, _) in
+                self?.speechRecognitionService.processAudioBuffer(buffer)
+            }
+            logger.info("startVoiceCapture: Audio engine successfully started.")
+
+            logger.info("startVoiceCapture: Attempting to start speech recognition task...")
+            try speechRecognitionService.startRecognition(recognitionHandler: { [weak self] (transcriptFromRecognizer, isFinal, error) in
+                guard let self = self else { return }
+                
+                let prefix = self.textInEditorBeforeVoiceInput
+                let separator = prefix.isEmpty || prefix.last == " " ? "" : " "
+
+                if let error = error {
+                    let nsError = error as NSError
+                    logger.error("Speech recognition handler error: Domain: \(nsError.domain), Code: \(nsError.code), Description: \(nsError.localizedDescription)")
+
+                    // MODIFICATION: Adjusted isCancellationError check for macOS 14+ SFSpeechError.Code
+                    // The specific SFSpeechError.Code members for cancellation might not be available.
+                    // We rely on the domain and potentially the description or other codes.
+                    var isCancellationError = false
+                    if #available(macOS 14, *) { // Check for SFSpeechErrorDomain if available
+                        if nsError.domain == SFSpeechErrorDomain {
+                             // For macOS 14+, SFSpeechError.Code doesn't have explicit cancel codes.
+                             // A common pattern for cancellation is code 203 with "cancel" in description.
+                             // Or if the task is simply finalized by the system/user action without a specific "error".
+                            if (nsError.code == 203 && nsError.localizedDescription.lowercased().contains("cancel")) {
+                                isCancellationError = true
+                            }
+                            // Add other SFSpeechErrorDomain codes that might signify a benign stop if necessary
+                        }
+                    }
+                    // kAFAssistantErrorDomain is another source for user cancellation.
+                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107 { // User cancelled
+                        isCancellationError = true
+                    }
+                                               
+                    if isCancellationError {
+                        logger.info("Recognition task was cancelled (likely intentional stop or end of audio). Treating as clean stop.")
+                        if !transcriptFromRecognizer.isEmpty {
+                            self.userInput = prefix + separator + transcriptFromRecognizer
+                        } else {
+                            self.userInput = prefix
+                        }
+                        self.stopVoiceCaptureAndFinalize(customError: nil)
+                    } else if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
+                        logger.info("No speech detected (kAFAssistantErrorDomain code 1110).")
+                        self.userInput = prefix
+                        self.stopVoiceCaptureAndFinalize(customError: "No speech detected.")
+                    } else {
+                        // For other errors, preserve original text and show error.
+                        self.userInput = prefix
+                        self.stopVoiceCaptureAndFinalize(customError: "Recognition error: \(error.localizedDescription.prefix(50))")
+                    }
+                    return
+                }
+
+                // No error, proceed with transcript update
+                if !transcriptFromRecognizer.isEmpty {
+                    self.userInput = prefix + separator + transcriptFromRecognizer
+                } else {
+                    // If no error, but transcript is empty (e.g., silence leading to a non-final result)
+                    // keep the userInput as the prefix. Don't append an empty string.
+                    if isFinal { // If it's final and transcript is empty, userInput should be what it was before.
+                        self.userInput = prefix
+                    }
+                }
+                logger.trace("Transcript update. isFinal: \(isFinal), userInput: '\(self.userInput.prefix(100))'")
+
+                if isFinal {
+                    // This block is reached if error was nil and isFinal is true.
+                    logger.info("Final transcript (natural end without error). userInput: '\(self.userInput.prefix(100))'")
+                    self.stopVoiceCaptureAndFinalize(customError: nil)
+                }
+            })
+            logger.info("startVoiceCapture: Speech recognition task successfully started.")
+            voiceInputState = .recording
+            
+        } catch let audioError as AudioEngineError {
+            logger.error("startVoiceCapture: AudioEngineError caught: \(audioError.localizedDescription)")
+            voiceInputState = .error("Audio engine error: \(audioError.localizedDescription.prefix(50))")
+            audioEngineService.stopStreamingAudio()
+        } catch let speechError as SpeechRecognitionError {
+            logger.error("startVoiceCapture: SpeechRecognitionError caught: \(speechError.localizedDescription)")
+            voiceInputState = .error("Speech setup error: \(speechError.localizedDescription.prefix(50))")
+            audioEngineService.stopStreamingAudio()
+        } catch {
+            logger.error("startVoiceCapture: Generic error caught: \(error.localizedDescription)")
+            voiceInputState = .error("Start capture error: \(error.localizedDescription.prefix(50))")
+            audioEngineService.stopStreamingAudio()
+        }
+    }
+
+    private func stopVoiceCaptureAndFinalize(customError: String?) {
+        logger.info("stopVoiceCaptureAndFinalize: Entered. Error: \(customError ?? "None"). Current state: \(self.voiceInputState.description)")
+        
+        guard voiceInputState == .recording || voiceInputState == .processing || audioEngineService.isRecording else {
+            logger.info("stopVoiceCaptureAndFinalize: Not in recording/processing state or audio engine not active. No action needed or already stopping. Current state: \(self.voiceInputState.description), audioEngine.isRecording: \(String(describing: self.audioEngineService.isRecording))")
+            if let err = customError, !err.isEmpty {
+                if case .error(let existingError) = voiceInputState {
+                    if existingError != err { self.voiceInputState = .error(err) }
+                } else if self.voiceInputState != .available {
+                     self.voiceInputState = .error(err)
+                }
+            } else if voiceInputState != .available && voiceInputState != .idle && voiceInputState != .requestingPermissions {
+                var shouldSetToAvailable = true
+                if case .error(let currentErr) = voiceInputState {
+                    if !currentErr.isEmpty { shouldSetToAvailable = false }
+                }
+                if shouldSetToAvailable { self.voiceInputState = .available }
+            }
+            return
+        }
+
+        audioEngineService.stopStreamingAudio()
+        logger.info("stopVoiceCaptureAndFinalize: Audio engine stopped.")
+        speechRecognitionService.stopRecognition()
+        logger.info("stopVoiceCaptureAndFinalize: Speech recognition service stop requested.")
+
+        if let err = customError, !err.isEmpty {
+            voiceInputState = .error(err)
+            logger.info("stopVoiceCaptureAndFinalize: State set to .error: \(err)")
+        } else {
+            if voiceInputState == .recording || voiceInputState == .processing {
+                voiceInputState = .available
+                logger.info("stopVoiceCaptureAndFinalize: State set to .available after clean stop.")
+            }
+        }
+        logger.info("stopVoiceCaptureAndFinalize: Completed. Final userInput: '\(self.userInput.prefix(100))'")
+    }
+
+
+    // MARK: - Conversation Management
+    func transferSelectedConversationToOverlay() {
+        guard let conversationID = selectedConversationID else { return }
         UserDefaults.standard.set(conversationID.uuidString, forKey: SettingsKeys.quickAccessOverlayConversationId)
-        let userInfo = ["forceExpand": true]
-        NotificationCenter.default.post(name: SettingsKeys.showQuickAccessPanelNotification, object: nil, userInfo: userInfo)
+        NotificationCenter.default.post(name: SettingsKeys.showQuickAccessPanelNotification, object: nil, userInfo: ["forceExpand": true])
         self.selectedConversationID = nil
     }
     
     func deleteConversation(conversationID: UUID) {
-        logger.info("Attempting to delete single conversation with ID: \(conversationID.uuidString) via store.")
         store.deleteConversation(withId: conversationID)
         if selectedConversationID == conversationID {
             selectedConversationID = conversations.first(where: { $0.id != conversationID })?.id
@@ -399,7 +697,6 @@ class MainApplicationViewModel: ObservableObject {
 
     func deleteMultipleConversations(ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
-        logger.info("Attempting to delete \(ids.count) conversations via store.")
         store.deleteConversations(withIds: ids)
         if let currentSelected = selectedConversationID, ids.contains(currentSelected) {
             selectedConversationID = conversations.first(where: { !ids.contains($0.id) })?.id
@@ -407,21 +704,13 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     func deleteConversationsInGroup(groupKey: String) {
-        logger.info("Attempting to delete all conversations in group: \(groupKey) via store.")
         let idsToDelete = Set(self.conversations.filter { self.groupKey(for: $0.timestamp) == groupKey }.map { $0.id })
-        if idsToDelete.isEmpty {
-            logger.warning("No conversations found for group key '\(groupKey)'. Nothing to delete.")
-            return
-        }
+        if idsToDelete.isEmpty { return }
         deleteMultipleConversations(ids: idsToDelete)
     }
     
     func renameConversation(conversationID: UUID, newTitle: String) {
-        logger.info("Attempting to rename conversation ID \(conversationID.uuidString) to '\(newTitle)' via store.")
-        guard var conversationToRename = store.getConversation(withId: conversationID) else {
-            logger.error("Failed to rename: Conversation ID \(conversationID.uuidString) not found in store.")
-            return
-        }
+        guard var conversationToRename = store.getConversation(withId: conversationID) else { return }
         let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         conversationToRename.userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
         store.updateConversation(conversationToRename)
@@ -429,57 +718,42 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - UI Toggles
     func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            isSidebarCollapsed.toggle()
-            if !isSidebarCollapsed {
-                if showSettings { showSettings = false }
-                if showPromptLibrary { showPromptLibrary = false }
-            }
+        withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() }
+        if !isSidebarCollapsed {
+            if showSettings { showSettings = false }
+            if showPromptLibrary { showPromptLibrary = false }
         }
     }
 
     func toggleSettings() {
-        withAnimation {
-            let becomingVisible = !showSettings
-            showSettings.toggle()
-            if becomingVisible {
-                if showPromptLibrary { showPromptLibrary = false }
-                if !isSidebarCollapsed { isSidebarCollapsed = true }
-            }
+        withAnimation { showSettings.toggle() }
+        if showSettings {
+            if showPromptLibrary { showPromptLibrary = false }
+            if !isSidebarCollapsed { isSidebarCollapsed = true }
         }
     }
 
     func togglePromptLibrary() {
-        withAnimation {
-            let becomingVisible = !showPromptLibrary
-            showPromptLibrary.toggle()
-            if becomingVisible {
-                if showSettings { showSettings = false }
-                if !isSidebarCollapsed { isSidebarCollapsed = true }
-            }
+        withAnimation { showPromptLibrary.toggle() }
+        if showPromptLibrary {
+            if showSettings { showSettings = false }
+            if !isSidebarCollapsed { isSidebarCollapsed = true }
         }
-        logger.info("Prompt Library panel toggled. Showing: \(self.showPromptLibrary)")
     }
 
     func toggleContextArea() {
          withAnimation { showContextArea.toggle() }
          if !showContextArea { activeContextFilePath = nil }
-         logger.info("Context area toggled. Showing: \(self.showContextArea). Path: \(self.activeContextFilePath ?? "nil")")
     }
 
     func requestEditPrompt(_ prompt: Prompt) {
-        logger.info("Requesting to edit prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
-        if !showPromptLibrary {
-            togglePromptLibrary()
-        } else {
-            if showSettings { showSettings = false }
-        }
+        if !showPromptLibrary { togglePromptLibrary() }
+        else if showSettings { showSettings = false }
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: AppNotifications.editPromptRequestedFromBriefView, object: prompt)
-            logger.debug("Posted notification to edit prompt: '\(prompt.title)' using AppNotifications")
         }
     }
-
+    
     // MARK: - Private Helper Methods
     private struct BackendConfiguration { let url: String; let endpoint: String; let payload: [String: Any] }
     private func determineBackendConfiguration(message: String) -> BackendConfiguration {
@@ -490,7 +764,7 @@ class MainApplicationViewModel: ObservableObject {
                 "top_p": self.ollamaTopP, "repeat_penalty": self.ollamaRepeatPenalty,
                 "num_ctx": self.ollamaContextWindowSize, "num_gpu": self.ollamaGpuLayers
             ]
-            let modelName = ollamaService.llmModelName.isEmpty ? "default_model" : ollamaService.llmModelName
+            let modelName = ollamaService.llmModelName.isEmpty ? "default_model_name" : ollamaService.llmModelName
             return BackendConfiguration(
                 url: "http://127.0.0.1:11434",
                 endpoint: "/api/generate",

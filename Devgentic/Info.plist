@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Devgentic needs access to your microphone to capture audio for voice-to-text input.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Devgentic needs to send audio data to Apple&apos;s servers or process it on-device for speech recognition to convert your voice to text.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict/>

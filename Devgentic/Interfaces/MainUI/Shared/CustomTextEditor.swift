@@ -3,11 +3,13 @@ import SwiftUI
 import AppKit
 import os
 
+// Make sure you have created AttributedStringKeys.swift with the extension
+// and that this file (CustomTextEditor.swift) can see those definitions.
+
 struct CustomTextEditor: NSViewRepresentable {
     // MARK: - Bindings and Properties
     @Binding var text: String // Plain text representation
-    // NEW: Callback to pass the NSAttributedString when committing
-    var onCommit: (NSAttributedString) -> Void
+    var onCommit: (NSAttributedString) -> Void // Callback to pass the NSAttributedString when committing
     var minHeight: CGFloat
     var maxHeight: CGFloat
 
@@ -26,7 +28,6 @@ struct CustomTextEditor: NSViewRepresentable {
     // --- Common Attributed Text Insertion ---
     @Binding var attributedTextInsertion: AttributedTextInsertionAction?
 
-    // NEW: Callback to expose the NSTextView instance
     var textViewRef: ((CustomTextEditor.CustomNSTextView?) -> Void)?
 
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.CustomTextEditor", category: "CustomTextEditorRefactored")
@@ -43,7 +44,7 @@ struct CustomTextEditor: NSViewRepresentable {
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
         [
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
-            .foregroundColor: NSColor.labelColor
+            .foregroundColor: NSColor.labelColor // Adaptive color for typing
         ]
     }
 
@@ -57,7 +58,8 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.importsGraphics = false
         textView.drawsBackground = false
         textView.backgroundColor = NSColor.clear
-        textView.textColor = NSColor.labelColor
+        
+        textView.textColor = NSColor.textColor // Adaptive system text color
         textView.insertionPointColor = NSColor.labelColor
         
         textView.textContainerInset = NSSize(width: 0, height: 3)
@@ -112,11 +114,11 @@ struct CustomTextEditor: NSViewRepresentable {
             self.attributedTextInsertion = nil
 
             if context.coordinator.lastProcessedInsertionID == actionToProcess.id {
-                logger.warning("NSTextView: Attributed text insertion ID \(actionToProcess.id) was already processed. Skipping.")
+                logger.warning("NSTextView: Attributed text insertion ID \(actionToProcess.id.uuidString) was already processed. Skipping.")
                 return
             }
 
-            logger.debug("NSTextView: Processing attributed text insertion. ID: \(actionToProcess.id)")
+            logger.debug("NSTextView: Processing attributed text insertion. ID: \(actionToProcess.id.uuidString)")
             context.coordinator.lastProcessedInsertionID = actionToProcess.id
             
             if let textStorage = textView.textStorage {
@@ -131,13 +133,12 @@ struct CustomTextEditor: NSViewRepresentable {
                 let newCursorPosition = actualRangeToReplace.location + actionToProcess.attributedString.length
                 textView.setSelectedRange(NSRange(location: newCursorPosition, length: 0))
                 
+                textView.textColor = NSColor.textColor
                 textView.typingAttributes = defaultTypingAttributes
                 
                 context.coordinator.isProgrammaticallyChangingText = false
-                
-                // The textDidChange delegate method will update the plain text binding.
             } else {
-                logger.error("NSTextView: textStorage is nil for attributed insertion ID: \(actionToProcess.id).")
+                logger.error("NSTextView: textStorage is nil for attributed insertion ID: \(actionToProcess.id.uuidString).")
             }
             return
         } else {
@@ -146,25 +147,19 @@ struct CustomTextEditor: NSViewRepresentable {
             }
         }
 
-        // Synchronize plain text if changed externally (e.g., programmatic clear after send)
-        // This condition ensures that we only update the NSTextView from the `text` binding
-        // if the change didn't originate from the NSTextView itself (isTyping) or from another
-        // programmatic change within this component (isProgrammaticallyChangingText).
         if textView.string != self.text && !context.coordinator.isTyping && !context.coordinator.isProgrammaticallyChangingText {
              logger.debug("Updating NSTextView from plain text binding. Current NSTextView: \"\(textView.string.prefix(50))\", New binding value: \"\(self.text.prefix(50))\"")
              let currentSelectedRange = textView.selectedRange()
              context.coordinator.isProgrammaticallyChangingText = true
              
-             // Replace the entire content of the textStorage.
-             // Use textView.string.count for the length of the current string in NSTextView.
              textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: textView.string.count), with: self.text)
-                                                                                                // ^^^^^ Corrected here
+                                                                                                
              context.coordinator.isProgrammaticallyChangingText = false
              
-             // Try to restore selection or set to end of the new text.
              let newLocation = min(currentSelectedRange.location, self.text.count)
-             textView.setSelectedRange(NSRange(location: newLocation, length: 0)) // Length 0 for cursor
+             textView.setSelectedRange(NSRange(location: newLocation, length: 0))
              
+             textView.textColor = NSColor.textColor
              textView.typingAttributes = defaultTypingAttributes
         }
     }
@@ -280,14 +275,15 @@ struct CustomTextEditor: NSViewRepresentable {
             let charIndex = layoutManager.characterIndex(for: pointInView, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
             
             if charIndex < textStorage.length {
-                if let promptID = textStorage.attribute(.promptID, at: charIndex, effectiveRange: nil) as? UUID {
-                    coordinator?.parent.logger.debug("Clicked on text with promptID: \(promptID.uuidString)")
-                    coordinator?.promptTagTapped(with: promptID)
+                // Use the centrally defined keys
+                if let promptIDVal = textStorage.attribute(NSAttributedString.Key.promptID, at: charIndex, effectiveRange: nil) as? UUID {
+                    coordinator?.parent.logger.debug("Clicked on text with promptID: \(promptIDVal.uuidString)")
+                    coordinator?.promptTagTapped(with: promptIDVal)
                     return
                 }
-                if let fileURL = textStorage.attribute(.devgenticFileURL, at: charIndex, effectiveRange: nil) as? URL {
-                    coordinator?.parent.logger.debug("Clicked on text with devgenticFileURL: \(fileURL.path)")
-                    coordinator?.fileTagTapped(with: fileURL)
+                if let fileURLVal = textStorage.attribute(NSAttributedString.Key.devgenticFileURL, at: charIndex, effectiveRange: nil) as? URL {
+                    coordinator?.parent.logger.debug("Clicked on text with devgenticFileURL: \(fileURLVal.path)")
+                    coordinator?.fileTagTapped(with: fileURLVal)
                     return
                 }
             }
@@ -323,13 +319,14 @@ struct CustomTextEditor: NSViewRepresentable {
                 let deletionLocation = affectedCharRange.location
                 if deletionLocation >= 0 && deletionLocation < textStorage.length {
                     var effectiveRange = NSRange()
-                    if textStorage.attribute(.promptID, at: deletionLocation, effectiveRange: &effectiveRange) != nil {
+                    // Use the centrally defined keys
+                    if textStorage.attribute(NSAttributedString.Key.promptID, at: deletionLocation, effectiveRange: &effectiveRange) != nil {
                         parent.logger.debug("Atomic deletion triggered for prompt tag at range: \(effectiveRange)")
                         performAtomicDeletion(for: effectiveRange, in: textStorage, textView: textView)
                         return false
                     }
                     effectiveRange = NSRange()
-                    if textStorage.attribute(.devgenticFileURL, at: deletionLocation, effectiveRange: &effectiveRange) != nil {
+                    if textStorage.attribute(NSAttributedString.Key.devgenticFileURL, at: deletionLocation, effectiveRange: &effectiveRange) != nil {
                         parent.logger.debug("Atomic deletion triggered for file tag at range: \(effectiveRange)")
                         performAtomicDeletion(for: effectiveRange, in: textStorage, textView: textView)
                         return false
@@ -507,25 +504,28 @@ struct CustomTextEditor: NSViewRepresentable {
             if range.length == 0 {
                 var cursorIsInsideTaggedSegment = false
                 if range.location > 0 {
-                    if textView.textStorage?.attribute(.promptID, at: range.location - 1, effectiveRange: nil) != nil ||
-                       textView.textStorage?.attribute(.devgenticFileURL, at: range.location - 1, effectiveRange: nil) != nil {
+                    // Use the centrally defined keys
+                    if textView.textStorage?.attribute(NSAttributedString.Key.promptID, at: range.location - 1, effectiveRange: nil) != nil ||
+                       textView.textStorage?.attribute(NSAttributedString.Key.devgenticFileURL, at: range.location - 1, effectiveRange: nil) != nil {
                         cursorIsInsideTaggedSegment = true
                     }
                 }
                 if !cursorIsInsideTaggedSegment && range.location < textView.string.count {
-                     if textView.textStorage?.attribute(.promptID, at: range.location, effectiveRange: nil) != nil ||
-                        textView.textStorage?.attribute(.devgenticFileURL, at: range.location, effectiveRange: nil) != nil {
+                     if textView.textStorage?.attribute(NSAttributedString.Key.promptID, at: range.location, effectiveRange: nil) != nil ||
+                        textView.textStorage?.attribute(NSAttributedString.Key.devgenticFileURL, at: range.location, effectiveRange: nil) != nil {
                         cursorIsInsideTaggedSegment = true
                     }
                 }
                 if !cursorIsInsideTaggedSegment {
                     let currentTypingAttrs = textView.typingAttributes
                     var needsReset = false
-                    if currentTypingAttrs[.promptID] != nil || currentTypingAttrs[.devgenticFileURL] != nil {
+                    if currentTypingAttrs[NSAttributedString.Key.promptID] != nil || currentTypingAttrs[NSAttributedString.Key.devgenticFileURL] != nil {
                         needsReset = true
-                    } else if (currentTypingAttrs[.font] as? NSFont) != (defaultTypingAttributes[.font] as? NSFont) {
+                    }
+                    else if (currentTypingAttrs[.font] as? NSFont) != (defaultTypingAttributes[.font] as? NSFont) {
                         needsReset = true
-                    } else if (currentTypingAttrs[.foregroundColor] as? NSColor) != (defaultTypingAttributes[.foregroundColor] as? NSColor) {
+                    }
+                    else if (currentTypingAttrs[.foregroundColor] as? NSColor) != (defaultTypingAttributes[.foregroundColor] as? NSColor) {
                         needsReset = true
                     }
                     if needsReset {
@@ -566,7 +566,9 @@ struct CustomTextEditor: NSViewRepresentable {
 }
 
 // MARK: - Preview
-struct CustomTextEditor_Previews_Phase5_Corrected: PreviewProvider { // Renamed preview struct
+// Ensure this preview can access the centrally defined keys if it uses them.
+// For this preview, it's mostly about the CustomTextEditor's own functionality.
+struct CustomTextEditor_Previews_Phase5_Corrected: PreviewProvider {
     @State static var textContent: String = "Test #SampleTag and @FileMention.txt here."
     @State static var showPrompts: Bool = false
     @State static var promptQuery: String = ""
@@ -597,5 +599,9 @@ struct CustomTextEditor_Previews_Phase5_Corrected: PreviewProvider { // Renamed 
         .padding()
         .frame(width: 350, height: 100)
         .previewDisplayName("CustomTextEditor with Attributed Commit (Corrected)")
+        .preferredColorScheme(.dark)
     }
 }
+
+// MODIFICATION: Removed the NSAttributedString.Key extension from here.
+// It should now be in a separate file like AttributedStringKeys.swift.
