@@ -8,6 +8,7 @@ import AVFoundation // Required for AVCaptureDevice
 
 // Logger for the ViewModel
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MainApplicationViewModel")
+private let attachedFilesLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainAppViewModel_AttachedFiles")
 
 // Assuming SettingsSection, BackendType, SettingsKeys, Conversation,
 // ChatMessage, MessageContent, ConversationStore, AppDelegate, OllamaService,
@@ -51,6 +52,8 @@ class MainApplicationViewModel: ObservableObject {
     @Published var showContextArea: Bool = false
     @Published var activeContextFilePath: String? = nil
     @Published var isUserMessagesOnlyFilterActive: Bool = false
+    @Published var attachedFiles: [FileSystemItem] = []
+    
 
     // MARK: - Voice Input State
     enum VoiceInputState: Equatable {
@@ -285,10 +288,10 @@ class MainApplicationViewModel: ObservableObject {
         var plainTextForLLM = ""
         var attachedFileContents: [String] = []
         
-        attributedString.enumerateAttributes(in: NSRange(location: 0, length: attributedString.length), options: []) { attrs, range, stop in
+        attributedString.enumerateAttributes(in: NSRange(location: 0, length: attributedString.length), options: []) { urlValue, range, stop in
             let segmentString = attributedString.attributedSubstring(from: range).string
 
-            if let fileURL = attrs[NSAttributedString.Key.devgenticFileURL] as? URL {
+            if let fileURL = urlValue as? URL {
                 plainTextForLLM += segmentString
                 logger.debug("Found file tag: \(segmentString) for URL: \(fileURL.path)")
 
@@ -787,4 +790,73 @@ class MainApplicationViewModel: ObservableObject {
         else if calendar.isDateInYesterday(date) { return "Yesterday" }
         else { return self.groupDateFormatter.string(from: date) }
     }
+    
+    /// Adds a single file to the `attachedFiles` list.
+        /// - Parameter fileItem: The `FileSystemItem` to add.
+        /// - Note: This implementation prevents adding duplicate files based on their URL (id).
+        @MainActor
+        func addAttachedFile(fileItem: FileSystemItem) {
+            if !attachedFiles.contains(where: { $0.id == fileItem.id }) {
+                attachedFiles.append(fileItem)
+                attachedFilesLogger.info("Added attached file: \(fileItem.name) - Path: \(fileItem.url.path)")
+            } else {
+                attachedFilesLogger.info("File already attached, not adding duplicate: \(fileItem.name)")
+            }
+        }
+
+        /// Adds multiple files to the `attachedFiles` list.
+        /// - Parameter fileItems: An array of `FileSystemItem`s to add.
+        /// - Note: This implementation prevents adding duplicate files based on their URL (id).
+        @MainActor
+        func addAttachedFiles(fileItems: [FileSystemItem]) {
+            var newFilesAddedCount = 0
+            for fileItem in fileItems {
+                if !attachedFiles.contains(where: { $0.id == fileItem.id }) {
+                    attachedFiles.append(fileItem)
+                    newFilesAddedCount += 1
+                    attachedFilesLogger.info("Added attached file (batch): \(fileItem.name) - Path: \(fileItem.url.path)")
+                } else {
+                    attachedFilesLogger.info("File already attached (batch), not adding duplicate: \(fileItem.name)")
+                }
+            }
+            if newFilesAddedCount > 0 {
+                attachedFilesLogger.info("\(newFilesAddedCount) new file(s) added to attached files list.")
+            }
+        }
+
+        /// Removes a specific file from the `attachedFiles` list.
+        /// - Parameter fileItem: The `FileSystemItem` to remove.
+        @MainActor
+        func removeAttachedFile(fileItem: FileSystemItem) {
+            if let index = attachedFiles.firstIndex(where: { $0.id == fileItem.id }) {
+                let removedItem = attachedFiles.remove(at: index)
+                attachedFilesLogger.info("Removed attached file: \(removedItem.name) - Path: \(removedItem.url.path)")
+            } else {
+                attachedFilesLogger.warning("Attempted to remove a file that was not found in the attached list: \(fileItem.name)")
+            }
+        }
+        
+        /// Removes a specific file from the `attachedFiles` list by its ID (URL).
+        /// - Parameter fileId: The URL (ID) of the `FileSystemItem` to remove.
+        @MainActor
+        func removeAttachedFile(byId fileId: URL) {
+            if let index = attachedFiles.firstIndex(where: { $0.id == fileId }) {
+                let removedItem = attachedFiles.remove(at: index)
+                attachedFilesLogger.info("Removed attached file by ID: \(removedItem.name) - Path: \(removedItem.url.path)")
+            } else {
+                attachedFilesLogger.warning("Attempted to remove a file by ID that was not found in the attached list: \(fileId.path)")
+            }
+        }
+
+
+        /// Clears all files from the `attachedFiles` list.
+        @MainActor
+        func clearAttachedFiles() {
+            if !attachedFiles.isEmpty {
+                attachedFiles.removeAll()
+                attachedFilesLogger.info("Cleared all (\(self.attachedFiles.count)) attached files.")
+            } else {
+                attachedFilesLogger.info("No attached files to clear.")
+            }
+        }
 }
