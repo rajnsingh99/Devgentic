@@ -1,4 +1,10 @@
-// ViewModels/MainApplicationViewModel.swift
+//
+//  MainApplicationViewModel
+//  Devgentic
+//
+//  Created by Raj Singh on 15/04/25.
+//
+
 import SwiftUI
 import Combine
 import os
@@ -10,18 +16,18 @@ import AVFoundation // Required for AVCaptureDevice
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MainApplicationViewModel")
 private let attachedFilesLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainAppViewModel_AttachedFiles")
 
-// Assuming SettingsSection, BackendType, SettingsKeys, Conversation,
-// ChatMessage, MessageContent, ConversationStore, AppDelegate, OllamaService,
-// AIConnect, AgentResponseHandler, ErrorHandling are defined elsewhere.
-
 @MainActor // Ensure UI updates happen on the main thread
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
     private let store = ConversationStore.shared
-    private let aiConnect = AIConnect()
-    private let responseHandler = AgentResponseHandler()
+    // Removed: private let aiConnect = AIConnect()
+    // Removed: private let responseHandler = AgentResponseHandler()
     
+    private let fileProcessorService: FileProcessorService
+    private let messageAssemblerService: MessageAssemblerService
+    private let llmCommunicator: LLMCommunicatorProtocol // Added
+
     @ObservedObject var ollamaService: OllamaService
 
     // MARK: - Voice Input Services
@@ -29,17 +35,17 @@ class MainApplicationViewModel: ObservableObject {
     private let speechRecognitionService: NativeSpeechRecognitionService
     
     private var cancellables = Set<AnyCancellable>()
+    private var textInEditorBeforeVoiceInput: String = ""
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
+    // ... (no changes to these properties) ...
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
     @Published var userInput: String = ""
     @Published var isSidebarCollapsed: Bool = true
     @Published var showSettings: Bool = false
-    
     @Published var showPromptLibrary: Bool = false
-
     @Published var selectedSettingsSection: SettingsSection = .general {
         didSet {
             if selectedSettingsSection == .localAI && selectedBackend == .ollama {
@@ -53,44 +59,14 @@ class MainApplicationViewModel: ObservableObject {
     @Published var activeContextFilePath: String? = nil
     @Published var isUserMessagesOnlyFilterActive: Bool = false
     @Published var attachedFiles: [FileSystemItem] = []
-    
-
-    // MARK: - Voice Input State
-    enum VoiceInputState: Equatable {
-        case idle
-        case requestingPermissions
-        case permissionsDeniedMic
-        case permissionsDeniedSpeech
-        case speechRecognitionUnavailable
-        case available
-        case recording
-        case processing
-        case error(String)
-        
-        // Custom description for logging purposes
-        var description: String {
-            switch self {
-            case .idle: return "idle"
-            case .requestingPermissions: return "requestingPermissions"
-            case .permissionsDeniedMic: return "permissionsDeniedMic"
-            case .permissionsDeniedSpeech: return "permissionsDeniedSpeech"
-            case .speechRecognitionUnavailable: return "speechRecognitionUnavailable"
-            case .available: return "available"
-            case .recording: return "recording"
-            case .processing: return "processing"
-            case .error(let msg): return "error(\(msg.prefix(30)))" // Truncate error for brevity in logs
-            }
-        }
-    }
     @Published var voiceInputState: VoiceInputState = .idle
-    private var textInEditorBeforeVoiceInput: String = ""
 
     // --- Settings Properties ---
+    // ... (AppStorage properties remain the same) ...
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .ollama
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
     @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
-    
     @AppStorage(SettingsKeys.ollamaTemperature) var ollamaTemperature: Double = 0.8
     @AppStorage(SettingsKeys.ollamaTopK) var ollamaTopK: Int = 40
     @AppStorage(SettingsKeys.ollamaTopP) var ollamaTopP: Double = 0.9
@@ -106,6 +82,7 @@ class MainApplicationViewModel: ObservableObject {
     }()
 
     // MARK: - Computed Properties
+    // ... (currentChatMessages, currentConversationTitle, groupedConversations, sortedGroupKeys remain the same) ...
     var currentChatMessages: [ChatMessage] {
         guard let selectedID = selectedConversationID,
               let conversation = self.conversations.first(where: { $0.id == selectedID }) else {
@@ -151,11 +128,23 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Initialization
     init(ollamaService: OllamaService,
          audioEngineService: AudioEngineService = AudioEngineService(),
-         speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService()) {
+         speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
+         fileProcessorService: FileProcessorService = FileProcessorService(),
+         messageAssemblerService: MessageAssemblerService? = nil,
+         llmCommunicator: LLMCommunicatorProtocol? = nil // Added communicator
+    ) {
         self.ollamaService = ollamaService
         self.audioEngineService = audioEngineService
         self.speechRecognitionService = speechRecognitionService
         
+        self.fileProcessorService = fileProcessorService
+        self.messageAssemblerService = messageAssemblerService ?? MessageAssemblerService(fileProcessorService: self.fileProcessorService)
+        
+        // Initialize LLMCommunicator, potentially passing its own dependencies if needed by its concrete type
+        // For DefaultLLMCommunicator, it uses default instances of AIConnect and AgentResponseHandler if not provided.
+        self.llmCommunicator = llmCommunicator ?? DefaultLLMCommunicator(fileProcessorService: self.fileProcessorService)
+
+
         self.conversations = store.getAllConversations()
         validateSelectedConversation()
         observeConversationStoreChanges()
@@ -188,11 +177,20 @@ class MainApplicationViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    // Convenience init to maintain existing call sites if they don't pass the new services
     convenience init() {
-        self.init(ollamaService: OllamaService())
+        let fpService = FileProcessorService()
+        let maService = MessageAssemblerService(fileProcessorService: fpService)
+        let comm = DefaultLLMCommunicator(fileProcessorService: fpService)
+        self.init(ollamaService: OllamaService(),
+                  fileProcessorService: fpService,
+                  messageAssemblerService: maService,
+                  llmCommunicator: comm)
     }
 
+
     deinit {
+        // ... (remains the same) ...
         logger.info("MainApplicationViewModel deinitialized.")
         cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
@@ -205,6 +203,7 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func observeConversationStoreChanges() {
+        // ... (remains the same) ...
         store.$conversations
             .receive(on: DispatchQueue.main)
             .sink { [weak self] updatedConversationsFromStore in
@@ -216,6 +215,7 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     private func validateSelectedConversation() {
+        // ... (remains the same) ...
         if let currentSelectedID = selectedConversationID {
             if !conversations.contains(where: { $0.id == currentSelectedID }) {
                 selectedConversationID = conversations.first?.id
@@ -226,6 +226,7 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)
+    // ... (toggleUserMessagesFilter, startNewConversation, createAndSelectNewConversation remain the same) ...
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
     }
@@ -234,6 +235,7 @@ class MainApplicationViewModel: ObservableObject {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
         userInput = ""
+        clearAttachedFiles()
         
         let currentConversations = store.getAllConversations()
         if let mostRecentConv = currentConversations.first(where: {$0.messages.isEmpty}) {
@@ -256,17 +258,25 @@ class MainApplicationViewModel: ObservableObject {
         return newConversation.id
     }
 
-    // MARK: - Message Sending Logic
+    // MARK: - Message Sending Logic (Refactored for LLMCommunicator)
     func sendMessage(attributedString: NSAttributedString) {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
         
-        let plainUserInputFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        logger.debug("sendMessage called. Backend: \(String(describing: self.selectedBackend.rawValue)), isSending: \(self.isSending), attributedInput (plain): \"\(plainUserInputFromEditor.prefix(50))...\"")
+        let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filesToProcess = self.attachedFiles
+        
+        logger.debug("""
+            sendMessage called. Backend: \(String(describing: self.selectedBackend.rawValue)), isSending: \(self.isSending),
+            Plain User Query: \"\(plainUserQueryFromEditor.prefix(50))...\", Attached Files Count: \(filesToProcess.count)
+            """)
 
-        guard !isSending else { logger.warning("sendMessage aborted: Already sending."); return }
-        guard !plainUserInputFromEditor.isEmpty else {
-            logger.info("sendMessage aborted: Input (from attributedString) empty.")
+        guard !isSending else {
+            logger.warning("sendMessage aborted: Already sending.")
+            return
+        }
+        guard !plainUserQueryFromEditor.isEmpty || !filesToProcess.isEmpty else {
+            logger.info("sendMessage aborted: Input empty and no files attached.")
             if !self.userInput.isEmpty { self.userInput = "" }
             return
         }
@@ -285,118 +295,131 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
-        var plainTextForLLM = ""
-        var attachedFileContents: [String] = []
-        
-        attributedString.enumerateAttributes(in: NSRange(location: 0, length: attributedString.length), options: []) { urlValue, range, stop in
-            let segmentString = attributedString.attributedSubstring(from: range).string
-
-            if let fileURL = urlValue as? URL {
-                plainTextForLLM += segmentString
-                logger.debug("Found file tag: \(segmentString) for URL: \(fileURL.path)")
-
-                let didStartAccess = fileURL.startAccessingSecurityScopedResource()
-                defer {
-                    if didStartAccess {
-                        fileURL.stopAccessingSecurityScopedResource()
-                        logger.trace("Stopped security-scoped access for \(fileURL.lastPathComponent)")
-                    }
-                }
-
-                if didStartAccess {
-                    logger.trace("Started security-scoped access for \(fileURL.lastPathComponent)")
-                    do {
-                        let content = try String(contentsOf: fileURL, encoding: .utf8)
-                        let fileContext = """
-                        --- Content of file: \(fileURL.lastPathComponent) ---
-                        \(content)
-                        --- End of file: \(fileURL.lastPathComponent) ---
-                        """
-                        attachedFileContents.append(fileContext)
-                        logger.debug("Successfully read and appended content for file: \(fileURL.lastPathComponent)")
-                    } catch {
-                        logger.error("Error reading file \(fileURL.lastPathComponent): \(error.localizedDescription)")
-                        attachedFileContents.append("--- Error reading file: \(fileURL.lastPathComponent): \(error.localizedDescription) ---")
-                    }
-                } else {
-                    logger.error("Could not start security-scoped access for file: \(fileURL.lastPathComponent)")
-                    attachedFileContents.append("--- Could not access file: \(fileURL.lastPathComponent) ---")
-                }
-            } else {
-                plainTextForLLM += segmentString
-            }
+        if !plainUserQueryFromEditor.isEmpty {
+            let userMessageForDisplay = ChatMessage(
+                conversationId: conversationIDToUse,
+                sender: .user,
+                content: .plainText(plainUserQueryFromEditor)
+            )
+            targetConversationForUserMessage.messages.append(userMessageForDisplay)
+            targetConversationForUserMessage.timestamp = Date()
+            store.updateConversation(targetConversationForUserMessage)
+        } else if filesToProcess.isEmpty {
+            logger.info("sendMessage: No text and no files to send. Aborting actual send logic.")
+            isSending = false
+            return
         }
 
-        var messageToSendToBackend = plainTextForLLM
-        if !attachedFileContents.isEmpty {
-            messageToSendToBackend += "\n\n" + attachedFileContents.joined(separator: "\n\n")
-        }
-        
-        var finalMessageWithContextPrefix = messageToSendToBackend
-        if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
-            finalMessageWithContextPrefix = "Context File: \(filePath)\n\nUser Message and Attached Files:\n" + messageToSendToBackend
-            logger.debug("Prepended active context file path: \(filePath)")
-        }
-
-        let userMessageForDisplay = ChatMessage(
-            conversationId: conversationIDToUse,
-            sender: .user,
-            content: .plainText(plainUserInputFromEditor)
-        )
-        
-        targetConversationForUserMessage.messages.append(userMessageForDisplay)
-        targetConversationForUserMessage.timestamp = Date()
-        store.updateConversation(targetConversationForUserMessage)
-
-        self.userInput = ""
-        isSending = true
+        self.isSending = true
 
         Task {
             var agentMessagesForThisTurn: [ChatMessage] = []
             
-            if selectedBackend == .ollama {
-                 if ollamaService.serverStatus != .connected && ollamaService.serverStatus != .checking {
-                      logger.info("Ollama status is \(String(describing: self.ollamaService.serverStatus.rawValue)), re-checking before sending.")
-                      await ollamaService.checkServerStatusAndUpdateModels()
-                 }
-                 if ollamaService.serverStatus != .connected {
-                    let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(String(describing: self.ollamaService.serverStatus.rawValue))"
-                    logger.error("\(errorMsg)")
-                    let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg)
-                    let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
-                    agentMessagesForThisTurn.append(errorChatMessage)
-                 }
+            // 1. Assemble MessageParts
+            let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
+                userQuery: plainUserQueryFromEditor,
+                attachedFiles: filesToProcess,
+                for: self.selectedBackend,
+                ollamaModelDetails: nil
+            )
+
+            // 2. Handle processing warnings
+            if !processingWarnings.isEmpty {
+                logger.warning("File processing warnings: \(processingWarnings.joined(separator: "; "))")
+                let warningTitle = "File Processing Notice"
+                let details = processingWarnings.joined(separator: "\n- ")
+                let warningContent = MessageContent.error(title: warningTitle, details: "- " + details)
+                let warningMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: warningContent) // Changed sender to .system for warnings
+                agentMessagesForThisTurn.append(warningMessage)
             }
 
-            if agentMessagesForThisTurn.isEmpty {
-                let backendConfig = self.determineBackendConfiguration(message: finalMessageWithContextPrefix)
-                do {
-                    logger.debug("Sending task to \(backendConfig.url)\(backendConfig.endpoint). Message (first 200 chars): '\(finalMessageWithContextPrefix.prefix(200))'")
-                    
-                    let responseData = try await self.aiConnect.postToLocalServer(endpoint: backendConfig.endpoint, payload: backendConfig.payload)
-                    let responseText = try responseHandler.parseInitialResponse(data: responseData, for: self.selectedBackend)
-                    let parsedContents = responseHandler.parseTextToMessageContent(responseText)
+            // 3. Filter unprocessable parts
+            let processableParts = messageParts.filter { (part: MessagePart) -> Bool in
+                if let fileRep = part.fileRepresentation {
+                    if case .unprocessable = fileRep { return false }
+                }
+                return true
+            }
 
-                    for content in parsedContents {
-                        let agentMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: content)
-                        agentMessagesForThisTurn.append(agentMessage)
+            let hasTextToSend = processableParts.contains { $0.type == .text && !$0.content.isEmpty }
+            let hasFilesToSend = processableParts.contains { $0.type == .file }
+
+            if !hasTextToSend && !hasFilesToSend {
+                logger.info("No processable content to send to LLM after assembly and filtering.")
+            } else {
+                // 4. Pre-communication checks (e.g., Ollama server status)
+                if self.selectedBackend == .ollama {
+                    if ollamaService.serverStatus != .connected && ollamaService.serverStatus != .checking {
+                        logger.info("Ollama status is \(String(describing: self.ollamaService.serverStatus.rawValue)), re-checking before sending.")
+                        await ollamaService.checkServerStatusAndUpdateModels()
                     }
-                } catch {
-                    logger.error("Error during API call or parsing: \(error.localizedDescription)")
-                    let errorText = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
-                    let errorMessageContent = MessageContent.error(title: "Processing Error", details: errorText)
-                    let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
-                    agentMessagesForThisTurn.append(errorChatMessage)
-                    
-                     if selectedBackend == .ollama {
-                         if let urlError = error as? URLError,
-                            (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
-                             ollamaService.serverStatus = .disconnected
-                         }
-                     }
+                    if ollamaService.serverStatus != .connected {
+                        let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(String(describing: self.ollamaService.serverStatus.rawValue))"
+                        logger.error("\(errorMsg)")
+                        let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg)
+                        let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
+                        agentMessagesForThisTurn.append(errorChatMessage)
+                    }
+                }
+                
+                // 5. Proceed with LLM communication if no preliminary errors
+                if !agentMessagesForThisTurn.contains(where: { (message: ChatMessage) -> Bool in
+                     if case .error = message.content { return true }
+                     return false
+                }) {
+                    // Determine backend configuration (URL, endpoint, static LLM params)
+                    // The actual 'prompt' or 'payload' part of this config will be overridden by the communicator
+                    // based on the `processableParts`.
+                    // The `message` parameter to `determineBackendConfiguration` is now less critical for payload,
+                    // but might still be used for other dynamic aspects of the config if any.
+                    // For now, pass empty string as the communicator will build the main payload.
+                    let baseBackendConfig = self.determineBackendConfiguration(message: "") // Pass empty, communicator builds payload
+
+                    // Add context prefix to processableParts if active
+                    var finalPartsToSend = processableParts
+                    if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
+                         let contextText = "Context File: \(filePath)\n\nUser Message and Attached Files:\n"
+                         finalPartsToSend.insert(.text(contextText), at: 0) // Prepend context
+                         logger.debug("Prepended active context file path to message parts: \(filePath)")
+                    }
+
+                    do {
+                        logger.debug("Calling LLM Communicator for backend: \(self.selectedBackend.rawValue)")
+                        
+                        let llmResponse = try await self.llmCommunicator.sendMessage(
+                            parts: finalPartsToSend, // Use parts with prepended context if any
+                            to: self.selectedBackend,
+                            config: baseBackendConfig // Pass the base config
+                        )
+
+                        for contentBlock in llmResponse.content {
+                            let agentMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: contentBlock)
+                            agentMessagesForThisTurn.append(agentMessage)
+                        }
+                        if let commError = llmResponse.error { // Check for non-critical errors from communicator
+                            logger.error("LLMCommunicator reported an error in response: \(commError.localizedDescription)")
+                            let errorContent = MessageContent.error(title: "LLM Error", details: commError.localizedDescription)
+                            agentMessagesForThisTurn.append(ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorContent))
+                        }
+
+                    } catch {
+                        logger.error("Error from LLMCommunicator.sendMessage: \(error.localizedDescription)")
+                        let errorText = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
+                        let errorMessageContent = MessageContent.error(title: "Communication Error", details: errorText)
+                        let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
+                        agentMessagesForThisTurn.append(errorChatMessage)
+                        
+                        if selectedBackend == .ollama { // Update Ollama status on specific network errors
+                            if let urlError = error as? URLError,
+                               (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
+                                ollamaService.serverStatus = .disconnected
+                            }
+                        }
+                    }
                 }
             }
 
+            // 6. Update chat history and UI
             if !agentMessagesForThisTurn.isEmpty {
                 guard var targetConversationForAgentMessages = store.getConversation(withId: conversationIDToUse) else {
                     logger.error("CRITICAL: Could not find conversation for ID: \(conversationIDToUse.uuidString) to add agent messages.")
@@ -406,36 +429,70 @@ class MainApplicationViewModel: ObservableObject {
                 for msg in agentMessagesForThisTurn { targetConversationForAgentMessages.messages.append(msg) }
                 targetConversationForAgentMessages.timestamp = Date()
                 store.updateConversation(targetConversationForAgentMessages)
-                logger.debug("Appended \(agentMessagesForThisTurn.count) agent message(s) to conversation \(conversationIDToUse.uuidString) via store.")
+                logger.debug("Appended \(agentMessagesForThisTurn.count) agent/system message(s) to conversation \(conversationIDToUse.uuidString) via store.")
             } else if isSending {
-                 logger.warning("sendMessage Task finished but generated no agent messages to handle.")
+                 logger.warning("sendMessage Task finished but generated no agent/system messages to handle.")
             }
             
-            self.isSending = false
+            await MainActor.run {
+                self.userInput = ""
+                self.attachedFiles.removeAll()
+                self.isSending = false
+            }
         }
     }
 
+
+    private func determineBackendConfiguration(message: String) -> BackendConfiguration {
+        // 'message' parameter is now less important here as communicator builds the main payload.
+        // It could be used if some part of the config depends on the raw user text, but unlikely for now.
+        switch self.selectedBackend {
+        case .ollama:
+            let advancedOptions: [String: Any] = [
+                "temperature": self.ollamaTemperature, "top_k": self.ollamaTopK,
+                "top_p": self.ollamaTopP, "repeat_penalty": self.ollamaRepeatPenalty,
+                "num_ctx": self.ollamaContextWindowSize, "num_gpu": self.ollamaGpuLayers
+            ]
+            let modelName = ollamaService.llmModelName.isEmpty ? "default_model_name" : ollamaService.llmModelName
+            // The "prompt" key will be added/overridden by the LLMCommunicator
+            let initialPayload: [String: Any] = [
+                "model": modelName, "stream": false, "options": advancedOptions
+            ]
+            return BackendConfiguration(
+                url: "http://127.0.0.1:11434", // Ollama base URL
+                endpoint: "/api/generate",
+                payload: initialPayload
+            )
+        case .agent:
+            // The "main_task" key will be added/overridden by the LLMCommunicator
+            let initialPayload: [String: Any] = [
+                "strategy": self.agentDelegationStrategy
+            ]
+            return BackendConfiguration(
+                url: self.agentBaseURL,
+                endpoint: "/execute_task",
+                payload: initialPayload
+            )
+        }
+    }
+    
     // MARK: - Voice Input Methods
+    // ... (checkVoiceInputPermissionsAndAvailability, checkSpeechRecognitionPermission, toggleVoiceInput, startVoiceCapture, stopVoiceCaptureAndFinalize remain the same) ...
     func checkVoiceInputPermissionsAndAvailability() {
         logger.info("Checking voice input permissions and availability...")
         self.voiceInputState = .requestingPermissions
-
         let currentMicStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         logger.debug("Current microphone permission status (synchronous check): \(String(describing: currentMicStatus.rawValue))")
-
         switch currentMicStatus {
         case .authorized:
             logger.info("Microphone permission is already granted.")
             checkSpeechRecognitionPermission()
-
         case .denied:
             logger.warning("Microphone permission was previously denied by user or policy.")
             self.voiceInputState = .permissionsDeniedMic
-        
         case .restricted:
             logger.warning("Microphone permission is restricted.")
             self.voiceInputState = .permissionsDeniedMic
-
         case .notDetermined:
             logger.info("Microphone permission is .notDetermined. Requesting via audioEngineService...")
             audioEngineService.requestMicrophonePermission { [weak self] grantedByRequestCallback in
@@ -458,7 +515,6 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("Checking speech recognition permission...")
         let currentSpeechAuthStatus = SFSpeechRecognizer.authorizationStatus()
         logger.debug("Current speech recognition status (synchronous check): \(String(describing: currentSpeechAuthStatus.rawValue))")
-
         switch currentSpeechAuthStatus {
         case .authorized:
             logger.info("Speech recognition permission already authorized.")
@@ -478,7 +534,6 @@ class MainApplicationViewModel: ObservableObject {
         case .notDetermined:
             logger.info("Speech recognition permission .notDetermined. Requesting via speechRecognitionService...")
             if self.voiceInputState != .requestingPermissions { self.voiceInputState = .requestingPermissions }
-            
             speechRecognitionService.requestSpeechRecognitionPermission { [weak self] statusAfterRequestCallback in
                 guard let self = self else { return }
                 logger.info("Callback from speechRecognitionService.requestSpeechRecognitionPermission. New status: \(String(describing: statusAfterRequestCallback.rawValue))")
@@ -507,7 +562,6 @@ class MainApplicationViewModel: ObservableObject {
 
     func toggleVoiceInput() {
         logger.info("Toggle voice input button tapped. Current voiceInputState: \(self.voiceInputState.description)")
-        
         switch self.voiceInputState {
         case .idle, .available:
             logger.info("Attempting to start voice capture.")
@@ -526,10 +580,8 @@ class MainApplicationViewModel: ObservableObject {
 
     private func startVoiceCapture() {
         logger.info("startVoiceCapture: Entered method.")
-        
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
-
         guard micStatus == .authorized else {
             logger.error("startVoiceCapture: Aborted. Microphone permission not .authorized (is \(String(describing: micStatus.rawValue))).")
             checkVoiceInputPermissionsAndAvailability()
@@ -545,49 +597,34 @@ class MainApplicationViewModel: ObservableObject {
             self.voiceInputState = .speechRecognitionUnavailable
             return
         }
-        
         logger.info("startVoiceCapture: All permissions and availability checks passed.")
         textInEditorBeforeVoiceInput = userInput
         logger.info("startVoiceCapture: Stored textInEditorBeforeVoiceInput: '\(self.textInEditorBeforeVoiceInput.prefix(30))'")
-
         do {
             logger.info("startVoiceCapture: Attempting to start audio engine...")
             try audioEngineService.startStreamingAudio { [weak self] (buffer, _) in
                 self?.speechRecognitionService.processAudioBuffer(buffer)
             }
             logger.info("startVoiceCapture: Audio engine successfully started.")
-
             logger.info("startVoiceCapture: Attempting to start speech recognition task...")
             try speechRecognitionService.startRecognition(recognitionHandler: { [weak self] (transcriptFromRecognizer, isFinal, error) in
                 guard let self = self else { return }
-                
                 let prefix = self.textInEditorBeforeVoiceInput
                 let separator = prefix.isEmpty || prefix.last == " " ? "" : " "
-
                 if let error = error {
                     let nsError = error as NSError
                     logger.error("Speech recognition handler error: Domain: \(nsError.domain), Code: \(nsError.code), Description: \(nsError.localizedDescription)")
-
-                    // MODIFICATION: Adjusted isCancellationError check for macOS 14+ SFSpeechError.Code
-                    // The specific SFSpeechError.Code members for cancellation might not be available.
-                    // We rely on the domain and potentially the description or other codes.
                     var isCancellationError = false
-                    if #available(macOS 14, *) { // Check for SFSpeechErrorDomain if available
+                    if #available(macOS 14, *) {
                         if nsError.domain == SFSpeechErrorDomain {
-                             // For macOS 14+, SFSpeechError.Code doesn't have explicit cancel codes.
-                             // A common pattern for cancellation is code 203 with "cancel" in description.
-                             // Or if the task is simply finalized by the system/user action without a specific "error".
                             if (nsError.code == 203 && nsError.localizedDescription.lowercased().contains("cancel")) {
                                 isCancellationError = true
                             }
-                            // Add other SFSpeechErrorDomain codes that might signify a benign stop if necessary
                         }
                     }
-                    // kAFAssistantErrorDomain is another source for user cancellation.
-                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107 { // User cancelled
+                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107 {
                         isCancellationError = true
                     }
-                                               
                     if isCancellationError {
                         logger.info("Recognition task was cancelled (likely intentional stop or end of audio). Treating as clean stop.")
                         if !transcriptFromRecognizer.isEmpty {
@@ -601,34 +638,26 @@ class MainApplicationViewModel: ObservableObject {
                         self.userInput = prefix
                         self.stopVoiceCaptureAndFinalize(customError: "No speech detected.")
                     } else {
-                        // For other errors, preserve original text and show error.
                         self.userInput = prefix
                         self.stopVoiceCaptureAndFinalize(customError: "Recognition error: \(error.localizedDescription.prefix(50))")
                     }
                     return
                 }
-
-                // No error, proceed with transcript update
                 if !transcriptFromRecognizer.isEmpty {
                     self.userInput = prefix + separator + transcriptFromRecognizer
                 } else {
-                    // If no error, but transcript is empty (e.g., silence leading to a non-final result)
-                    // keep the userInput as the prefix. Don't append an empty string.
-                    if isFinal { // If it's final and transcript is empty, userInput should be what it was before.
+                    if isFinal {
                         self.userInput = prefix
                     }
                 }
                 logger.trace("Transcript update. isFinal: \(isFinal), userInput: '\(self.userInput.prefix(100))'")
-
                 if isFinal {
-                    // This block is reached if error was nil and isFinal is true.
                     logger.info("Final transcript (natural end without error). userInput: '\(self.userInput.prefix(100))'")
                     self.stopVoiceCaptureAndFinalize(customError: nil)
                 }
             })
             logger.info("startVoiceCapture: Speech recognition task successfully started.")
             voiceInputState = .recording
-            
         } catch let audioError as AudioEngineError {
             logger.error("startVoiceCapture: AudioEngineError caught: \(audioError.localizedDescription)")
             voiceInputState = .error("Audio engine error: \(audioError.localizedDescription.prefix(50))")
@@ -646,7 +675,6 @@ class MainApplicationViewModel: ObservableObject {
 
     private func stopVoiceCaptureAndFinalize(customError: String?) {
         logger.info("stopVoiceCaptureAndFinalize: Entered. Error: \(customError ?? "None"). Current state: \(self.voiceInputState.description)")
-        
         guard voiceInputState == .recording || voiceInputState == .processing || audioEngineService.isRecording else {
             logger.info("stopVoiceCaptureAndFinalize: Not in recording/processing state or audio engine not active. No action needed or already stopping. Current state: \(self.voiceInputState.description), audioEngine.isRecording: \(String(describing: self.audioEngineService.isRecording))")
             if let err = customError, !err.isEmpty {
@@ -664,12 +692,10 @@ class MainApplicationViewModel: ObservableObject {
             }
             return
         }
-
         audioEngineService.stopStreamingAudio()
         logger.info("stopVoiceCaptureAndFinalize: Audio engine stopped.")
         speechRecognitionService.stopRecognition()
         logger.info("stopVoiceCaptureAndFinalize: Speech recognition service stop requested.")
-
         if let err = customError, !err.isEmpty {
             voiceInputState = .error(err)
             logger.info("stopVoiceCaptureAndFinalize: State set to .error: \(err)")
@@ -684,6 +710,7 @@ class MainApplicationViewModel: ObservableObject {
 
 
     // MARK: - Conversation Management
+    // ... (transferSelectedConversationToOverlay, deleteConversation, deleteMultipleConversations, deleteConversationsInGroup, renameConversation remain the same) ...
     func transferSelectedConversationToOverlay() {
         guard let conversationID = selectedConversationID else { return }
         UserDefaults.standard.set(conversationID.uuidString, forKey: SettingsKeys.quickAccessOverlayConversationId)
@@ -719,7 +746,9 @@ class MainApplicationViewModel: ObservableObject {
         store.updateConversation(conversationToRename)
     }
 
+
     // MARK: - UI Toggles
+    // ... (toggleSidebar, toggleSettings, togglePromptLibrary, toggleContextArea, requestEditPrompt remain the same) ...
     func toggleSidebar() {
         withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() }
         if !isSidebarCollapsed {
@@ -758,32 +787,7 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Private Helper Methods
-    private struct BackendConfiguration { let url: String; let endpoint: String; let payload: [String: Any] }
-    private func determineBackendConfiguration(message: String) -> BackendConfiguration {
-        switch self.selectedBackend {
-        case .ollama:
-            let advancedOptions: [String: Any] = [
-                "temperature": self.ollamaTemperature, "top_k": self.ollamaTopK,
-                "top_p": self.ollamaTopP, "repeat_penalty": self.ollamaRepeatPenalty,
-                "num_ctx": self.ollamaContextWindowSize, "num_gpu": self.ollamaGpuLayers
-            ]
-            let modelName = ollamaService.llmModelName.isEmpty ? "default_model_name" : ollamaService.llmModelName
-            return BackendConfiguration(
-                url: "http://127.0.0.1:11434",
-                endpoint: "/api/generate",
-                payload: [
-                    "model": modelName, "prompt": message, "stream": false, "options": advancedOptions
-                ]
-            )
-        case .agent:
-            return BackendConfiguration(
-                url: self.agentBaseURL,
-                endpoint: "/execute_task",
-                payload: [ "main_task": message, "strategy": self.agentDelegationStrategy ]
-            )
-        }
-    }
-    
+    // ... (groupKey, addAttachedFile, addAttachedFiles, removeAttachedFile, removeAttachedFile byId, clearAttachedFiles remain the same) ...
     func groupKey(for date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return "Today" }
@@ -791,72 +795,61 @@ class MainApplicationViewModel: ObservableObject {
         else { return self.groupDateFormatter.string(from: date) }
     }
     
-    /// Adds a single file to the `attachedFiles` list.
-        /// - Parameter fileItem: The `FileSystemItem` to add.
-        /// - Note: This implementation prevents adding duplicate files based on their URL (id).
-        @MainActor
-        func addAttachedFile(fileItem: FileSystemItem) {
+    @MainActor
+    func addAttachedFile(fileItem: FileSystemItem) {
+        if !attachedFiles.contains(where: { $0.id == fileItem.id }) {
+            attachedFiles.append(fileItem)
+            attachedFilesLogger.info("Added attached file: \(fileItem.name) - Path: \(fileItem.url.path)")
+        } else {
+            attachedFilesLogger.info("File already attached, not adding duplicate: \(fileItem.name)")
+        }
+    }
+
+    @MainActor
+    func addAttachedFiles(fileItems: [FileSystemItem]) {
+        var newFilesAddedCount = 0
+        for fileItem in fileItems {
             if !attachedFiles.contains(where: { $0.id == fileItem.id }) {
                 attachedFiles.append(fileItem)
-                attachedFilesLogger.info("Added attached file: \(fileItem.name) - Path: \(fileItem.url.path)")
+                newFilesAddedCount += 1
+                attachedFilesLogger.info("Added attached file (batch): \(fileItem.name) - Path: \(fileItem.url.path)")
             } else {
-                attachedFilesLogger.info("File already attached, not adding duplicate: \(fileItem.name)")
+                attachedFilesLogger.info("File already attached (batch), not adding duplicate: \(fileItem.name)")
             }
         }
+        if newFilesAddedCount > 0 {
+            attachedFilesLogger.info("\(newFilesAddedCount) new file(s) added to attached files list.")
+        }
+    }
 
-        /// Adds multiple files to the `attachedFiles` list.
-        /// - Parameter fileItems: An array of `FileSystemItem`s to add.
-        /// - Note: This implementation prevents adding duplicate files based on their URL (id).
-        @MainActor
-        func addAttachedFiles(fileItems: [FileSystemItem]) {
-            var newFilesAddedCount = 0
-            for fileItem in fileItems {
-                if !attachedFiles.contains(where: { $0.id == fileItem.id }) {
-                    attachedFiles.append(fileItem)
-                    newFilesAddedCount += 1
-                    attachedFilesLogger.info("Added attached file (batch): \(fileItem.name) - Path: \(fileItem.url.path)")
-                } else {
-                    attachedFilesLogger.info("File already attached (batch), not adding duplicate: \(fileItem.name)")
-                }
-            }
-            if newFilesAddedCount > 0 {
-                attachedFilesLogger.info("\(newFilesAddedCount) new file(s) added to attached files list.")
-            }
+    @MainActor
+    func removeAttachedFile(fileItem: FileSystemItem) {
+        if let index = attachedFiles.firstIndex(where: { $0.id == fileItem.id }) {
+            let removedItem = attachedFiles.remove(at: index)
+            attachedFilesLogger.info("Removed attached file: \(removedItem.name) - Path: \(removedItem.url.path)")
+        } else {
+            attachedFilesLogger.warning("Attempted to remove a file that was not found in the attached list: \(fileItem.name)")
         }
+    }
+    
+    @MainActor
+    func removeAttachedFile(byId fileId: URL) {
+        if let index = attachedFiles.firstIndex(where: { $0.id == fileId }) {
+            let removedItem = attachedFiles.remove(at: index)
+            attachedFilesLogger.info("Removed attached file by ID: \(removedItem.name) - Path: \(removedItem.url.path)")
+        } else {
+            attachedFilesLogger.warning("Attempted to remove a file by ID that was not found in the attached list: \(fileId.path)")
+        }
+    }
 
-        /// Removes a specific file from the `attachedFiles` list.
-        /// - Parameter fileItem: The `FileSystemItem` to remove.
-        @MainActor
-        func removeAttachedFile(fileItem: FileSystemItem) {
-            if let index = attachedFiles.firstIndex(where: { $0.id == fileItem.id }) {
-                let removedItem = attachedFiles.remove(at: index)
-                attachedFilesLogger.info("Removed attached file: \(removedItem.name) - Path: \(removedItem.url.path)")
-            } else {
-                attachedFilesLogger.warning("Attempted to remove a file that was not found in the attached list: \(fileItem.name)")
-            }
+    @MainActor
+    func clearAttachedFiles() {
+        if !attachedFiles.isEmpty {
+            let count = attachedFiles.count
+            attachedFiles.removeAll()
+            attachedFilesLogger.info("Cleared all (\(count)) attached files.")
+        } else {
+            attachedFilesLogger.info("No attached files to clear.")
         }
-        
-        /// Removes a specific file from the `attachedFiles` list by its ID (URL).
-        /// - Parameter fileId: The URL (ID) of the `FileSystemItem` to remove.
-        @MainActor
-        func removeAttachedFile(byId fileId: URL) {
-            if let index = attachedFiles.firstIndex(where: { $0.id == fileId }) {
-                let removedItem = attachedFiles.remove(at: index)
-                attachedFilesLogger.info("Removed attached file by ID: \(removedItem.name) - Path: \(removedItem.url.path)")
-            } else {
-                attachedFilesLogger.warning("Attempted to remove a file by ID that was not found in the attached list: \(fileId.path)")
-            }
-        }
-
-
-        /// Clears all files from the `attachedFiles` list.
-        @MainActor
-        func clearAttachedFiles() {
-            if !attachedFiles.isEmpty {
-                attachedFiles.removeAll()
-                attachedFilesLogger.info("Cleared all (\(self.attachedFiles.count)) attached files.")
-            } else {
-                attachedFilesLogger.info("No attached files to clear.")
-            }
-        }
+    }
 }
