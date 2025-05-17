@@ -1,4 +1,10 @@
-// Views/Sidebar/NewChatTabView.swift
+//
+//  NewChatTabView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 17/05/25.
+//
+
 import SwiftUI
 import os
 

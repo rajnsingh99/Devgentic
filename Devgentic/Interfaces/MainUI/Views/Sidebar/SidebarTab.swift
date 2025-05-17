@@ -1,12 +1,14 @@
+//
+//  SidebarTab.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 17/05/25.
+//
+
 import SwiftUI
-import Combine // For potential future use with ViewModel state
-import os     // For logging (optional here, but good practice)
+import Combine
+import os
 
-// Logger (Optional)
-// private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "Sidebar")
-
-// MARK: - SidebarTab Enum
-/// Represents the different tabs available in the Activity Bar.
 enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations

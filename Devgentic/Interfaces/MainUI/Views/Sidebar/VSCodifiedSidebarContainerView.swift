@@ -1,4 +1,10 @@
-// Views/Sidebar/VSCodifiedSidebarContainerView.swift (Pane Animation)
+//
+//  VSCodifiedSidebarContainerView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 17/05/25.
+//
+
 import SwiftUI
 import Combine
 import os

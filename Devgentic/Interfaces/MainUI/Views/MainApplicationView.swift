@@ -1,18 +1,20 @@
-//  /Users/alice/Documents/Workspace/mac-projects/Devgentic/Devgentic/MainApplicationView.swift
+//
+//  MainApplicationViewModel
+//  Devgentic
+//
+//  Created by Raj Singh on 15/04/25.
+//
+
 import SwiftUI
 import AppKit
 import os
 
-// Logger
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationView")
 
 // MARK: - Main View
 struct MainApplicationView: View {
     // --- ViewModel ---
     @StateObject private var viewModel = MainApplicationViewModel()
-    // NEW: Instantiate ExplorerViewModel here.
-    // This instance will be shared with views that need it, like ChatInputAreaView (for @ file suggestions)
-    // and your VSCodifiedSidebarContainerView (for displaying the file explorer).
     @StateObject private var explorerViewModel = ExplorerViewModel()
 
 
@@ -132,25 +134,10 @@ struct MainApplicationView: View {
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
 
 
-            // --- Layer 2: VS Code Style Sidebar ---
-            // This view also needs the explorerViewModel if it's responsible for displaying files
             VSCodifiedSidebarContainerView(isSidebarVisible: $isSidebarVisible)
-                // The .environmentObject(explorerViewModel) modifier on the ZStack will provide it here too.
                 .frame(width: isSidebarVisible ? (activityBarWidth + sideBarPaneIdealWidth) : activityBarWidth)
                 .zIndex(1)
 
-
-            // --- Layer 3: Settings Panel Overlay ---
-            if viewModel.showSettings {
-                SettingsPanelView(
-                    viewModel: viewModel,
-                    showSettings: $viewModel.showSettings
-                )
-                .transition(.scale.combined(with: .opacity))
-                .zIndex(2)
-            }
-
-            // MARK: - Layer 4: Prompt Library Panel Overlay
             if viewModel.showPromptLibrary {
                 PromptLibraryPanelView(showPromptLibrary: $viewModel.showPromptLibrary)
                     .transition(.scale.combined(with: .opacity))
@@ -226,9 +213,6 @@ struct MainApplicationView: View {
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
         MainApplicationView()
-            // The @StateObject wrappers in MainApplicationView will create instances for the preview.
-            // No explicit .environmentObject needed here for MainApplicationViewModel or ExplorerViewModel
-            // because they are @StateObject within MainApplicationView itself now.
             .frame(width: 900, height: 600)
             .previewDisplayName("Main View with Header and Filter")
     }

@@ -1,4 +1,10 @@
-// Views/Sidebar/ActivityBarView.swift
+//
+//  CommandCentreView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 17/05/25.
+//
+
 import SwiftUI
 
 struct ActivityBarView: View {
