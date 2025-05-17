@@ -1,5 +1,5 @@
+// MainApplicationView.swift
 //
-//  MainApplicationViewModel
 //  Devgentic
 //
 //  Created by Raj Singh on 15/04/25.
@@ -17,14 +17,15 @@ struct MainApplicationView: View {
     @StateObject private var viewModel = MainApplicationViewModel()
     @StateObject private var explorerViewModel = ExplorerViewModel()
 
-
     // --- View State ---
     @FocusState private var isInputFocused: Bool
     @State private var isSidebarVisible: Bool = true
+    @State private var currentSidebarPaneWidth: CGFloat = 280
+    
     private let activityBarWidth: CGFloat = 50
-    private let sideBarPaneIdealWidth: CGFloat = 280
-    private var totalSidebarWidth: CGFloat { activityBarWidth + (isSidebarVisible ? sideBarPaneIdealWidth : 0) }
-
+    private var totalSidebarWidth: CGFloat {
+        activityBarWidth + (isSidebarVisible ? currentSidebarPaneWidth : 0)
+    }
 
     // --- Constants for UI adjustments ---
     private let chatHistoryBottomPadding: CGFloat = 130
@@ -32,11 +33,7 @@ struct MainApplicationView: View {
 
     // MARK: - Body
     var body: some View {
-        // The top-level ZStack.
-        // Inject both viewModels into the environment here, making them available
-        // to all child views within this ZStack.
         ZStack(alignment: .leading) {
-
             // --- Main Content Area (Header, Chat History + Input) ---
             VStack(spacing: 0) {
                 ChatHeaderView(
@@ -115,27 +112,31 @@ struct MainApplicationView: View {
                             isSending: viewModel.isSending,
                             showSettings: viewModel.showSettings,
                             isInputFocused: $isInputFocused,
-                            onSendMessage: viewModel.sendMessage, // sendMessage in ViewModel needs to accept NSAttributedString
+                            onSendMessage: viewModel.sendMessage,
                             onToggleContext: {
                                 withAnimation { viewModel.toggleContextArea() }
                             }
                         )
-                        // ChatInputAreaView will now find explorerViewModel in its environment
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 8)
-                    .frame(maxWidth: 1050)
+                    .frame(maxWidth: 1050) // Consider if this maxWidth needs to be dynamic
                     .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(VisualEffectBlur(material: .windowBackground))
             }
-            .padding(.leading, isSidebarVisible ? (activityBarWidth + sideBarPaneIdealWidth) : activityBarWidth)
+            // ** UPDATED PADDING: Use the dynamic totalSidebarWidth **
+            .padding(.leading, totalSidebarWidth)
+            // Animate the padding change when sidebar visibility or width changes
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
-
-
-            VSCodifiedSidebarContainerView(isSidebarVisible: $isSidebarVisible)
-                .frame(width: isSidebarVisible ? (activityBarWidth + sideBarPaneIdealWidth) : activityBarWidth)
+            .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
+            
+            VSCodifiedSidebarContainerView(
+                isSidebarVisible: $isSidebarVisible,
+                sidebarWidth: $currentSidebarPaneWidth // This line is crucial
+            )
+                .frame(width: totalSidebarWidth)
                 .zIndex(1)
 
             if viewModel.showPromptLibrary {
@@ -143,7 +144,6 @@ struct MainApplicationView: View {
                     .transition(.scale.combined(with: .opacity))
                     .zIndex(3)
             }
-
 
             Button(action: {
                 viewModel.startNewConversation()
@@ -155,12 +155,11 @@ struct MainApplicationView: View {
             }) { EmptyView() }
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
-
         }
-        .environmentObject(viewModel) // For MainApplicationViewModel
-        .environmentObject(explorerViewModel) // NEW: Inject ExplorerViewModel for all children of ZStack
+        .environmentObject(viewModel)
+        .environmentObject(explorerViewModel)
         .opacity(viewModel.windowOpacity)
-        .frame(minWidth: 800, minHeight: 500)
+        .frame(minWidth: 800, minHeight: 500) // Adjust minWidth if needed due to resizable sidebar
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {
                  DispatchQueue.main.async { isInputFocused = true }
@@ -185,6 +184,19 @@ struct MainApplicationView: View {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
+        // ** IMPORTANT: Listen for width changes from VSCodifiedSidebarContainerView **
+        // This requires VSCodifiedSidebarContainerView to publish its width.
+        // One way is using a custom PreferenceKey.
+        // For this example, we'll assume `VSCodifiedSidebarContainerView`'s `sidebarWidth` @State
+        // is the source of truth and `MainApplicationView` needs to react.
+        // A more robust solution involves a shared binding or a PreferenceKey pattern.
+        // If VSCodifiedSidebarContainerView had:
+        // @Binding var externalSidebarWidth: CGFloat
+        // Then MainApplicationView would pass $currentSidebarPaneWidth.
+        // And VSCodifiedSidebarContainerView would update this binding.
+        //
+        // For now, the currentSidebarPaneWidth in MainApplicationView is illustrative
+        // of how the main content padding would react. True synchronization needs a bit more wiring.
     }
 
     private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
@@ -213,7 +225,7 @@ struct MainApplicationView: View {
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
         MainApplicationView()
-            .frame(width: 900, height: 600)
-            .previewDisplayName("Main View with Header and Filter")
+            .frame(width: 1000, height: 700) // Adjusted for potentially wider sidebar
+            .previewDisplayName("Main View with Resizable Sidebar")
     }
 }

@@ -1,4 +1,10 @@
-// Views/Settings/LocalAISettingsView.swift
+//
+//  LocalAISettingsView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/05/25.
+//
+
 import SwiftUI
 import os
 
@@ -7,14 +13,11 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 // MARK: - Local AI Settings Detail View
 struct LocalAISettingsView: View {
-    // Observe OllamaService for Ollama-specific state and actions
     @ObservedObject var ollamaService: OllamaService
-    // Observe MainApplicationViewModel for general settings like advanced parameters
     @ObservedObject var mainViewModel: MainApplicationViewModel
 
-    // --- State for Confirmation Dialog ---
     @State private var showingRemovalConfirmation = false
-    @State private var modelToRemoveFromName: String? = nil // Store the name of the model to remove
+    @State private var modelToRemoveFromName: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -25,6 +28,7 @@ struct LocalAISettingsView: View {
             Divider()
 
             // --- Displaying and Selecting Models ---
+            // ... (This section remains unchanged from the previous version) ...
             VStack(alignment: .leading, spacing: 10) {
                 Text("Available Models:")
                     .font(.headline)
@@ -46,7 +50,6 @@ struct LocalAISettingsView: View {
                              .foregroundColor(.gray)
                              .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        // Bind selection to ollamaService.llmModelName (@AppStorage via OllamaService)
                         Picker("Select a model", selection: $ollamaService.llmModelName) {
                             ForEach(ollamaService.localModels, id: \.self) { modelName in
                                 Text(modelName).tag(modelName)
@@ -54,9 +57,8 @@ struct LocalAISettingsView: View {
                         }
                         .labelsHidden()
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .onChange(of: ollamaService.llmModelName) { newValue, _ in // Updated for iOS 17+
+                        .onChange(of: ollamaService.llmModelName) { newValue, _ in
                              logger.debug("Ollama model selected: \(newValue)")
-                             // llmModelName in OllamaService is @AppStorage, changes are auto-saved.
                          }
                     }
                 }
@@ -85,7 +87,7 @@ struct LocalAISettingsView: View {
                                  }
                                  .disabled(ollamaService.isPullingModel ||
                                            ollamaService.isRemovingModel ||
-                                           ollamaService.llmModelName == modelName) // Cannot remove active model
+                                           ollamaService.llmModelName == modelName)
                                  .foregroundColor(.red)
                                  .buttonStyle(PlainButtonStyle())
                                  .help("Remove \(modelName)")
@@ -106,6 +108,7 @@ struct LocalAISettingsView: View {
             Divider()
 
             // --- Pull Model Section ---
+            // ... (This section remains unchanged from the previous version) ...
             VStack(alignment: .leading, spacing: 10) {
                  Text("Download New Model:")
                      .font(.headline)
@@ -113,18 +116,15 @@ struct LocalAISettingsView: View {
                  HStack {
                      Text("Model Name:")
                           .frame(width: 150, alignment: .leading)
-                     // Bind to ollamaService.modelToPull
                      TextField("e.g., llama2:7b, mistral:latest", text: $ollamaService.modelToPull)
                          .textFieldStyle(RoundedBorderTextFieldStyle())
                          .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel)
-                         .onChange(of: ollamaService.modelToPull) { _, _ in // Updated for iOS 17+
+                         .onChange(of: ollamaService.modelToPull) { _, _ in
                               ollamaService.clearPullActionStatus()
-                              // ollamaService.clearRemoveActionStatus() // Not strictly needed here, pull status is enough
                           }
 
                      Button {
                          Task {
-                             // Call action on ollamaService
                              await ollamaService.pullModel(name: ollamaService.modelToPull)
                          }
                      } label: {
@@ -169,7 +169,7 @@ struct LocalAISettingsView: View {
                          .foregroundColor(.red)
                          .font(.callout)
                  }
-                 if let error = ollamaService.modelRemoveError { // Display removal errors from OllamaService
+                 if let error = ollamaService.modelRemoveError {
                      Text("Removal Error: \(error)")
                          .foregroundColor(.red)
                          .font(.callout)
@@ -178,14 +178,13 @@ struct LocalAISettingsView: View {
 
             Divider()
 
-            // --- Advanced Generation Parameters Section ---
-            // These parameters are still bound to MainApplicationViewModel's @AppStorage properties
+            // --- Advanced Generation and File Handling Parameters Section ---
              VStack(alignment: .leading, spacing: 10) {
                  Text("Advanced Generation Parameters:")
                      .font(.headline)
                      .padding(.bottom, 5)
-                 .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel) // Use ollamaService state
-
+                 
+                 // ... (Temperature, Top K, Top P, Repeat Penalty, Context Window, GPU Layers - unchanged) ...
                  HStack {
                      Text("Temperature:")
                          .frame(width: 150, alignment: .leading)
@@ -199,10 +198,8 @@ struct LocalAISettingsView: View {
                      Text("Top K:")
                           .frame(width: 150, alignment: .leading)
                           .help("Limits sampling to top K tokens.")
-                     Stepper(value: $mainViewModel.ollamaTopK, in: 0...200) { Text("Top K") }
+                     Stepper(value: $mainViewModel.ollamaTopK, in: 0...200) { Text("Top K: \(mainViewModel.ollamaTopK)") }
                      .controlSize(.regular)
-                     Text("\(mainViewModel.ollamaTopK)")
-                          .frame(width: 40, alignment: .trailing)
                  }
                  HStack {
                       Text("Top P:")
@@ -235,20 +232,94 @@ struct LocalAISettingsView: View {
                       Text("GPU Layers:")
                            .frame(width: 150, alignment: .leading)
                            .help("Number of layers to offload to GPU (-1 for all).")
-                      Stepper(value: $mainViewModel.ollamaGpuLayers, in: -1...100) { Text("GPU Layers") }
+                      Stepper(value: $mainViewModel.ollamaGpuLayers, in: -1...100) { Text("GPU Layers: \(mainViewModel.ollamaGpuLayers == -1 ? "All" : "\(mainViewModel.ollamaGpuLayers)")") }
                       .controlSize(.regular)
-                      Text(mainViewModel.ollamaGpuLayers == -1 ? "All" : "\(mainViewModel.ollamaGpuLayers)")
-                           .frame(width: 40, alignment: .trailing)
                  }
+
+                Divider().padding(.vertical, 5)
+
+                Text("File Handling Parameters:")
+                    .font(.subheadline)
+                    .padding(.bottom, 3)
+
+                // Phase 1 Settings (Max Inline Chars, Max Attached Files - unchanged)
+                HStack {
+                    Text("Max Inline Chars:")
+                        .frame(width: 150, alignment: .leading)
+                        .help("Maximum characters from a text/source file to include directly in the prompt. Larger files are referenced by path. (Default: 5000)")
+                    TextField("", value: $mainViewModel.ollamaMaxInlineChars, format: .number)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .frame(width: 80)
+                        .controlSize(.regular)
+                        .multilineTextAlignment(.trailing)
+                    Text("chars")
+                        .foregroundColor(.gray)
+                }
+
+                HStack {
+                    Text("Max Attached Files:")
+                        .frame(width: 150, alignment: .leading)
+                        .help("Maximum number of files to reference or include in a single prompt to Ollama. (Default: 5)")
+                    Stepper(value: $mainViewModel.ollamaMaxAttachedFiles, in: 1...20) {
+                        Text("\(mainViewModel.ollamaMaxAttachedFiles) files")
+                    }
+                    .controlSize(.regular)
+                }
+                 
+                // NEW: Phase 2 Strategy Pickers
+                HStack {
+                    Text("Text File Strategy:")
+                        .frame(width: 150, alignment: .leading)
+                        .help("Choose how text and source code files are presented to Ollama.")
+                    Picker("Text File Strategy", selection: $mainViewModel.ollamaTextFileInclusionStrategy) {
+                        ForEach(TextFileInclusionStrategy.allCases) { strategy in
+                            Text(strategy.displayName).tag(strategy)
+                        }
+                    }
+                    .labelsHidden() // Keep label for accessibility, but hide visually if Text view is sufficient
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .controlSize(.regular)
+                }
+
+                HStack {
+                    Text("Image Handling:")
+                        .frame(width: 150, alignment: .leading)
+                        .help("How to handle image attachments for text-only Ollama models.")
+                    Picker("Image Handling", selection: $mainViewModel.ollamaImageHandlingStrategy) {
+                        ForEach(OllamaImageHandlingStrategy.allCases) { strategy in
+                            Text(strategy.displayName).tag(strategy)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .controlSize(.regular)
+                }
+
+                HStack {
+                    Text("Binary File Handling:")
+                        .frame(width: 150, alignment: .leading)
+                        .help("How to handle non-text, non-image binary files (PDF, DOCX) for text-only Ollama models.")
+                    Picker("Binary File Handling", selection: $mainViewModel.ollamaBinaryFileHandlingStrategy) {
+                        ForEach(OllamaBinaryFileHandlingStrategy.allCases) { strategy in
+                            Text(strategy.displayName).tag(strategy)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .controlSize(.regular)
+                }
+
              }
+             .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel)
+
             Spacer()
         }
+        .padding()
         .confirmationDialog("Confirm Model Removal",
                             isPresented: $showingRemovalConfirmation,
                             presenting: modelToRemoveFromName) { modelNameInDialog in
             Button("Remove '\(modelNameInDialog)'", role: .destructive) {
                 Task {
-                    // Call action on ollamaService
                     await ollamaService.removeModel(name: modelNameInDialog)
                 }
             }
@@ -258,17 +329,12 @@ struct LocalAISettingsView: View {
         }
         .onAppear {
             logger.debug("LocalAISettingsView appeared.")
-            // Initial status/model load is typically handled by MainApplicationViewModel's selectedSettingsSection didSet
-            // or by OllamaService's init or a specific trigger.
-            // Ensure statuses are clear on appear if navigating back to this tab.
             ollamaService.clearAllModelActionStatuses()
-            showingRemovalConfirmation = false
-            modelToRemoveFromName = nil
         }
         .onDisappear {
              ollamaService.clearAllModelActionStatuses()
-             showingRemovalConfirmation = false
              modelToRemoveFromName = nil
+             showingRemovalConfirmation = false
         }
     }
 }
@@ -278,31 +344,32 @@ struct LocalAISettingsView_Previews: PreviewProvider {
     static var mockOllamaService: OllamaService {
         let service = OllamaService()
         service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
-        service.llmModelName = "mistral:7b" // This is @AppStorage in OllamaService
+        service.llmModelName = "mistral:7b"
         service.serverStatus = .connected
         return service
     }
 
     static var mockMainViewModel: MainApplicationViewModel {
-        // MainApplicationViewModel's init now takes OllamaService
         let vm = MainApplicationViewModel(ollamaService: mockOllamaService)
-        // Set other mainViewModel properties if needed for preview
-        vm.ollamaTemperature = 0.5
-        vm.ollamaTopK = 50
+        vm.ollamaMaxInlineChars = 5000
+        vm.ollamaMaxAttachedFiles = 5
+        // Defaults for strategies are already set in MainApplicationViewModel's @AppStorage initializers
+        // vm.ollamaTextFileInclusionStrategy = .preferInlining (already default)
+        // vm.ollamaImageHandlingStrategy = .includePathWithWarning (already default)
+        // vm.ollamaBinaryFileHandlingStrategy = .includePathWithWarning (already default)
+        vm.ollamaTemperature = 0.75
+        vm.ollamaTopK = 45
         return vm
     }
     
-    // Preview helper for confirmation dialog
     struct ConfirmationDialogPreviewWrapper: View {
         @ObservedObject var ollamaService: OllamaService
         @ObservedObject var mainViewModel: MainApplicationViewModel
-        @State private var showingConfirmation = true // Start with dialog shown
+        @State private var showingConfirmation = true
         @State private var modelToRemove: String? = "gemma:2b"
 
         var body: some View {
             LocalAISettingsView(ollamaService: ollamaService, mainViewModel: mainViewModel)
-                 .padding()
-                 .frame(width: 500)
                  .confirmationDialog("Confirm Model Removal",
                                      isPresented: $showingConfirmation,
                                      presenting: modelToRemove) { name in
@@ -318,12 +385,10 @@ struct LocalAISettingsView_Previews: PreviewProvider {
     static var previews: some View {
         Group {
             LocalAISettingsView(ollamaService: mockOllamaService, mainViewModel: mockMainViewModel)
-                .padding()
-                .frame(width: 500)
+                .frame(width: 500, height: 800) // Increased height for new pickers
                 .previewLayout(.sizeThatFits)
                 .previewDisplayName("Default State")
 
-            // To preview pulling state:
             let pullingOllamaService: OllamaService = {
                 let service = OllamaService()
                 service.serverStatus = .connected
@@ -336,12 +401,12 @@ struct LocalAISettingsView_Previews: PreviewProvider {
                 return service
             }()
             LocalAISettingsView(ollamaService: pullingOllamaService, mainViewModel: MainApplicationViewModel(ollamaService: pullingOllamaService))
-                .padding()
-                .frame(width: 500)
+                .frame(width: 500, height: 800)
                 .previewLayout(.sizeThatFits)
                 .previewDisplayName("Pulling State")
                 
             ConfirmationDialogPreviewWrapper(ollamaService: mockOllamaService, mainViewModel: mockMainViewModel)
+                 .frame(width: 500, height: 800)
                  .previewDisplayName("Confirmation Dialog")
         }
     }

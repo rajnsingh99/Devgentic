@@ -1,4 +1,10 @@
-// Models/SettingsSection.swift
+//
+//  SettingsSection.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/05/25.
+//
+
 import Foundation
 
 // MARK: - Settings Section Definition

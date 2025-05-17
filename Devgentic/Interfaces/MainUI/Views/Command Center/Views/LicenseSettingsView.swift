@@ -1,4 +1,10 @@
-// Views/LicenseSettingsView.swift
+//
+//  LicenseSettingsView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/05/25.
+//
+
 import SwiftUI
 
 // MARK: - License Settings Detail View

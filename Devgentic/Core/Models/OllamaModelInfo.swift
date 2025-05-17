@@ -1,4 +1,10 @@
-// Models/OllamaModelInfo.swift
+//
+//  OllamaModelInfo.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/05/25.
+//
+
 import Foundation
 
 /// Represents information about a recommended Ollama model for the onboarding selection.

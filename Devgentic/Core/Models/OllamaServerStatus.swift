@@ -1,4 +1,10 @@
-// Models/OllamaServerStatus.swift
+//
+//  OllamaServerStatus.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/05/25.
+//
+
 import SwiftUI // For Color
 
 /// Represents the connection status of the Ollama server.

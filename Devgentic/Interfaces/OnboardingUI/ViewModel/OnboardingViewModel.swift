@@ -639,9 +639,3 @@ extension ScriptRunnerService {
      }
 }
 
-// Assume BackendType enum exists in Models/BackendType.swift
-// enum BackendType: String, Codable, CaseIterable { ... }
-// Assume OllamaModelInfo struct exists in Models/OllamaModelInfo.swift
-// struct OllamaModelInfo: Identifiable, Hashable { ... }
-
-

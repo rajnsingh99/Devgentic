@@ -1,4 +1,10 @@
-// Models/SettingsKeys.swift
+//
+//  SettingsKeys.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/05/25.
+//
+
 import Foundation
 
 // MARK: - UserDefaults Keys (for @AppStorage and manual access)
@@ -6,6 +12,7 @@ struct SettingsKeys {
     // --- Existing Keys ---
     static let selectedBackend = "selectedBackend"
     static let windowOpacity = "windowOpacity"
+    // Note: llmModelName is used by OllamaService
     static let llmModelName = "llmModelName"
     static let agentBaseURL = "agentBaseURL"
     static let agentDelegationStrategy = "agentDelegationStrategy"
@@ -19,13 +26,22 @@ struct SettingsKeys {
     static let ollamaContextWindowSize = "ollamaContextWindowSize"
     static let ollamaGpuLayers = "ollamaGpuLayers"
     
+    // --- Ollama File Handling Parameters ---
+    // Phase 1 Keys
+    static let ollamaMaxInlineChars = "ollamaMaxInlineChars"
+    static let ollamaMaxAttachedFiles = "ollamaMaxAttachedFiles"
+    
+    // NEW: Phase 2 Keys for Strategies
+    static let ollamaTextFileInclusionStrategy = "ollamaTextFileInclusionStrategy"
+    static let ollamaImageHandlingStrategy = "ollamaImageHandlingStrategy"
+    static let ollamaBinaryFileHandlingStrategy = "ollamaBinaryFileHandlingStrategy"
+
     // --- Quick Access ---
     static let quickAccessOverlayConversationId = "quickAccessOverlayConversationId"
     static let quickAccessLastCloseTime = "quickAccessLastCloseTime"
     static let quickAccessWasExpandedOnClose = "quickAccessWasExpandedOnClose"
     
-    // --- NEW: Notification Name ---
+    // --- Notification Name ---
     /// Notification posted to request the AppDelegate show the Quick Access Panel.
     static let showQuickAccessPanelNotification = Notification.Name("devgentic.showQuickAccessPanel")
-    // --- End New Notification Name ---
 }

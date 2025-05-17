@@ -21,12 +21,10 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
     private let store = ConversationStore.shared
-    // Removed: private let aiConnect = AIConnect()
-    // Removed: private let responseHandler = AgentResponseHandler()
     
     private let fileProcessorService: FileProcessorService
     private let messageAssemblerService: MessageAssemblerService
-    private let llmCommunicator: LLMCommunicatorProtocol // Added
+    private let llmCommunicator: LLMCommunicatorProtocol
 
     @ObservedObject var ollamaService: OllamaService
 
@@ -38,7 +36,6 @@ class MainApplicationViewModel: ObservableObject {
     private var textInEditorBeforeVoiceInput: String = ""
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
-    // ... (no changes to these properties) ...
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID?
     @Published var isSending: Bool = false
@@ -62,17 +59,28 @@ class MainApplicationViewModel: ObservableObject {
     @Published var voiceInputState: VoiceInputState = .idle
 
     // --- Settings Properties ---
-    // ... (AppStorage properties remain the same) ...
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .ollama
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
     @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
+    
+    // --- Ollama Advanced Parameters ---
     @AppStorage(SettingsKeys.ollamaTemperature) var ollamaTemperature: Double = 0.8
     @AppStorage(SettingsKeys.ollamaTopK) var ollamaTopK: Int = 40
     @AppStorage(SettingsKeys.ollamaTopP) var ollamaTopP: Double = 0.9
     @AppStorage(SettingsKeys.ollamaRepeatPenalty) var ollamaRepeatPenalty: Double = 1.1
     @AppStorage(SettingsKeys.ollamaContextWindowSize) var ollamaContextWindowSize: Int = 4096
     @AppStorage(SettingsKeys.ollamaGpuLayers) var ollamaGpuLayers: Int = -1
+
+    // --- Ollama File Handling Parameters ---
+    // Phase 1
+    @AppStorage(SettingsKeys.ollamaMaxInlineChars) var ollamaMaxInlineChars: Int = 5000
+    @AppStorage(SettingsKeys.ollamaMaxAttachedFiles) var ollamaMaxAttachedFiles: Int = 5
+    
+    // Phase 2 Strategy Settings
+    @AppStorage(SettingsKeys.ollamaTextFileInclusionStrategy) var ollamaTextFileInclusionStrategy: TextFileInclusionStrategy = .preferInlining
+    @AppStorage(SettingsKeys.ollamaImageHandlingStrategy) var ollamaImageHandlingStrategy: OllamaImageHandlingStrategy = .includePathWithWarning
+    @AppStorage(SettingsKeys.ollamaBinaryFileHandlingStrategy) var ollamaBinaryFileHandlingStrategy: OllamaBinaryFileHandlingStrategy = .includePathWithWarning
 
 
     private let groupDateFormatter: DateFormatter = {
@@ -82,7 +90,6 @@ class MainApplicationViewModel: ObservableObject {
     }()
 
     // MARK: - Computed Properties
-    // ... (currentChatMessages, currentConversationTitle, groupedConversations, sortedGroupKeys remain the same) ...
     var currentChatMessages: [ChatMessage] {
         guard let selectedID = selectedConversationID,
               let conversation = self.conversations.first(where: { $0.id == selectedID }) else {
@@ -131,7 +138,7 @@ class MainApplicationViewModel: ObservableObject {
          speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
          fileProcessorService: FileProcessorService = FileProcessorService(),
          messageAssemblerService: MessageAssemblerService? = nil,
-         llmCommunicator: LLMCommunicatorProtocol? = nil // Added communicator
+         llmCommunicator: LLMCommunicatorProtocol? = nil
     ) {
         self.ollamaService = ollamaService
         self.audioEngineService = audioEngineService
@@ -140,10 +147,7 @@ class MainApplicationViewModel: ObservableObject {
         self.fileProcessorService = fileProcessorService
         self.messageAssemblerService = messageAssemblerService ?? MessageAssemblerService(fileProcessorService: self.fileProcessorService)
         
-        // Initialize LLMCommunicator, potentially passing its own dependencies if needed by its concrete type
-        // For DefaultLLMCommunicator, it uses default instances of AIConnect and AgentResponseHandler if not provided.
         self.llmCommunicator = llmCommunicator ?? DefaultLLMCommunicator(fileProcessorService: self.fileProcessorService)
-
 
         self.conversations = store.getAllConversations()
         validateSelectedConversation()
@@ -176,8 +180,7 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
     }
-
-    // Convenience init to maintain existing call sites if they don't pass the new services
+ 
     convenience init() {
         let fpService = FileProcessorService()
         let maService = MessageAssemblerService(fileProcessorService: fpService)
@@ -190,7 +193,6 @@ class MainApplicationViewModel: ObservableObject {
 
 
     deinit {
-        // ... (remains the same) ...
         logger.info("MainApplicationViewModel deinitialized.")
         cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
@@ -203,7 +205,6 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func observeConversationStoreChanges() {
-        // ... (remains the same) ...
         store.$conversations
             .receive(on: DispatchQueue.main)
             .sink { [weak self] updatedConversationsFromStore in
@@ -215,7 +216,6 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     private func validateSelectedConversation() {
-        // ... (remains the same) ...
         if let currentSelectedID = selectedConversationID {
             if !conversations.contains(where: { $0.id == currentSelectedID }) {
                 selectedConversationID = conversations.first?.id
@@ -226,7 +226,6 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)
-    // ... (toggleUserMessagesFilter, startNewConversation, createAndSelectNewConversation remain the same) ...
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
     }
@@ -258,7 +257,7 @@ class MainApplicationViewModel: ObservableObject {
         return newConversation.id
     }
 
-    // MARK: - Message Sending Logic (Refactored for LLMCommunicator)
+    // MARK: - Message Sending Logic
     func sendMessage(attributedString: NSAttributedString) {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
@@ -315,26 +314,36 @@ class MainApplicationViewModel: ObservableObject {
         Task {
             var agentMessagesForThisTurn: [ChatMessage] = []
             
+            let currentOllamaModelName = self.ollamaService.llmModelName
+            var ollamaModelInfo: OllamaModelInfo? = nil
+            if !currentOllamaModelName.isEmpty {
+                ollamaModelInfo = OllamaModelInfo(name: currentOllamaModelName, displayName: currentOllamaModelName, sizeDescription: "N/A")
+            }
+
             // 1. Assemble MessageParts
             let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
                 userQuery: plainUserQueryFromEditor,
                 attachedFiles: filesToProcess,
                 for: self.selectedBackend,
-                ollamaModelDetails: nil
+                ollamaModelDetails: ollamaModelInfo,
+                maxInlineCharsOllama: self.ollamaMaxInlineChars,
+                maxFilesForOllama: self.ollamaMaxAttachedFiles,
+                // NEW: Pass strategy settings from @AppStorage
+                textFileStrategy: self.ollamaTextFileInclusionStrategy,
+                imageHandlingStrategy: self.ollamaImageHandlingStrategy,
+                binaryFileHandlingStrategy: self.ollamaBinaryFileHandlingStrategy
             )
 
-            // 2. Handle processing warnings
             if !processingWarnings.isEmpty {
                 logger.warning("File processing warnings: \(processingWarnings.joined(separator: "; "))")
                 let warningTitle = "File Processing Notice"
                 let details = processingWarnings.joined(separator: "\n- ")
                 let warningContent = MessageContent.error(title: warningTitle, details: "- " + details)
-                let warningMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: warningContent) // Changed sender to .system for warnings
+                let warningMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: warningContent)
                 agentMessagesForThisTurn.append(warningMessage)
             }
 
-            // 3. Filter unprocessable parts
-            let processableParts = messageParts.filter { (part: MessagePart) -> Bool in
+            let processableParts = messageParts.filter { part in
                 if let fileRep = part.fileRepresentation {
                     if case .unprocessable = fileRep { return false }
                 }
@@ -347,7 +356,6 @@ class MainApplicationViewModel: ObservableObject {
             if !hasTextToSend && !hasFilesToSend {
                 logger.info("No processable content to send to LLM after assembly and filtering.")
             } else {
-                // 4. Pre-communication checks (e.g., Ollama server status)
                 if self.selectedBackend == .ollama {
                     if ollamaService.serverStatus != .connected && ollamaService.serverStatus != .checking {
                         logger.info("Ollama status is \(String(describing: self.ollamaService.serverStatus.rawValue)), re-checking before sending.")
@@ -362,24 +370,15 @@ class MainApplicationViewModel: ObservableObject {
                     }
                 }
                 
-                // 5. Proceed with LLM communication if no preliminary errors
-                if !agentMessagesForThisTurn.contains(where: { (message: ChatMessage) -> Bool in
+                if !agentMessagesForThisTurn.contains(where: { message in
                      if case .error = message.content { return true }
                      return false
                 }) {
-                    // Determine backend configuration (URL, endpoint, static LLM params)
-                    // The actual 'prompt' or 'payload' part of this config will be overridden by the communicator
-                    // based on the `processableParts`.
-                    // The `message` parameter to `determineBackendConfiguration` is now less critical for payload,
-                    // but might still be used for other dynamic aspects of the config if any.
-                    // For now, pass empty string as the communicator will build the main payload.
-                    let baseBackendConfig = self.determineBackendConfiguration(message: "") // Pass empty, communicator builds payload
-
-                    // Add context prefix to processableParts if active
+                    let baseBackendConfig = self.determineBackendConfiguration(message: "")
                     var finalPartsToSend = processableParts
                     if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
                          let contextText = "Context File: \(filePath)\n\nUser Message and Attached Files:\n"
-                         finalPartsToSend.insert(.text(contextText), at: 0) // Prepend context
+                         finalPartsToSend.insert(.text(contextText), at: 0)
                          logger.debug("Prepended active context file path to message parts: \(filePath)")
                     }
 
@@ -387,16 +386,16 @@ class MainApplicationViewModel: ObservableObject {
                         logger.debug("Calling LLM Communicator for backend: \(self.selectedBackend.rawValue)")
                         
                         let llmResponse = try await self.llmCommunicator.sendMessage(
-                            parts: finalPartsToSend, // Use parts with prepended context if any
+                            parts: finalPartsToSend,
                             to: self.selectedBackend,
-                            config: baseBackendConfig // Pass the base config
+                            config: baseBackendConfig
                         )
 
                         for contentBlock in llmResponse.content {
                             let agentMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: contentBlock)
                             agentMessagesForThisTurn.append(agentMessage)
                         }
-                        if let commError = llmResponse.error { // Check for non-critical errors from communicator
+                        if let commError = llmResponse.error {
                             logger.error("LLMCommunicator reported an error in response: \(commError.localizedDescription)")
                             let errorContent = MessageContent.error(title: "LLM Error", details: commError.localizedDescription)
                             agentMessagesForThisTurn.append(ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorContent))
@@ -409,7 +408,7 @@ class MainApplicationViewModel: ObservableObject {
                         let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
                         agentMessagesForThisTurn.append(errorChatMessage)
                         
-                        if selectedBackend == .ollama { // Update Ollama status on specific network errors
+                        if selectedBackend == .ollama {
                             if let urlError = error as? URLError,
                                (urlError.code == .cannotConnectToHost || urlError.code == .cannotFindHost || urlError.code == .networkConnectionLost) {
                                 ollamaService.serverStatus = .disconnected
@@ -419,7 +418,6 @@ class MainApplicationViewModel: ObservableObject {
                 }
             }
 
-            // 6. Update chat history and UI
             if !agentMessagesForThisTurn.isEmpty {
                 guard var targetConversationForAgentMessages = store.getConversation(withId: conversationIDToUse) else {
                     logger.error("CRITICAL: Could not find conversation for ID: \(conversationIDToUse.uuidString) to add agent messages.")
@@ -436,7 +434,7 @@ class MainApplicationViewModel: ObservableObject {
             
             await MainActor.run {
                 self.userInput = ""
-                self.attachedFiles.removeAll()
+                self.clearAttachedFiles()
                 self.isSending = false
             }
         }
@@ -444,8 +442,6 @@ class MainApplicationViewModel: ObservableObject {
 
 
     private func determineBackendConfiguration(message: String) -> BackendConfiguration {
-        // 'message' parameter is now less important here as communicator builds the main payload.
-        // It could be used if some part of the config depends on the raw user text, but unlikely for now.
         switch self.selectedBackend {
         case .ollama:
             let advancedOptions: [String: Any] = [
@@ -454,17 +450,15 @@ class MainApplicationViewModel: ObservableObject {
                 "num_ctx": self.ollamaContextWindowSize, "num_gpu": self.ollamaGpuLayers
             ]
             let modelName = ollamaService.llmModelName.isEmpty ? "default_model_name" : ollamaService.llmModelName
-            // The "prompt" key will be added/overridden by the LLMCommunicator
             let initialPayload: [String: Any] = [
                 "model": modelName, "stream": false, "options": advancedOptions
             ]
             return BackendConfiguration(
-                url: "http://127.0.0.1:11434", // Ollama base URL
+                url: "http://127.0.0.1:11434",
                 endpoint: "/api/generate",
                 payload: initialPayload
             )
         case .agent:
-            // The "main_task" key will be added/overridden by the LLMCommunicator
             let initialPayload: [String: Any] = [
                 "strategy": self.agentDelegationStrategy
             ]
@@ -477,7 +471,6 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Voice Input Methods
-    // ... (checkVoiceInputPermissionsAndAvailability, checkSpeechRecognitionPermission, toggleVoiceInput, startVoiceCapture, stopVoiceCaptureAndFinalize remain the same) ...
     func checkVoiceInputPermissionsAndAvailability() {
         logger.info("Checking voice input permissions and availability...")
         self.voiceInputState = .requestingPermissions
@@ -625,6 +618,7 @@ class MainApplicationViewModel: ObservableObject {
                     if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107 {
                         isCancellationError = true
                     }
+                    
                     if isCancellationError {
                         logger.info("Recognition task was cancelled (likely intentional stop or end of audio). Treating as clean stop.")
                         if !transcriptFromRecognizer.isEmpty {
@@ -646,11 +640,10 @@ class MainApplicationViewModel: ObservableObject {
                 if !transcriptFromRecognizer.isEmpty {
                     self.userInput = prefix + separator + transcriptFromRecognizer
                 } else {
-                    if isFinal {
-                        self.userInput = prefix
-                    }
+                    if isFinal { self.userInput = prefix }
                 }
                 logger.trace("Transcript update. isFinal: \(isFinal), userInput: '\(self.userInput.prefix(100))'")
+                
                 if isFinal {
                     logger.info("Final transcript (natural end without error). userInput: '\(self.userInput.prefix(100))'")
                     self.stopVoiceCaptureAndFinalize(customError: nil)
@@ -675,12 +668,13 @@ class MainApplicationViewModel: ObservableObject {
 
     private func stopVoiceCaptureAndFinalize(customError: String?) {
         logger.info("stopVoiceCaptureAndFinalize: Entered. Error: \(customError ?? "None"). Current state: \(self.voiceInputState.description)")
+        
         guard voiceInputState == .recording || voiceInputState == .processing || audioEngineService.isRecording else {
             logger.info("stopVoiceCaptureAndFinalize: Not in recording/processing state or audio engine not active. No action needed or already stopping. Current state: \(self.voiceInputState.description), audioEngine.isRecording: \(String(describing: self.audioEngineService.isRecording))")
             if let err = customError, !err.isEmpty {
                 if case .error(let existingError) = voiceInputState {
                     if existingError != err { self.voiceInputState = .error(err) }
-                } else if self.voiceInputState != .available {
+                } else if self.voiceInputState != .available && self.voiceInputState != .idle && self.voiceInputState != .requestingPermissions {
                      self.voiceInputState = .error(err)
                 }
             } else if voiceInputState != .available && voiceInputState != .idle && voiceInputState != .requestingPermissions {
@@ -692,10 +686,13 @@ class MainApplicationViewModel: ObservableObject {
             }
             return
         }
+
         audioEngineService.stopStreamingAudio()
         logger.info("stopVoiceCaptureAndFinalize: Audio engine stopped.")
+        
         speechRecognitionService.stopRecognition()
         logger.info("stopVoiceCaptureAndFinalize: Speech recognition service stop requested.")
+
         if let err = customError, !err.isEmpty {
             voiceInputState = .error(err)
             logger.info("stopVoiceCaptureAndFinalize: State set to .error: \(err)")
@@ -710,7 +707,6 @@ class MainApplicationViewModel: ObservableObject {
 
 
     // MARK: - Conversation Management
-    // ... (transferSelectedConversationToOverlay, deleteConversation, deleteMultipleConversations, deleteConversationsInGroup, renameConversation remain the same) ...
     func transferSelectedConversationToOverlay() {
         guard let conversationID = selectedConversationID else { return }
         UserDefaults.standard.set(conversationID.uuidString, forKey: SettingsKeys.quickAccessOverlayConversationId)
@@ -748,7 +744,6 @@ class MainApplicationViewModel: ObservableObject {
 
 
     // MARK: - UI Toggles
-    // ... (toggleSidebar, toggleSettings, togglePromptLibrary, toggleContextArea, requestEditPrompt remain the same) ...
     func toggleSidebar() {
         withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() }
         if !isSidebarCollapsed {
@@ -787,7 +782,6 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Private Helper Methods
-    // ... (groupKey, addAttachedFile, addAttachedFiles, removeAttachedFile, removeAttachedFile byId, clearAttachedFiles remain the same) ...
     func groupKey(for date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) { return "Today" }
