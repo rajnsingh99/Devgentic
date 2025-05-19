@@ -17,7 +17,11 @@ struct SettingsKeys {
     static let agentBaseURL = "agentBaseURL"
     static let agentDelegationStrategy = "agentDelegationStrategy"
     static let isOnboardingComplete = "isOnboardingComplete"
-
+    static let defaultAgentModel = "defaultAgentModel"
+    static let agentPID = "agentPID"
+    static let venvPythonPath = "venvPythonPath"
+    static let venvName = "devgentic"
+    
     // --- Ollama Advanced Parameters ---
     static let ollamaTemperature = "ollamaTemperature"
     static let ollamaTopK = "ollamaTopK"

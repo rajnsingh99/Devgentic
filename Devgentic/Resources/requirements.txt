@@ -1,0 +1,14 @@
+#
+#  requirements.txt
+#  Devgentic
+#
+#  Created by Raj Singh on 19/05/25.
+#
+
+fastapi
+uvicorn[standard]
+langchain
+langchain-community
+langchain-ollama
+ollama
+# Add any other specific dependencies your agent_launcher.py will need

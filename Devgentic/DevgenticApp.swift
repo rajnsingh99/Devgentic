@@ -17,18 +17,49 @@ struct DevgenticApp: App {
     
     // Environment variable to open new windows
     @Environment(\.openWindow) var openWindow
-
+    
+    @StateObject var agentManager = AgentManager() // AppDelegate also creates one, decide on single source of truth.
+                                                     // For simplicity, let's assume AppDelegate's instance is primary for lifecycle,
+                                                     // and this one is for UI if needed. Or better, have AppDelegate expose its instance.
+                                                     // For now, we'll pass the callback to the onboarding view model.
+    
     var body: some Scene {
         // MARK: - Main Application Window
         WindowGroup {
-            if isOnboardingComplete {
-                MainApplicationView()
-            } else {
-                OnboardingRootView {
-                    isOnboardingComplete = true
+                    if isOnboardingComplete {
+                        MainApplicationView()
+                            .environmentObject(agentManager) // Make agentManager available to MainApp
+                            .onAppear {
+                                // When MainApplicationView appears and onboarding is complete,
+                                // ensure agent starts if not already running.
+                                // AppDelegate handles initial launch, this is a fallback/re-check.
+                                agentManager.startAgentIfNeeded()
+                            }
+                    } else {
+                        AgentOnboardingRootView(
+                            onComplete: {
+                                // This closure is called by AgentOnboardingViewModel.completeOnboarding()
+                                // AFTER it has called its own onAgentReady.
+                                isOnboardingComplete = true
+                                // AgentManager should have been notified by onAgentReady already.
+                                // We can still call startAgentIfNeeded here to be sure or if MainUI needs it.
+                                // agentManager.startAgentIfNeeded() // Or let MainApplicationView's onAppear handle it.
+                            },
+                            onAgentReady: { agentURL, agentPID in
+                                // This callback is now part of AgentOnboardingViewModel's init.
+                                // It's called from AgentOnboardingViewModel.completeOnboarding().
+                                // The AgentManager instance in AppDelegate can be notified here,
+                                // or the AgentOnboardingViewModel can directly call a method on a shared AgentManager.
+                                // For now, AgentManager's init and onboardingDidComplete handle this.
+                                // This specific callback to DevgenticApp might be redundant if AgentManager
+                                // is robustly handling its state from UserDefaults and its own notifications.
+                                // However, explicitly calling onboardingDidComplete on the shared manager is good.
+                                agentManager.onboardingDidComplete(agentURL: agentURL, agentPID: agentPID)
+                            }
+                        )
+                        .environmentObject(agentManager) // Onboarding might also want to show agent status
+                    }
                 }
-            }
-        }
         .commands {
             CommandMenu("File") {
                 Button("Close File Viewer Window") {
@@ -43,6 +74,14 @@ struct DevgenticApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command) // Standard shortcut for settings/preferences
             }
+            
+            CommandGroup(replacing: .appTermination) { // Example placement
+                             Button("Stop Agent and Quit") {
+                                 agentManager.stopAgent(reason: "Manual Quit Command")
+                                 NSApplication.shared.terminate(nil)
+                             }
+                             .keyboardShortcut("q", modifiers: [.command, .option]) // Example shortcut
+                        }
         }
 
         // MARK: - File Viewer Window
