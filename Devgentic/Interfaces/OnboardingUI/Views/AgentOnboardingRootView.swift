@@ -1,3 +1,4 @@
+// AgentOnboardingRootView.swift
 //
 //  AgentOnboardingRootView.swift
 //  Devgentic
@@ -8,44 +9,36 @@
 import SwiftUI
 
 struct AgentOnboardingRootView: View {
-    // Use @StateObject for ViewModel creation and lifecycle management within this view
     @StateObject private var viewModel: AgentOnboardingViewModel
     
-    // Initializer to accept both onComplete and onAgentReady closures
     init(onComplete: @escaping () -> Void, onAgentReady: @escaping (URL, Int32) -> Void) {
-        // Pass both closures to the AgentOnboardingViewModel
         _viewModel = StateObject(wrappedValue: AgentOnboardingViewModel(onComplete: onComplete, onAgentReady: onAgentReady))
     }
 
     var body: some View {
         VStack {
-            Group {
-                switch viewModel.currentStep {
-                case .welcome:
-                    AgentWelcomeView(viewModel: viewModel)
-                case .prerequisitesCheck, .environmentSetup:
-                    AutomatedSetupInProgressView(viewModel: viewModel)
-                case .pythonInstallNeeded:
-                    // This state is primarily handled by the sheet.
-                    // Showing the welcome view allows the user to retry or see options again.
-                    AgentWelcomeView(viewModel: viewModel)
-                case .setupFailed:
-                    SetupFailedView(viewModel: viewModel)
-                }
+            // Determine the view based on the currentFlowStep of the ViewModel
+            switch viewModel.currentFlowStep {
+            case .welcome:
+                AgentWelcomeView(viewModel: viewModel) // Existing welcome view
+            case .interactiveSetup:
+                InteractiveSetupMainView(viewModel: viewModel) // New interactive setup view
+            case .setupFailed:
+                // Ensure AgentOnboardingViewModel conforms to SetupFailedViewModelProtocol
+                SetupFailedView(viewModel: viewModel)
+            case .setupComplete:
+                SetupCompleteScreen(onFinish: {
+                    viewModel.onComplete?() // Call the original onComplete closure
+                }) // Existing completion screen
             }
-            .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
         }
-        .animation(.default, value: viewModel.currentStep) // Apply animation to step transitions
-        .frame(minWidth: 480, idealWidth: 550, maxWidth: 700,
-               minHeight: 400, idealHeight: 500, maxHeight: 600)
-        .sheet(isPresented: $viewModel.showPythonInstallSheet) {
-            // The sheet for Python installation prompt
-            PythonInstallPromptView(viewModel: viewModel)
-        }
-        // The onComplete and onAgentReady closures are now handled by the ViewModel.
+        .animation(.default, value: viewModel.currentFlowStep)
+        .frame(minWidth: 700, idealWidth: 800, maxWidth: 900, // Adjusted for wider interactive UI
+               minHeight: 500, idealHeight: 600, maxHeight: 700)
     }
 }
 
+// Preview for AgentOnboardingRootView
 struct AgentOnboardingRootView_Previews: PreviewProvider {
     static var previews: some View {
         AgentOnboardingRootView(
