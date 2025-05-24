@@ -35,7 +35,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.logger.info("Application did finish launching.")
-        UserDefaults.standard.set(false, forKey: SettingsKeys.isOnboardingComplete)
         // Initialize AgentManager
         agentManager = AgentManager()
         Self.logger.info("AgentManager initialized in AppDelegate.")

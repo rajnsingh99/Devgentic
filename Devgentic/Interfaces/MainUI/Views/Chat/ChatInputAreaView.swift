@@ -5,10 +5,10 @@ import os
 import Combine
 import AppKit
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatInputAreaSyncFix")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatInputAreaUI_V2")
 
 struct ChatInputAreaView: View {
-    @Binding var userInput: String // This is the source of truth for text content
+    @Binding var userInput: String
     @Binding var showContextArea: Bool
     @Binding var activeContextFilePath: String?
     let isSending: Bool
@@ -24,14 +24,13 @@ struct ChatInputAreaView: View {
     @State private var showPromptSuggestions: Bool = false
     @State private var suggestionQuery: String = ""
     @State private var filteredPrompts: [Prompt] = []
-    @State private var activePromptTriggerRange: NSRange? = nil // Managed by CustomTextEditor's Coordinator
+    @State private var activePromptTriggerRange: NSRange? = nil
     
     @State private var showFileSuggestions: Bool = false
     @State private var fileSuggestionQuery: String = ""
     @State private var filteredFiles: [FileSystemItem] = []
-    @State private var activeFileMentionTriggerRange: NSRange? = nil // Managed by CustomTextEditor's Coordinator
+    @State private var activeFileMentionTriggerRange: NSRange? = nil
 
-    // This is how ChatInputAreaView tells CustomTextEditor to insert something
     @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
     
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
@@ -39,7 +38,7 @@ struct ChatInputAreaView: View {
     private let promptStore = PromptStore.shared
     
     private let iconSize: CGFloat = 18
-    private let sendButtonSize: CGFloat = 26
+    private let dynamicButtonSize: CGFloat = 26
     private let cornerRadiusValue: CGFloat = 12
     private let textEditorMinHeight: CGFloat = 24
     private let textEditorMaxHeight: CGFloat = 200
@@ -49,6 +48,35 @@ struct ChatInputAreaView: View {
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
             .foregroundColor: NSColor.labelColor
         ]
+    }
+    
+    private var hasInputText: Bool {
+        !userInput.isEmpty
+    }
+
+    // Determines the current mode of the dynamic button
+    // Removed 'private' to make it internal and accessible to the PreviewProvider in the same file
+    // Made it conform to CustomStringConvertible for Preview debugging
+    enum DynamicButtonMode: CustomStringConvertible {
+        case mic, stop, send
+
+        var description: String {
+            switch self {
+            case .mic: return "Mic"
+            case .stop: return "Stop"
+            case .send: return "Send"
+            }
+        }
+    }
+
+    private var currentDynamicButtonMode: DynamicButtonMode {
+        if mainViewModel.voiceInputState == .recording {
+            return .stop
+        } else if hasInputText {
+            return .send
+        } else {
+            return .mic
+        }
     }
 
     var body: some View {
@@ -70,19 +98,19 @@ struct ChatInputAreaView: View {
             mainInputArea
         }
         .animation(.spring(), value: mainViewModel.attachedFiles.count)
+        .animation(.easeInOut(duration: 0.15), value: currentDynamicButtonMode) // Animate button transition
+        .animation(.easeInOut(duration: 0.15), value: mainViewModel.voiceInputState)
         .fixedSize(horizontal: false, vertical: true)
-        .onChange(of: suggestionQuery) { newValue in performPromptFiltering(query: newValue) } // Use newValue
-        .onChange(of: showPromptSuggestions) { showState in // Use new name
+        .onChange(of: suggestionQuery) { newValue in performPromptFiltering(query: newValue) }
+        .onChange(of: showPromptSuggestions) { showState in
             if showState { performPromptFiltering(query: suggestionQuery) }
             else if !filteredPrompts.isEmpty { filteredPrompts = [] }
         }
-        .onChange(of: fileSuggestionQuery) { newValue in performFileFiltering(query: newValue) } // Use newValue
-        .onChange(of: showFileSuggestions) { showState in // Use new name
+        .onChange(of: fileSuggestionQuery) { newValue in performFileFiltering(query: newValue) }
+        .onChange(of: showFileSuggestions) { showState in
             if showState { performFileFiltering(query: fileSuggestionQuery) }
             else if !filteredFiles.isEmpty { filteredFiles = [] }
         }
-        // When userInput changes externally (e.g. ViewModel clears it),
-        // CustomTextEditor's updateNSView will handle updating the NSTextView.
     }
 
     @ViewBuilder private var promptSuggestionsArea: some View {
@@ -124,25 +152,22 @@ struct ChatInputAreaView: View {
     private var editorAndPlaceholderArea: some View {
         ZStack(alignment: .topLeading) {
             CustomTextEditor(
-                text: $userInput, // Bound to ViewModel's userInput via MainApplicationView
+                text: $userInput,
                 onCommit: { attributedString in
-                    // This `userInput` here is the @Binding, which should reflect CustomTextEditor's content.
-                    // However, always prefer to get the most current attributedString directly from the editor for sending.
-                    logger.debug("onCommit from CustomTextEditor. Text to send: \"\(attributedString.string.prefix(50))\"")
-                    self.onSendMessage(attributedString)
-                    // After onSendMessage, the ViewModel is expected to clear its `userInput` string.
-                    // This change to `userInput` will flow back to CustomTextEditor via its binding
-                    // and `updateNSView` will clear the NSTextView.
+                    logger.debug("onCommit from CustomTextEditor (Enter pressed). Text to send: \"\(attributedString.string.prefix(50))\"")
+                     if !showPromptSuggestions && !showFileSuggestions {
+                        self.onSendMessage(attributedString)
+                     }
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
-                showPromptSuggestions: $showPromptSuggestions, // Controls visibility of suggestion UI
-                suggestionQuery: $suggestionQuery,             // Text after '#' or '@'
-                activePromptTriggerRange: $activePromptTriggerRange, // Range of '#query' in editor
+                showPromptSuggestions: $showPromptSuggestions,
+                suggestionQuery: $suggestionQuery,
+                activePromptTriggerRange: $activePromptTriggerRange,
                 showFileSuggestions: $showFileSuggestions,
                 fileSuggestionQuery: $fileSuggestionQuery,
                 activeFileMentionTriggerRange: $activeFileMentionTriggerRange,
-                attributedTextInsertion: $attributedTextInsertionRequest, // Action for insertions
+                attributedTextInsertion: $attributedTextInsertionRequest,
                 textViewRef: { nsTextViewInstance in
                     self.editorTextView = nsTextViewInstance
                 }
@@ -160,32 +185,65 @@ struct ChatInputAreaView: View {
         }
         .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
         .focused(isInputFocused)
-        .disabled(isSending || showSettings || mainViewModel.voiceInputState == .processing)
+        // Disable editor if sending text, or if settings are shown.
+        // Also disable if voice is processing AND there's text (to prevent editing during finalization of voice input that added text)
+        .disabled(isSending || showSettings || (hasInputText && mainViewModel.voiceInputState == .processing) )
     }
     
-    private var placeholderText: String { /* ... same ... */
+    private var placeholderText: String {
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
-        switch mainViewModel.voiceInputState {
-            case .recording: return "Listening..."
-            case .processing: return "Processing audio..."
-            case .error(let message): return "Voice error: \(message.prefix(30))..."
-            default: return "Ask Devgentic..."
+        if userInput.isEmpty { // Only show voice-related placeholders if input is empty
+            switch mainViewModel.voiceInputState {
+                case .recording: return "Listening..."
+                case .processing: return "Processing audio..."
+                case .error(let message): return "Voice error: \(message.prefix(30))..."
+                default: return "Type or click mic to talk..." // More inviting
+            }
         }
+        return "Type or click mic to talk..." // Default when userInput is not empty, but mic button won't be shown
     }
-    private var toolbarArea: some View { /* ... same ... */
+
+    private var toolbarArea: some View {
         HStack(spacing: 12) {
             Button(action: openFilePicker) {
                 Image(systemName: "plus").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
-            }.buttonStyle(PlainButtonStyle()).disabled(isSending || showSettings || mainViewModel.voiceInputState == .processing).help("Attach files")
-            Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: { Image(systemName: "globe").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary) }.buttonStyle(PlainButtonStyle()).disabled(isSending || showSettings).help("Web Search (Not Implemented)")
-            Button(action: onToggleContext) { Image(systemName: "paperclip").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(showContextArea ? Color(NSColor.controlAccentColor) : .secondary) }.buttonStyle(PlainButtonStyle()).disabled(isSending || showSettings).help(showContextArea ? "Hide Context Area" : "Show Context Area")
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing)
+            .help("Attach files")
+
+            Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
+                Image(systemName: "globe").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing)
+            .help("Web Search (Not Implemented)")
+
+            Button(action: onToggleContext) {
+                Image(systemName: "paperclip").resizable().scaledToFit().frame(width: iconSize, height: iconSize)
+                    .foregroundColor(showContextArea ? Color(NSColor.controlAccentColor) : .secondary)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .disabled(isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing)
+            .help(showContextArea ? "Hide Context Area" : "Show Context Area")
+            
             Spacer()
-            Button { mainViewModel.toggleVoiceInput() } label: {
-                micButtonImage.resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(micButtonColor)
-            }.buttonStyle(PlainButtonStyle()).disabled(isSending || showSettings || mainViewModel.voiceInputState == .requestingPermissions || mainViewModel.voiceInputState == .processing).help(micButtonHelpText)
-            Button(action: {
+            
+            dynamicActionButton
+        }
+        .padding(.horizontal, 15)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private var dynamicActionButton: some View {
+        let mode = currentDynamicButtonMode
+        
+        Button(action: {
+            switch mode {
+            case .send:
                 guard let textView = editorTextView else {
-                    logger.error("Send button: editorTextView is nil. Cannot get attributedString.");
+                    logger.error("Send button: editorTextView is nil.");
                     if !userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty {
                         onSendMessage(NSAttributedString(string: userInput, attributes: defaultTypingAttributes))
                     }
@@ -195,71 +253,165 @@ struct ChatInputAreaView: View {
                 if !textToSend.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty {
                     onSendMessage(textToSend)
                 }
-            }) {
-                if isSending { ProgressView().controlSize(.small).frame(width: sendButtonSize, height: sendButtonSize) }
-                else {
-                    ZStack {
-                        let canSend = !(editorTextView?.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || !mainViewModel.attachedFiles.isEmpty
-                        Circle().fill( (canSend && !showSettings) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3))
-                        Image(systemName: "arrow.up").resizable().scaledToFit().fontWeight(.semibold).frame(width: sendButtonSize * 0.5, height: sendButtonSize * 0.5).foregroundColor(Color.white)
-                    }.frame(width: sendButtonSize, height: sendButtonSize)
-                }
+            case .mic, .stop: // Both mic and stop actions trigger toggleVoiceInput
+                mainViewModel.toggleVoiceInput()
             }
-            .buttonStyle(PlainButtonStyle())
-            .disabled( !(!(editorTextView?.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || !mainViewModel.attachedFiles.isEmpty) || isSending || showSettings)
-            .keyboardShortcut(.return, modifiers: .shift)
+        }) {
+            if isSending && mode == .send { // Show progress only when sending text
+                ProgressView().controlSize(.small)
+                    .frame(width: dynamicButtonSize, height: dynamicButtonSize)
+            } else {
+                ZStack {
+                    let canSend = mode == .send && (!userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty)
+                    let isDisabledBySystem = showSettings || (mode == .send && (mainViewModel.voiceInputState == .processing || mainViewModel.voiceInputState == .recording))
+
+                    Circle()
+                        .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem))
+                    
+                    Image(systemName: buttonIconName(for: mode))
+                        .resizable().scaledToFit()
+                        .fontWeight(buttonIconWeight(for: mode))
+                        .frame(width: dynamicButtonSize * buttonIconScale(for: mode), height: dynamicButtonSize * buttonIconScale(for: mode))
+                        .foregroundColor(buttonIconForegroundColor(for: mode))
+                }
+                .frame(width: dynamicButtonSize, height: dynamicButtonSize)
+            }
         }
-        .padding(.horizontal, 15).padding(.bottom, 10)
+        .buttonStyle(PlainButtonStyle())
+        .disabled(isDynamicButtonDisabled(for: mode))
+        .help(buttonHelpText(for: mode))
     }
-    private func openFilePicker() { /* ... same ... */
+
+    private func buttonIconName(for mode: DynamicButtonMode) -> String {
+        switch mode {
+        case .send:
+            return "arrow.up"
+        case .stop:
+            return "stop.circle.fill"
+        case .mic: // This covers .idle, .available, .error, .permissionsDenied*, .speechRecognitionUnavailable, .processing (when input is empty)
+            switch mainViewModel.voiceInputState {
+            // .recording is handled by .stop mode above
+            case .processing: // If input is empty and processing (e.g. initial processing before text appears)
+                return "hourglass.circle"
+            case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error:
+                return "mic.slash.fill"
+            case .requestingPermissions:
+                return "mic.badge.plus"
+            default: // .idle, .available
+                return "mic.fill"
+            }
+        }
+    }
+    
+    private func buttonIconScale(for mode: DynamicButtonMode) -> CGFloat {
+        switch mode {
+        case .send: return 0.5
+        case .stop: return 0.65 // Stop icon can be a bit larger
+        case .mic: return 0.6
+        }
+    }
+
+    private func buttonIconWeight(for mode: DynamicButtonMode) -> Font.Weight {
+        mode == .send ? .semibold : .regular
+    }
+
+    private func buttonBackgroundColor(for mode: DynamicButtonMode, canSend: Bool, isDisabledBySystem: Bool) -> Color {
+        switch mode {
+        case .send:
+            return (canSend && !isDisabledBySystem) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
+        case .stop:
+            return Color.red.opacity(0.8) // Distinct color for stop
+        case .mic:
+            // Mic button usually doesn't have a filled background unless active/error
+            // For error states, the icon color changes. Here, keep it clear or subtle.
+            return Color.clear // Or a very subtle gray if preferred: Color.gray.opacity(0.1)
+        }
+    }
+    
+    private func buttonIconForegroundColor(for mode: DynamicButtonMode) -> Color {
+        switch mode {
+        case .send:
+            return .white
+        case .stop:
+            return .white
+        case .mic: // Color depends on the actual voiceInputState when in mic mode
+            switch mainViewModel.voiceInputState {
+            case .recording: return .white // Should be covered by .stop mode, but for safety
+            case .processing: return .orange // If processing and input is empty
+            case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error:
+                return .red.opacity(0.7)
+            case .requestingPermissions:
+                return .orange
+            default: // .idle, .available
+                return .secondary
+            }
+        }
+    }
+
+    private func isDynamicButtonDisabled(for mode: DynamicButtonMode) -> Bool {
+        switch mode {
+        case .send:
+            let isEmptyTextAndNoFiles = userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mainViewModel.attachedFiles.isEmpty
+            return isEmptyTextAndNoFiles || isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing
+        case .stop: // Stop button should generally always be enabled if shown
+            return isSending || showSettings
+        case .mic:
+            // Mic button (when input is empty) is disabled if sending text (shouldn't happen), settings shown,
+            // or in a voice state that isn't idle/available (like requesting permissions, or already recording/processing)
+            return isSending || showSettings || mainViewModel.voiceInputState == .requestingPermissions || mainViewModel.voiceInputState == .processing || mainViewModel.voiceInputState == .recording
+        }
+    }
+
+    private func buttonHelpText(for mode: DynamicButtonMode) -> String {
+        switch mode {
+        case .send:
+            return "Send message (Enter)"
+        case .stop:
+            return "Stop Voice Input"
+        case .mic: // Help text for when the button is in "mic mode"
+            switch mainViewModel.voiceInputState {
+            case .idle, .available: return "Start Voice Input (Mic button)"
+            // .recording is handled by .stop mode's help text
+            case .processing: return "Processing Voice Input..." // if input is empty
+            case .requestingPermissions: return "Requesting Voice Permissions..."
+            case .permissionsDeniedMic: return "Microphone permission denied. Click to re-check."
+            case .permissionsDeniedSpeech: return "Speech recognition permission denied. Click to re-check."
+            case .speechRecognitionUnavailable: return "Speech recognition is currently unavailable. Click to re-check."
+            case .error(let specificError): return "Voice input error: \(specificError.prefix(30))... Click to re-check."
+            default: return "Voice Input" // Generic fallback
+            }
+        }
+    }
+    
+    private func openFilePicker() {
         let openPanel = NSOpenPanel()
-        openPanel.canChooseFiles = true; openPanel.canChooseDirectories = true; openPanel.allowsMultipleSelection = true
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = true
+        openPanel.allowsMultipleSelection = true
         openPanel.prompt = "Attach Files or Folders"
-        openPanel.begin { response in if response == .OK { processSelectedURLs(openPanel.urls) } }
+        openPanel.begin { response in
+            if response == .OK {
+                processSelectedURLs(openPanel.urls)
+            }
+        }
     }
-    private func processSelectedURLs(_ urls: [URL]) { /* ... same ... */
+
+    private func processSelectedURLs(_ urls: [URL]) {
         var newItems: [FileSystemItem] = []
         for url in urls {
             var fileIsDirectoryObjC: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &fileIsDirectoryObjC) {
-                let itemName = url.lastPathComponent; let isDirectoryBool = fileIsDirectoryObjC.boolValue
+                let itemName = url.lastPathComponent
+                let isDirectoryBool = fileIsDirectoryObjC.boolValue
                 newItems.append(FileSystemItem(id: url, name: itemName, url: url, isDirectory: isDirectoryBool))
             }
         }
-        if !newItems.isEmpty { mainViewModel.addAttachedFiles(fileItems: newItems) }
-    }
-    private var micButtonImage: Image { /* ... same ... */
-        switch mainViewModel.voiceInputState {
-            case .recording: return Image(systemName: "stop.circle.fill")
-            case .processing: return Image(systemName: "hourglass.circle")
-            case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error: return Image(systemName: "mic.slash.fill")
-            case .requestingPermissions: return Image(systemName: "mic.badge.plus")
-            default: return Image(systemName: "mic.fill")
+        if !newItems.isEmpty {
+            mainViewModel.addAttachedFiles(fileItems: newItems)
         }
     }
-    private var micButtonColor: Color { /* ... same ... */
-        switch mainViewModel.voiceInputState {
-            case .recording: return .red
-            case .processing: return .orange
-            case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error: return .red.opacity(0.7)
-            case .requestingPermissions: return .orange
-            default: return .secondary
-        }
-    }
-    private var micButtonHelpText: String { /* ... same ... */
-        switch mainViewModel.voiceInputState {
-            case .idle, .available: return "Start Voice Input"
-            case .recording: return "Stop Voice Input"
-            case .processing: return "Processing Voice Input..."
-            case .requestingPermissions: return "Requesting Voice Permissions..."
-            case .permissionsDeniedMic: return "Microphone permission denied."
-            case .permissionsDeniedSpeech: return "Speech recognition permission denied."
-            case .speechRecognitionUnavailable: return "Speech recognition is currently unavailable."
-            case .error(let specificError): return "Voice input error: \(specificError.prefix(30))..."
-        }
-    }
-
-    private func performPromptFiltering(query: String) { /* ... same ... */
+    
+    private func performPromptFiltering(query: String) {
         let allPrompts = promptStore.getAllPrompts()
         if query.isEmpty {
             filteredPrompts = Array(allPrompts.sorted { $0.title.lowercased() < $1.title.lowercased() }.prefix(10))
@@ -271,15 +423,11 @@ struct ChatInputAreaView: View {
     }
     
     private func handlePromptSelection(_ selectedPrompt: Prompt) {
-        // This range is determined by CustomTextEditor's Coordinator based on user typing '#' and query
         guard let rangeToReplace = activePromptTriggerRange else {
             logger.error("Cannot insert prompt text: activePromptTriggerRange is nil. Current userInput: \"\(userInput)\". Appending text as fallback.")
             let separator = userInput.isEmpty || userInput.last == " " || userInput.last == "\n" ? "" : " "
-            // Directly modify userInput; CustomTextEditor will pick up the change via binding.
-            // This direct modification should be okay if rangeToReplace is nil, as it implies
-            // the suggestion trigger mechanism didn't set the range properly.
             userInput += "\(separator)\(selectedPrompt.text) "
-            clearPromptSuggestionStates() // Still clear suggestion UI
+            clearPromptSuggestionStates()
             return
         }
 
@@ -291,33 +439,26 @@ struct ChatInputAreaView: View {
         let finalAttributedString = NSMutableAttributedString(attributedString: attributedPromptText)
         finalAttributedString.append(trailingSpace)
         
-        // Set the request for CustomTextEditor to handle the actual text replacement
         attributedTextInsertionRequest = .init(
             range: rangeToReplace,
             attributedString: finalAttributedString
         )
-        // CustomTextEditor's updateNSView will perform the replacement and then update its
-        // internal text. The binding $userInput will be updated from CustomTextEditor.
-
-        clearPromptSuggestionStates() // Hide suggestion UI
-        DispatchQueue.main.async { self.isInputFocused.wrappedValue = true } // Refocus editor
+        clearPromptSuggestionStates()
+        DispatchQueue.main.async { self.isInputFocused.wrappedValue = true }
     }
     
     private func clearPromptSuggestionStates() {
         showPromptSuggestions = false
-        // activePromptTriggerRange is managed by Coordinator, but good to nil it here if selection happens.
-        // However, Coordinator should clear it upon successful processing or dismissal.
-        // For safety, we can nil it here too, though it might be redundant if Coordinator is robust.
         activePromptTriggerRange = nil
         suggestionQuery = ""
-        // filteredPrompts will clear via .onChange
     }
 
-    private func performFileFiltering(query: String) { /* ... same ... */
+    private func performFileFiltering(query: String) {
         let files = explorerViewModel.suggestableFiles(query: query)
         self.filteredFiles = Array(files.prefix(10))
     }
-    private func handleFileSelection(_ selectedFile: FileSystemItem) { /* ... same, ensure no direct userInput update ... */
+
+    private func handleFileSelection(_ selectedFile: FileSystemItem) {
         mainViewModel.addAttachedFile(fileItem: selectedFile)
         if let rangeToReplace = activeFileMentionTriggerRange {
             attributedTextInsertionRequest = .init(range: rangeToReplace, attributedString: NSAttributedString(string: ""))
@@ -325,78 +466,137 @@ struct ChatInputAreaView: View {
         clearFileSuggestionStates()
         DispatchQueue.main.async { self.isInputFocused.wrappedValue = true }
     }
-    private func clearFileSuggestionStates() { /* ... same ... */
+
+    private func clearFileSuggestionStates() {
         showFileSuggestions = false
         activeFileMentionTriggerRange = nil
         fileSuggestionQuery = ""
     }
 }
 
-struct ChatInputAreaView_Previews_Refactor_AtMention_P2_Cleanup: PreviewProvider {
+struct ChatInputAreaView_Previews_EnhancedMicStopSend: PreviewProvider {
     static var localPromptStore = PromptStore.shared
     @StateObject static var previewExplorerViewModel = ExplorerViewModel()
     
-    static func createPreviewMainViewModel(withAttachedFiles files: [FileSystemItem] = []) -> MainApplicationViewModel { /* ... */ return MainApplicationViewModel() }
-    static func createDummyFile(name: String, ext: String, isDirectoryInput: Bool = false) -> FileSystemItem { /* ... */ return FileSystemItem(id:URL(fileURLWithPath: ""), name:"", url:URL(fileURLWithPath:""), isDirectory:false) }
+    static func createPreviewMainViewModel(configure: @escaping (MainApplicationViewModel) -> Void = { _ in }) -> MainApplicationViewModel {
+         let vm = MainApplicationViewModel()
+         configure(vm)
+         return vm
+    }
 
     struct ChatInputAreaInteractivePreview: View {
         @StateObject var mainViewModelForPreview: MainApplicationViewModel
         @FocusState private var isInputFocusedPreview: Bool
-        @State private var previewUserInput: String = "" // This will be bound to CustomTextEditor
+        @State private var previewUserInput: String
 
-        init(configure: @escaping (MainApplicationViewModel) -> Void = { _ in }, attachedFiles: [FileSystemItem] = [], initialUserInput: String = "") {
+        init(initialUserInput: String = "", configureVM: @escaping (MainApplicationViewModel) -> Void = { _ in }) {
             let vm = MainApplicationViewModel()
-            vm.attachedFiles = attachedFiles
+            configureVM(vm)
+            vm.userInput = initialUserInput
+            
             _mainViewModelForPreview = StateObject(wrappedValue: vm)
-            _previewUserInput = State(initialValue: initialUserInput) // Initialize the @State
-            configure(vm)
+            _previewUserInput = State(initialValue: initialUserInput)
             
             if PromptStore.shared.getAllPrompts().isEmpty {
                  PromptStore.shared.addPrompt(Prompt(title: "Test Prompt", text: "This is the full test prompt text.", category: "Testing", isUserDefined: true))
-                 PromptStore.shared.addPrompt(Prompt(title: "Brainstorm", text: "Brainstorm ideas for X, Y, and Z.", category: "Creativity", isUserDefined: false))
             }
         }
 
         var body: some View {
             VStack(alignment: .leading) {
-                Text("Type '#' for prompt suggestions. Selecting inserts full text.")
+                Text("Dynamic Button: Mic -> Stop -> Send/Mic. Enter to send, Shift+Enter for newline.")
                      .font(.caption).foregroundColor(.gray).padding(.bottom, 5)
                 ChatInputAreaView(
-                    userInput: $previewUserInput, // Pass the @State binding
+                    userInput: $previewUserInput,
                     showContextArea: .constant(false),
                     activeContextFilePath: .constant(nil),
                     isSending: mainViewModelForPreview.isSending,
                     showSettings: mainViewModelForPreview.showSettings,
                     isInputFocused: $isInputFocusedPreview,
                     onSendMessage: { attrString in
-                        print("Preview: Send Tapped. Input: \(attrString.string.prefix(100))")
+                        print("Preview: Send Tapped/Enter. Input: \(attrString.string.prefix(100))")
                         mainViewModelForPreview.isSending = true
-                        // Simulate ViewModel clearing the input
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { // Slightly longer to ensure updates propagate
-                             previewUserInput = "" // This change should flow to CustomTextEditor
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                             previewUserInput = ""
+                             mainViewModelForPreview.userInput = ""
                              mainViewModelForPreview.isSending = false
                         }
                     },
                     onToggleContext: { print("Preview: Toggle Context Tapped") }
                 )
                 .environmentObject(mainViewModelForPreview)
-                .environmentObject(ChatInputAreaView_Previews_Refactor_AtMention_P2_Cleanup.previewExplorerViewModel)
-                Text("Bound userInput in Preview: \"\(previewUserInput)\"") // Debugging display
+                .environmentObject(ChatInputAreaView_Previews_EnhancedMicStopSend.previewExplorerViewModel)
+                
+                Text("Bound userInput: \"\(previewUserInput)\"")
+                Text("VM userInput: \"\(mainViewModelForPreview.userInput)\"")
+                Text("VM voiceInputState: \(mainViewModelForPreview.voiceInputState.description)")
+                Text("Current Button Mode: \(currentButtonModeForPreview.description)") // Corrected
+                
+                HStack {
+                    Button("Simulate Mic Start") {
+                        previewUserInput = ""
+                        mainViewModelForPreview.userInput = ""
+                        mainViewModelForPreview.voiceInputState = .available
+                        mainViewModelForPreview.toggleVoiceInput()
+                    }
+                    Button("Simulate Mic Stop (by toggle)") {
+                        if mainViewModelForPreview.voiceInputState == .recording {
+                            mainViewModelForPreview.toggleVoiceInput()
+                        }
+                    }
+                     Button("Simulate Text Input") { previewUserInput = "Hello" }
+                     Button("Clear Text Input") { previewUserInput = "" }
+                }
+                HStack {
+                    Button("Set VM State: Error") { mainViewModelForPreview.voiceInputState = .error("Test Error") }
+                    Button("Set VM State: Available") { mainViewModelForPreview.voiceInputState = .available }
+                }
+            }
+            .onChange(of: mainViewModelForPreview.userInput) { newValue in
+                if previewUserInput != newValue {
+                    previewUserInput = newValue
+                }
+            }
+             .onChange(of: previewUserInput) { newValue in
+                if mainViewModelForPreview.userInput != newValue {
+                    mainViewModelForPreview.userInput = newValue
+                }
+            }
+        }
+        
+        private var currentButtonModeForPreview: ChatInputAreaView.DynamicButtonMode {
+            if mainViewModelForPreview.voiceInputState == .recording {
+                return .stop
+            } else if !previewUserInput.isEmpty {
+                return .send
+            } else {
+                return .mic
             }
         }
     }
 
     static var previews: some View {
-        return ScrollView {
+        ScrollView {
             VStack(spacing: 30) {
-                Text("Chat Input Area (Sync & Insertion Fixes)")
+                Text("Chat Input Area (Enhanced Mic/Stop/Send)")
                     .font(.largeTitle).padding(.bottom)
-                ChatInputAreaInteractivePreview(initialUserInput: "#Test") // Test with initial text
-                    .padding().background(Color(NSColor.controlBackgroundColor).opacity(0.3)).cornerRadius(10)
-                ChatInputAreaInteractivePreview() // Test empty initial state
-                    .padding().background(Color(NSColor.controlBackgroundColor).opacity(0.3)).cornerRadius(10)
+                
+                ChatInputAreaInteractivePreview(initialUserInput: "")
+                    .padding().background(Color(NSColor.windowBackgroundColor).opacity(0.7)).cornerRadius(10)
+                
+                ChatInputAreaInteractivePreview(initialUserInput: "Some typed text")
+                    .padding().background(Color(NSColor.windowBackgroundColor).opacity(0.7)).cornerRadius(10)
+                
+                ChatInputAreaInteractivePreview(initialUserInput: "", configureVM: { vm in
+                    vm.userInput = ""
+                    vm.voiceInputState = .available
+                    vm.toggleVoiceInput()
+                })
+                .padding().background(Color(NSColor.windowBackgroundColor).opacity(0.7)).cornerRadius(10)
+                .previewDisplayName("Recording State")
+
 
             }.padding().frame(width: 480)
-        }.background(Color(NSColor.windowBackgroundColor))
+        }
     }
 }

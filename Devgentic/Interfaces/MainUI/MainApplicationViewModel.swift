@@ -33,7 +33,10 @@ class MainApplicationViewModel: ObservableObject {
     private let speechRecognitionService: NativeSpeechRecognitionService
     
     private var cancellables = Set<AnyCancellable>()
-    private var textInEditorBeforeVoiceInput: String = ""
+    
+    // This will store the text that should prefix the current spoken utterance
+    // when voice input starts.
+    private var prefixForCurrentUtterance: String = ""
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
     @Published var conversations: [Conversation] = []
@@ -59,7 +62,7 @@ class MainApplicationViewModel: ObservableObject {
     @Published var voiceInputState: VoiceInputState = .idle
 
     // --- Settings Properties ---
-    @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .ollama
+    @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .agent
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
     @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
@@ -73,11 +76,8 @@ class MainApplicationViewModel: ObservableObject {
     @AppStorage(SettingsKeys.ollamaGpuLayers) var ollamaGpuLayers: Int = -1
 
     // --- Ollama File Handling Parameters ---
-    // Phase 1
     @AppStorage(SettingsKeys.ollamaMaxInlineChars) var ollamaMaxInlineChars: Int = 5000
     @AppStorage(SettingsKeys.ollamaMaxAttachedFiles) var ollamaMaxAttachedFiles: Int = 5
-    
-    // Phase 2 Strategy Settings
     @AppStorage(SettingsKeys.ollamaTextFileInclusionStrategy) var ollamaTextFileInclusionStrategy: TextFileInclusionStrategy = .preferInlining
     @AppStorage(SettingsKeys.ollamaImageHandlingStrategy) var ollamaImageHandlingStrategy: OllamaImageHandlingStrategy = .includePathWithWarning
     @AppStorage(SettingsKeys.ollamaBinaryFileHandlingStrategy) var ollamaBinaryFileHandlingStrategy: OllamaBinaryFileHandlingStrategy = .includePathWithWarning
@@ -170,9 +170,11 @@ class MainApplicationViewModel: ObservableObject {
                     if self.voiceInputState == .recording || self.voiceInputState == .processing {
                         self.stopVoiceCaptureAndFinalize(customError: "Speech recognizer became unavailable.")
                     }
-                    self.voiceInputState = .speechRecognitionUnavailable
+                    if self.voiceInputState != .permissionsDeniedMic && self.voiceInputState != .permissionsDeniedSpeech {
+                        self.voiceInputState = .speechRecognitionUnavailable
+                    }
                 } else {
-                    if self.voiceInputState == .speechRecognitionUnavailable || self.voiceInputState == .idle {
+                    if self.voiceInputState == .speechRecognitionUnavailable || self.voiceInputState == .idle || self.voiceInputState == .error("Speech recognizer became unavailable.") {
                          logger.info("Speech recognizer became available. Re-checking permissions and overall availability.")
                          self.checkVoiceInputPermissionsAndAvailability()
                     }
@@ -197,9 +199,9 @@ class MainApplicationViewModel: ObservableObject {
         cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
         
-        if audioEngineService.isRecording {
-            Task { [weak self] in
-                await self?.stopVoiceCaptureAndFinalize(customError: "ViewModel deinitializing")
+        if audioEngineService.isRecording || speechRecognitionService.isRecognitionActive {
+            Task {
+                await self.stopVoiceCaptureAndFinalize(customError: "ViewModel deinitializing")
             }
         }
     }
@@ -280,6 +282,15 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
+        switch self.voiceInputState {
+        case .recording, .processing, .error:
+            logger.info("sendMessage: Voice input state is \(self.voiceInputState.description). Finalizing session and resetting to available.")
+            self.stopVoiceCaptureAndFinalize(customError: nil)
+        default:
+            logger.info("sendMessage: Voice input state is \(self.voiceInputState.description). No mic finalization action needed by send.")
+            break
+        }
+
         var conversationIDToUse: UUID
         if let currentID = selectedConversationID, store.getConversation(withId: currentID) != nil {
             conversationIDToUse = currentID
@@ -306,9 +317,10 @@ class MainApplicationViewModel: ObservableObject {
         } else if filesToProcess.isEmpty {
             logger.info("sendMessage: No text and no files to send. Aborting actual send logic.")
             isSending = false
+            if !self.userInput.isEmpty { self.userInput = "" }
             return
         }
-
+        
         self.isSending = true
 
         Task {
@@ -320,7 +332,6 @@ class MainApplicationViewModel: ObservableObject {
                 ollamaModelInfo = OllamaModelInfo(name: currentOllamaModelName, displayName: currentOllamaModelName, sizeDescription: "N/A")
             }
 
-            // 1. Assemble MessageParts
             let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
                 userQuery: plainUserQueryFromEditor,
                 attachedFiles: filesToProcess,
@@ -328,7 +339,6 @@ class MainApplicationViewModel: ObservableObject {
                 ollamaModelDetails: ollamaModelInfo,
                 maxInlineCharsOllama: self.ollamaMaxInlineChars,
                 maxFilesForOllama: self.ollamaMaxAttachedFiles,
-                // NEW: Pass strategy settings from @AppStorage
                 textFileStrategy: self.ollamaTextFileInclusionStrategy,
                 imageHandlingStrategy: self.ollamaImageHandlingStrategy,
                 binaryFileHandlingStrategy: self.ollamaBinaryFileHandlingStrategy
@@ -464,7 +474,7 @@ class MainApplicationViewModel: ObservableObject {
             ]
             return BackendConfiguration(
                 url: self.agentBaseURL,
-                endpoint: "/execute_task",
+                endpoint: "/chat",
                 payload: initialPayload
             )
         }
@@ -473,7 +483,11 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Voice Input Methods
     func checkVoiceInputPermissionsAndAvailability() {
         logger.info("Checking voice input permissions and availability...")
-        self.voiceInputState = .requestingPermissions
+        
+        if self.voiceInputState != .requestingPermissions {
+             self.voiceInputState = .requestingPermissions
+        }
+
         let currentMicStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         logger.debug("Current microphone permission status (synchronous check): \(String(describing: currentMicStatus.rawValue))")
         switch currentMicStatus {
@@ -490,12 +504,14 @@ class MainApplicationViewModel: ObservableObject {
             logger.info("Microphone permission is .notDetermined. Requesting via audioEngineService...")
             audioEngineService.requestMicrophonePermission { [weak self] grantedByRequestCallback in
                 guard let self = self else { return }
-                if grantedByRequestCallback {
-                    logger.info("audioEngineService.requestMicrophonePermission callback returned: \(grantedByRequestCallback). Re-checking speech permission.")
-                    self.checkSpeechRecognitionPermission()
-                } else {
-                    logger.warning("Microphone permission denied by user or system (from callback).")
-                    self.voiceInputState = .permissionsDeniedMic
+                DispatchQueue.main.async {
+                    if grantedByRequestCallback {
+                        logger.info("audioEngineService.requestMicrophonePermission callback returned: GRANTED. Re-checking speech permission.")
+                        self.checkSpeechRecognitionPermission()
+                    } else {
+                        logger.warning("Microphone permission denied by user or system (from callback).")
+                        self.voiceInputState = .permissionsDeniedMic
+                    }
                 }
             }
         @unknown default:
@@ -508,6 +524,7 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("Checking speech recognition permission...")
         let currentSpeechAuthStatus = SFSpeechRecognizer.authorizationStatus()
         logger.debug("Current speech recognition status (synchronous check): \(String(describing: currentSpeechAuthStatus.rawValue))")
+        
         switch currentSpeechAuthStatus {
         case .authorized:
             logger.info("Speech recognition permission already authorized.")
@@ -515,7 +532,7 @@ class MainApplicationViewModel: ObservableObject {
                 logger.info("Speech recognizer is available. Setting state to .available.")
                 self.voiceInputState = .available
             } else {
-                logger.warning("Speech recognizer is NOT available.")
+                logger.warning("Speech recognizer is NOT available (e.g. no network for server-based).")
                 self.voiceInputState = .speechRecognitionUnavailable
             }
         case .denied:
@@ -526,25 +543,26 @@ class MainApplicationViewModel: ObservableObject {
             self.voiceInputState = .error("Speech recognition restricted.")
         case .notDetermined:
             logger.info("Speech recognition permission .notDetermined. Requesting via speechRecognitionService...")
-            if self.voiceInputState != .requestingPermissions { self.voiceInputState = .requestingPermissions }
             speechRecognitionService.requestSpeechRecognitionPermission { [weak self] statusAfterRequestCallback in
                 guard let self = self else { return }
-                logger.info("Callback from speechRecognitionService.requestSpeechRecognitionPermission. New status: \(String(describing: statusAfterRequestCallback.rawValue))")
-                switch statusAfterRequestCallback {
-                case .authorized:
-                    if self.speechRecognitionService.speechRecognizerAvailable {
-                        self.voiceInputState = .available
-                    } else {
-                        self.voiceInputState = .speechRecognitionUnavailable
+                DispatchQueue.main.async {
+                    logger.info("Callback from speechRecognitionService.requestSpeechRecognitionPermission. New status: \(String(describing: statusAfterRequestCallback.rawValue))")
+                    switch statusAfterRequestCallback {
+                    case .authorized:
+                        if self.speechRecognitionService.speechRecognizerAvailable {
+                            self.voiceInputState = .available
+                        } else {
+                            self.voiceInputState = .speechRecognitionUnavailable
+                        }
+                    case .denied:
+                        self.voiceInputState = .permissionsDeniedSpeech
+                    case .restricted:
+                        self.voiceInputState = .error("Speech recognition restricted.")
+                    case .notDetermined:
+                        self.voiceInputState = .error("Could not determine speech permission after request.")
+                    @unknown default:
+                        self.voiceInputState = .error("Unknown speech permission state post-request.")
                     }
-                case .denied:
-                    self.voiceInputState = .permissionsDeniedSpeech
-                case .restricted:
-                    self.voiceInputState = .error("Speech recognition restricted.")
-                case .notDetermined:
-                    self.voiceInputState = .error("Could not determine speech permission after request.")
-                @unknown default:
-                    self.voiceInputState = .error("Unknown speech permission state post-request.")
                 }
             }
         @unknown default:
@@ -554,45 +572,72 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     func toggleVoiceInput() {
-        logger.info("Toggle voice input button tapped. Current voiceInputState: \(self.voiceInputState.description)")
+        logger.info("Toggle voice input button tapped. Current voiceInputState: \(self.voiceInputState.description), UserInput empty: \(self.userInput.isEmpty)")
         switch self.voiceInputState {
         case .idle, .available:
-            logger.info("Attempting to start voice capture.")
-            startVoiceCapture()
+            // **NEW CONDITION**: Only start if userInput is empty
+            if userInput.isEmpty {
+                logger.info("Attempting to start voice capture (userInput is empty).")
+                startVoiceCapture()
+            } else {
+                logger.info("Voice input attempted but userInput is not empty. Mic activation prevented.")
+                // State remains .available or .idle. UI should show send button.
+            }
         case .recording:
-            logger.info("Attempting to stop voice capture.")
+            logger.info("Attempting to stop voice capture (from toggle).")
             stopVoiceCaptureAndFinalize(customError: nil)
-        case .requestingPermissions, .processing:
-            logger.info("Voice input busy (\(self.voiceInputState.description)). Ignoring toggle.")
+        case .requestingPermissions:
+            logger.info("Voice input busy (requestingPermissions). Ignoring toggle.")
             break
+        case .processing:
+             logger.info("Voice input busy (processing). User toggled to stop. Finalizing.")
+             stopVoiceCaptureAndFinalize(customError: nil)
+             break
         case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error:
-            logger.info("Permissions issue or error state (\(self.voiceInputState.description)). Re-checking permissions.")
+            logger.info("Permissions issue or error state (\(self.voiceInputState.description)). Re-checking permissions on toggle.")
             checkVoiceInputPermissionsAndAvailability()
         }
     }
 
     private func startVoiceCapture() {
         logger.info("startVoiceCapture: Entered method.")
+
+        // **NEW GUARD**: Ensure userInput is empty before starting
+        guard userInput.isEmpty else {
+            logger.error("startVoiceCapture: Aborted. Attempted to start with non-empty input. UserInput: '\(self.userInput.prefix(50))'")
+            // If somehow called while recording, try to reset to available.
+            if self.voiceInputState == .recording {
+                 self.stopVoiceCaptureAndFinalize(customError: "Internal error: Start called with text.")
+            } else {
+                // If not recording, but called, ensure state reflects availability based on permissions.
+                 checkVoiceInputPermissionsAndAvailability()
+            }
+            return
+        }
+        
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
+        
         guard micStatus == .authorized else {
-            logger.error("startVoiceCapture: Aborted. Microphone permission not .authorized (is \(String(describing: micStatus.rawValue))).")
-            checkVoiceInputPermissionsAndAvailability()
-            return
+            logger.error("startVoiceCapture: Aborted. Microphone permission not .authorized (is \(String(describing: micStatus.rawValue))). Re-running checks.")
+            checkVoiceInputPermissionsAndAvailability(); return
         }
         guard speechStatus == .authorized else {
-            logger.error("startVoiceCapture: Aborted. Speech recognition not .authorized (is \(String(describing: speechStatus.rawValue))).")
-            checkVoiceInputPermissionsAndAvailability()
-            return
+            logger.error("startVoiceCapture: Aborted. Speech recognition not .authorized (is \(String(describing: speechStatus.rawValue))). Re-running checks.")
+            checkVoiceInputPermissionsAndAvailability(); return
         }
         guard speechRecognitionService.speechRecognizerAvailable else {
-            logger.error("startVoiceCapture: Aborted. Speech recognizer not available.")
+            logger.error("startVoiceCapture: Aborted. Speech recognizer not available. Current state: \(self.voiceInputState.description)")
             self.voiceInputState = .speechRecognitionUnavailable
             return
         }
-        logger.info("startVoiceCapture: All permissions and availability checks passed.")
-        textInEditorBeforeVoiceInput = userInput
-        logger.info("startVoiceCapture: Stored textInEditorBeforeVoiceInput: '\(self.textInEditorBeforeVoiceInput.prefix(30))'")
+
+        logger.info("startVoiceCapture: All permissions and availability checks passed, userInput is empty.")
+        
+        // prefixForCurrentUtterance should be empty now due to the guard, but kept for safety/structure.
+        self.prefixForCurrentUtterance = self.userInput
+        logger.info("startVoiceCapture: Initialized prefixForCurrentUtterance to '\(self.prefixForCurrentUtterance.prefix(50))'.")
+
         do {
             logger.info("startVoiceCapture: Attempting to start audio engine...")
             try audioEngineService.startStreamingAudio { [weak self] (buffer, _) in
@@ -602,51 +647,43 @@ class MainApplicationViewModel: ObservableObject {
             logger.info("startVoiceCapture: Attempting to start speech recognition task...")
             try speechRecognitionService.startRecognition(recognitionHandler: { [weak self] (transcriptFromRecognizer, isFinal, error) in
                 guard let self = self else { return }
-                let prefix = self.textInEditorBeforeVoiceInput
-                let separator = prefix.isEmpty || prefix.last == " " ? "" : " "
-                if let error = error {
-                    let nsError = error as NSError
-                    logger.error("Speech recognition handler error: Domain: \(nsError.domain), Code: \(nsError.code), Description: \(nsError.localizedDescription)")
-                    var isCancellationError = false
-                    if #available(macOS 14, *) {
-                        if nsError.domain == SFSpeechErrorDomain {
-                            if (nsError.code == 203 && nsError.localizedDescription.lowercased().contains("cancel")) {
-                                isCancellationError = true
-                            }
-                        }
-                    }
-                    if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107 {
-                        isCancellationError = true
-                    }
-                    
-                    if isCancellationError {
-                        logger.info("Recognition task was cancelled (likely intentional stop or end of audio). Treating as clean stop.")
-                        if !transcriptFromRecognizer.isEmpty {
-                            self.userInput = prefix + separator + transcriptFromRecognizer
-                        } else {
-                            self.userInput = prefix
-                        }
-                        self.stopVoiceCaptureAndFinalize(customError: nil)
-                    } else if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
-                        logger.info("No speech detected (kAFAssistantErrorDomain code 1110).")
-                        self.userInput = prefix
-                        self.stopVoiceCaptureAndFinalize(customError: "No speech detected.")
-                    } else {
-                        self.userInput = prefix
-                        self.stopVoiceCaptureAndFinalize(customError: "Recognition error: \(error.localizedDescription.prefix(50))")
-                    }
-                    return
-                }
-                if !transcriptFromRecognizer.isEmpty {
-                    self.userInput = prefix + separator + transcriptFromRecognizer
-                } else {
-                    if isFinal { self.userInput = prefix }
-                }
-                logger.trace("Transcript update. isFinal: \(isFinal), userInput: '\(self.userInput.prefix(100))'")
                 
-                if isFinal {
-                    logger.info("Final transcript (natural end without error). userInput: '\(self.userInput.prefix(100))'")
-                    self.stopVoiceCaptureAndFinalize(customError: nil)
+                DispatchQueue.main.async {
+                    if let error = error {
+                        let nsError = error as NSError
+                        logger.error("Speech recognition handler error: Domain: \(nsError.domain), Code: \(nsError.code), Description: \(nsError.localizedDescription)")
+                        
+                        var isCancellationError = false
+                        if nsError.domain == SFSpeechErrorDomain {
+                            isCancellationError = true
+                        }
+                        if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107 { isCancellationError = true }
+
+                        let finalActionErrorString: String?
+                        if isCancellationError {
+                            logger.info("REC HANDLER: Cancellation error. UserInput: '\(self.userInput.prefix(50))'")
+                            finalActionErrorString = nil
+                        } else if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110 {
+                            logger.info("REC HANDLER: No speech detected. UserInput: '\(self.userInput.prefix(50))'")
+                            finalActionErrorString = "No speech detected."
+                        } else {
+                            logger.warning("REC HANDLER: Other error. UserInput: '\(self.userInput.prefix(50))'")
+                            finalActionErrorString = "Recognition error: \(error.localizedDescription.prefix(50))"
+                        }
+                        
+                        self.stopVoiceCaptureAndFinalize(customError: finalActionErrorString)
+                        return
+                    }
+
+                    let currentPrefix = self.prefixForCurrentUtterance
+                    let separator = currentPrefix.isEmpty || currentPrefix.last?.isWhitespace == true || currentPrefix.last?.isNewline == true ? "" : " "
+                    self.userInput = currentPrefix + separator + transcriptFromRecognizer
+                    logger.trace("REC HANDLER: Appending. prefix='\(currentPrefix.prefix(50))', transcript='\(transcriptFromRecognizer.prefix(50))', userInput='\(self.userInput.prefix(50))'")
+                    
+                    if isFinal {
+                        logger.info("REC HANDLER: Final transcript received. userInput='\(self.userInput.prefix(100))'")
+                        self.stopVoiceCaptureAndFinalize(customError: nil)
+                    }
                 }
             })
             logger.info("startVoiceCapture: Speech recognition task successfully started.")
@@ -667,42 +704,51 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func stopVoiceCaptureAndFinalize(customError: String?) {
-        logger.info("stopVoiceCaptureAndFinalize: Entered. Error: \(customError ?? "None"). Current state: \(self.voiceInputState.description)")
-        
-        guard voiceInputState == .recording || voiceInputState == .processing || audioEngineService.isRecording else {
-            logger.info("stopVoiceCaptureAndFinalize: Not in recording/processing state or audio engine not active. No action needed or already stopping. Current state: \(self.voiceInputState.description), audioEngine.isRecording: \(String(describing: self.audioEngineService.isRecording))")
-            if let err = customError, !err.isEmpty {
-                if case .error(let existingError) = voiceInputState {
-                    if existingError != err { self.voiceInputState = .error(err) }
-                } else if self.voiceInputState != .available && self.voiceInputState != .idle && self.voiceInputState != .requestingPermissions {
-                     self.voiceInputState = .error(err)
-                }
-            } else if voiceInputState != .available && voiceInputState != .idle && voiceInputState != .requestingPermissions {
-                var shouldSetToAvailable = true
-                if case .error(let currentErr) = voiceInputState {
-                    if !currentErr.isEmpty { shouldSetToAvailable = false }
-                }
-                if shouldSetToAvailable { self.voiceInputState = .available }
-            }
-            return
-        }
+        let previousState = self.voiceInputState
+        logger.info("stopVoiceCaptureAndFinalize: Entered. Requested Error: \(customError ?? "None"). Current state before action: \(previousState.description)")
 
-        audioEngineService.stopStreamingAudio()
-        logger.info("stopVoiceCaptureAndFinalize: Audio engine stopped.")
-        
-        speechRecognitionService.stopRecognition()
-        logger.info("stopVoiceCaptureAndFinalize: Speech recognition service stop requested.")
-
-        if let err = customError, !err.isEmpty {
-            voiceInputState = .error(err)
-            logger.info("stopVoiceCaptureAndFinalize: State set to .error: \(err)")
+        if audioEngineService.isRecording || speechRecognitionService.isRecognitionActive {
+            audioEngineService.stopStreamingAudio()
+            speechRecognitionService.stopRecognition()
+            logger.info("stopVoiceCaptureAndFinalize: Audio and Speech services stop requested/confirmed.")
         } else {
-            if voiceInputState == .recording || voiceInputState == .processing {
-                voiceInputState = .available
-                logger.info("stopVoiceCaptureAndFinalize: State set to .available after clean stop.")
-            }
+            logger.info("stopVoiceCaptureAndFinalize: Services indicate no active session to stop (or already stopped).")
         }
-        logger.info("stopVoiceCaptureAndFinalize: Completed. Final userInput: '\(self.userInput.prefix(100))'")
+
+        var newStateDetermined = false
+
+        if let explicitNewError = customError, !explicitNewError.isEmpty {
+            if self.voiceInputState != .error(explicitNewError) {
+                self.voiceInputState = .error(explicitNewError)
+            }
+            newStateDetermined = true
+        } else {
+            let micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+            let speechPermission = SFSpeechRecognizer.authorizationStatus()
+            let recognizerIsActuallyAvailable = speechRecognitionService.speechRecognizerAvailable
+
+            if micPermission != .authorized {
+                if self.voiceInputState != .permissionsDeniedMic { self.voiceInputState = .permissionsDeniedMic }
+            } else if speechPermission != .authorized {
+                if self.voiceInputState != .permissionsDeniedSpeech { self.voiceInputState = .permissionsDeniedSpeech }
+            } else if !recognizerIsActuallyAvailable {
+                if self.voiceInputState != .speechRecognitionUnavailable { self.voiceInputState = .speechRecognitionUnavailable }
+            } else {
+                if self.voiceInputState != .available { self.voiceInputState = .available }
+            }
+            newStateDetermined = true
+        }
+        
+        if !newStateDetermined && previousState == .requestingPermissions {
+             logger.warning("stopVoiceCaptureAndFinalize: Was in .requestingPermissions, no explicit error, and no new state determined. Re-checking availability.")
+             checkVoiceInputPermissionsAndAvailability()
+        }
+
+        if previousState != self.voiceInputState {
+            logger.info("stopVoiceCaptureAndFinalize: Completed. State transitioned from \(previousState.description) to \(self.voiceInputState.description). UserInput: '\(self.userInput.prefix(100))'")
+        } else {
+            logger.info("stopVoiceCaptureAndFinalize: Completed. State remained \(self.voiceInputState.description). UserInput: '\(self.userInput.prefix(100))'")
+        }
     }
 
 
@@ -847,3 +893,4 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 }
+
