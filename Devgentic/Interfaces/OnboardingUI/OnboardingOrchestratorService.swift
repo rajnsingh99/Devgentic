@@ -1,20 +1,18 @@
-// OnboardingOrchestratorService.swift
 //
 //  OnboardingOrchestratorService.swift
 //  Devgentic
 //
 //  Created by Raj Singh on 19/05/25.
+//  Updated for modular Python agent.
 //
 
 import Foundation
 import Combine
-import os // For logging
-import System // For FilePath, if used (not strictly necessary for current implementation)
+import os
+import System
 
-// Logger for this service
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "OnboardingOrchestrator")
 
-// Define potential errors that can occur during the orchestration process
 enum OrchestrationError: LocalizedError {
     case pythonNotInstalled
     case pythonVersionTooLow(foundVersion: String)
@@ -22,7 +20,8 @@ enum OrchestrationError: LocalizedError {
     case processExecutionFailed(command: String, exitCode: Int32, standardError: String)
     case virtualEnvironmentCreationFailed
     case requirementsInstallationFailed
-    case scriptNotFound(scriptName: String)
+    case scriptNotFound(scriptName: String) // Keep for requirements.txt, local.py etc.
+    case agentPackageNotFound(packageName: String) // For the devgentic_agent package
     case ollamaAppInstallFailed
     case ollamaModelDownloadFailed
     case agentLaunchFailed(reason: String)
@@ -34,6 +33,7 @@ enum OrchestrationError: LocalizedError {
     case cancelled
     case generic(message: String)
     case pythonPathError
+    case resourcePathError
 
     var errorDescription: String? {
         switch self {
@@ -51,6 +51,8 @@ enum OrchestrationError: LocalizedError {
             return "Failed to install Python dependencies from requirements.txt."
         case .scriptNotFound(let scriptName):
             return "Required script '\(scriptName)' was not found in the app bundle."
+        case .agentPackageNotFound(let packageName):
+            return "Required Python agent package '\(packageName)' not found in app bundle resources."
         case .ollamaAppInstallFailed:
             return "Failed to install the Ollama application."
         case .ollamaModelDownloadFailed:
@@ -73,29 +75,28 @@ enum OrchestrationError: LocalizedError {
             return message
         case .pythonPathError:
             return "Could not determine a valid Python executable path."
+        case .resourcePathError:
+            return "Could not determine the application's resource path."
         }
     }
 }
 
-// Structure to hold Python check results
 struct PythonCheckResult {
     let isInstalled: Bool
     let version: String?
     let path: String?
 }
 
-// Structure for Agent Launch results
 struct AgentLaunchResult {
     let url: URL
     let pid: Int32
+    let venvPythonPathUsed: String // Also return the python path used for AgentManager
 }
 
-// Structure to decode the JSON payload for admin commands from local.py
 struct AdminCommandPayload: Decodable {
     let command: [String]
 }
 
-// Constant to match the marker string from local.py
 private let PRIVILEGE_ESCALATION_MARKER = "###REQUIRES_ELEVATED_PRIVILEGES###"
 
 class OnboardingOrchestratorService {
@@ -103,6 +104,7 @@ class OnboardingOrchestratorService {
     private var currentProcess: Process?
     private let venvName = "devgentic"
     private let defaultOllamaModel = "gemma:2b"
+    private let agentPackageName = "devgentic_agent" // The Python package folder name
 
     private func getSystemPythonPath() async throws -> String {
         logger.info("Attempting to determine system Python 3 path...")
@@ -281,11 +283,10 @@ class OnboardingOrchestratorService {
                 arguments: [localPyPath, "--phase", "initial"],
                 outputHandler: { line, isStdErr in
                     progressUpdate(line)
-                    if line.contains("Ollama is already installed.") { // Check for this message from local.py
+                    if line.contains("Ollama is already installed.") {
                         ollamaAlreadyInstalledByScript = true
                         logger.info("local.py reported Ollama is already installed.")
                     }
-                    // Use the globally defined constant here
                     if line.contains(PRIVILEGE_ESCALATION_MARKER) {
                         privilegeMarkerDetected = true
                         logger.info("local.py signaled for elevated privileges. Expecting JSON.")
@@ -298,7 +299,7 @@ class OnboardingOrchestratorService {
                                 logger.error("Failed to parse admin command JSON '\(line)': \(error.localizedDescription)")
                             }
                         }
-                        privilegeMarkerDetected = false
+                        privilegeMarkerDetected = false // Reset after processing the line following the marker
                     }
                 }
             )
@@ -340,12 +341,15 @@ class OnboardingOrchestratorService {
                 logger.error("Privileged command for Ollama installation failed or was cancelled.")
                 throw OrchestrationError.ollamaAppInstallFailed
             }
-        } else if privilegeMarkerDetected && adminCommandToExecute == nil {
+        } else if privilegeMarkerDetected && adminCommandToExecute == nil { // Marker seen, but no command parsed
             logger.error("Privilege marker was detected from local.py, but a valid admin command was not parsed.")
             progressUpdate("Error: Script indicated admin rights needed, but command was unclear.")
             throw OrchestrationError.adminCommandParseFailed
-        } else if !(await isOllamaAppInstalled()) {
-             logger.warning("local.py finished without errors or admin command, but Ollama.app still not found. Installation might have failed silently.")
+        } else if !(await isOllamaAppInstalled()) { // No admin command, and not installed
+             logger.warning("local.py finished without errors or admin command, but Ollama.app still not found. Installation might have failed silently or not attempted.")
+             // This might not be an error if local.py determined no action was needed and it wasn't installed.
+             // However, if the goal was installation, this is a failure point.
+             // For now, let's assume if it's not installed after this, it's an issue.
              throw OrchestrationError.ollamaAppInstallFailed
         }
          progressUpdate("Ollama application setup process potentially complete. Verification will occur if model download is triggered.")
@@ -387,7 +391,8 @@ class OnboardingOrchestratorService {
                             logger.debug("Parsed Ollama pull progress: \(percentValue)% from line: \(line)")
                         }
                     }
-                    progressUpdate(line, percentage)
+                    progressUpdate(line, percentage) // Pass line and optional percentage
+                    if isStdErr { logger.error("[Ollama Model STDERR]: \(line)")}
                 }
             )
             progressUpdate("Ollama model \(modelToDownload) download process finished.", 1.0)
@@ -401,17 +406,24 @@ class OnboardingOrchestratorService {
 
     public func launchAgent(venvPythonURL: URL, progressUpdate: @escaping (String) -> Void) async throws -> AgentLaunchResult {
         logger.info("Launching agent using Python from venv: \(venvPythonURL.path)")
-        progressUpdate("Starting Devgentic agent...")
+        progressUpdate("Starting Devgentic agent (modular)...")
 
-        guard let agentScriptPath = Bundle.main.path(forResource: "agent_launcher", ofType: "py") else {
-            logger.error("agent_launcher.py not found in app bundle.")
-            throw OrchestrationError.scriptNotFound(scriptName: "agent_launcher.py")
+        // The `devgentic_agent` package (folder) should be in the app's resources.
+        guard let resourcePathURL = Bundle.main.resourceURL else {
+            logger.error("Application resource path not found. Cannot set working directory for agent.")
+            throw OrchestrationError.resourcePathError
+        }
+        
+        let agentPackageDirURL = resourcePathURL.appendingPathComponent(agentPackageName, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: agentPackageDirURL.path) else {
+            logger.error("Python agent package '\(self.agentPackageName)' not found in bundle resources at \(agentPackageDirURL.path).")
+            throw OrchestrationError.agentPackageNotFound(packageName: agentPackageName)
         }
         
         var agentURLString: String? = nil
         var agentPIDString: String? = nil
-        let agentURLMarker = "Agent running on:"
-        let agentPIDMarker = "Agent PID:"
+        let agentURLMarker = "Agent running on:" // This comes from Python's print statement
+        let agentPIDMarker = "Agent PID:"       // This also comes from Python's print statement
         var agentProcess: Process?
 
         return try await withTaskCancellationHandler {
@@ -424,7 +436,10 @@ class OnboardingOrchestratorService {
                 self.currentProcess = process
 
                 process.executableURL = venvPythonURL
-                process.arguments = [agentScriptPath]
+                process.arguments = ["-m", "\(agentPackageName).main"] // Launch as module
+                process.currentDirectoryURL = resourcePathURL // Set CWD to Resources folder
+
+                logger.info("Agent launch: \(venvPythonURL.path) \(process.arguments?.joined(separator: " ") ?? "") in CWD: \(resourcePathURL.path)")
 
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
@@ -432,11 +447,13 @@ class OnboardingOrchestratorService {
                 process.standardError = errorPipe
                 
                 var accumulatedAgentError = ""
+                var hasResumed = false // Ensure continuation is resumed only once
 
                 outputPipe.fileHandleForReading.readabilityHandler = { fileHandle in
                     let data = fileHandle.availableData
                     if let lineChunk = String(data: data, encoding: .utf8) {
                         DispatchQueue.main.async {
+                            guard !hasResumed else { return }
                             lineChunk.split(separator: "\n").forEach { subLine in
                                 let trimmedLine = String(subLine).trimmingCharacters(in: .whitespacesAndNewlines)
                                 if !trimmedLine.isEmpty {
@@ -452,11 +469,12 @@ class OnboardingOrchestratorService {
                                     }
 
                                     if let urlStr = agentURLString, let url = URL(string: urlStr),
-                                       let pidStr = agentPIDString, let pid = Int32(pidStr),
-                                       agentURLString != "RESUMED_SUCCESS" {
-                                        agentURLString = "RESUMED_SUCCESS"
-                                        logger.info("Agent URL and PID successfully parsed. Resuming continuation.")
-                                        continuation.resume(returning: AgentLaunchResult(url: url, pid: pid))
+                                       let pidStr = agentPIDString, let pid = Int32(pidStr) {
+                                        if !hasResumed {
+                                            hasResumed = true
+                                            logger.info("Agent URL and PID successfully parsed. Resuming continuation.")
+                                            continuation.resume(returning: AgentLaunchResult(url: url, pid: pid, venvPythonPathUsed: venvPythonURL.path))
+                                        }
                                     }
                                 }
                             }
@@ -485,36 +503,43 @@ class OnboardingOrchestratorService {
                     outputPipe.fileHandleForReading.readabilityHandler = nil
                     errorPipe.fileHandleForReading.readabilityHandler = nil
                     
-                    if agentURLString != "RESUMED_SUCCESS" {
-                        var reason = "Agent exited prematurely before reporting full details."
-                        if agentURLString == nil && agentPIDString == nil { reason = "Agent did not report URL or PID." }
-                        else if agentURLString == nil { reason = "Agent did not report its URL." }
-                        else if agentPIDString == nil { reason = "Agent did not report its PID." }
-                        
-                        let errorMsg = accumulatedAgentError.isEmpty ? reason : accumulatedAgentError.trimmingCharacters(in: .whitespacesAndNewlines)
-                        logger.error("Agent launch failed before URL/PID capture or due to premature exit: \(errorMsg)")
-                        continuation.resume(throwing: OrchestrationError.processExecutionFailed(
-                            command: "agent_launcher.py",
-                            exitCode: terminatedProcess.terminationStatus,
-                            standardError: errorMsg
-                        ))
+                    DispatchQueue.main.async { // Ensure continuation is called on main thread if needed, though it's async
+                        if !hasResumed {
+                            hasResumed = true // Mark as resumed to prevent double resume
+                            var reason = "Agent exited prematurely before reporting full details."
+                            if agentURLString == nil && agentPIDString == nil { reason = "Agent did not report URL or PID." }
+                            else if agentURLString == nil { reason = "Agent did not report its URL." }
+                            else if agentPIDString == nil { reason = "Agent did not report its PID." }
+                            
+                            let errorMsg = accumulatedAgentError.isEmpty ? reason : accumulatedAgentError.trimmingCharacters(in: .whitespacesAndNewlines)
+                            logger.error("Agent launch failed before URL/PID capture or due to premature exit: \(errorMsg)")
+                            continuation.resume(throwing: OrchestrationError.processExecutionFailed(
+                                command: "\(self.agentPackageName).main",
+                                exitCode: terminatedProcess.terminationStatus,
+                                standardError: errorMsg
+                            ))
+                        }
                     }
                     if self.currentProcess == terminatedProcess { self.currentProcess = nil }
                 }
 
                 do {
-                    logger.info("Attempting to run agent process: \(venvPythonURL.path) \(agentScriptPath)")
+                    logger.info("Attempting to run agent process: \(venvPythonURL.path) -m \(self.agentPackageName).main in CWD: \(resourcePathURL.path)")
                     try process.run()
                     logger.info("Agent process launched (OS PID: \(process.processIdentifier)). Waiting for script to report URL and its own PID...")
                 } catch {
                     logger.error("Failed to run agent process: \(error.localizedDescription)")
-                    continuation.resume(throwing: OrchestrationError.agentLaunchFailed(reason: error.localizedDescription))
+                    if !hasResumed {
+                        hasResumed = true
+                        continuation.resume(throwing: OrchestrationError.agentLaunchFailed(reason: error.localizedDescription))
+                    }
                     if self.currentProcess == process { self.currentProcess = nil }
                 }
             }
         } onCancel: {
             logger.info("Agent launch task was cancelled. Interrupting agent process (PID: \(agentProcess?.processIdentifier ?? -1)).")
-            agentProcess?.interrupt()
+            agentProcess?.interrupt() // Sends SIGINT
+            // Consider a more forceful termination if interrupt doesn't work after a timeout
             if self.currentProcess == agentProcess {
                  self.currentProcess = nil
             }
@@ -523,7 +548,9 @@ class OnboardingOrchestratorService {
 
     public func cancelCurrentTask() {
         logger.info("Attempting to cancel current process (PID: \(self.currentProcess?.processIdentifier ?? -1)).")
-        currentProcess?.interrupt()
+        currentProcess?.interrupt() // Sends SIGINT
+        // Note: If the process is stuck and doesn't handle SIGINT, it might not terminate.
+        // A more robust cancel might involve a timeout and then currentProcess?.terminate() (SIGTERM).
         currentProcess = nil
     }
 
@@ -588,10 +615,10 @@ class OnboardingOrchestratorService {
     private func runProcessStreaming(
         executableURL: URL,
         arguments: [String],
-        outputHandler: @escaping (String, Bool) -> Void
+        outputHandler: @escaping (String, Bool) -> Void // line, isStdErr
     ) async throws {
         let process = Process()
-        self.currentProcess = process
+        self.currentProcess = process // Track the current process for cancellation
 
         process.executableURL = executableURL
         process.arguments = arguments
@@ -601,12 +628,12 @@ class OnboardingOrchestratorService {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
-        var accumulatedStdErr = ""
+        var accumulatedStdErr = "" // To capture stderr for error reporting
 
         outputPipe.fileHandleForReading.readabilityHandler = { fileHandle in
             let data = fileHandle.availableData
             if let lineStream = String(data: data, encoding: .utf8) {
-                 DispatchQueue.main.async {
+                 DispatchQueue.main.async { // Ensure UI updates on main thread
                     lineStream.split(separator: "\n", omittingEmptySubsequences: false).forEach { subLine in
                         outputHandler(String(subLine), false)
                     }
@@ -617,11 +644,11 @@ class OnboardingOrchestratorService {
         errorPipe.fileHandleForReading.readabilityHandler = { fileHandle in
             let data = fileHandle.availableData
             if let errorStream = String(data: data, encoding: .utf8) {
-                 DispatchQueue.main.async {
+                 DispatchQueue.main.async { // Ensure UI updates on main thread
                     errorStream.split(separator: "\n", omittingEmptySubsequences: false).forEach { subLine in
                         let strSubLine = String(subLine)
                         outputHandler(strSubLine, true)
-                        accumulatedStdErr += strSubLine + "\n"
+                        accumulatedStdErr += strSubLine + "\n" // Accumulate for potential error reporting
                     }
                 }
             }
@@ -632,6 +659,7 @@ class OnboardingOrchestratorService {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { terminatedProcess in
+                    // Ensure handlers are nilled out to stop further processing
                     outputPipe.fileHandleForReading.readabilityHandler = nil
                     errorPipe.fileHandleForReading.readabilityHandler = nil
                     
@@ -639,9 +667,13 @@ class OnboardingOrchestratorService {
                         logger.debug("Streaming command finished successfully.")
                         continuation.resume(returning: ())
                     } else {
+                        // Check if cancellation was the reason for termination
+                        // This is a heuristic; `terminatedProcess.terminationReason == .exit` and `self.currentProcess == nil` (due to onCancel)
+                        // might indicate a cancellation path.
                         let finalErrorMessage = accumulatedStdErr.isEmpty ? "Process exited non-zero with no stderr." : accumulatedStdErr.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if self.currentProcess == nil && terminatedProcess.terminationReason == .exit {
-                             logger.warning("Streaming command terminated with status (\(terminatedProcess.terminationStatus)) but might have been cancelled. Stderr: \(finalErrorMessage.prefix(500))")
+
+                        if self.currentProcess == nil && terminatedProcess.terminationReason == .exit && Task.isCancelled {
+                             logger.warning("Streaming command terminated with status (\(terminatedProcess.terminationStatus)) but task was cancelled. Stderr: \(finalErrorMessage.prefix(500))")
                              continuation.resume(throwing: OrchestrationError.cancelled)
                         } else {
                             logger.error("Streaming command failed with status \(terminatedProcess.terminationStatus). Stderr: \(finalErrorMessage.prefix(500))")
@@ -652,6 +684,7 @@ class OnboardingOrchestratorService {
                             ))
                         }
                     }
+                    // Clear currentProcess if it's the one that terminated
                     if self.currentProcess == terminatedProcess { self.currentProcess = nil }
                 }
 
@@ -659,11 +692,12 @@ class OnboardingOrchestratorService {
                     try process.run()
                 } catch {
                     logger.error("Failed to run streaming process \(executableURL.path): \(error.localizedDescription)")
+                    // Nil out handlers immediately on failure to run
                     outputPipe.fileHandleForReading.readabilityHandler = nil
                     errorPipe.fileHandleForReading.readabilityHandler = nil
                     continuation.resume(throwing: OrchestrationError.processExecutionFailed(
                         command: "\(executableURL.lastPathComponent) \(arguments.joined(separator: " "))",
-                        exitCode: -1,
+                        exitCode: -1, // Indicate launch failure
                         standardError: error.localizedDescription
                     ))
                     if self.currentProcess == process { self.currentProcess = nil }
@@ -671,7 +705,8 @@ class OnboardingOrchestratorService {
             }
         } onCancel: {
              logger.info("Streaming process task was cancelled. Interrupting process (PID: \(process.processIdentifier)).")
-             process.interrupt()
+             process.interrupt() // Send SIGINT
+             // If self.currentProcess points to this process, clear it
              if self.currentProcess == process { self.currentProcess = nil }
         }
     }

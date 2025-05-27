@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 19/05/25.
+//  Updated for modular Python agent.
 //
 
 import Foundation
@@ -32,7 +33,7 @@ class AgentManager: ObservableObject {
             UserDefaults.standard.set(agentPID, forKey: SettingsKeys.agentPID) // Save PID
         }
     }
-    private var agentURL: URL?
+    private var agentURL: URL? // This is the base URL like http://127.0.0.1:8000
     private var venvPythonPath: String?
 
     private var healthCheckTimer: Timer?
@@ -53,31 +54,26 @@ class AgentManager: ObservableObject {
         if let urlString = UserDefaults.standard.string(forKey: SettingsKeys.agentBaseURL) {
             self.agentURL = URL(string: urlString)
         }
+        
         // Path to venv python is needed to restart the agent.
         // This should be saved during onboarding.
-        // For now, let's assume it's derivable or saved.
-        // A robust way is to save it in UserDefaults during onboarding.
-        // Example: self.venvPythonPath = UserDefaults.standard.string(forKey: SettingsKeys.venvPythonPath)
-        
-        // For demonstration, let's construct a potential path. This needs to be reliable.
         if let appSupportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            let venvDir = appSupportDir.appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.devgentic", isDirectory: true).appendingPathComponent("devgentic", isDirectory: true)
+            let venvDir = appSupportDir.appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.devgentic", isDirectory: true).appendingPathComponent("devgentic", isDirectory: true) // Assuming venv is named "devgentic"
             self.venvPythonPath = venvDir.appendingPathComponent("bin/python").path
+            // Also save this to UserDefaults if it's reliably determined here or during onboarding
+            // UserDefaults.standard.set(self.venvPythonPath, forKey: SettingsKeys.venvPythonPath)
         }
 
 
-        Self.logger.info("Loaded agent details - PID: \(self.agentPID ?? -1), URL: \(self.agentURL?.absoluteString ?? "nil")")
+        Self.logger.info("Loaded agent details - PID: \(self.agentPID ?? -1), URL: \(self.agentURL?.absoluteString ?? "nil"), VenvPython: \(self.venvPythonPath ?? "nil")")
         
         // Initial status check
         if let pid = self.agentPID, isProcessRunning(pid: pid) {
-            // PID exists and process is running, but is it our agent?
-            // Perform a health check to confirm.
             Task { await performHealthCheck(showInitialStatus: true) }
         } else if self.agentPID != nil && self.agentPID != 0 {
-            // PID was saved, but process is not running.
             Self.logger.info("Agent PID \(self.agentPID!) was found in UserDefaults, but process is not running. Marking as stopped/failed.")
-            self.agentStatus = .failed // Or .stopped, depending on desired UX
-            self.agentPID = nil // Clear invalid PID
+            self.agentStatus = .failed
+            self.agentPID = nil
         } else {
             self.agentStatus = .stopped
         }
@@ -96,7 +92,6 @@ class AgentManager: ObservableObject {
             return
         }
         
-        // If PID is nil or process not running, try to start.
         Self.logger.info("Attempting to start agent.")
         guard let pythonPath = venvPythonPath, FileManager.default.fileExists(atPath: pythonPath) else {
             Self.logger.error("Virtual environment Python path not found or not set: \(self.venvPythonPath ?? "nil"). Cannot start agent.")
@@ -104,21 +99,37 @@ class AgentManager: ObservableObject {
             appendLog("Error: Python environment not found. Agent cannot start.")
             return
         }
-        guard let agentScriptPath = Bundle.main.path(forResource: "agent_launcher", ofType: "py") else {
-            Self.logger.error("agent_launcher.py script not found in bundle. Cannot start agent.")
+        
+        // The `devgentic_agent` package (folder) should be in the app's resources.
+        guard let resourcePath = Bundle.main.resourceURL else {
+            Self.logger.error("Application resource path not found. Cannot set working directory for agent.")
             agentStatus = .failed
-            appendLog("Error: Agent script not found. Agent cannot start.")
+            appendLog("Error: Application resource path not found.")
+            return
+        }
+        
+        // Check if the devgentic_agent package directory exists in resources
+        let agentPackageDir = resourcePath.appendingPathComponent("devgentic_agent", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: agentPackageDir.path) else {
+            Self.logger.error("Python agent package 'devgentic_agent' not found in bundle resources at \(agentPackageDir.path).")
+            agentStatus = .failed
+            appendLog("Error: Agent package 'devgentic_agent' not found in app resources.")
             return
         }
 
+
         agentStatus = .starting
-        appendLog("Starting Devgentic agent...")
+        appendLog("Starting Devgentic agent (modular)...")
 
         agentProcess = Process()
         agentProcess?.executableURL = URL(fileURLWithPath: pythonPath)
-        agentProcess?.arguments = [agentScriptPath]
+        // Launch the agent as a module
+        agentProcess?.arguments = ["-m", "devgentic_agent.main"]
+        // Set the working directory to where `devgentic_agent` package can be found by Python's module system
+        agentProcess?.currentDirectoryURL = resourcePath
 
-        // Setup pipes to capture output if desired for live logging
+        Self.logger.info("Agent launch configuration: Python: \(pythonPath), Args: \(self.agentProcess?.arguments?.joined(separator: " ") ?? ""), CWD: \(self.agentProcess?.currentDirectoryURL?.path ?? "nil")")
+
         let outputPipe = Pipe()
         agentProcess?.standardOutput = outputPipe
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
@@ -126,20 +137,29 @@ class AgentManager: ObservableObject {
             if let line = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty {
                 DispatchQueue.main.async {
                     self?.appendLog("[AGENT]: \(line)")
-                    // Check for URL and PID from output if this is the first launch after an app restart
-                    // and we didn't have them (though PID is usually enough to monitor)
                 }
             }
         }
-        // Similarly for standardError
+        
+        let errorPipe = Pipe()
+        agentProcess?.standardError = errorPipe
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
+            let data = fileHandle.availableData
+            if let line = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty {
+                DispatchQueue.main.async {
+                    self?.appendLog("[AGENT ERR]: \(line)")
+                }
+            }
+        }
+
 
         do {
             try agentProcess?.run()
-            self.agentPID = agentProcess?.processIdentifier // Store the new PID
+            self.agentPID = agentProcess?.processIdentifier
             Self.logger.info("Agent process started with PID: \(self.agentPID ?? -1). Will verify with health check.")
             appendLog("Agent process initiated (PID: \(self.agentPID ?? -1)). Waiting for it to become healthy...")
-            // Start health checks
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { // Give agent time to start
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 7) { // Increased delay slightly for module loading
                 self.performHealthCheck()
                 self.startHealthCheckTimer()
             }
@@ -167,19 +187,17 @@ class AgentManager: ObservableObject {
 
         if isProcessRunning(pid: pid) {
             agentStatus = .stopping
-            // Send SIGINT (Ctrl+C) first for graceful shutdown
-            let killResult = kill(pid, SIGINT)
+            let killResult = kill(pid, SIGINT) // SIGINT for graceful shutdown
             if killResult == 0 {
                 Self.logger.info("Sent SIGINT to agent process \(pid). Waiting for termination...")
-                // Give it a moment to shut down gracefully
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                     if self.isProcessRunning(pid: pid) {
                         Self.logger.warning("Agent process \(pid) did not terminate after SIGINT. Sending SIGTERM.")
-                        kill(pid, SIGTERM) // Force terminate
-                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { // Check after SIGTERM
+                        kill(pid, SIGTERM)
+                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             if self.isProcessRunning(pid: pid) {
                                 Self.logger.error("Agent process \(pid) could not be terminated even with SIGTERM.")
-                                self.agentStatus = .unknown // Or .failedToStop
+                                self.agentStatus = .unknown
                             } else {
                                 Self.logger.info("Agent process \(pid) terminated after SIGTERM.")
                                 self.agentStatus = .stopped
@@ -189,67 +207,65 @@ class AgentManager: ObservableObject {
                         Self.logger.info("Agent process \(pid) terminated gracefully after SIGINT.")
                         self.agentStatus = .stopped
                     }
-                    if self.agentStatus == .stopped { self.agentPID = nil } // Clear PID if stopped
+                    if self.agentStatus == .stopped { self.agentPID = nil }
                 }
             } else {
                 Self.logger.error("Failed to send SIGINT to agent process \(pid). Error: \(String(cString: strerror(errno)))")
-                // If kill fails, the process might not exist or we don't have permission (unlikely for own child)
-                if !isProcessRunning(pid: pid) { // Check if it's already gone
+                if !isProcessRunning(pid: pid) {
                     self.agentStatus = .stopped
                     self.agentPID = nil
                 } else {
-                    self.agentStatus = .unknown // Or .failedToStop
+                    self.agentStatus = .unknown
                 }
             }
         } else {
             Self.logger.info("Agent process \(pid) was not running when stop was requested.")
             agentStatus = .stopped
-            self.agentPID = nil // Clear PID if not running
+            self.agentPID = nil
         }
-        agentProcess = nil // Clear Process object
+        agentProcess = nil
     }
 
     func performHealthCheck(showInitialStatus: Bool = false) {
-        guard let url = agentURL?.appendingPathComponent("health") else {
+        // The agentURL is the base (e.g., http://127.0.0.1:8000)
+        // The health endpoint is now /agent/health
+        guard let baseAgentURL = agentURL else {
             if showInitialStatus && agentPID != nil && !isProcessRunning(pid: agentPID!) {
-                 // If PID was known but process is gone, it failed
                 agentStatus = .failed
                 Self.logger.warning("Agent URL not set for health check, and process for PID \(self.agentPID!) is gone.")
-                self.agentPID = nil // Clear invalid PID
+                self.agentPID = nil
             } else if showInitialStatus {
-                agentStatus = .stopped // Or unknown if URL is missing but PID might be valid
+                agentStatus = .stopped
                  Self.logger.warning("Agent URL not set for health check.")
             }
             return
         }
+        let healthCheckURL = baseAgentURL.appendingPathComponent("agent/health") // Updated path
         
-        // If we have a PID, first check if the process is actually running
         if let pid = agentPID, !isProcessRunning(pid: pid) {
             Self.logger.info("Health check: Process for PID \(pid) is not running. Marking agent as failed/stopped.")
-            agentStatus = .failed // Or .stopped
-            self.agentPID = nil // Clear invalid PID
-            healthCheckTimer?.invalidate() // Stop further checks if process is gone
+            agentStatus = .failed
+            self.agentPID = nil
+            healthCheckTimer?.invalidate()
             return
         }
 
-
-        Self.logger.debug("Performing health check on: \(url.absoluteString)")
-        var request = URLRequest(url: url)
+        Self.logger.debug("Performing health check on: \(healthCheckURL.absoluteString)")
+        var request = URLRequest(url: healthCheckURL)
         request.httpMethod = "GET"
-        request.timeoutInterval = 5 // Short timeout for health check
+        request.timeoutInterval = 5
 
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
 
                 if let error = error {
-                    Self.logger.warning("Health check failed (network error): \(error.localizedDescription)")
-                    if self.agentStatus != .starting && self.agentStatus != .stopping { // Don't override transient states
-                        // If we thought it was running, but health check fails, it's problematic
+                    Self.logger.warning("Health check failed (network error): \(error.localizedDescription) for URL: \(healthCheckURL.absoluteString)")
+                    if self.agentStatus != .starting && self.agentStatus != .stopping {
                         if self.isProcessRunning(pid: self.agentPID ?? 0) {
-                             self.agentStatus = .unknown // Process running, but not responding
+                             self.agentStatus = .unknown
                         } else {
-                             self.agentStatus = .failed // Process likely crashed
+                             self.agentStatus = .failed
                              self.agentPID = nil
                         }
                     }
@@ -257,7 +273,7 @@ class AgentManager: ObservableObject {
                 }
 
                 guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                    Self.logger.warning("Health check failed (status code: \((response as? HTTPURLResponse)?.statusCode ?? -1)).")
+                    Self.logger.warning("Health check failed (status code: \((response as? HTTPURLResponse)?.statusCode ?? -1)) for URL: \(healthCheckURL.absoluteString).")
                      if self.agentStatus != .starting && self.agentStatus != .stopping {
                         if self.isProcessRunning(pid: self.agentPID ?? 0) {
                              self.agentStatus = .unknown
@@ -269,59 +285,60 @@ class AgentManager: ObservableObject {
                     return
                 }
 
-                // Optional: Parse response data for more detailed status
                 if let data = data, let jsonData = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                      Self.logger.info("Health check successful. Response: \(jsonData)")
-                     if let statusString = jsonData["status"] as? String, statusString == "ok" {
+                     // The new health check returns "overall_status"
+                     if let overallStatus = jsonData["overall_status"] as? String, overallStatus == "ok" {
                         self.agentStatus = .running
-                     } else {
+                     } else if let overallStatus = jsonData["overall_status"] as? String, overallStatus == "degraded" {
+                        self.agentStatus = .unknown // Or a new .degraded status
+                        Self.logger.warning("Agent health check reported 'degraded': \(jsonData)")
+                     }
+                     else {
                         self.agentStatus = .unknown // Healthy response but unexpected content
+                        Self.logger.warning("Agent health check reported unexpected overall_status: \(jsonData)")
                      }
                 } else {
-                    self.agentStatus = .running // Got 200 OK, assume running
+                    Self.logger.warning("Health check response was 200 OK, but no parsable JSON data.")
+                    self.agentStatus = .running // Assuming 200 OK means it's at least responsive
                 }
-                
-                // If health check is good, ensure PID matches if possible (more advanced)
-                // For now, 200 OK means running.
             }
         }.resume()
     }
 
     private func startHealthCheckTimer() {
-        healthCheckTimer?.invalidate() // Invalidate existing timer
+        healthCheckTimer?.invalidate()
         healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             Self.logger.debug("Periodic health check triggered.")
             self?.performHealthCheck()
         }
-        // Perform one immediately too
         performHealthCheck()
     }
     
     private func isProcessRunning(pid: Int32) -> Bool {
         guard pid != 0 else { return false }
-        // Using `kill -0 pid` checks if a process with that PID exists and we have permission to signal it.
-        // It doesn't actually send a signal if signal number is 0.
-        return kill(pid, 0) == 0 || errno != ESRCH // ESRCH means no such process
+        return kill(pid, 0) == 0 || errno != ESRCH
     }
 
     private func appendLog(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         let logEntry = "[\(timestamp)] \(message)"
-        if agentLog.count > 100 { agentLog.removeFirst(50) } // Keep log size manageable
+        if agentLog.count > 200 { agentLog.removeFirst(100) } // Keep log size manageable
         agentLog.append(logEntry)
-        Self.logger.info("\(message)")
+        Self.logger.info("\(message)") // Also log to system console
     }
 
-    // Call this if onboarding completes and provides new agent details
-    func onboardingDidComplete(agentURL: URL, agentPID: Int32) {
-        Self.logger.info("AgentManager notified of onboarding completion. New PID: \(agentPID), URL: \(agentURL.absoluteString)")
+    func onboardingDidComplete(agentURL: URL, agentPID: Int32, venvPythonPath: String) {
+        Self.logger.info("AgentManager notified of onboarding completion. New PID: \(agentPID), URL: \(agentURL.absoluteString), VenvPython: \(venvPythonPath)")
         self.agentURL = agentURL
-        self.agentPID = agentPID // This will also save to UserDefaults via didSet
-        UserDefaults.standard.set(agentURL.absoluteString, forKey: SettingsKeys.agentBaseURL)
-        // Assuming venvPythonPath is already set or known by now
+        self.agentPID = agentPID
+        self.venvPythonPath = venvPythonPath
         
-        // Perform an initial health check and start timer
+        UserDefaults.standard.set(agentURL.absoluteString, forKey: SettingsKeys.agentBaseURL)
+        UserDefaults.standard.set(venvPythonPath, forKey: SettingsKeys.venvPythonPath) // Save venv path
+        
         performHealthCheck(showInitialStatus: true)
         startHealthCheckTimer()
     }
 }
+

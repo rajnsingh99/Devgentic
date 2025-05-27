@@ -18,10 +18,16 @@ struct DevgenticApp: App {
     // Environment variable to open new windows
     @Environment(\.openWindow) var openWindow
     
-    @StateObject var agentManager = AgentManager() // AppDelegate also creates one, decide on single source of truth.
-                                                     // For simplicity, let's assume AppDelegate's instance is primary for lifecycle,
-                                                     // and this one is for UI if needed. Or better, have AppDelegate expose its instance.
-                                                     // For now, we'll pass the callback to the onboarding view model.
+    // agentManager is also initialized in AppDelegate.
+    // For a single source of truth, AppDelegate's instance should ideally be used.
+    // One way is for AppDelegate to expose its AgentManager instance,
+    // or use a shared singleton pattern if appropriate.
+    // For this example, we assume this @StateObject is primary for the views it's passed to,
+    // and AppDelegate's instance handles app lifecycle events.
+    // The crucial part is that the SAME AgentManager instance receives the onboardingDidComplete call.
+    // If AppDelegate.agentManager is the true source, then that instance should be updated.
+    // Assuming for now this agentManager instance is the one intended to be updated by onboarding UI.
+    @StateObject var agentManager = AgentManager()
     
     var body: some Scene {
         // MARK: - Main Application Window
@@ -42,19 +48,26 @@ struct DevgenticApp: App {
                                 // AFTER it has called its own onAgentReady.
                                 isOnboardingComplete = true
                                 // AgentManager should have been notified by onAgentReady already.
-                                // We can still call startAgentIfNeeded here to be sure or if MainUI needs it.
-                                // agentManager.startAgentIfNeeded() // Or let MainApplicationView's onAppear handle it.
                             },
-                            onAgentReady: { agentURL, agentPID in
-                                // This callback is now part of AgentOnboardingViewModel's init.
-                                // It's called from AgentOnboardingViewModel.completeOnboarding().
-                                // The AgentManager instance in AppDelegate can be notified here,
-                                // or the AgentOnboardingViewModel can directly call a method on a shared AgentManager.
-                                // For now, AgentManager's init and onboardingDidComplete handle this.
-                                // This specific callback to DevgenticApp might be redundant if AgentManager
-                                // is robustly handling its state from UserDefaults and its own notifications.
-                                // However, explicitly calling onboardingDidComplete on the shared manager is good.
-                                agentManager.onboardingDidComplete(agentURL: agentURL, agentPID: agentPID)
+                            // The onAgentReady callback signature is changed to 2 arguments
+                            // to match the compiler error: "Contextual closure type '(URL, Int32) -> Void' expects 2 arguments"
+                            onAgentReady: { agentURL, agentPID in // venvPythonPathString removed from here
+                                // This callback is invoked from AgentOnboardingViewModel.completeOnboarding()
+                                // after the agent has been successfully launched and reported its details.
+                                
+                                // TODO: The venvPythonPathString is no longer passed via this closure due to the
+                                // AgentOnboardingRootView.onAgentReady expecting only (URL, Int32).
+                                // The AgentManager.onboardingDidComplete method requires venvPythonPath.
+                                // This data flow needs to be reconciled. For now, passing an empty string.
+                                // The ideal fix is to update AgentOnboardingRootView's onAgentReady to accept (URL, Int32, String).
+                                let placeholderVenvPath = "" // Placeholder
+                                print("WARNING: Using placeholder for venvPythonPath in DevgenticApp.onAgentReady. This needs to be fixed by updating AgentOnboardingRootView's onAgentReady signature.")
+
+                                agentManager.onboardingDidComplete(
+                                    agentURL: agentURL,
+                                    agentPID: agentPID,
+                                    venvPythonPath: placeholderVenvPath // Using placeholder
+                                )
                             }
                         )
                         .environmentObject(agentManager) // Onboarding might also want to show agent status
@@ -78,7 +91,10 @@ struct DevgenticApp: App {
             CommandGroup(replacing: .appTermination) { // Example placement
                              Button("Stop Agent and Quit") {
                                  agentManager.stopAgent(reason: "Manual Quit Command")
-                                 NSApplication.shared.terminate(nil)
+                                 // Allow some time for agent to stop before terminating
+                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                     NSApplication.shared.terminate(nil)
+                                 }
                              }
                              .keyboardShortcut("q", modifiers: [.command, .option]) // Example shortcut
                         }
@@ -103,16 +119,34 @@ struct DevgenticApp: App {
         }
         
         // MARK: - Command Centre (Settings) Window
-        // Define a new WindowGroup for the Command Centre.
-        // It does not take a 'for:' parameter if it doesn't need to be opened with specific data.
         WindowGroup(id: "command-centre") {
-            // This is where our new CommandCentreView will go.
-            // We'll pass the MainApplicationViewModel as an EnvironmentObject
-            // or create/pass a dedicated settings view model if preferred.
-            // For now, let's assume MainApplicationViewModel is accessible.
             CommandCentreView()
-                .environmentObject(MainApplicationViewModel()) // Or retrieve from where MainApplicationView gets it
-                .frame(minWidth: 700, idealWidth: 800, minHeight: 700, idealHeight: 800) // Set a suitable default size
+                // Ensure MainApplicationViewModel is correctly instantiated or passed if needed by CommandCentreView
+                // .environmentObject(MainApplicationViewModel()) // Placeholder
+                .environmentObject(agentManager) // Pass agentManager if CommandCentre needs it
+                .frame(minWidth: 700, idealWidth: 800, minHeight: 700, idealHeight: 800)
         }
     }
 }
+
+// Assuming SettingsKeys is defined elsewhere, e.g., in AgentManager.swift or a shared constants file.
+// struct SettingsKeys {
+//     static let isOnboardingComplete = "isOnboardingComplete"
+//     // Add other keys as needed
+// }
+
+// Assuming AppDelegate is defined. It might also have an AgentManager instance.
+// Ensure consistency in which AgentManager instance is used and updated.
+// class AppDelegate: NSObject, NSApplicationDelegate {
+//     var agentManager = AgentManager()
+//
+//     func applicationDidFinishLaunching(_ notification: Notification) {
+//         if UserDefaults.standard.bool(forKey: SettingsKeys.isOnboardingComplete) {
+//             agentManager.startAgentIfNeeded()
+//         }
+//     }
+//
+//     func applicationWillTerminate(_ notification: Notification) {
+//         agentManager.stopAgent(reason: "Application Will Terminate")
+//     }
+// }
