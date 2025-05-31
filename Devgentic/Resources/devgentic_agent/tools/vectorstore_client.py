@@ -1,8 +1,9 @@
 # devgentic_agent/tools/vectorstore_client.py
 import sys
 from typing import Optional, List, Dict, Any
-from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OllamaEmbeddings
+# Using the updated direct imports for LangChain components as suggested by deprecation warnings
+from langchain_chroma import Chroma # Corrected import based on warning [cite: 4]
+from langchain_ollama import OllamaEmbeddings # Corrected import based on warning [cite: 3]
 from langchain_core.vectorstores import VectorStoreRetriever
 
 from ..config import (
@@ -23,25 +24,38 @@ class VectorStoreManager:
         self.initialization_error: Optional[str] = None
 
         try:
+            # Initialize Embeddings
             self.embeddings = OllamaEmbeddings(
                 model=EMBEDDING_MODEL_NAME,
                 base_url=OLLAMA_BASE_URL
             )
             print(f"OllamaEmbeddings initialized with model: {EMBEDDING_MODEL_NAME}, base_url: {OLLAMA_BASE_URL}")
 
+            # Initialize ChromaDB Vector Store
             self.vectorstore = Chroma(
                 collection_name=CHROMA_COLLECTION_NAME,
                 embedding_function=self.embeddings,
                 persist_directory=CHROMA_PERSIST_DIRECTORY,
             )
+            print(f"ChromaDB vectorstore initialized. Collection: '{CHROMA_COLLECTION_NAME}', Persist Dir: '{CHROMA_PERSIST_DIRECTORY}'")
+
+            # Initialize Retriever
             self.retriever = self.vectorstore.as_retriever(
                 search_type="similarity",
                 search_kwargs={"k": 3} # Retrieve top 3 relevant docs
             )
-            print(f"ChromaDB vectorstore initialized. Collection: '{CHROMA_COLLECTION_NAME}', Persist Dir: '{CHROMA_PERSIST_DIRECTORY}'")
+            print("ChromaDB retriever initialized.")
+
+            # If all components are successfully set, clear any previous error
+            self.initialization_error = None
+
         except Exception as e:
             self.initialization_error = f"Error initializing ChromaDB or Embeddings: {e}"
             print(self.initialization_error, file=sys.stderr)
+            # Ensure components are None if an error occurred during their setup
+            self.embeddings = None
+            self.vectorstore = None
+            self.retriever = None
 
     def add_documents(self, texts: List[str], metadatas: Optional[List[Dict[str, Any]]] = None) -> tuple[bool, Optional[List[str]]]:
         """Adds documents to ChromaDB."""
@@ -49,10 +63,7 @@ class VectorStoreManager:
             print("ChromaDB vectorstore not available, cannot add documents.", file=sys.stderr)
             return False, None
         try:
-            # Chroma's add_texts can return a list of IDs for the added documents
             doc_ids = self.vectorstore.add_texts(texts=texts, metadatas=metadatas)
-            # Ensure persistence if not automatically handled by the client version/config
-            # self.vectorstore.persist() # May not be needed depending on Chroma client behavior
             print(f"Successfully added {len(texts)} documents to ChromaDB. IDs: {doc_ids}")
             return True, doc_ids
         except Exception as e:
@@ -72,17 +83,23 @@ class VectorStoreManager:
             return []
 
     def get_status(self) -> tuple[str, str | None]:
-        """Returns the status of the VectorStore ('ok', 'error') and an error message if any."""
+        """Returns the status of the VectorStore ('ok', 'error', 'degraded') and an error message if any."""
+        # If initialization_error is set during __init__, that's the primary error
         if self.initialization_error:
             return "error", self.initialization_error
-        if self.vectorstore and self.retriever and self.embeddings:
-            try:
-                # Perform a lightweight check, e.g., count items in collection
-                count = self.vectorstore._collection.count()
-                return "ok", f"ChromaDB initialized. Collection has {count} items."
-            except Exception as e:
-                return "degraded", f"ChromaDB initialized but health check failed: {e}"
-        return "error", "VectorStore components not fully initialized."
+        
+        # Check if all components are successfully set
+        if self.vectorstore is None or self.retriever is None or self.embeddings is None:
+            # This indicates a partial initialization failure not caught by the initial try-except
+            return "error", "VectorStore components not fully initialized."
+
+        try:
+            # Perform a lightweight check, e.g., count items in collection
+            # This will raise an exception if the connection to ChromaDB is broken after init
+            count = self.vectorstore._collection.count()
+            return "ok", f"ChromaDB initialized. Collection has {count} items."
+        except Exception as e:
+            return "degraded", f"ChromaDB initialized but health check call failed: {e}"
 
 # Initialize a global instance
 vector_store_manager = VectorStoreManager()
@@ -96,4 +113,3 @@ def format_chroma_context_for_prompt(docs: List[Any]) -> str: # Any is langchain
         f"Source: {doc.metadata.get('source', 'N/A')}\nContent: {doc.page_content}"
         for doc in docs
     ]) if docs else "No relevant context found in documents."
-

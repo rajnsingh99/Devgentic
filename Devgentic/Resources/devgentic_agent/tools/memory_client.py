@@ -1,8 +1,7 @@
 # devgentic_agent/tools/memory_client.py
-from mem0 import Mem0
-from typing import Optional, List
-from mem0.types import Memory as Mem0MemoryType # For type hinting
-
+from mem0 import Memory # Corrected import: Import Memory instead of Mem0
+import sys
+from typing import Optional, List # For type hinting, still refers to mem0.types.Memory
 from ..config import MEM0_API_KEY # Relative import from config
 
 class MemoryManager:
@@ -10,13 +9,15 @@ class MemoryManager:
     Manages interactions with the Mem0 client.
     """
     def __init__(self, api_key: Optional[str]):
-        self.client: Optional[Mem0] = None
+        # Updated type hint to reflect the correct class
+        self.client: Optional[Memory] = None
         self.initialization_error: Optional[str] = None
         self.is_configured: bool = bool(api_key)
 
         if api_key:
             try:
-                self.client = Mem0(api_key=api_key)
+                # Corrected initialization: Use Memory() instead of Mem0()
+                self.client = Memory(api_key=api_key)
                 print("Mem0 client initialized successfully.")
             except Exception as e:
                 self.initialization_error = f"Error initializing Mem0 client: {e}"
@@ -38,7 +39,7 @@ class MemoryManager:
             print(f"Error adding memory to Mem0 for user_id {user_id}: {e}", file=sys.stderr)
             return False
 
-    def get_all_memories(self, user_id: str, limit: int = 10) -> List[Mem0MemoryType]:
+    def get_all_memories(self, user_id: str, limit: int = 10) -> List[Memory]:
         """Retrieves all memories for a user from Mem0."""
         if not self.client:
             print("Mem0 client not available, cannot retrieve memories.", file=sys.stderr)
@@ -73,7 +74,7 @@ class MemoryManager:
 memory_manager = MemoryManager(api_key=MEM0_API_KEY)
 
 # Helper function to be used by Langchain chain
-def format_mem0_history_for_prompt(history_entries: List[Mem0MemoryType]) -> str:
+def format_mem0_history_for_prompt(history_entries: List[Memory]) -> str:
     """Formats Mem0 history objects into a readable string for the LLM prompt."""
     if not history_entries:
         return "No chat history found for this conversation."
@@ -88,4 +89,3 @@ def format_mem0_history_for_prompt(history_entries: List[Mem0MemoryType]) -> str
         else:
             formatted_history.append(f"User: {content}")
     return "\n".join(formatted_history)
-
