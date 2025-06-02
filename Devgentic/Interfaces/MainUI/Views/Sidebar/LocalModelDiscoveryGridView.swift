@@ -75,7 +75,9 @@ struct LocalModelDiscoveryGridView: View {
                     ForEach(discoverableModels) { model in
                         ModelCardView(
                             model: model,
-                            ollamaService: ollamaService // Pass OllamaService
+                            ollamaService: ollamaService, // Pass OllamaService
+                            // Pass the current Ollama profile's base URL for model operations
+                            ollamaBaseURL: mainViewModel.ollamaProfileStore.currentProfile?.baseURL ?? "http://localhost:11434"
                         )
                     }
                 }
@@ -90,6 +92,8 @@ struct LocalModelDiscoveryGridView: View {
              // Trigger a status check if Ollama is the selected backend and status is not connected
              if mainViewModel.selectedBackend == .ollama && ollamaService.serverStatus != .connected {
                   Task {
+                       // Use the currently active profile's base URL for the status check
+                       ollamaService.ollamaBaseURL = mainViewModel.ollamaProfileStore.currentProfile?.baseURL ?? "http://localhost:11434"
                        await ollamaService.checkServerStatusAndUpdateModels()
                   }
              }
@@ -105,6 +109,7 @@ struct LocalModelDiscoveryGridView: View {
 // MARK: - Ollama Status View Helper
 struct OllamaStatusView: View {
     @ObservedObject var ollamaService: OllamaService // Use OllamaService
+    @Environment(\.openWindow) var openWindow // To open the Ollama Profiles window
 
     var body: some View {
         HStack {
@@ -130,6 +135,15 @@ struct OllamaStatusView: View {
             } else if ollamaService.serverStatus == .checking {
                  ProgressView().controlSize(.small)
             }
+
+            // MARK: - New: Settings icon to open Ollama Profiles window
+            Button {
+                openWindow(id: "ollama-profiles")
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.plain)
+            .help("Manage Ollama Profiles")
         }
     }
 }
@@ -139,6 +153,7 @@ struct OllamaStatusView: View {
 struct ModelCardView: View {
     let model: LocalModelDiscoveryGridView.DiscoverableModel
     @ObservedObject var ollamaService: OllamaService // Use OllamaService
+    let ollamaBaseURL: String // New property to receive the base URL
 
     private var isPullingThisModel: Bool {
         ollamaService.isPullingModel && ollamaService.modelToPull == model.name
@@ -194,8 +209,8 @@ struct ModelCardView: View {
                         // Set the model name in OllamaService before calling pull
                         ollamaService.modelToPull = model.name
                         Task {
-                            // Call action on OllamaService
-                            await ollamaService.pullModel(name: model.name)
+                            // Call action on OllamaService, passing the correct baseURL
+                            await ollamaService.pullModel(name: model.name, baseURL: ollamaBaseURL)
                         }
                     } label: {
                         Label("Download", systemImage: "arrow.down.circle")
@@ -236,11 +251,33 @@ struct LocalModelDiscoveryGridView_Previews: PreviewProvider {
         let disconnectedOllamaService = OllamaService()
         disconnectedOllamaService.serverStatus = .disconnected
         
+        // Create mock OllamaProfileStore instances for previews
+        let defaultOllamaProfileStore = OllamaProfileStore()
+        defaultOllamaProfileStore.profiles = [OllamaProfile.defaultProfile()]
+        defaultOllamaProfileStore.selectedProfileID = defaultOllamaProfileStore.profiles.first?.id
+
+        let pullingOllamaProfileStore = OllamaProfileStore()
+        pullingOllamaProfileStore.profiles = [OllamaProfile.defaultProfile()]
+        pullingOllamaProfileStore.selectedProfileID = pullingOllamaProfileStore.profiles.first?.id
+
+        let disconnectedOllamaProfileStore = OllamaProfileStore()
+        disconnectedOllamaProfileStore.profiles = [OllamaProfile.defaultProfile()]
+        disconnectedOllamaProfileStore.selectedProfileID = disconnectedOllamaProfileStore.profiles.first?.id
+
         // Create a mock MainApplicationViewModel for the preview context
-        // It needs an OllamaService instance.
-        let mockMainViewModelDefault = MainApplicationViewModel(ollamaService: defaultOllamaService)
-        let mockMainViewModelPulling = MainApplicationViewModel(ollamaService: pullingOllamaService)
-        let mockMainViewModelDisconnected = MainApplicationViewModel(ollamaService: disconnectedOllamaService)
+        // It needs an OllamaService instance AND an OllamaProfileStore instance.
+        let mockMainViewModelDefault = MainApplicationViewModel(
+            ollamaService: defaultOllamaService,
+            ollamaProfileStore: defaultOllamaProfileStore
+        )
+        let mockMainViewModelPulling = MainApplicationViewModel(
+            ollamaService: pullingOllamaService,
+            ollamaProfileStore: pullingOllamaProfileStore
+        )
+        let mockMainViewModelDisconnected = MainApplicationViewModel(
+            ollamaService: disconnectedOllamaService,
+            ollamaProfileStore: disconnectedOllamaProfileStore
+        )
 
 
         return Group {

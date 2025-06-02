@@ -27,6 +27,7 @@ class MainApplicationViewModel: ObservableObject {
     private let llmCommunicator: LLMCommunicatorProtocol
 
     @ObservedObject var ollamaService: OllamaService
+    @ObservedObject var ollamaProfileStore: OllamaProfileStore
 
     // MARK: - Voice Input Services
     private let audioEngineService: AudioEngineService
@@ -34,8 +35,6 @@ class MainApplicationViewModel: ObservableObject {
     
     private var cancellables = Set<AnyCancellable>()
     
-    // This will store the text that should prefix the current spoken utterance
-    // when voice input starts.
     private var prefixForCurrentUtterance: String = ""
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
@@ -48,11 +47,7 @@ class MainApplicationViewModel: ObservableObject {
     @Published var showPromptLibrary: Bool = false
     @Published var selectedSettingsSection: SettingsSection = .general {
         didSet {
-            if selectedSettingsSection == .localAI && selectedBackend == .ollama {
-                Task { await ollamaService.checkServerStatusAndUpdateModels() }
-            } else if selectedSettingsSection != .localAI {
-                ollamaService.clearAllModelActionStatuses()
-            }
+            ollamaService.clearAllModelActionStatuses()
         }
     }
     @Published var showContextArea: Bool = false
@@ -67,22 +62,6 @@ class MainApplicationViewModel: ObservableObject {
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
     @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
     
-    // --- Ollama Advanced Parameters ---
-    @AppStorage(SettingsKeys.ollamaTemperature) var ollamaTemperature: Double = 0.8
-    @AppStorage(SettingsKeys.ollamaTopK) var ollamaTopK: Int = 40
-    @AppStorage(SettingsKeys.ollamaTopP) var ollamaTopP: Double = 0.9
-    @AppStorage(SettingsKeys.ollamaRepeatPenalty) var ollamaRepeatPenalty: Double = 1.1
-    @AppStorage(SettingsKeys.ollamaContextWindowSize) var ollamaContextWindowSize: Int = 4096
-    @AppStorage(SettingsKeys.ollamaGpuLayers) var ollamaGpuLayers: Int = -1
-
-    // --- Ollama File Handling Parameters ---
-    @AppStorage(SettingsKeys.ollamaMaxInlineChars) var ollamaMaxInlineChars: Int = 5000
-    @AppStorage(SettingsKeys.ollamaMaxAttachedFiles) var ollamaMaxAttachedFiles: Int = 5
-    @AppStorage(SettingsKeys.ollamaTextFileInclusionStrategy) var ollamaTextFileInclusionStrategy: TextFileInclusionStrategy = .preferInlining
-    @AppStorage(SettingsKeys.ollamaImageHandlingStrategy) var ollamaImageHandlingStrategy: OllamaImageHandlingStrategy = .includePathWithWarning
-    @AppStorage(SettingsKeys.ollamaBinaryFileHandlingStrategy) var ollamaBinaryFileHandlingStrategy: OllamaBinaryFileHandlingStrategy = .includePathWithWarning
-
-
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMMM d, yy"
@@ -134,6 +113,7 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Initialization
     init(ollamaService: OllamaService,
+         ollamaProfileStore: OllamaProfileStore,
          audioEngineService: AudioEngineService = AudioEngineService(),
          speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
          fileProcessorService: FileProcessorService = FileProcessorService(),
@@ -141,6 +121,7 @@ class MainApplicationViewModel: ObservableObject {
          llmCommunicator: LLMCommunicatorProtocol? = nil
     ) {
         self.ollamaService = ollamaService
+        self.ollamaProfileStore = ollamaProfileStore
         self.audioEngineService = audioEngineService
         self.speechRecognitionService = speechRecognitionService
         
@@ -154,8 +135,22 @@ class MainApplicationViewModel: ObservableObject {
         observeConversationStoreChanges()
         
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
+        
+        if let currentProfile = ollamaProfileStore.currentProfile {
+            self.ollamaService.ollamaBaseURL = currentProfile.baseURL
+            self.ollamaService.llmModelName = currentProfile.llmModelName
+            logger.info("OllamaService initialized with profile: \(currentProfile.profileName), baseURL: \(currentProfile.baseURL), model: \(currentProfile.llmModelName)")
+        } else {
+            logger.warning("MainApplicationViewModel initialized without a selected Ollama profile.")
+        }
+
         if selectedBackend == .ollama {
-            Task { await self.ollamaService.checkServerStatusAndUpdateModels() }
+             // Initial check when app starts and Ollama is the selected backend.
+             // The sink below will handle subsequent profile changes.
+            Task {
+                logger.debug("MainApplicationViewModel init: Ollama is selected backend. Triggering initial checkServerStatusAndUpdateModels.")
+                await self.ollamaService.checkServerStatusAndUpdateModels()
+            }
         }
         
         checkVoiceInputPermissionsAndAvailability()
@@ -181,13 +176,58 @@ class MainApplicationViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Observe changes to the selected profile in OllamaProfileStore
+        ollamaProfileStore.$selectedProfileID
+            .compactMap { $0 }
+            // .removeDuplicates() // Consider if needed; @Published usually handles distinct values.
+            .sink { [weak self] newSelectedID in
+                guard let self = self,
+                      let newProfile = self.ollamaProfileStore.profiles.first(where: { $0.id == newSelectedID }) else {
+                    logger.warning("MainApplicationViewModel: Sink for selectedProfileID received nil or profile not found for ID: \(newSelectedID.uuidString )")
+                    return
+                }
+                
+                let oldOllamaServiceBaseURL = self.ollamaService.ollamaBaseURL
+                let oldOllamaServiceModelName = self.ollamaService.llmModelName
+
+                let baseURLChanged = oldOllamaServiceBaseURL != newProfile.baseURL
+                let modelNameChanged = oldOllamaServiceModelName != newProfile.llmModelName
+
+                if baseURLChanged {
+                    logger.info("MainApplicationViewModel: Selected Ollama profile changed to '\(newProfile.profileName)'. BaseURL changed from '\(oldOllamaServiceBaseURL)' to '\(newProfile.baseURL)'. Updating OllamaService.")
+                    self.ollamaService.ollamaBaseURL = newProfile.baseURL
+                    self.ollamaService.llmModelName = newProfile.llmModelName // Also update model name with baseURL change
+
+                    if self.selectedBackend == .ollama {
+                        Task {
+                            logger.debug("MainApplicationViewModel: Triggering checkServerStatusAndUpdateModels due to profile/baseURL change.")
+                            await self.ollamaService.checkServerStatusAndUpdateModels()
+                        }
+                    }
+                } else if modelNameChanged {
+                    // BaseURL is the same, but model name changed.
+                    logger.info("MainApplicationViewModel: Selected Ollama profile '\(newProfile.profileName)'. LLM Model changed from '\(oldOllamaServiceModelName)' to '\(newProfile.llmModelName)'. BaseURL '\(newProfile.baseURL)' remains the same.")
+                    self.ollamaService.llmModelName = newProfile.llmModelName
+                    // No need for a full server check if the base URL is the same.
+                    // The LocalAISettingsView's picker directly binds to the profile's model name.
+                    // OllamaService.llmModelName is updated here to keep it in sync for other operations.
+                } else {
+                    logger.info("MainApplicationViewModel: Selected Ollama profile '\(newProfile.profileName)'. BaseURL and LLM Model are already up-to-date in OllamaService. No refresh triggered by this sink.")
+                }
+            }
+            .store(in: &cancellables)
     }
  
     convenience init() {
         let fpService = FileProcessorService()
         let maService = MessageAssemblerService(fileProcessorService: fpService)
         let comm = DefaultLLMCommunicator(fileProcessorService: fpService)
-        self.init(ollamaService: OllamaService(),
+        let ollamaService = OllamaService()
+        let ollamaProfileStore = OllamaProfileStore()
+
+        self.init(ollamaService: ollamaService,
+                  ollamaProfileStore: ollamaProfileStore,
                   fileProcessorService: fpService,
                   messageAssemblerService: maService,
                   llmCommunicator: comm)
@@ -326,7 +366,7 @@ class MainApplicationViewModel: ObservableObject {
         Task {
             var agentMessagesForThisTurn: [ChatMessage] = []
             
-            let currentOllamaModelName = self.ollamaService.llmModelName
+            let currentOllamaModelName = self.ollamaProfileStore.currentProfile?.llmModelName ?? "gemma:2b"
             var ollamaModelInfo: OllamaModelInfo? = nil
             if !currentOllamaModelName.isEmpty {
                 ollamaModelInfo = OllamaModelInfo(name: currentOllamaModelName, displayName: currentOllamaModelName, sizeDescription: "N/A")
@@ -337,11 +377,11 @@ class MainApplicationViewModel: ObservableObject {
                 attachedFiles: filesToProcess,
                 for: self.selectedBackend,
                 ollamaModelDetails: ollamaModelInfo,
-                maxInlineCharsOllama: self.ollamaMaxInlineChars,
-                maxFilesForOllama: self.ollamaMaxAttachedFiles,
-                textFileStrategy: self.ollamaTextFileInclusionStrategy,
-                imageHandlingStrategy: self.ollamaImageHandlingStrategy,
-                binaryFileHandlingStrategy: self.ollamaBinaryFileHandlingStrategy
+                maxInlineCharsOllama: self.ollamaProfileStore.currentProfile?.maxInlineChars ?? 5000,
+                maxFilesForOllama: self.ollamaProfileStore.currentProfile?.maxAttachedFiles ?? 5,
+                textFileStrategy: self.ollamaProfileStore.currentProfile?.textFileInclusionStrategy ?? .preferInlining,
+                imageHandlingStrategy: self.ollamaProfileStore.currentProfile?.imageHandlingStrategy ?? .includePathWithWarning,
+                binaryFileHandlingStrategy: self.ollamaProfileStore.currentProfile?.binaryFileHandlingStrategy ?? .includePathWithWarning
             )
 
             if !processingWarnings.isEmpty {
@@ -367,12 +407,16 @@ class MainApplicationViewModel: ObservableObject {
                 logger.info("No processable content to send to LLM after assembly and filtering.")
             } else {
                 if self.selectedBackend == .ollama {
-                    if ollamaService.serverStatus != .connected && ollamaService.serverStatus != .checking {
+                    // Check server status before sending if Ollama is the backend
+                    // The checkServerStatusAndUpdateModels in the sink for selectedProfileID handles initial/profile-switch connection checks.
+                    // This is an additional check right before sending.
+                    if ollamaService.serverStatus != .connected { // Simplified: if not connected, try to check again.
                         logger.info("Ollama status is \(String(describing: self.ollamaService.serverStatus.rawValue)), re-checking before sending.")
-                        await ollamaService.checkServerStatusAndUpdateModels()
+                        await ollamaService.checkServerStatusAndUpdateModels() // This uses the service's current baseURL
                     }
+
                     if ollamaService.serverStatus != .connected {
-                        let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(String(describing: self.ollamaService.serverStatus.rawValue))"
+                        let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(String(describing: self.ollamaService.serverStatus.rawValue)) at \(self.ollamaService.ollamaBaseURL)"
                         logger.error("\(errorMsg)")
                         let errorMessageContent = MessageContent.error(title: "Connection Error", details: errorMsg)
                         let errorChatMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorMessageContent)
@@ -452,23 +496,27 @@ class MainApplicationViewModel: ObservableObject {
 
 
     private func determineBackendConfiguration(message: String) -> BackendConfiguration {
-        switch self.selectedBackend {
-        case .ollama:
+        if let currentProfile = ollamaProfileStore.currentProfile, self.selectedBackend == .ollama {
             let advancedOptions: [String: Any] = [
-                "temperature": self.ollamaTemperature, "top_k": self.ollamaTopK,
-                "top_p": self.ollamaTopP, "repeat_penalty": self.ollamaRepeatPenalty,
-                "num_ctx": self.ollamaContextWindowSize, "num_gpu": self.ollamaGpuLayers
+                "temperature": currentProfile.temperature,
+                "top_k": currentProfile.topK,
+                "top_p": currentProfile.topP,
+                "repeat_penalty": currentProfile.repeatPenalty,
+                "num_ctx": currentProfile.contextWindowSize,
+                "num_gpu": currentProfile.gpuLayers
             ]
+            // Use ollamaService.llmModelName as it's kept in sync with the active profile's model
             let modelName = ollamaService.llmModelName.isEmpty ? "default_model_name" : ollamaService.llmModelName
             let initialPayload: [String: Any] = [
                 "model": modelName, "stream": false, "options": advancedOptions
             ]
+            // Use ollamaService.ollamaBaseURL as it's kept in sync with the active profile's URL
             return BackendConfiguration(
-                url: "http://127.0.0.1:11434",
+                url: ollamaService.ollamaBaseURL,
                 endpoint: "/api/generate",
                 payload: initialPayload
             )
-        case .agent:
+        } else {
             let initialPayload: [String: Any] = [
                 "strategy": self.agentDelegationStrategy
             ]
@@ -575,13 +623,11 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("Toggle voice input button tapped. Current voiceInputState: \(self.voiceInputState.description), UserInput empty: \(self.userInput.isEmpty)")
         switch self.voiceInputState {
         case .idle, .available:
-            // **NEW CONDITION**: Only start if userInput is empty
             if userInput.isEmpty {
                 logger.info("Attempting to start voice capture (userInput is empty).")
                 startVoiceCapture()
             } else {
                 logger.info("Voice input attempted but userInput is not empty. Mic activation prevented.")
-                // State remains .available or .idle. UI should show send button.
             }
         case .recording:
             logger.info("Attempting to stop voice capture (from toggle).")
@@ -602,14 +648,11 @@ class MainApplicationViewModel: ObservableObject {
     private func startVoiceCapture() {
         logger.info("startVoiceCapture: Entered method.")
 
-        // **NEW GUARD**: Ensure userInput is empty before starting
         guard userInput.isEmpty else {
             logger.error("startVoiceCapture: Aborted. Attempted to start with non-empty input. UserInput: '\(self.userInput.prefix(50))'")
-            // If somehow called while recording, try to reset to available.
             if self.voiceInputState == .recording {
                  self.stopVoiceCaptureAndFinalize(customError: "Internal error: Start called with text.")
             } else {
-                // If not recording, but called, ensure state reflects availability based on permissions.
                  checkVoiceInputPermissionsAndAvailability()
             }
             return
@@ -634,7 +677,6 @@ class MainApplicationViewModel: ObservableObject {
 
         logger.info("startVoiceCapture: All permissions and availability checks passed, userInput is empty.")
         
-        // prefixForCurrentUtterance should be empty now due to the guard, but kept for safety/structure.
         self.prefixForCurrentUtterance = self.userInput
         logger.info("startVoiceCapture: Initialized prefixForCurrentUtterance to '\(self.prefixForCurrentUtterance.prefix(50))'.")
 
@@ -893,4 +935,3 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 }
-

@@ -117,8 +117,25 @@ struct SideBarPaneView_Previews: PreviewProvider {
             return service
         }()
 
-        let convoViewModel: MainApplicationViewModel = MainApplicationViewModel(ollamaService: defaultOllamaService)
-        let modelsViewModel: MainApplicationViewModel = MainApplicationViewModel(ollamaService: modelsOllamaService)
+        // MARK: - Fix: Provide ollamaProfileStore to MainApplicationViewModel init
+        static let mockOllamaProfileStore: OllamaProfileStore = {
+            let store = OllamaProfileStore()
+            // Ensure there's at least one profile for the view model to use
+            if store.profiles.isEmpty {
+                store.profiles.append(OllamaProfile.defaultProfile())
+                store.selectedProfileID = store.profiles.first?.id
+            }
+            return store
+        }()
+
+        let convoViewModel: MainApplicationViewModel = MainApplicationViewModel(
+            ollamaService: defaultOllamaService,
+            ollamaProfileStore: mockOllamaProfileStore // Pass the mock store
+        )
+        let modelsViewModel: MainApplicationViewModel = MainApplicationViewModel(
+            ollamaService: modelsOllamaService,
+            ollamaProfileStore: mockOllamaProfileStore // Pass the mock store
+        )
         
         init() {
             convoViewModel.conversations = [

@@ -27,9 +27,10 @@ class OllamaService: ObservableObject {
     @Published var removingModelName: String? = nil // To indicate which model is being removed
     @Published var modelRemoveError: String? = nil
     
-    // MARK: - AppStorage for Ollama Settings
-    @AppStorage(SettingsKeys.llmModelName) var llmModelName: String = "gemma:2b" // Default model
-    private let ollamaBaseURL = "http://localhost:11434"
+    // MARK: - Modified: llmModelName and ollamaBaseURL are now @Published, not @AppStorage
+    // They will be set by MainApplicationViewModel based on the selected OllamaProfile
+    @Published var llmModelName: String = "gemma:2b" // Default, but will be overridden by profile
+    @Published var ollamaBaseURL: String = "http://localhost:11434" // Default, but will be overridden by profile
 
 
     init() {
@@ -38,10 +39,11 @@ class OllamaService: ObservableObject {
 
     // MARK: - Public Methods for Ollama Management
 
+    // checkServerStatusAndUpdateModels now uses the internal ollamaBaseURL
     func checkServerStatusAndUpdateModels() async {
         guard serverStatus != .checking else { return }
         
-        logger.info("Checking Ollama server status...")
+        logger.info("Checking Ollama server status at \(self.ollamaBaseURL)...")
         serverStatus = .checking
         isLoadingModels = true
         modelLoadingError = nil
@@ -61,6 +63,7 @@ class OllamaService: ObservableObject {
         }
     }
 
+    // loadLocalModels now uses the internal ollamaBaseURL
     func loadLocalModels() async {
         guard serverStatus == .connected else {
             logger.warning("Cannot load local models: Ollama server is not connected.")
@@ -83,6 +86,7 @@ class OllamaService: ObservableObject {
             self.modelLoadingError = nil
             logger.info("Loaded \(self.localModels.count) local Ollama models.")
 
+            // Only update llmModelName if the current one isn't in the list AND there are local models
             if !self.localModels.contains(self.llmModelName) && !self.localModels.isEmpty {
                 logger.warning("Currently selected model '\(self.llmModelName)' not found in fetched list. Setting to first available model.")
                 self.llmModelName = self.localModels.first!
@@ -103,7 +107,8 @@ class OllamaService: ObservableObject {
         isLoadingModels = false
     }
 
-    func pullModel(name: String) async {
+    // pullModel now accepts a baseURL parameter
+    func pullModel(name: String, baseURL: String) async {
         let trimmedModelName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else {
             self.modelPullError = "Model name cannot be empty."
@@ -117,14 +122,15 @@ class OllamaService: ObservableObject {
             self.modelPullError = "Cannot pull model: Another model is currently being removed."
             return
         }
-        guard serverStatus == .connected else {
-            self.modelPullError = "Cannot pull model: Ollama server is not connected."
-            // Corrected Logger Call
-            if let errorToLog = self.modelPullError {
-                logger.warning("Pull model attempt failed: \(errorToLog)")
-            }
+        // Use the passed baseURL for the check
+        guard await AIConnect.checkOllamaServerStatus(baseURL: baseURL) else {
+            self.modelPullError = "Cannot pull model: Ollama server at \(baseURL) is not connected."
+            logger.warning("Pull model attempt failed: \(self.modelPullError!)")
+            self.serverStatus = .disconnected // Update status if connection failed
             return
         }
+        // Ensure ollamaService's internal baseURL matches the one used for the pull
+        self.ollamaBaseURL = baseURL
 
         isPullingModel = true
         self.pullStatusMessage = "Starting pull for \(trimmedModelName)..."
@@ -134,10 +140,10 @@ class OllamaService: ObservableObject {
         pullTotalBytes = nil
         pullCompletedBytes = nil
         
-        logger.info("Attempting to pull model: \(trimmedModelName) with streaming.")
+        logger.info("Attempting to pull model: \(trimmedModelName) with streaming from \(baseURL).")
         
         do {
-            try await AIConnect.pullOllamaModel(name: trimmedModelName, baseURL: ollamaBaseURL) { progressUpdate in
+            try await AIConnect.pullOllamaModel(name: trimmedModelName, baseURL: baseURL) { progressUpdate in
                 self.pullStage = progressUpdate.status
                 self.pullTotalBytes = progressUpdate.total
                 self.pullCompletedBytes = progressUpdate.completed
@@ -161,7 +167,7 @@ class OllamaService: ObservableObject {
             self.pullProgress = 1.0
             self.pullStage = "Complete"
             logger.info("Model \(trimmedModelName) pulled successfully.")
-            await loadLocalModels()
+            await loadLocalModels() // Reload models for the current ollamaBaseURL
             if self.modelToPull == trimmedModelName { self.modelToPull = "" }
 
         } catch {
@@ -183,7 +189,8 @@ class OllamaService: ObservableObject {
         }
     }
 
-    func removeModel(name: String) async {
+    // removeModel now accepts a baseURL parameter
+    func removeModel(name: String, baseURL: String) async {
         let trimmedModelName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else {
             self.modelRemoveError = "Model name cannot be empty for removal."
@@ -205,24 +212,26 @@ class OllamaService: ObservableObject {
             self.modelRemoveError = "Cannot remove model: Another model is currently being pulled."
             return
         }
-        guard serverStatus == .connected else {
-            self.modelRemoveError = "Cannot remove model: Ollama server is not connected."
-            // Corrected Logger Call
-            if let errorToLog = self.modelRemoveError {
-                logger.warning("Remove model attempt failed: \(errorToLog)")
-            }
+        // Use the passed baseURL for the check
+        guard await AIConnect.checkOllamaServerStatus(baseURL: baseURL) else {
+            self.modelRemoveError = "Cannot remove model: Ollama server at \(baseURL) is not connected."
+            logger.warning("Remove model attempt failed: \(self.modelRemoveError!)")
+            self.serverStatus = .disconnected // Update status if connection failed
             return
         }
+        // Ensure ollamaService's internal baseURL matches the one used for the remove
+        self.ollamaBaseURL = baseURL
+
 
         isRemovingModel = true
         removingModelName = trimmedModelName
         modelRemoveError = nil
-        logger.info("Attempting to remove model: \(trimmedModelName)")
+        logger.info("Attempting to remove model: \(trimmedModelName) from \(baseURL).")
 
         do {
-            try await AIConnect.removeOllamaModel(name: trimmedModelName, baseURL: ollamaBaseURL)
+            try await AIConnect.removeOllamaModel(name: trimmedModelName, baseURL: baseURL)
             logger.info("Model \(trimmedModelName) removed successfully.")
-            await loadLocalModels()
+            await loadLocalModels() // Reload models for the current ollamaBaseURL
             self.removingModelName = nil
         } catch {
             let errorMessage = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: .ollama)

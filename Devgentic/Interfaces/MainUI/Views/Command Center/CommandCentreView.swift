@@ -14,6 +14,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct CommandCentreView: View {
     // Access to the shared ViewModel.
     @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(\.openWindow) var openWindow // To open the new Ollama Profiles window
     
     // Local optional state for NavigationLink selection, to match its expected binding type.
     @State private var selectedSectionForNavigation: SettingsSection?
@@ -102,12 +103,7 @@ struct CommandCentreView: View {
                 case .general:
                     GeneralSettingsView(windowOpacity: $viewModel.windowOpacity)
                         .environmentObject(viewModel)
-                case .localAI:
-                    LocalAISettingsView(
-                        ollamaService: viewModel.ollamaService,
-                        mainViewModel: viewModel
-                    )
-                    .environmentObject(viewModel)
+                // MARK: - Removed .localAI case as per enhancement plan
                 case .agents:
                     AgentSettingsView(
                         agentBaseURL: $viewModel.agentBaseURL,
@@ -131,25 +127,31 @@ struct CommandCentreView: View {
 // Preview Provider for CommandCentreView
 struct CommandCentreView_Previews: PreviewProvider {
     static var previews: some View {
-        let mockViewModel = MainApplicationViewModel()
-        // mockViewModel.selectedSettingsSection = .localAI // Example for preview
+        // Create mock OllamaService instances for previews
+        let mockOllamaService: OllamaService = {
+            let service = OllamaService()
+            service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
+            service.llmModelName = "mistral:7b"
+            service.serverStatus = .connected
+            return service
+        }()
+
+        // Create a mock OllamaProfileStore for previews
+        let mockOllamaProfileStore: OllamaProfileStore = {
+            let store = OllamaProfileStore()
+            store.profiles = [OllamaProfile.defaultProfile()]
+            store.selectedProfileID = store.profiles.first?.id
+            return store
+        }()
+
+        let mockViewModel = MainApplicationViewModel(
+            ollamaService: mockOllamaService,
+            ollamaProfileStore: mockOllamaProfileStore
+        )
 
         CommandCentreView()
             .environmentObject(mockViewModel)
             .frame(width: 800, height: 500)
-            .onAppear {
-                // Example: Pre-select a section for preview if desired
-                // mockViewModel.selectedSettingsSection = .localAI
-
-                // If previewing a specific section with potentially long content:
-                if mockViewModel.selectedSettingsSection == .localAI {
-                    // You might set up mockViewModel.ollamaService with enough data
-                    // to make LocalAISettingsView scrollable for testing the fix.
-                    // For instance:
-                    // mockViewModel.ollamaService.localModels = (1...20).map { "preview-model-\($0):latest" }
-                    // mockViewModel.ollamaService.serverStatus = .connected
-                }
-            }
             .previewDisplayName("Command Centre Preview")
     }
 }

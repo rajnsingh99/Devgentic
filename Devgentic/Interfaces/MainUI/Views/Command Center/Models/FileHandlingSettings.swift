@@ -10,7 +10,8 @@ import Foundation
 // MARK: - Text File Inclusion Strategy
 
 /// Defines how text and source code files are presented to Ollama.
-enum TextFileInclusionStrategy: String, CaseIterable, Identifiable {
+// Added Codable conformance
+enum TextFileInclusionStrategy: String, Codable, CaseIterable, Identifiable {
     /// Includes content directly in the prompt if within character limits. (Default)
     case preferInlining = "preferInlining"
     /// Always uses file paths, requiring the LLM to access the file system (if capable and configured).
@@ -32,7 +33,8 @@ enum TextFileInclusionStrategy: String, CaseIterable, Identifiable {
 // MARK: - Image Handling Strategy for Ollama Text Models
 
 /// Defines how image attachments are handled when the selected Ollama model is likely text-only.
-enum OllamaImageHandlingStrategy: String, CaseIterable, Identifiable {
+// Added Codable conformance
+enum OllamaImageHandlingStrategy: String, Codable, CaseIterable, Identifiable {
     /// Includes the image path with a warning. (Default)
     case includePathWithWarning = "includePathWithWarning"
     /// Does not include images in the prompt.
@@ -54,7 +56,8 @@ enum OllamaImageHandlingStrategy: String, CaseIterable, Identifiable {
 // MARK: - Binary File Handling Strategy for Ollama Text Models
 
 /// Defines how non-text, non-image binary files (like PDFs, DOCX) are handled with text-based Ollama models.
-enum OllamaBinaryFileHandlingStrategy: String, CaseIterable, Identifiable {
+// Added Codable conformance
+enum OllamaBinaryFileHandlingStrategy: String, Codable, CaseIterable, Identifiable {
     /// Includes the file path with a warning. (Default)
     case includePathWithWarning = "includePathWithWarning"
     /// Does not include these file types in the prompt.

@@ -12,10 +12,10 @@ import os
 enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations
-    case localModels
+    case localModels // This tab will now open OllamaProfilesView
     case explorer
     // MARK: - New Tab for Prompt Library
-    case promptLibrary // Added new case
+    case promptLibrary
     case agents
     case settings
     case user
@@ -30,10 +30,10 @@ enum SidebarTab: CaseIterable, Identifiable {
         case .conversations:
             return "message"
         case .localModels:
-            return "cpu"
+            return "cpu" // Keeping the CPU icon for Local Models
         // MARK: - Icon for Prompt Library
         case .promptLibrary:
-            return "books.vertical" // Example icon, choose one that fits
+            return "books.vertical"
         case .agents:
             return "figure.walk.motion"
         case .settings:
@@ -53,7 +53,7 @@ enum SidebarTab: CaseIterable, Identifiable {
         case .conversations:
             return "Conversations"
         case .localModels:
-            return "Local AI Models"
+            return "Local AI Models" // Title remains the same, but behavior changes
         // MARK: - Title for Prompt Library
         case .promptLibrary:
             return "Prompt Library"
@@ -113,4 +113,3 @@ struct UserTabView: View {
             .foregroundColor(.secondary)
     }
 }
-

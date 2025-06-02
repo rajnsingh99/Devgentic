@@ -15,20 +15,89 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct LocalAISettingsView: View {
     @ObservedObject var ollamaService: OllamaService
     @ObservedObject var mainViewModel: MainApplicationViewModel
+    @Binding var ollamaProfile: OllamaProfile
 
     @State private var showingRemovalConfirmation = false
     @State private var modelToRemoveFromName: String? = nil
+    
+    // New state for editable profile name
+    @State private var editableProfileName: String
+    @State private var showUpdateFeedback = false
+
+    // MARK: - Initializer to accept the binding and initialize editableProfileName
+    init(ollamaService: OllamaService, mainViewModel: MainApplicationViewModel, ollamaProfileBinding: Binding<OllamaProfile>) {
+        self.ollamaService = ollamaService
+        self.mainViewModel = mainViewModel
+        self._ollamaProfile = ollamaProfileBinding
+        // Initialize editableProfileName with the current profile's name
+        self._editableProfileName = State(initialValue: ollamaProfileBinding.wrappedValue.profileName)
+    }
+
+    var isProfileNameChanged: Bool {
+        editableProfileName.trimmingCharacters(in: .whitespacesAndNewlines) != ollamaProfile.profileName &&
+        !editableProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
-            Text("Local AI (Ollama)")
+            Text("Local AI (Ollama) Profile: \(ollamaProfile.profileName)")
                 .font(.title2)
                 .padding(.bottom, 5)
 
             Divider()
 
+            // --- Profile Name and Base URL ---
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Profile Details:")
+                    .font(.headline)
+                HStack {
+                    Text("Profile Name:")
+                        .frame(width: 150, alignment: .leading)
+                    TextField("Profile Name", text: $editableProfileName)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    
+                    Button {
+                        let trimmedName = editableProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmedName.isEmpty {
+                            ollamaProfile.profileName = trimmedName
+                            logger.info("Profile name updated to '\(trimmedName)' for profile ID \(ollamaProfile.id.uuidString)")
+                            withAnimation {
+                                showUpdateFeedback = true
+                            }
+                            Task {
+                                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                                await MainActor.run {
+                                    withAnimation {
+                                        showUpdateFeedback = false
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        if showUpdateFeedback {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                        } else {
+                            Text("Update")
+                        }
+                    }
+                    .disabled(!isProfileNameChanged || showUpdateFeedback)
+                    .buttonStyle(.bordered)
+                    .frame(width: showUpdateFeedback ? 40 : 80) // Adjust width for feedback icon
+                }
+                HStack {
+                    Text("Base URL:")
+                        .frame(width: 150, alignment: .leading)
+                    TextField("Ollama Base URL", text: $ollamaProfile.baseURL)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .disabled(true)
+                        .help("Base URL is set when the profile is created and cannot be changed.")
+                }
+            }
+
+            Divider()
+
             // --- Displaying and Selecting Models ---
-            // ... (This section remains unchanged from the previous version) ...
             VStack(alignment: .leading, spacing: 10) {
                 Text("Available Models:")
                     .font(.headline)
@@ -50,15 +119,15 @@ struct LocalAISettingsView: View {
                              .foregroundColor(.gray)
                              .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Picker("Select a model", selection: $ollamaService.llmModelName) {
+                        Picker("Select a model", selection: $ollamaProfile.llmModelName) {
                             ForEach(ollamaService.localModels, id: \.self) { modelName in
                                 Text(modelName).tag(modelName)
                             }
                         }
                         .labelsHidden()
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .onChange(of: ollamaService.llmModelName) { newValue, _ in
-                             logger.debug("Ollama model selected: \(newValue)")
+                        .onChange(of: ollamaProfile.llmModelName) { newValue, _ in
+                             logger.debug("Ollama model selected for profile '\(ollamaProfile.profileName)': \(newValue)")
                          }
                     }
                 }
@@ -87,7 +156,7 @@ struct LocalAISettingsView: View {
                                  }
                                  .disabled(ollamaService.isPullingModel ||
                                            ollamaService.isRemovingModel ||
-                                           ollamaService.llmModelName == modelName)
+                                           ollamaProfile.llmModelName == modelName)
                                  .foregroundColor(.red)
                                  .buttonStyle(PlainButtonStyle())
                                  .help("Remove \(modelName)")
@@ -108,7 +177,6 @@ struct LocalAISettingsView: View {
             Divider()
 
             // --- Pull Model Section ---
-            // ... (This section remains unchanged from the previous version) ...
             VStack(alignment: .leading, spacing: 10) {
                  Text("Download New Model:")
                      .font(.headline)
@@ -125,7 +193,7 @@ struct LocalAISettingsView: View {
 
                      Button {
                          Task {
-                             await ollamaService.pullModel(name: ollamaService.modelToPull)
+                             await ollamaService.pullModel(name: ollamaService.modelToPull, baseURL: ollamaProfile.baseURL)
                          }
                      } label: {
                          if ollamaService.isPullingModel {
@@ -178,52 +246,51 @@ struct LocalAISettingsView: View {
 
             Divider()
 
-            // --- Advanced Generation and File Handling Parameters Section ---
+            // MARK: - Bind Advanced Generation and File Handling Parameters to ollamaProfile
              VStack(alignment: .leading, spacing: 10) {
                  Text("Advanced Generation Parameters:")
                      .font(.headline)
                      .padding(.bottom, 5)
                  
-                 // ... (Temperature, Top K, Top P, Repeat Penalty, Context Window, GPU Layers - unchanged) ...
                  HStack {
                      Text("Temperature:")
                          .frame(width: 150, alignment: .leading)
                          .help("Controls randomness. Higher is more creative.")
-                     Slider(value: $mainViewModel.ollamaTemperature, in: 0.0...2.0) { Text("Temperature") }
+                     Slider(value: $ollamaProfile.temperature, in: 0.0...2.0) { Text("Temperature") }
                      .controlSize(.regular)
-                     Text("\(mainViewModel.ollamaTemperature, format: .number.precision(.fractionLength(2)))")
+                     Text("\(ollamaProfile.temperature, format: .number.precision(.fractionLength(2)))")
                          .frame(width: 40, alignment: .trailing)
                  }
                  HStack {
                      Text("Top K:")
                           .frame(width: 150, alignment: .leading)
                           .help("Limits sampling to top K tokens.")
-                     Stepper(value: $mainViewModel.ollamaTopK, in: 0...200) { Text("Top K: \(mainViewModel.ollamaTopK)") }
+                     Stepper(value: $ollamaProfile.topK, in: 0...200) { Text("Top K: \(ollamaProfile.topK)") }
                      .controlSize(.regular)
                  }
                  HStack {
                       Text("Top P:")
                           .frame(width: 150, alignment: .leading)
                            .help("Limits sampling based on cumulative probability.")
-                      Slider(value: $mainViewModel.ollamaTopP, in: 0.0...1.0) { Text("Top P") }
+                      Slider(value: $ollamaProfile.topP, in: 0.0...1.0) { Text("Top P") }
                       .controlSize(.regular)
-                      Text("\(mainViewModel.ollamaTopP, format: .number.precision(.fractionLength(2)))")
+                      Text("\(ollamaProfile.topP, format: .number.precision(.fractionLength(2)))")
                            .frame(width: 40, alignment: .trailing)
                  }
                  HStack {
                       Text("Repeat Penalty:")
                           .frame(width: 150, alignment: .leading)
                            .help("Penalizes repeated tokens.")
-                      Slider(value: $mainViewModel.ollamaRepeatPenalty, in: 1.0...2.0) { Text("Repeat Penalty") }
+                      Slider(value: $ollamaProfile.repeatPenalty, in: 1.0...2.0) { Text("Repeat Penalty") }
                       .controlSize(.regular)
-                      Text("\(mainViewModel.ollamaRepeatPenalty, format: .number.precision(.fractionLength(2)))")
+                      Text("\(ollamaProfile.repeatPenalty, format: .number.precision(.fractionLength(2)))")
                            .frame(width: 40, alignment: .trailing)
                  }
                  HStack {
                       Text("Context Window:")
                            .frame(width: 150, alignment: .leading)
                            .help("Model's context window size (tokens).")
-                      TextField("e.g., 4096", value: $mainViewModel.ollamaContextWindowSize, format: .number)
+                      TextField("e.g., 4096", value: $ollamaProfile.contextWindowSize, format: .number)
                           .textFieldStyle(RoundedBorderTextFieldStyle())
                           .frame(width: 80)
                           .controlSize(.regular)
@@ -232,7 +299,7 @@ struct LocalAISettingsView: View {
                       Text("GPU Layers:")
                            .frame(width: 150, alignment: .leading)
                            .help("Number of layers to offload to GPU (-1 for all).")
-                      Stepper(value: $mainViewModel.ollamaGpuLayers, in: -1...100) { Text("GPU Layers: \(mainViewModel.ollamaGpuLayers == -1 ? "All" : "\(mainViewModel.ollamaGpuLayers)")") }
+                      Stepper(value: $ollamaProfile.gpuLayers, in: -1...100) { Text("GPU Layers: \(ollamaProfile.gpuLayers == -1 ? "All" : "\(ollamaProfile.gpuLayers)")") }
                       .controlSize(.regular)
                  }
 
@@ -242,12 +309,11 @@ struct LocalAISettingsView: View {
                     .font(.subheadline)
                     .padding(.bottom, 3)
 
-                // Phase 1 Settings (Max Inline Chars, Max Attached Files - unchanged)
                 HStack {
                     Text("Max Inline Chars:")
                         .frame(width: 150, alignment: .leading)
                         .help("Maximum characters from a text/source file to include directly in the prompt. Larger files are referenced by path. (Default: 5000)")
-                    TextField("", value: $mainViewModel.ollamaMaxInlineChars, format: .number)
+                    TextField("", value: $ollamaProfile.maxInlineChars, format: .number)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .frame(width: 80)
                         .controlSize(.regular)
@@ -260,23 +326,22 @@ struct LocalAISettingsView: View {
                     Text("Max Attached Files:")
                         .frame(width: 150, alignment: .leading)
                         .help("Maximum number of files to reference or include in a single prompt to Ollama. (Default: 5)")
-                    Stepper(value: $mainViewModel.ollamaMaxAttachedFiles, in: 1...20) {
-                        Text("\(mainViewModel.ollamaMaxAttachedFiles) files")
+                    Stepper(value: $ollamaProfile.maxAttachedFiles, in: 1...20) {
+                        Text("\(ollamaProfile.maxAttachedFiles) files")
                     }
                     .controlSize(.regular)
                 }
                  
-                // NEW: Phase 2 Strategy Pickers
                 HStack {
                     Text("Text File Strategy:")
                         .frame(width: 150, alignment: .leading)
                         .help("Choose how text and source code files are presented to Ollama.")
-                    Picker("Text File Strategy", selection: $mainViewModel.ollamaTextFileInclusionStrategy) {
+                    Picker("Text File Strategy", selection: $ollamaProfile.textFileInclusionStrategy) {
                         ForEach(TextFileInclusionStrategy.allCases) { strategy in
                             Text(strategy.displayName).tag(strategy)
                         }
                     }
-                    .labelsHidden() // Keep label for accessibility, but hide visually if Text view is sufficient
+                    .labelsHidden()
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .controlSize(.regular)
                 }
@@ -285,7 +350,7 @@ struct LocalAISettingsView: View {
                     Text("Image Handling:")
                         .frame(width: 150, alignment: .leading)
                         .help("How to handle image attachments for text-only Ollama models.")
-                    Picker("Image Handling", selection: $mainViewModel.ollamaImageHandlingStrategy) {
+                    Picker("Image Handling", selection: $ollamaProfile.imageHandlingStrategy) {
                         ForEach(OllamaImageHandlingStrategy.allCases) { strategy in
                             Text(strategy.displayName).tag(strategy)
                         }
@@ -299,7 +364,7 @@ struct LocalAISettingsView: View {
                     Text("Binary File Handling:")
                         .frame(width: 150, alignment: .leading)
                         .help("How to handle non-text, non-image binary files (PDF, DOCX) for text-only Ollama models.")
-                    Picker("Binary File Handling", selection: $mainViewModel.ollamaBinaryFileHandlingStrategy) {
+                    Picker("Binary File Handling", selection: $ollamaProfile.binaryFileHandlingStrategy) {
                         ForEach(OllamaBinaryFileHandlingStrategy.allCases) { strategy in
                             Text(strategy.displayName).tag(strategy)
                         }
@@ -320,7 +385,7 @@ struct LocalAISettingsView: View {
                             presenting: modelToRemoveFromName) { modelNameInDialog in
             Button("Remove '\(modelNameInDialog)'", role: .destructive) {
                 Task {
-                    await ollamaService.removeModel(name: modelNameInDialog)
+                    await ollamaService.removeModel(name: modelNameInDialog, baseURL: ollamaProfile.baseURL)
                 }
             }
             Button("Cancel", role: .cancel) {}
@@ -328,19 +393,77 @@ struct LocalAISettingsView: View {
             Text("Are you sure you want to remove the model '\(modelNameInDialog)'? This action cannot be undone.")
         }
         .onAppear {
-            logger.debug("LocalAISettingsView appeared.")
+            logger.debug("LocalAISettingsView appeared for profile: \(ollamaProfile.profileName). Current editable name: '\(editableProfileName)'")
             ollamaService.clearAllModelActionStatuses()
+            
+            if editableProfileName != ollamaProfile.profileName {
+                editableProfileName = ollamaProfile.profileName
+                logger.debug("Synced editableProfileName to bound profile name: '\(ollamaProfile.profileName)' on appear.")
+            }
+
+            if ollamaService.ollamaBaseURL != ollamaProfile.baseURL {
+                 logger.debug("Profile baseURL (\(ollamaProfile.baseURL)) differs from OllamaService baseURL (\(ollamaService.ollamaBaseURL)) on appear. Updating OllamaService's baseURL.")
+                 ollamaService.ollamaBaseURL = ollamaProfile.baseURL
+            }
+            if ollamaService.llmModelName != ollamaProfile.llmModelName {
+                 logger.debug("Profile llmModelName (\(ollamaProfile.llmModelName)) differs from OllamaService llmModelName (\(ollamaService.llmModelName)) on appear. Updating OllamaService's llmModelName.")
+                 ollamaService.llmModelName = ollamaProfile.llmModelName
+            }
         }
         .onDisappear {
              ollamaService.clearAllModelActionStatuses()
              modelToRemoveFromName = nil
              showingRemovalConfirmation = false
         }
+        .onChange(of: ollamaProfile.id) { oldProfileID, newProfileID in
+            // newProfileID is of type UUID here because ollamaProfile.id is a non-optional UUID.
+            logger.debug("LocalAISettingsView: ollamaProfile.id changed from \(oldProfileID.uuidString) to \(newProfileID.uuidString).")
+            
+            // Attempt to find the new profile in the store to ensure we have the freshest data.
+            if let newProfileFromStore = mainViewModel.ollamaProfileStore.profiles.first(where: { $0.id == newProfileID }) {
+                if editableProfileName != newProfileFromStore.profileName {
+                    editableProfileName = newProfileFromStore.profileName
+                    logger.debug("Reset editableProfileName to '\(newProfileFromStore.profileName)' from store for new profile ID.")
+                }
+            } else {
+                // Fallback: If the profile isn't in the store (e.g., if store update is lagging or profile was deleted),
+                // use the name from the `ollamaProfile` binding, which should represent the new profile.
+                // This assumes the `ollamaProfile` binding passed by the parent (`OllamaProfilesView`) IS the new profile.
+                if editableProfileName != ollamaProfile.profileName {
+                    editableProfileName = ollamaProfile.profileName
+                    logger.warning("Profile with ID \(newProfileID.uuidString) not found in store. Reset editableProfileName using the current binding's profileName: '\(ollamaProfile.profileName)'.")
+                }
+            }
+        }
+        .onChange(of: ollamaProfile.baseURL) { oldURL, newURL in
+            if oldURL != newURL {
+                logger.debug("LocalAISettingsView: ollamaProfile.baseURL changed from '\(oldURL)' to '\(newURL)' for profile '\(ollamaProfile.profileName)'.")
+                ollamaService.ollamaBaseURL = newURL
+                if mainViewModel.ollamaProfileStore.selectedProfileID == ollamaProfile.id {
+                    logger.info("LocalAISettingsView: baseURL of active profile '\(ollamaProfile.profileName)' changed. Triggering checkServerStatusAndUpdateModels.")
+                    Task {
+                        await ollamaService.checkServerStatusAndUpdateModels()
+                    }
+                }
+            }
+        }
+        .onChange(of: ollamaProfile.llmModelName) { oldModel, newModel in
+            if oldModel != newModel {
+                logger.debug("LocalAISettingsView: ollamaProfile.llmModelName changed from '\(oldModel ?? "nil")' to '\(newModel)' for profile '\(ollamaProfile.profileName)'.")
+                if mainViewModel.ollamaProfileStore.selectedProfileID == ollamaProfile.id {
+                    ollamaService.llmModelName = newModel
+                }
+            }
+        }
     }
 }
 
 // MARK: - Preview Provider
+// (Preview Provider remains the same as the previous version)
 struct LocalAISettingsView_Previews: PreviewProvider {
+    @State static var defaultMockProfile = OllamaProfile.defaultProfile()
+    @State static var pullingMockProfile = OllamaProfile.defaultProfile()
+
     static var mockOllamaService: OllamaService {
         let service = OllamaService()
         service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
@@ -349,16 +472,18 @@ struct LocalAISettingsView_Previews: PreviewProvider {
         return service
     }
 
+    static var mockOllamaProfileStore: OllamaProfileStore {
+        let store = OllamaProfileStore()
+        var profileForStore = OllamaProfile.defaultProfile()
+        profileForStore.profileName = "Default Preview Profile" // Give it a distinct name for clarity
+        store.profiles = [profileForStore]
+        store.selectedProfileID = profileForStore.id
+        defaultMockProfile = profileForStore // Ensure the @State var for preview also uses this
+        return store
+    }
+
     static var mockMainViewModel: MainApplicationViewModel {
-        let vm = MainApplicationViewModel(ollamaService: mockOllamaService)
-        vm.ollamaMaxInlineChars = 5000
-        vm.ollamaMaxAttachedFiles = 5
-        // Defaults for strategies are already set in MainApplicationViewModel's @AppStorage initializers
-        // vm.ollamaTextFileInclusionStrategy = .preferInlining (already default)
-        // vm.ollamaImageHandlingStrategy = .includePathWithWarning (already default)
-        // vm.ollamaBinaryFileHandlingStrategy = .includePathWithWarning (already default)
-        vm.ollamaTemperature = 0.75
-        vm.ollamaTopK = 45
+        let vm = MainApplicationViewModel(ollamaService: mockOllamaService, ollamaProfileStore: mockOllamaProfileStore)
         return vm
     }
     
@@ -367,9 +492,10 @@ struct LocalAISettingsView_Previews: PreviewProvider {
         @ObservedObject var mainViewModel: MainApplicationViewModel
         @State private var showingConfirmation = true
         @State private var modelToRemove: String? = "gemma:2b"
+        @State private var mockProfileForDialog = OllamaProfile.defaultProfile()
 
         var body: some View {
-            LocalAISettingsView(ollamaService: ollamaService, mainViewModel: mainViewModel)
+            LocalAISettingsView(ollamaService: ollamaService, mainViewModel: mainViewModel, ollamaProfileBinding: $mockProfileForDialog)
                  .confirmationDialog("Confirm Model Removal",
                                      isPresented: $showingConfirmation,
                                      presenting: modelToRemove) { name in
@@ -381,15 +507,22 @@ struct LocalAISettingsView_Previews: PreviewProvider {
         }
     }
 
-
     static var previews: some View {
         Group {
-            LocalAISettingsView(ollamaService: mockOllamaService, mainViewModel: mockMainViewModel)
-                .frame(width: 500, height: 800) // Increased height for new pickers
+            LocalAISettingsView(ollamaService: mockOllamaService, mainViewModel: mockMainViewModel, ollamaProfileBinding: $defaultMockProfile)
+                .frame(width: 500, height: 800)
                 .previewLayout(.sizeThatFits)
                 .previewDisplayName("Default State")
+                .onAppear {
+                    // For preview, ensure defaultMockProfile is what's in the store if needed for consistency
+                    if mockOllamaProfileStore.profiles.isEmpty {
+                        mockOllamaProfileStore.profiles.append(defaultMockProfile)
+                        mockOllamaProfileStore.selectedProfileID = defaultMockProfile.id
+                    }
+                }
 
-            let pullingOllamaService: OllamaService = {
+
+            let pullingOllamaServiceInstance: OllamaService = {
                 let service = OllamaService()
                 service.serverStatus = .connected
                 service.localModels = ["mistral:7b"]
@@ -400,7 +533,22 @@ struct LocalAISettingsView_Previews: PreviewProvider {
                 service.pullProgress = 0.45
                 return service
             }()
-            LocalAISettingsView(ollamaService: pullingOllamaService, mainViewModel: MainApplicationViewModel(ollamaService: pullingOllamaService))
+            
+            let pullingMockProfileStoreInstance: OllamaProfileStore = {
+                let store = OllamaProfileStore()
+                 var pullingProfile = OllamaProfile.defaultProfile()
+                 pullingProfile.profileName = "Pulling Preview Profile"
+                 pullingMockProfile = pullingProfile // Update the @State var
+                store.profiles = [pullingProfile]
+                store.selectedProfileID = pullingProfile.id
+                return store
+            }()
+
+            LocalAISettingsView(
+                ollamaService: pullingOllamaServiceInstance,
+                mainViewModel: MainApplicationViewModel(ollamaService: pullingOllamaServiceInstance, ollamaProfileStore: pullingMockProfileStoreInstance),
+                ollamaProfileBinding: $pullingMockProfile
+            )
                 .frame(width: 500, height: 800)
                 .previewLayout(.sizeThatFits)
                 .previewDisplayName("Pulling State")

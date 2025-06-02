@@ -14,8 +14,9 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 // MARK: - Main View
 struct MainApplicationView: View {
     // --- ViewModel ---
-    @StateObject private var viewModel = MainApplicationViewModel()
-    @StateObject private var explorerViewModel = ExplorerViewModel()
+    // MODIFIED: Changed from @StateObject to @EnvironmentObject
+    @EnvironmentObject private var viewModel: MainApplicationViewModel
+    @StateObject private var explorerViewModel = ExplorerViewModel() // This remains a @StateObject owned by MainApplicationView
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
@@ -120,21 +121,19 @@ struct MainApplicationView: View {
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 8)
-                    .frame(maxWidth: 1050) // Consider if this maxWidth needs to be dynamic
+                    .frame(maxWidth: 1050)
                     .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(VisualEffectBlur(material: .windowBackground))
             }
-            // ** UPDATED PADDING: Use the dynamic totalSidebarWidth **
             .padding(.leading, totalSidebarWidth)
-            // Animate the padding change when sidebar visibility or width changes
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
             
             VSCodifiedSidebarContainerView(
                 isSidebarVisible: $isSidebarVisible,
-                sidebarWidth: $currentSidebarPaneWidth // This line is crucial
+                sidebarWidth: $currentSidebarPaneWidth
             )
                 .frame(width: totalSidebarWidth)
                 .zIndex(1)
@@ -156,10 +155,10 @@ struct MainApplicationView: View {
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
         }
-        .environmentObject(viewModel)
-        .environmentObject(explorerViewModel)
+        // .environmentObject(viewModel) // This is not strictly needed here if viewModel is @EnvironmentObject and children access it the same way
+        .environmentObject(explorerViewModel) // explorerViewModel is owned by this view, so it's passed to its children here
         .opacity(viewModel.windowOpacity)
-        .frame(minWidth: 800, minHeight: 500) // Adjust minWidth if needed due to resizable sidebar
+        .frame(minWidth: 800, minHeight: 500)
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {
                  DispatchQueue.main.async { isInputFocused = true }
@@ -184,19 +183,6 @@ struct MainApplicationView: View {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
-        // ** IMPORTANT: Listen for width changes from VSCodifiedSidebarContainerView **
-        // This requires VSCodifiedSidebarContainerView to publish its width.
-        // One way is using a custom PreferenceKey.
-        // For this example, we'll assume `VSCodifiedSidebarContainerView`'s `sidebarWidth` @State
-        // is the source of truth and `MainApplicationView` needs to react.
-        // A more robust solution involves a shared binding or a PreferenceKey pattern.
-        // If VSCodifiedSidebarContainerView had:
-        // @Binding var externalSidebarWidth: CGFloat
-        // Then MainApplicationView would pass $currentSidebarPaneWidth.
-        // And VSCodifiedSidebarContainerView would update this binding.
-        //
-        // For now, the currentSidebarPaneWidth in MainApplicationView is illustrative
-        // of how the main content padding would react. True synchronization needs a bit more wiring.
     }
 
     private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
@@ -224,8 +210,11 @@ struct MainApplicationView: View {
 
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
+        // MODIFIED: Inject MainApplicationViewModel and ExplorerViewModel for the preview
         MainApplicationView()
-            .frame(width: 1000, height: 700) // Adjusted for potentially wider sidebar
+            .environmentObject(MainApplicationViewModel())
+            .environmentObject(ExplorerViewModel())
+            .frame(width: 1000, height: 700)
             .previewDisplayName("Main View with Resizable Sidebar")
     }
 }

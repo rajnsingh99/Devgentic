@@ -10,7 +10,6 @@ import Foundation
 // MARK: - Settings Section Definition
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
-    case localAI = "Local AI"
     case agents = "Agents"
     case license = "License & Access"
 
@@ -20,7 +19,6 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var iconName: String {
         switch self {
         case .general: return "gearshape"
-        case .localAI: return "cpu"
         case .agents: return "person.3.sequence"
         case .license: return "key"
         }

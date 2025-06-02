@@ -1,10 +1,4 @@
-//
-//  DevgenticApp.swift
-//  Devgentic
-//
-//  Created by Raj Singh on 15/04/25.
-//
-
+// DevgenticApp.swift
 import SwiftUI
 
 @main
@@ -18,61 +12,47 @@ struct DevgenticApp: App {
     // Environment variable to open new windows
     @Environment(\.openWindow) var openWindow
     
-    // agentManager is also initialized in AppDelegate.
-    // For a single source of truth, AppDelegate's instance should ideally be used.
-    // One way is for AppDelegate to expose its AgentManager instance,
-    // or use a shared singleton pattern if appropriate.
-    // For this example, we assume this @StateObject is primary for the views it's passed to,
-    // and AppDelegate's instance handles app lifecycle events.
-    // The crucial part is that the SAME AgentManager instance receives the onboardingDidComplete call.
-    // If AppDelegate.agentManager is the true source, then that instance should be updated.
-    // Assuming for now this agentManager instance is the one intended to be updated by onboarding UI.
     @StateObject var agentManager = AgentManager()
-    
+    // Create MainApplicationViewModel as a StateObject to be shared
+    // This will use the convenience init() of MainApplicationViewModel
+    @StateObject var mainApplicationViewModel = MainApplicationViewModel()
+
+    // MARK: - New: OllamaProfileStore as a StateObject
+    @StateObject var ollamaProfileStore = OllamaProfileStore()
+
     var body: some Scene {
         // MARK: - Main Application Window
         WindowGroup {
-                    if isOnboardingComplete {
-                        MainApplicationView()
-                            .environmentObject(agentManager) // Make agentManager available to MainApp
-                            .onAppear {
-                                // When MainApplicationView appears and onboarding is complete,
-                                // ensure agent starts if not already running.
-                                // AppDelegate handles initial launch, this is a fallback/re-check.
-                                agentManager.startAgentIfNeeded()
-                            }
-                    } else {
-                        AgentOnboardingRootView(
-                            onComplete: {
-                                // This closure is called by AgentOnboardingViewModel.completeOnboarding()
-                                // AFTER it has called its own onAgentReady.
-                                isOnboardingComplete = true
-                                // AgentManager should have been notified by onAgentReady already.
-                            },
-                            // The onAgentReady callback signature is changed to 2 arguments
-                            // to match the compiler error: "Contextual closure type '(URL, Int32) -> Void' expects 2 arguments"
-                            onAgentReady: { agentURL, agentPID in // venvPythonPathString removed from here
-                                // This callback is invoked from AgentOnboardingViewModel.completeOnboarding()
-                                // after the agent has been successfully launched and reported its details.
-                                
-                                // TODO: The venvPythonPathString is no longer passed via this closure due to the
-                                // AgentOnboardingRootView.onAgentReady expecting only (URL, Int32).
-                                // The AgentManager.onboardingDidComplete method requires venvPythonPath.
-                                // This data flow needs to be reconciled. For now, passing an empty string.
-                                // The ideal fix is to update AgentOnboardingRootView's onAgentReady to accept (URL, Int32, String).
-                                let placeholderVenvPath = "" // Placeholder
-                                print("WARNING: Using placeholder for venvPythonPath in DevgenticApp.onAgentReady. This needs to be fixed by updating AgentOnboardingRootView's onAgentReady signature.")
-
-                                agentManager.onboardingDidComplete(
-                                    agentURL: agentURL,
-                                    agentPID: agentPID,
-                                    venvPythonPath: placeholderVenvPath // Using placeholder
-                                )
-                            }
-                        )
-                        .environmentObject(agentManager) // Onboarding might also want to show agent status
+            if isOnboardingComplete {
+                MainApplicationView()
+                    .environmentObject(agentManager) // Make agentManager available to MainApp
+                    .environmentObject(mainApplicationViewModel) // Inject MainApplicationViewModel
+                    .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore
+                    .onAppear {
+                        // When MainApplicationView appears and onboarding is complete,
+                        // ensure agent starts if not already running.
+                        // AppDelegate handles initial launch, this is a fallback/re-check.
+                        agentManager.startAgentIfNeeded()
                     }
-                }
+            } else {
+                AgentOnboardingRootView(
+                    onComplete: {
+                        isOnboardingComplete = true
+                    },
+                    onAgentReady: { agentURL, agentPID in
+                        // TODO: Reconcile venvPythonPath data flow as noted in the original code.
+                        let placeholderVenvPath = ""
+                        print("WARNING: Using placeholder for venvPythonPath in DevgenticApp.onAgentReady. This needs to be fixed by updating AgentOnboardingRootView's onAgentReady signature.")
+                        agentManager.onboardingDidComplete(
+                            agentURL: agentURL,
+                            agentPID: agentPID,
+                            venvPythonPath: placeholderVenvPath
+                        )
+                    }
+                )
+                .environmentObject(agentManager) // Onboarding might also want to show agent status
+            }
+        }
         .commands {
             CommandMenu("File") {
                 Button("Close File Viewer Window") {
@@ -80,24 +60,27 @@ struct DevgenticApp: App {
                 }
                 .keyboardShortcut("w", modifiers: .command)
             }
-            // Add a command to open Settings/Command Centre
-            CommandGroup(after: .appInfo) { // Or another appropriate placement
+            CommandGroup(after: .appInfo) {
                 Button("Command Centre...") {
                     openWindow(id: "command-centre")
                 }
-                .keyboardShortcut(",", modifiers: .command) // Standard shortcut for settings/preferences
+                .keyboardShortcut(",", modifiers: .command)
+
+                // MARK: - New: Menu item to open Ollama Profiles window
+                Button("Ollama Profiles...") {
+                    openWindow(id: "ollama-profiles")
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift]) // Example shortcut
             }
-            
-            CommandGroup(replacing: .appTermination) { // Example placement
-                             Button("Stop Agent and Quit") {
-                                 agentManager.stopAgent(reason: "Manual Quit Command")
-                                 // Allow some time for agent to stop before terminating
-                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                                     NSApplication.shared.terminate(nil)
-                                 }
-                             }
-                             .keyboardShortcut("q", modifiers: [.command, .option]) // Example shortcut
-                        }
+            CommandGroup(replacing: .appTermination) {
+                Button("Stop Agent and Quit") {
+                    agentManager.stopAgent(reason: "Manual Quit Command")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        NSApplication.shared.terminate(nil)
+                    }
+                }
+                .keyboardShortcut("q", modifiers: [.command, .option])
+            }
         }
 
         // MARK: - File Viewer Window
@@ -121,32 +104,18 @@ struct DevgenticApp: App {
         // MARK: - Command Centre (Settings) Window
         WindowGroup(id: "command-centre") {
             CommandCentreView()
-                // Ensure MainApplicationViewModel is correctly instantiated or passed if needed by CommandCentreView
-                // .environmentObject(MainApplicationViewModel()) // Placeholder
-                .environmentObject(agentManager) // Pass agentManager if CommandCentre needs it
+                .environmentObject(mainApplicationViewModel) // Inject the shared MainApplicationViewModel
+                .environmentObject(agentManager) // agentManager is already correctly passed
+                .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore
                 .frame(minWidth: 700, idealWidth: 800, minHeight: 700, idealHeight: 800)
+        }
+
+        // MARK: - New: Ollama Profiles Window
+        WindowGroup(id: "ollama-profiles") {
+            OllamaProfilesView()
+                .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore
+                .environmentObject(mainApplicationViewModel) // Still needed for OllamaService in LocalAISettingsView for now
+                .frame(minWidth: 700, idealWidth: 900, minHeight: 700, idealHeight: 800)
         }
     }
 }
-
-// Assuming SettingsKeys is defined elsewhere, e.g., in AgentManager.swift or a shared constants file.
-// struct SettingsKeys {
-//     static let isOnboardingComplete = "isOnboardingComplete"
-//     // Add other keys as needed
-// }
-
-// Assuming AppDelegate is defined. It might also have an AgentManager instance.
-// Ensure consistency in which AgentManager instance is used and updated.
-// class AppDelegate: NSObject, NSApplicationDelegate {
-//     var agentManager = AgentManager()
-//
-//     func applicationDidFinishLaunching(_ notification: Notification) {
-//         if UserDefaults.standard.bool(forKey: SettingsKeys.isOnboardingComplete) {
-//             agentManager.startAgentIfNeeded()
-//         }
-//     }
-//
-//     func applicationWillTerminate(_ notification: Notification) {
-//         agentManager.stopAgent(reason: "Application Will Terminate")
-//     }
-// }
