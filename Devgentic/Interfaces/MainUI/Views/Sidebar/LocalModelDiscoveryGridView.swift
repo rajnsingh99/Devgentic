@@ -18,6 +18,9 @@ struct LocalModelDiscoveryGridView: View {
     // Access the MainApplicationViewModel for general app state like selectedBackend
     @ObservedObject var mainViewModel: MainApplicationViewModel
 
+    // MARK: - New: Binding for sidebar width to dynamically adjust grid
+    @Binding var sidebarWidth: CGFloat
+
     // Define a structure for discoverable models (can be expanded later)
     // This can remain here or be moved to a shared Models file if used elsewhere.
     struct DiscoverableModel: Identifiable, Hashable {
@@ -39,11 +42,26 @@ struct LocalModelDiscoveryGridView: View {
         DiscoverableModel(name: "qwen:7b", description: "Alibaba Cloud's large vision language model.", sizeEstimate: "4.1 GB")
     ]
 
-    // Grid layout definition
-    let columns: [GridItem] = [
-        GridItem(.flexible(), spacing: 16),
-        GridItem(.flexible(), spacing: 16)
-    ]
+    // MARK: - Dynamic Grid Layout
+    // Calculate columns based on available width.
+    // Assuming a minimum card width of ~180-200 and some padding.
+    private var columns: [GridItem] {
+        let minItemWidth: CGFloat = 180 // Minimum width for a single grid item
+        let horizontalPadding: CGFloat = 16 // Padding applied to the LazyVGrid
+
+        // Calculate the effective width available for items (sidebarWidth - total padding)
+        let availableContentWidth = sidebarWidth - (2 * horizontalPadding)
+
+        // Use adaptive grid items to fit as many columns as possible
+        return [GridItem(.adaptive(minimum: minItemWidth))]
+    }
+
+    // MARK: - Initializer to accept sidebarWidth binding
+    init(ollamaService: OllamaService, mainViewModel: MainApplicationViewModel, sidebarWidth: Binding<CGFloat>) {
+        self.ollamaService = ollamaService
+        self.mainViewModel = mainViewModel
+        self._sidebarWidth = sidebarWidth
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -144,7 +162,7 @@ struct OllamaStatusView: View {
             }
             .buttonStyle(.plain)
             .help("Manage Ollama Profiles")
-        }
+        }.padding(.top, 10)
     }
 }
 
@@ -281,13 +299,14 @@ struct LocalModelDiscoveryGridView_Previews: PreviewProvider {
 
 
         return Group {
-            LocalModelDiscoveryGridView(ollamaService: defaultOllamaService, mainViewModel: mockMainViewModelDefault)
+            // Pass a dummy sidebarWidth for preview, as it's a binding
+            LocalModelDiscoveryGridView(ollamaService: defaultOllamaService, mainViewModel: mockMainViewModelDefault, sidebarWidth: .constant(400))
                 .previewDisplayName("Default State")
 
-            LocalModelDiscoveryGridView(ollamaService: pullingOllamaService, mainViewModel: mockMainViewModelPulling)
+            LocalModelDiscoveryGridView(ollamaService: pullingOllamaService, mainViewModel: mockMainViewModelPulling, sidebarWidth: .constant(400))
                 .previewDisplayName("Pulling State")
 
-            LocalModelDiscoveryGridView(ollamaService: disconnectedOllamaService, mainViewModel: mockMainViewModelDisconnected)
+            LocalModelDiscoveryGridView(ollamaService: disconnectedOllamaService, mainViewModel: mockMainViewModelDisconnected, sidebarWidth: .constant(400))
                 .previewDisplayName("Disconnected State")
         }
         .frame(width: 400, height: 600) // Simulate sidebar pane size

@@ -16,15 +16,27 @@ import os
 // MARK: - Main Sidebar Container View
 struct VSCodifiedSidebarContainerView: View {
     // --- State Management ---
-    @State private var selectedTab: SidebarTab? = .conversations
+    @State private var selectedTab: SidebarTab? = .conversations // Initial tab
     @Binding var isSidebarVisible: Bool
 
     // *** Use @Binding for sidebarWidth, passed from the parent (MainApplicationView) ***
     @Binding var sidebarWidth: CGFloat
     
-    private let minSidebarWidth: CGFloat = 200
-    private let maxSidebarWidth: CGFloat = 500 // You can adjust this as needed
+    private let minSidebarWidth: CGFloat = 300
+    private let maxSidebarWidth: CGFloat = 1000 // You can adjust this as needed
     private let activityBarWidth: CGFloat = 50
+
+    // MARK: - New: Preferred widths for different tabs
+    @State private var preferredWidths: [SidebarTab: CGFloat] = [
+        .newChat: 300,
+        .conversations: 300,
+        .explorer: 300,
+        .localModels: 500, // Custom wider width for local models
+        .agents: 300,
+        .promptLibrary: 300,
+        .settings: 300,
+        .user: 300
+    ]
 
     // Access to the shared ViewModel
     @EnvironmentObject var viewModel: MainApplicationViewModel
@@ -44,7 +56,7 @@ struct VSCodifiedSidebarContainerView: View {
             // --- Side Bar Pane (Content Area) & Draggable Divider ---
             // These are only added to the view if the sidebar is visible.
             if isSidebarVisible {
-                SideBarPaneView(selectedTab: $selectedTab)
+                SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $sidebarWidth) // MARK: Fix: Pass sidebarWidth
                     .frame(width: sidebarWidth) // Use the bound sidebarWidth
                     // Apply transition for visibility toggle
                     .transition(.move(edge: .leading))
@@ -74,6 +86,24 @@ struct VSCodifiedSidebarContainerView: View {
         .background(Color(NSColor.windowBackgroundColor).opacity(0.9))
         // Animation for the overall container size change (due to sidebarWidth)
         // will be handled by MainApplicationView.
+        // MARK: - New: Update sidebarWidth when selectedTab changes
+        .onChange(of: selectedTab) { newTab in
+            if let newTab = newTab, let newPreferredWidth = preferredWidths[newTab] {
+                withAnimation(.easeInOut(duration: 0.2)) { // Optional: animate width change
+                    self.sidebarWidth = min(max(newPreferredWidth, self.minSidebarWidth), self.maxSidebarWidth)
+                }
+            } else if newTab == nil { // If no tab is selected, perhaps revert to a default or hide (if not already handled by isSidebarVisible)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.sidebarWidth = self.minSidebarWidth // Or any default width when no tab is selected
+                }
+            }
+        }
+        // MARK: - New: Set initial sidebar width on appear
+        .onAppear {
+            if let initialTab = selectedTab, let initialPreferredWidth = preferredWidths[initialTab] {
+                self.sidebarWidth = min(max(initialPreferredWidth, self.minSidebarWidth), self.maxSidebarWidth)
+            }
+        }
     }
 }
 
@@ -82,7 +112,11 @@ struct VSCodifiedSidebarContainerView: View {
     struct PreviewWrapper: View {
         @State var sidebarVisible = true
         @State var currentSidebarWidth: CGFloat = 280 // Default width for preview
-        @StateObject var vm = MainApplicationViewModel()
+        // Fix: Provide mock OllamaProfileStore to MainApplicationViewModel
+        @StateObject var vm = MainApplicationViewModel(
+            ollamaService: OllamaService(), // Mock OllamaService
+            ollamaProfileStore: OllamaProfileStore() // Mock OllamaProfileStore
+        )
 
         var body: some View {
              HStack(spacing: 0) {

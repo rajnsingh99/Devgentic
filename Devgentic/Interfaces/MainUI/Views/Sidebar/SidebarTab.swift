@@ -12,9 +12,8 @@ import os
 enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations
-    case localModels // This tab will now open OllamaProfilesView
+    case localModels
     case explorer
-    // MARK: - New Tab for Prompt Library
     case promptLibrary
     case agents
     case settings
@@ -30,7 +29,7 @@ enum SidebarTab: CaseIterable, Identifiable {
         case .conversations:
             return "message"
         case .localModels:
-            return "cpu" // Keeping the CPU icon for Local Models
+            return "cpu"
         // MARK: - Icon for Prompt Library
         case .promptLibrary:
             return "books.vertical"
@@ -81,15 +80,6 @@ struct ConversationsTabViewPlaceholder: View {
 struct LocalModelDiscoveryGridViewPlaceholder: View {
     var body: some View {
         Text("Local Model Discovery Grid Placeholder\n(Will show models to download)")
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .foregroundColor(.secondary)
-    }
-}
-
-struct AgentsTabView: View {
-    var body: some View {
-        Text("Agent configuration and management will appear here.")
             .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .foregroundColor(.secondary)

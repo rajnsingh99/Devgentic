@@ -28,6 +28,7 @@ class MainApplicationViewModel: ObservableObject {
 
     @ObservedObject var ollamaService: OllamaService
     @ObservedObject var ollamaProfileStore: OllamaProfileStore
+    @ObservedObject var agentStore: AgentStore // MARK: New: AgentStore dependency
 
     // MARK: - Voice Input Services
     private let audioEngineService: AudioEngineService
@@ -114,6 +115,7 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Initialization
     init(ollamaService: OllamaService,
          ollamaProfileStore: OllamaProfileStore,
+         agentStore: AgentStore = AgentStore(), // MARK: New: Initialize AgentStore dependency
          audioEngineService: AudioEngineService = AudioEngineService(),
          speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
          fileProcessorService: FileProcessorService = FileProcessorService(),
@@ -122,6 +124,7 @@ class MainApplicationViewModel: ObservableObject {
     ) {
         self.ollamaService = ollamaService
         self.ollamaProfileStore = ollamaProfileStore
+        self.agentStore = agentStore // MARK: New: Assign AgentStore
         self.audioEngineService = audioEngineService
         self.speechRecognitionService = speechRecognitionService
         
@@ -225,9 +228,11 @@ class MainApplicationViewModel: ObservableObject {
         let comm = DefaultLLMCommunicator(fileProcessorService: fpService)
         let ollamaService = OllamaService()
         let ollamaProfileStore = OllamaProfileStore()
+        let agentStore = AgentStore() // MARK: New: Initialize AgentStore for convenience init
 
         self.init(ollamaService: ollamaService,
                   ollamaProfileStore: ollamaProfileStore,
+                  agentStore: agentStore, // MARK: New: Pass AgentStore
                   fileProcessorService: fpService,
                   messageAssemblerService: maService,
                   llmCommunicator: comm)

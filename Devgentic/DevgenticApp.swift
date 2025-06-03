@@ -13,12 +13,18 @@ struct DevgenticApp: App {
     @Environment(\.openWindow) var openWindow
     
     @StateObject var agentManager = AgentManager()
-    // Create MainApplicationViewModel as a StateObject to be shared
-    // This will use the convenience init() of MainApplicationViewModel
-    @StateObject var mainApplicationViewModel = MainApplicationViewModel()
 
-    // MARK: - New: OllamaProfileStore as a StateObject
+    // MARK: - The single, shared MainApplicationViewModel instance
+    @StateObject var mainApplicationViewModel = MainApplicationViewModel(
+        ollamaService: OllamaService(),
+        ollamaProfileStore: OllamaProfileStore(),
+        agentStore: AgentStore() // This is the single instance of AgentStore
+    )
+
+    // MARK: - New: OllamaProfileStore as a StateObject (This is now part of mainApplicationViewModel, can potentially be removed if not used independently elsewhere)
+    // Keeping it for now as it was explicitly defined, but consider consolidating.
     @StateObject var ollamaProfileStore = OllamaProfileStore()
+
 
     var body: some Scene {
         // MARK: - Main Application Window
@@ -26,8 +32,8 @@ struct DevgenticApp: App {
             if isOnboardingComplete {
                 MainApplicationView()
                     .environmentObject(agentManager) // Make agentManager available to MainApp
-                    .environmentObject(mainApplicationViewModel) // Inject MainApplicationViewModel
-                    .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore
+                    .environmentObject(mainApplicationViewModel) // Inject the shared MainApplicationViewModel
+                    .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore (if still needed separately)
                     .onAppear {
                         // When MainApplicationView appears and onboarding is complete,
                         // ensure agent starts if not already running.
@@ -106,16 +112,25 @@ struct DevgenticApp: App {
             CommandCentreView()
                 .environmentObject(mainApplicationViewModel) // Inject the shared MainApplicationViewModel
                 .environmentObject(agentManager) // agentManager is already correctly passed
-                .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore
+                .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore (if still needed separately)
                 .frame(minWidth: 700, idealWidth: 800, minHeight: 700, idealHeight: 800)
         }
 
         // MARK: - New: Ollama Profiles Window
         WindowGroup(id: "ollama-profiles") {
             OllamaProfilesView()
-                .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore
+                .environmentObject(ollamaProfileStore) // Inject OllamaProfileStore (if still needed separately)
                 .environmentObject(mainApplicationViewModel) // Still needed for OllamaService in LocalAISettingsView for now
                 .frame(minWidth: 700, idealWidth: 900, minHeight: 700, idealHeight: 800)
         }
+        
+        // MARK: - Agent Settings Window
+        WindowGroup(id: "agent-settings", for: UUID.self) { agentID in // Note: 'for: UUID.self'
+                   AgentProfiler(initialAgentID: agentID.wrappedValue) // Pass the received ID
+                       // IMPORTANT: Pass the SAME shared MainApplicationViewModel instance
+                       .environmentObject(mainApplicationViewModel)
+               }
+               .windowStyle(.hiddenTitleBar)
+               .defaultSize(width: 800, height: 600)
     }
 }
