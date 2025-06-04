@@ -124,6 +124,7 @@ struct OllamaProfilesView: View {
         }
         .onAppear {
             // Initialize selectedProfileForNavigation from the store's selectedProfileID
+            // This ensures the correct profile is selected when the view first appears.
             if let currentSelectedID = ollamaProfileStore.selectedProfileID,
                let profile = ollamaProfileStore.profiles.first(where: { $0.id == currentSelectedID }) {
                 selectedProfileForNavigation = profile
@@ -135,16 +136,24 @@ struct OllamaProfilesView: View {
             logger.info("OllamaProfilesView appeared. Initial selected profile: \(selectedProfileForNavigation?.profileName ?? "nil")")
         }
         // Sync ollamaProfileStore's selection when local navigation selection changes
-        .onChange(of: selectedProfileForNavigation) { newValue in
-            if let newSelectedProfile = newValue {
+        // This onChange is crucial for maintaining the selection state.
+        .onChange(of: selectedProfileForNavigation) { oldProfile, newProfile in
+            if let newSelectedProfile = newProfile {
                 if ollamaProfileStore.selectedProfileID != newSelectedProfile.id {
                     ollamaProfileStore.selectedProfileID = newSelectedProfile.id
                     logger.debug("OllamaProfilesView local selection changed to: \(newSelectedProfile.profileName), updating store.")
                 }
+            } else {
+                // If selectedProfileForNavigation becomes nil, clear store's selection too.
+                if ollamaProfileStore.selectedProfileID != nil {
+                    ollamaProfileStore.selectedProfileID = nil
+                    logger.debug("OllamaProfilesView local selection cleared, updating store.")
+                }
             }
         }
         // Sync local navigation selection if ollamaProfileStore's selection changes from elsewhere
-        .onChange(of: ollamaProfileStore.selectedProfileID) { newStoreSelectedID in
+        // This onChange ensures the UI reacts to external changes to the selected profile.
+        .onChange(of: ollamaProfileStore.selectedProfileID) { oldID, newStoreSelectedID in
             if let newID = newStoreSelectedID,
                let profile = ollamaProfileStore.profiles.first(where: { $0.id == newID }) {
                 if selectedProfileForNavigation != profile {
@@ -152,8 +161,31 @@ struct OllamaProfilesView: View {
                     logger.debug("OllamaProfileStore selectedProfileID changed to: \(profile.profileName), updating local selection.")
                 }
             } else if newStoreSelectedID == nil {
+                // If the store's selected ID becomes nil, and our local selection isn't already nil, clear it.
+                if selectedProfileForNavigation != nil {
+                    selectedProfileForNavigation = nil
+                    logger.debug("OllamaProfileStore selectedProfileID cleared, clearing local selection.")
+                }
+            }
+        }
+        // New: Add an onChange for the profiles array itself.
+        // This handles cases where profiles are added or removed, ensuring the selection remains valid.
+        .onChange(of: ollamaProfileStore.profiles) { oldProfiles, newProfiles in
+            // If the currently selected profile is no longer in the list, try to select the first one.
+            if let currentSelected = selectedProfileForNavigation, !newProfiles.contains(currentSelected) {
+                selectedProfileForNavigation = newProfiles.first
+                ollamaProfileStore.selectedProfileID = newProfiles.first?.id
+                logger.debug("Selected profile removed or changed. Auto-selecting first available profile.")
+            } else if selectedProfileForNavigation == nil && !newProfiles.isEmpty {
+                // If nothing is selected but there are profiles, select the first one.
+                selectedProfileForNavigation = newProfiles.first
+                ollamaProfileStore.selectedProfileID = newProfiles.first?.id
+                logger.debug("No profile selected but profiles exist. Auto-selecting first available profile.")
+            } else if newProfiles.isEmpty {
+                // If there are no profiles, ensure nothing is selected.
                 selectedProfileForNavigation = nil
-                logger.debug("OllamaProfileStore selectedProfileID cleared, clearing local selection.")
+                ollamaProfileStore.selectedProfileID = nil
+                logger.debug("All profiles removed. Clearing selection.")
             }
         }
     }

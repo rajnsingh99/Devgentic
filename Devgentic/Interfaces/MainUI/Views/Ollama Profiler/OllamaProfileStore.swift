@@ -39,6 +39,7 @@ class OllamaProfileStore: ObservableObject {
     // Private properties
     private let storageFileName = "ollama_profiles.json"
     private var profilesDirectory: URL? // URL to the directory where profiles are stored
+    
 
     init() {
         // Initialize stored properties *before* calling instance methods that rely on 'self'.

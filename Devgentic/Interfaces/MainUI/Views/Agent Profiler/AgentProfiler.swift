@@ -101,9 +101,9 @@ struct AgentProfiler: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(NSColor.controlBackgroundColor)) // Background for the detail pane
+            .background(Color(NSColor.controlBackgroundColor))// Background for the detail pane
         }
-        .frame(minWidth: 700, minHeight: 400) // Minimum window size
+        .frame(minWidth: 1000, minHeight: 400) // Minimum window size
         // Removed the custom close button from the toolbar
         // .toolbar {
         //     ToolbarItem(placement: .navigation) {

@@ -401,10 +401,25 @@ struct LocalAISettingsView: View {
                 logger.debug("Synced editableProfileName to bound profile name: '\(ollamaProfile.profileName)' on appear.")
             }
 
+            // Always update OllamaService's baseURL and llmModelName to match the current profile
+            // and trigger a status check/model load for the new baseURL.
             if ollamaService.ollamaBaseURL != ollamaProfile.baseURL {
-                 logger.debug("Profile baseURL (\(ollamaProfile.baseURL)) differs from OllamaService baseURL (\(ollamaService.ollamaBaseURL)) on appear. Updating OllamaService's baseURL.")
+                 logger.debug("Profile baseURL (\(ollamaProfile.baseURL)) differs from OllamaService baseURL (\(ollamaService.ollamaBaseURL)) on appear. Updating OllamaService's baseURL and triggering status check.")
                  ollamaService.ollamaBaseURL = ollamaProfile.baseURL
+                 Task {
+                     await ollamaService.checkServerStatusAndUpdateModels()
+                 }
+            } else {
+                // If baseURL hasn't changed, but models might not be loaded yet (e.g., first appear)
+                // or if status is unknown/disconnected, trigger a check.
+                if ollamaService.serverStatus == .unknown || ollamaService.serverStatus == .disconnected || ollamaService.localModels.isEmpty {
+                    logger.debug("OllamaService status is unknown/disconnected or models are empty on appear. Triggering status check.")
+                    Task {
+                        await ollamaService.checkServerStatusAndUpdateModels()
+                    }
+                }
             }
+
             if ollamaService.llmModelName != ollamaProfile.llmModelName {
                  logger.debug("Profile llmModelName (\(ollamaProfile.llmModelName)) differs from OllamaService llmModelName (\(ollamaService.llmModelName)) on appear. Updating OllamaService's llmModelName.")
                  ollamaService.llmModelName = ollamaProfile.llmModelName
@@ -416,7 +431,6 @@ struct LocalAISettingsView: View {
              showingRemovalConfirmation = false
         }
         .onChange(of: ollamaProfile.id) { oldProfileID, newProfileID in
-            // newProfileID is of type UUID here because ollamaProfile.id is a non-optional UUID.
             logger.debug("LocalAISettingsView: ollamaProfile.id changed from \(oldProfileID.uuidString) to \(newProfileID.uuidString).")
             
             // Attempt to find the new profile in the store to ensure we have the freshest data.
@@ -425,6 +439,20 @@ struct LocalAISettingsView: View {
                     editableProfileName = newProfileFromStore.profileName
                     logger.debug("Reset editableProfileName to '\(newProfileFromStore.profileName)' from store for new profile ID.")
                 }
+                // When profile ID changes, always update OllamaService's baseURL and modelName
+                // and trigger a fresh status check/model load for the new profile.
+                if ollamaService.ollamaBaseURL != newProfileFromStore.baseURL {
+                    ollamaService.ollamaBaseURL = newProfileFromStore.baseURL
+                    logger.info("Profile ID changed. Updating OllamaService baseURL to '\(newProfileFromStore.baseURL)' and triggering status check.")
+                    Task {
+                        await ollamaService.checkServerStatusAndUpdateModels()
+                    }
+                }
+                if ollamaService.llmModelName != newProfileFromStore.llmModelName {
+                    ollamaService.llmModelName = newProfileFromStore.llmModelName
+                    logger.debug("Profile ID changed. Updating OllamaService llmModelName to '\(newProfileFromStore.llmModelName)'.")
+                }
+
             } else {
                 // Fallback: If the profile isn't in the store (e.g., if store update is lagging or profile was deleted),
                 // use the name from the `ollamaProfile` binding, which should represent the new profile.
@@ -433,23 +461,37 @@ struct LocalAISettingsView: View {
                     editableProfileName = ollamaProfile.profileName
                     logger.warning("Profile with ID \(newProfileID.uuidString) not found in store. Reset editableProfileName using the current binding's profileName: '\(ollamaProfile.profileName)'.")
                 }
+                // If the profile is somehow not found in the store, we should still try to update OllamaService
+                // based on the binding's current values.
+                if ollamaService.ollamaBaseURL != ollamaProfile.baseURL {
+                    ollamaService.ollamaBaseURL = ollamaProfile.baseURL
+                    logger.warning("Profile not found in store. Updating OllamaService baseURL from binding to '\(ollamaProfile.baseURL)' and triggering status check.")
+                    Task {
+                        await ollamaService.checkServerStatusAndUpdateModels()
+                    }
+                }
+                if ollamaService.llmModelName != ollamaProfile.llmModelName {
+                    ollamaService.llmModelName = ollamaProfile.llmModelName
+                    logger.warning("Profile not found in store. Updating OllamaService llmModelName from binding to '\(ollamaProfile.llmModelName)'.")
+                }
             }
         }
         .onChange(of: ollamaProfile.baseURL) { oldURL, newURL in
             if oldURL != newURL {
                 logger.debug("LocalAISettingsView: ollamaProfile.baseURL changed from '\(oldURL)' to '\(newURL)' for profile '\(ollamaProfile.profileName)'.")
+                // When baseURL changes, update OllamaService's baseURL and trigger a status check/model load.
                 ollamaService.ollamaBaseURL = newURL
-                if mainViewModel.ollamaProfileStore.selectedProfileID == ollamaProfile.id {
-                    logger.info("LocalAISettingsView: baseURL of active profile '\(ollamaProfile.profileName)' changed. Triggering checkServerStatusAndUpdateModels.")
-                    Task {
-                        await ollamaService.checkServerStatusAndUpdateModels()
-                    }
+                logger.info("baseURL of active profile '\(ollamaProfile.profileName)' changed. Triggering checkServerStatusAndUpdateModels.")
+                Task {
+                    await ollamaService.checkServerStatusAndUpdateModels()
                 }
             }
         }
         .onChange(of: ollamaProfile.llmModelName) { oldModel, newModel in
             if oldModel != newModel {
                 logger.debug("LocalAISettingsView: ollamaProfile.llmModelName changed from '\(oldModel ?? "nil")' to '\(newModel)' for profile '\(ollamaProfile.profileName)'.")
+                // Only update OllamaService's llmModelName if this profile is the currently selected one in the store.
+                // This prevents other profiles from changing the global OllamaService's active model.
                 if mainViewModel.ollamaProfileStore.selectedProfileID == ollamaProfile.id {
                     ollamaService.llmModelName = newModel
                 }

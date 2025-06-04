@@ -5,7 +5,7 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaService")
 
-@MainActor
+@MainActor // Ensure the entire class runs on the MainActor by default
 class OllamaService: ObservableObject {
 
     // MARK: - Published Properties (for Ollama State)
@@ -41,6 +41,8 @@ class OllamaService: ObservableObject {
 
     // checkServerStatusAndUpdateModels now uses the internal ollamaBaseURL
     func checkServerStatusAndUpdateModels() async {
+        // All @Published updates within this function are now implicitly on MainActor
+        // because the class itself is marked @MainActor.
         guard serverStatus != .checking else { return }
         
         logger.info("Checking Ollama server status at \(self.ollamaBaseURL)...")
@@ -65,6 +67,7 @@ class OllamaService: ObservableObject {
 
     // loadLocalModels now uses the internal ollamaBaseURL
     func loadLocalModels() async {
+        // All @Published updates within this function are now implicitly on MainActor.
         guard serverStatus == .connected else {
             logger.warning("Cannot load local models: Ollama server is not connected.")
             localModels = []
@@ -109,6 +112,7 @@ class OllamaService: ObservableObject {
 
     // pullModel now accepts a baseURL parameter
     func pullModel(name: String, baseURL: String) async {
+        // All @Published updates within this function are now implicitly on MainActor.
         let trimmedModelName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else {
             self.modelPullError = "Model name cannot be empty."
@@ -144,6 +148,7 @@ class OllamaService: ObservableObject {
         
         do {
             try await AIConnect.pullOllamaModel(name: trimmedModelName, baseURL: baseURL) { progressUpdate in
+                // The closure is already running on the MainActor because the class is @MainActor
                 self.pullStage = progressUpdate.status
                 self.pullTotalBytes = progressUpdate.total
                 self.pullCompletedBytes = progressUpdate.completed
@@ -183,7 +188,8 @@ class OllamaService: ObservableObject {
             }
         }
         isPullingModel = false
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        // Delay clearing status to allow user to see final message/error
+        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds delay
         if modelPullError == nil {
             clearPullActionStatus()
         }
@@ -191,6 +197,7 @@ class OllamaService: ObservableObject {
 
     // removeModel now accepts a baseURL parameter
     func removeModel(name: String, baseURL: String) async {
+        // All @Published updates within this function are now implicitly on MainActor.
         let trimmedModelName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedModelName.isEmpty else {
             self.modelRemoveError = "Model name cannot be empty for removal."
@@ -243,7 +250,8 @@ class OllamaService: ObservableObject {
             }
         }
         isRemovingModel = false
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        // Delay clearing status to allow user to see final message/error
+        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
         if modelRemoveError == nil {
              clearRemoveActionStatus()
         }
