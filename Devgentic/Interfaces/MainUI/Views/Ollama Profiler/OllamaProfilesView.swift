@@ -14,7 +14,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// It displays a master-detail interface for selecting and configuring different Ollama instances.
 struct OllamaProfilesView: View {
     @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
-    @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel // Needed for passing to LocalAISettingsView
+    @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
 
     @State private var selectedProfileForNavigation: OllamaProfile?
     @State private var showingAddProfilePopover = false
@@ -41,8 +41,7 @@ struct OllamaProfilesView: View {
                     .help("Add New Ollama Profile")
                     .popover(isPresented: $showingAddProfilePopover) {
                         AddOllamaProfilePopover()
-                            .environmentObject(ollamaProfileStore) // Pass the store to the popover
-                            .frame(minWidth: 300, idealWidth: 400, minHeight: 150, idealHeight: 200)
+                            .environmentObject(ollamaProfileStore)
                     }
                 }
                 .padding([.horizontal, .top])
@@ -71,7 +70,6 @@ struct OllamaProfilesView: View {
                             Button("Set as Active") {
                                 ollamaProfileStore.selectedProfileID = profile.id
                             }
-                            // Disable delete if it's the only profile or the active one
                             Button("Delete Profile", role: .destructive) {
                                 profileToDelete = profile
                                 showingDeleteConfirmation = true
@@ -82,24 +80,10 @@ struct OllamaProfilesView: View {
                 }
                 .listStyle(SidebarListStyle())
                 .frame(minWidth: 200, idealWidth: 220, maxWidth: 250)
-                .onDeleteCommand {
-                    // Handle delete key press
-                    if let selectedProfile = selectedProfileForNavigation,
-                       ollamaProfileStore.profiles.count > 1,
-                       ollamaProfileStore.selectedProfileID != selectedProfile.id {
-                        profileToDelete = selectedProfile
-                        showingDeleteConfirmation = true
-                    }
-                }
             }
-            .confirmationDialog("Delete Ollama Profile",
-                                isPresented: $showingDeleteConfirmation,
-                                presenting: profileToDelete) { profile in
+            .confirmationDialog("Delete Ollama Profile", isPresented: $showingDeleteConfirmation, presenting: profileToDelete) { profile in
                 Button("Delete '\(profile.profileName)'", role: .destructive) {
                     ollamaProfileStore.deleteProfile(id: profile.id)
-                    profileToDelete = nil // Clear the reference
-                }
-                Button("Cancel", role: .cancel) {
                     profileToDelete = nil
                 }
             } message: { profile in
@@ -108,84 +92,42 @@ struct OllamaProfilesView: View {
 
 
             // MARK: - Detail View Area
-            // Display the detail view for the selected profile, or a placeholder
             if let selectedProfile = selectedProfileForNavigation {
                 profileDetailView(for: selectedProfile)
-                    .navigationTitle(selectedProfile.profileName) // Set title for the detail view
+                    .navigationTitle(selectedProfile.profileName)
             } else {
-                VStack {
-                    Text("Select an Ollama Profile")
-                        .font(.title)
-                    Text("Choose a profile from the sidebar to view or edit its settings, or click '+' to add a new one.")
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Text("Select an Ollama Profile")
+                    .font(.title)
+                    .foregroundColor(.secondary)
             }
         }
         .onAppear {
-            // Initialize selectedProfileForNavigation from the store's selectedProfileID
-            // This ensures the correct profile is selected when the view first appears.
             if let currentSelectedID = ollamaProfileStore.selectedProfileID,
                let profile = ollamaProfileStore.profiles.first(where: { $0.id == currentSelectedID }) {
                 selectedProfileForNavigation = profile
-            } else if ollamaProfileStore.selectedProfileID == nil && !ollamaProfileStore.profiles.isEmpty {
-                // If no profile is selected in the store, but profiles exist, select the first one
+            } else if !ollamaProfileStore.profiles.isEmpty {
                 selectedProfileForNavigation = ollamaProfileStore.profiles.first
                 ollamaProfileStore.selectedProfileID = ollamaProfileStore.profiles.first?.id
             }
-            logger.info("OllamaProfilesView appeared. Initial selected profile: \(selectedProfileForNavigation?.profileName ?? "nil")")
         }
-        // Sync ollamaProfileStore's selection when local navigation selection changes
-        // This onChange is crucial for maintaining the selection state.
-        .onChange(of: selectedProfileForNavigation) { oldProfile, newProfile in
-            if let newSelectedProfile = newProfile {
-                if ollamaProfileStore.selectedProfileID != newSelectedProfile.id {
-                    ollamaProfileStore.selectedProfileID = newSelectedProfile.id
-                    logger.debug("OllamaProfilesView local selection changed to: \(newSelectedProfile.profileName), updating store.")
-                }
-            } else {
-                // If selectedProfileForNavigation becomes nil, clear store's selection too.
-                if ollamaProfileStore.selectedProfileID != nil {
-                    ollamaProfileStore.selectedProfileID = nil
-                    logger.debug("OllamaProfilesView local selection cleared, updating store.")
-                }
+        .onChange(of: selectedProfileForNavigation) { _, newProfile in
+            if let newSelectedProfile = newProfile, ollamaProfileStore.selectedProfileID != newSelectedProfile.id {
+                ollamaProfileStore.selectedProfileID = newSelectedProfile.id
             }
         }
-        // Sync local navigation selection if ollamaProfileStore's selection changes from elsewhere
-        // This onChange ensures the UI reacts to external changes to the selected profile.
-        .onChange(of: ollamaProfileStore.selectedProfileID) { oldID, newStoreSelectedID in
+        .onChange(of: ollamaProfileStore.selectedProfileID) { _, newStoreSelectedID in
             if let newID = newStoreSelectedID,
-               let profile = ollamaProfileStore.profiles.first(where: { $0.id == newID }) {
-                if selectedProfileForNavigation != profile {
-                    selectedProfileForNavigation = profile
-                    logger.debug("OllamaProfileStore selectedProfileID changed to: \(profile.profileName), updating local selection.")
-                }
+               let profile = ollamaProfileStore.profiles.first(where: { $0.id == newID }),
+               selectedProfileForNavigation != profile {
+                selectedProfileForNavigation = profile
             } else if newStoreSelectedID == nil {
-                // If the store's selected ID becomes nil, and our local selection isn't already nil, clear it.
-                if selectedProfileForNavigation != nil {
-                    selectedProfileForNavigation = nil
-                    logger.debug("OllamaProfileStore selectedProfileID cleared, clearing local selection.")
-                }
+                selectedProfileForNavigation = nil
             }
         }
-        // New: Add an onChange for the profiles array itself.
-        // This handles cases where profiles are added or removed, ensuring the selection remains valid.
-        .onChange(of: ollamaProfileStore.profiles) { oldProfiles, newProfiles in
-            // If the currently selected profile is no longer in the list, try to select the first one.
+        .onChange(of: ollamaProfileStore.profiles) { _, newProfiles in
             if let currentSelected = selectedProfileForNavigation, !newProfiles.contains(currentSelected) {
                 selectedProfileForNavigation = newProfiles.first
                 ollamaProfileStore.selectedProfileID = newProfiles.first?.id
-                logger.debug("Selected profile removed or changed. Auto-selecting first available profile.")
-            } else if selectedProfileForNavigation == nil && !newProfiles.isEmpty {
-                // If nothing is selected but there are profiles, select the first one.
-                selectedProfileForNavigation = newProfiles.first
-                ollamaProfileStore.selectedProfileID = newProfiles.first?.id
-                logger.debug("No profile selected but profiles exist. Auto-selecting first available profile.")
-            } else if newProfiles.isEmpty {
-                // If there are no profiles, ensure nothing is selected.
-                selectedProfileForNavigation = nil
-                ollamaProfileStore.selectedProfileID = nil
-                logger.debug("All profiles removed. Clearing selection.")
             }
         }
     }
@@ -193,29 +135,18 @@ struct OllamaProfilesView: View {
     // Helper to provide the correct detail view based on selection
     @ViewBuilder
     private func profileDetailView(for profile: OllamaProfile) -> some View {
-        // Wrap the entire content of the detail section in a ScrollView
         ScrollView {
-            // Create a binding that updates the store when the profile changes
             let profileBinding = Binding<OllamaProfile>(
-                get: {
-                    // Ensure we're always working with the latest version from the store
-                    self.ollamaProfileStore.profiles.first(where: { $0.id == profile.id }) ?? profile
-                },
-                set: { updatedProfile in
-                    self.ollamaProfileStore.updateProfile(profile: updatedProfile)
-                }
+                get: { self.ollamaProfileStore.profiles.first { $0.id == profile.id } ?? profile },
+                set: { updatedProfile in self.ollamaProfileStore.updateProfile(profile: updatedProfile) }
             )
 
-            // We need to pass the ollamaService and mainViewModel for now,
-            // as LocalAISettingsView still expects them.
-            // In Phase 3, LocalAISettingsView will be adapted to primarily use the OllamaProfile binding.
-            LocalAISettingsView(
-                ollamaService: mainApplicationViewModel.ollamaService, // Still using the main one for actions
-                mainViewModel: mainApplicationViewModel, // Still using the main one for global context
-                ollamaProfileBinding: profileBinding // Pass the new profile binding
-            )
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            // MARK: - Corrected call to LocalAISettingsView
+            // This view now gets its dependencies from the environment.
+            LocalAISettingsView(ollamaProfileBinding: profileBinding)
+                .environmentObject(mainApplicationViewModel) // Ensure environment is passed down
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -223,49 +154,48 @@ struct OllamaProfilesView: View {
 
 // MARK: - Preview Provider
 struct OllamaProfilesView_Previews: PreviewProvider {
-    static var previews: some View {
-        // Create a mock OllamaProfileStore for previews
-        let mockOllamaProfileStore: OllamaProfileStore = { // MARK: Use static for mock store
-            let store = OllamaProfileStore()
-            // Add some mock profiles
-            store.profiles = [
-                OllamaProfile.defaultProfile(),
-                OllamaProfile(
-                    id: UUID(),
-                    profileName: "Remote Server",
-                    baseURL: "http://192.168.1.100:11434",
-                    llmModelName: "llama2:7b",
-                    temperature: 0.7, topK: 30, topP: 0.8, repeatPenalty: 1.0, contextWindowSize: 2048, gpuLayers: 0,
-                    maxInlineChars: 2000, maxAttachedFiles: 3,
-                    textFileInclusionStrategy: .alwaysUsePaths, // Corrected enum case
-                    imageHandlingStrategy: .doNotInclude,
-                    binaryFileHandlingStrategy: .doNotInclude
-                )
-            ]
-            store.selectedProfileID = store.profiles.first?.id // Select the first one by default
-            return store
-        }()
-
-        // Create a mock OllamaService for previews
-        let mockOllamaService: OllamaService = { // MARK: Use static for mock service
-            let service = OllamaService()
-            service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
-            service.llmModelName = "mistral:7b"
-            service.serverStatus = .connected
-            return service
-        }()
-
-        // Create a mock MainApplicationViewModel for previews
-        // MARK: Fix: Provide ollamaProfileStore to MainApplicationViewModel init
-        let mockMainApplicationViewModel = MainApplicationViewModel(
-            ollamaService: mockOllamaService,
-            ollamaProfileStore: mockOllamaProfileStore
+    // Helper to create a view model instance for previews
+    static func createMockViewModel() -> MainApplicationViewModel {
+        let profileStore = OllamaProfileStore()
+        if profileStore.profiles.isEmpty {
+            let defaultProfile = OllamaProfile.defaultProfile()
+            let remoteProfile = OllamaProfile(
+                id: UUID(), profileName: "Remote Server", baseURL: "http://192.168.1.100:11434",
+                llmModelName: "llama2:7b", temperature: 0.7, topK: 30, topP: 0.8,
+                repeatPenalty: 1.0, contextWindowSize: 2048, gpuLayers: 0,
+                maxInlineChars: 2000, maxAttachedFiles: 3,
+                textFileInclusionStrategy: .alwaysUsePaths,
+                imageHandlingStrategy: .doNotInclude,
+                binaryFileHandlingStrategy: .doNotInclude
+            )
+            profileStore.profiles = [defaultProfile, remoteProfile]
+            profileStore.selectedProfileID = defaultProfile.id
+        }
+        
+        // Correctly initialize without OllamaService
+        return MainApplicationViewModel(
+            ollamaProfileStore: profileStore,
+            agentStore: AgentStore()
         )
+    }
 
+    static var previews: some View {
+        let mockViewModel = createMockViewModel()
+        
+        // Now, we inject both the viewModel and its profileStore into the environment
+        // for the preview to use.
         OllamaProfilesView()
-            .environmentObject(mockOllamaProfileStore)
-            .environmentObject(mockMainApplicationViewModel)
+            .environmentObject(mockViewModel)
+            .environmentObject(mockViewModel.ollamaProfileStore)
             .frame(width: 900, height: 600)
             .previewDisplayName("Ollama Profiles Window")
+            .onAppear {
+                // For previews, configure the state of the SHARED service instance
+                let service = OllamaService.shared
+                service.serverStatus = .connected
+                service.localModels = ["gemma:2b", "llama3:8b", "mistral:7b"]
+                service.isLoadingModels = false
+                service.modelPullError = nil
+            }
     }
 }

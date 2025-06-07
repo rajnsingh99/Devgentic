@@ -8,6 +8,10 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 @MainActor // Ensure the entire class runs on the MainActor by default
 class OllamaService: ObservableObject {
 
+    // MARK: - Singleton Pattern
+    /// The shared singleton instance of the OllamaService.
+    static let shared = OllamaService()
+
     // MARK: - Published Properties (for Ollama State)
     @Published var serverStatus: OllamaServerStatus = .unknown
     @Published var localModels: [String] = []
@@ -27,14 +31,15 @@ class OllamaService: ObservableObject {
     @Published var removingModelName: String? = nil // To indicate which model is being removed
     @Published var modelRemoveError: String? = nil
     
-    // MARK: - Modified: llmModelName and ollamaBaseURL are now @Published, not @AppStorage
-    // They will be set by MainApplicationViewModel based on the selected OllamaProfile
+    // MARK: - Configuration Properties
+    /// These properties are now set by a central authority (like MainApplicationViewModel) based on the active profile.
     @Published var llmModelName: String = "gemma:2b" // Default, but will be overridden by profile
     @Published var ollamaBaseURL: String = "http://localhost:11434" // Default, but will be overridden by profile
 
 
-    init() {
-        logger.info("OllamaService initialized.")
+    /// The initializer is private to enforce the use of the `shared` singleton instance.
+    private init() {
+        logger.info("OllamaService singleton initialized.")
     }
 
     // MARK: - Public Methods for Ollama Management

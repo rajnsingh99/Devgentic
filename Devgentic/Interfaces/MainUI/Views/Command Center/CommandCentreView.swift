@@ -42,51 +42,36 @@ struct CommandCentreView: View {
             .frame(minWidth: 200, idealWidth: 220, maxWidth: 250) // Keep sidebar width constrained
 
             // --- Detail View Area ---
-            // The NavigationView will place the selected destination here.
-            // If no selection, it might show a default view or the first item's view
-            // depending on the OS version and exact NavigationView behavior.
-            // We provide a placeholder for when selectedSectionForNavigation is nil.
-            if selectedSectionForNavigation == nil {
-                VStack {
+            VStack {
+                if selectedSectionForNavigation == nil {
                     Text("Select a category")
                         .font(.title)
                     Text("Choose a section from the sidebar to configure settings.")
                         .foregroundColor(.secondary)
+                } else {
+                    // This EmptyView acts as a placeholder for the NavigationLink's destination content.
+                    EmptyView()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                // This EmptyView acts as a placeholder for the NavigationLink's destination content.
-                // The actual content is determined by detailView(for: selectedSectionForNavigation!)
-                // when a selection is made.
-                EmptyView()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
-            // Initialize local selection state from the viewModel on appear
-            // This also helps in ensuring a detail view is loaded if one was previously selected.
             if selectedSectionForNavigation != viewModel.selectedSettingsSection {
                  selectedSectionForNavigation = viewModel.selectedSettingsSection
             }
-            // If no section is selected in the view model, and none locally, select the first one.
             if selectedSectionForNavigation == nil {
                 selectedSectionForNavigation = SettingsSection.allCases.first
             }
-            logger.info("CommandCentreView appeared. Initial selected section for navigation: \(selectedSectionForNavigation?.rawValue ?? "nil")")
+            logger.info("CommandCentreView appeared. Initial selected section: \(selectedSectionForNavigation?.rawValue ?? "nil")")
         }
-        // Sync viewModel's selection when local navigation selection changes
         .onChange(of: selectedSectionForNavigation) { newValue in
-            if let newSelectedSection = newValue {
-                if viewModel.selectedSettingsSection != newSelectedSection {
-                    viewModel.selectedSettingsSection = newSelectedSection
-                    logger.debug("CommandCentre local selection changed to: \(newSelectedSection.rawValue), updating viewModel.")
-                }
+            if let newSelectedSection = newValue, viewModel.selectedSettingsSection != newSelectedSection {
+                viewModel.selectedSettingsSection = newSelectedSection
             }
         }
-        // Sync local navigation selection if viewModel's selection changes from elsewhere
         .onChange(of: viewModel.selectedSettingsSection) { newViewModelSection in
             if selectedSectionForNavigation != newViewModelSection {
                 selectedSectionForNavigation = newViewModelSection
-                logger.debug("ViewModel selectedSettingsSection changed to: \(newViewModelSection.rawValue), updating CommandCentre local selection.")
             }
         }
     }
@@ -94,16 +79,12 @@ struct CommandCentreView: View {
     // Helper to provide the correct detail view based on selection
     @ViewBuilder
     private func detailView(for section: SettingsSection) -> some View {
-        // Wrap the entire content of the detail section in a ScrollView
-        // This ensures that if the content of any settings page is too tall,
-        // it becomes scrollable without distorting the NavigationView's layout.
         ScrollView {
             VStack(alignment: .leading, spacing: 15) {
                 switch section {
                 case .general:
                     GeneralSettingsView(windowOpacity: $viewModel.windowOpacity)
                         .environmentObject(viewModel)
-                // MARK: - Removed .localAI case as per enhancement plan
                 case .agents:
                     AgentSettingsView(
                         agentBaseURL: $viewModel.agentBaseURL,
@@ -114,28 +95,17 @@ struct CommandCentreView: View {
                     LicenseSettingsView()
                         .environmentObject(viewModel)
                 }
-                // Removed Spacer from here; ScrollView content will align top by default.
-                // If VStack content is shorter than ScrollView, it will stay at the top.
             }
-            .padding(20) // Apply padding to the content within the ScrollView
-            .frame(maxWidth: .infinity, alignment: .topLeading) // VStack takes full width; height is intrinsic to content
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity) // ScrollView itself fills the available detail area
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-// Preview Provider for CommandCentreView
+// MARK: - Preview Provider (Corrected)
 struct CommandCentreView_Previews: PreviewProvider {
     static var previews: some View {
-        // Create mock OllamaService instances for previews
-        let mockOllamaService: OllamaService = {
-            let service = OllamaService()
-            service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
-            service.llmModelName = "mistral:7b"
-            service.serverStatus = .connected
-            return service
-        }()
-
         // Create a mock OllamaProfileStore for previews
         let mockOllamaProfileStore: OllamaProfileStore = {
             let store = OllamaProfileStore()
@@ -144,8 +114,8 @@ struct CommandCentreView_Previews: PreviewProvider {
             return store
         }()
 
+        // MARK: - Corrected: Initialize the view model without the OllamaService argument
         let mockViewModel = MainApplicationViewModel(
-            ollamaService: mockOllamaService,
             ollamaProfileStore: mockOllamaProfileStore
         )
 
@@ -153,5 +123,12 @@ struct CommandCentreView_Previews: PreviewProvider {
             .environmentObject(mockViewModel)
             .frame(width: 800, height: 500)
             .previewDisplayName("Command Centre Preview")
+            .onAppear {
+                // MARK: - Corrected: Configure the SHARED OllamaService instance for this preview
+                let service = OllamaService.shared
+                service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
+                service.llmModelName = "mistral:7b"
+                service.serverStatus = .connected
+            }
     }
 }

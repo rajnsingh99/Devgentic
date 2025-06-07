@@ -29,7 +29,6 @@ struct AgentsTabView: View {
                                 .environmentObject(viewModel)
                                 .padding(.horizontal)
                                 .onTapGesture {
-                                    // **[NEW]** Single tap to select the agent
                                     viewModel.selectedAgentID = agent.id
                                 }
                                 .onTapGesture(count: 2) {
@@ -76,12 +75,11 @@ struct AgentRowView: View {
                         .foregroundColor(.gray)
                 }
             }
-            Spacer() // Pushes content to the left
+            Spacer()
             
-            // **[NEW]** Show a checkmark if the agent is active
             if agent.isActive {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
+                    .foregroundColor(.blue)
                     .font(.title2)
             }
         }
@@ -89,17 +87,16 @@ struct AgentRowView: View {
         .background(Color(NSColor.windowBackgroundColor))
         .cornerRadius(10)
         .overlay(
-            // **[NEW]** Add a green border if the agent is active
             RoundedRectangle(cornerRadius: 10)
-                .stroke(agent.isActive ? Color.green : Color.clear, lineWidth: 2)
+                .stroke(agent.isActive ? Color.blue : Color.clear, lineWidth: agent.isActive ? 0.5 : 1)
         )
         .shadow(color: Color.black.opacity(0.15), radius: 3, x: 0, y: 1)
         .contentShape(Rectangle())
-        .animation(.easeInOut(duration: 0.2), value: agent.isActive) // Animate the border change
+        .animation(.easeInOut(duration: 0.2), value: agent.isActive)
     }
 }
 
-// MARK: - Preview Provider
+// MARK: - Preview Provider (Corrected)
 struct AgentsTabView_Previews: PreviewProvider {
     static var previews: some View {
         let mockOllamaProfileStore: OllamaProfileStore = {
@@ -121,17 +118,15 @@ struct AgentsTabView_Previews: PreviewProvider {
         let mockAgentStore: AgentStore = {
             let store = AgentStore()
             var defaultAgent = Agent.defaultAgent()
-            defaultAgent.isActive = true // Make the first one active for the preview
+            defaultAgent.isActive = true
             let testAgent = Agent(id: UUID(), name: "Test Agent", description: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, selectedAgentTool: "Web Search")
             let inactiveAgent = Agent(id: UUID(), name: "Inactive Agent", description: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, selectedAgentTool: "None")
             store.agents = [defaultAgent, testAgent, inactiveAgent]
             return store
         }()
 
-        let mockOllamaService = OllamaService()
-
+        // MARK: - Corrected: Initialize view model without OllamaService
         let mockMainApplicationViewModel = MainApplicationViewModel(
-            ollamaService: mockOllamaService,
             ollamaProfileStore: mockOllamaProfileStore,
             agentStore: mockAgentStore
         )
@@ -141,5 +136,10 @@ struct AgentsTabView_Previews: PreviewProvider {
             .frame(width: 350, height: 500)
             .previewLayout(.sizeThatFits)
             .previewDisplayName("Agents Tab View")
+            .onAppear {
+                // MARK: - Corrected: Configure the SHARED service instance for the preview
+                let service = OllamaService.shared
+                service.serverStatus = .connected
+            }
     }
 }

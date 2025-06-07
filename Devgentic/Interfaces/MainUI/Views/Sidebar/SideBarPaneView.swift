@@ -24,7 +24,6 @@ struct SideBarPaneView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow // To open new windows for settings
 
-    // MARK: - Initializer to accept sidebarWidth binding
     init(selectedTab: Binding<SidebarTab?>, sidebarWidth: Binding<CGFloat>) {
         self._selectedTab = selectedTab
         self._sidebarWidth = sidebarWidth
@@ -41,7 +40,7 @@ struct SideBarPaneView: View {
                         .fontWeight(.semibold)
                     Spacer()
                     // Add settings button for specific tabs
-                    if tab == .agents { // MARK: New: Agent settings button
+                    if tab == .agents {
                         Button {
                             openWindow(id: "agent-settings")
                         } label: {
@@ -66,42 +65,39 @@ struct SideBarPaneView: View {
                         .environmentObject(viewModel)
                 
                 case .explorer:
-                    ExplorerView() // Add the new ExplorerView
+                    ExplorerView()
                         .environmentObject(viewModel)
 
                 case .conversations:
-                    // Assuming ConversationListView is defined and uses EnvironmentObject
                     ConversationListView()
 
                 case .ollama:
-                    // MARK: - UPDATED: Using the new OllamaSidebarView
+                    // This view now correctly uses the shared service instance
+                    // provided through the viewModel environment object.
                     OllamaSidebarView(sidebarWidth: $sidebarWidth)
-                    // The viewModel is already available from the parent's environment
+                        .environmentObject(viewModel)
 
                 case .promptLibrary:
-                    Spacer() // Or EmptyView(). The prompt library is a separate panel.
-                    Text("Prompt Library is open in a separate panel.") // Placeholder if needed
+                    Spacer()
+                    Text("Prompt Library is open in a separate panel.")
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-
 
                 case .agents:
-                    AgentsTabView() // MARK: AgentsTabView now directly displayed
-                        .environmentObject(viewModel) // Ensure viewModel is passed
+                    AgentsTabView()
+                        .environmentObject(viewModel)
 
                 case .settings:
-                    // Settings also opens as a separate panel.
-                    Spacer() // Or EmptyView(). Settings is a separate panel.
-                    Text("Settings are open in a separate panel.") // Placeholder if needed
+                    Spacer()
+                    Text("Settings are open in a separate panel.")
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-
 
                 case .user:
                     UserTabView()
 
                 case .none:
-                    Spacer() // Fill space if nothing is selected (sidebar pane is hidden)
+                    Spacer() // Fill space if nothing is selected
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -111,56 +107,63 @@ struct SideBarPaneView: View {
     }
 }
 
-// Preview Provider would remain the same, but ensure you add OllamaSidebarView to your project
-// so the preview can compile.
+
+// MARK: - Preview Provider
 struct SideBarPaneView_Previews: PreviewProvider {
-    // Container to manage state and ViewModel creation for preview
-    struct PreviewContainer: View {
-        @State var selectedTab: SidebarTab? = .ollama // Set initial tab to ollama for preview
-        @State var previewSidebarWidth: CGFloat = 350 // Define a width for the preview
-
-        static let mockOllamaService: OllamaService = {
-            let service = OllamaService()
-            service.localModels = ["mistral:7b", "phi3:mini", "my-custom-model:latest"]
-            service.serverStatus = .connected
-            return service
-        }()
-
-        static let mockOllamaProfileStore: OllamaProfileStore = {
-            let store = OllamaProfileStore()
-            // Ensure there's at least one profile for the view model to use
-            if store.profiles.isEmpty {
-                var defaultProfile = OllamaProfile.defaultProfile()
-                defaultProfile.llmModelName = "mistral:7b" // Make one model active
-                store.profiles.append(defaultProfile)
-                store.selectedProfileID = store.profiles.first?.id
-            }
-            return store
-        }()
-        
-        static let mockAgentStore: AgentStore = {
-            let store = AgentStore()
-            if store.agents.isEmpty {
-                store.agents.append(Agent.defaultAgent())
-            }
-            return store
-        }()
-
-        let mainViewModel: MainApplicationViewModel = MainApplicationViewModel(
-            ollamaService: mockOllamaService,
-            ollamaProfileStore: mockOllamaProfileStore,
-            agentStore: mockAgentStore
-        )
-        
-        var body: some View {
-            SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $previewSidebarWidth)
-                .environmentObject(mainViewModel)
-                .frame(width: previewSidebarWidth, height: 600)
+    // Helper function to create a MainApplicationViewModel for previews.
+    // This now correctly uses the new initializer.
+    static func createMockViewModel() -> MainApplicationViewModel {
+        let profileStore = OllamaProfileStore()
+        if profileStore.profiles.isEmpty {
+            profileStore.profiles.append(OllamaProfile.defaultProfile())
+            profileStore.selectedProfileID = profileStore.profiles.first?.id
         }
+        let agentStore = AgentStore()
+        if agentStore.agents.isEmpty {
+            agentStore.agents.append(Agent.defaultAgent())
+        }
+        
+        // Correctly initialize without the OllamaService parameter
+        return MainApplicationViewModel(
+            ollamaProfileStore: profileStore,
+            agentStore: agentStore
+        )
     }
 
     static var previews: some View {
-        PreviewContainer()
-            .previewDisplayName("Side Bar Pane (Ollama)")
+        let mockViewModel = createMockViewModel()
+
+        Group {
+            // Preview for Ollama Tab - Default State
+            SideBarPaneView(selectedTab: .constant(.ollama), sidebarWidth: .constant(350))
+                .environmentObject(mockViewModel)
+                .onAppear {
+                    // For previews, we configure the state of the SHARED service instance
+                    let service = OllamaService.shared
+                    service.serverStatus = .connected
+                    service.localModels = ["mistral:7b", "phi3:mini"]
+                    service.isLoadingModels = false
+                    service.isPullingModel = false
+                    service.modelLoadingError = nil
+                }
+                .previewDisplayName("Ollama Pane (Connected)")
+
+            // Preview for Ollama Tab - Disconnected State
+            SideBarPaneView(selectedTab: .constant(.ollama), sidebarWidth: .constant(350))
+                .environmentObject(mockViewModel)
+                .onAppear {
+                    let service = OllamaService.shared
+                    service.serverStatus = .disconnected
+                    service.localModels = []
+                    service.isLoadingModels = false
+                }
+                .previewDisplayName("Ollama Pane (Disconnected)")
+
+            // Preview for Agents Tab
+            SideBarPaneView(selectedTab: .constant(.agents), sidebarWidth: .constant(350))
+                .environmentObject(mockViewModel)
+                .previewDisplayName("Agents Pane")
+        }
+        .frame(height: 600)
     }
 }

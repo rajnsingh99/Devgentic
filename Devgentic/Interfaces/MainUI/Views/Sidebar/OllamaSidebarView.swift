@@ -12,26 +12,24 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 // MARK: - Main Sidebar View for Ollama
 struct OllamaSidebarView: View {
+    // MARK: - Step 4 Change: viewModel is now an EnvironmentObject. The service is accessed via viewModel.
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Binding var sidebarWidth: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Display the connection status and a button to access settings
+            // The status view now gets the service instance from the environment view model
             OllamaStatusView(ollamaService: viewModel.ollamaService)
                 .padding(.horizontal)
                 .padding(.bottom, 10)
 
-            // A scrollable area for the profiles and models
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    // Section for managing Ollama Profiles
                     OllamaProfilesSection()
                         .environmentObject(viewModel.ollamaProfileStore)
 
                     Divider()
 
-                    // Section for displaying locally downloaded LLMs
                     LocalModelsSection(
                         ollamaService: viewModel.ollamaService,
                         ollamaBaseURL: viewModel.ollamaProfileStore.currentProfile?.baseURL ?? "http://localhost:11434",
@@ -43,19 +41,11 @@ struct OllamaSidebarView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {
-            logger.debug("OllamaSidebarView appeared.")
-            viewModel.ollamaService.clearAllModelActionStatuses()
-            // Refresh server status when the view appears
-            if viewModel.selectedBackend == .ollama && viewModel.ollamaService.serverStatus != .connected {
-                 Task {
-                      viewModel.ollamaService.ollamaBaseURL = viewModel.ollamaProfileStore.currentProfile?.baseURL ?? "http://localhost:11434"
-                      await viewModel.ollamaService.checkServerStatusAndUpdateModels()
-                 }
-            }
-        }
+        // MARK: - Step 4 Change: The .onAppear modifier has been removed.
+        // Data loading is now handled centrally by MainApplicationViewModel.
         .onDisappear {
             logger.debug("OllamaSidebarView disappeared.")
+            // Clearing action statuses on disappear is still good practice.
             viewModel.ollamaService.clearAllModelActionStatuses()
         }
     }
@@ -87,7 +77,6 @@ private struct OllamaProfilesSection: View {
             .padding(.bottom, 5)
 
             LazyVStack(spacing: 8) {
-                // List each profile using the new card-style view
                 ForEach(ollamaProfileStore.profiles) { profile in
                     ProfileRowView(profile: profile)
                 }
@@ -125,7 +114,7 @@ private struct ProfileRowView: View {
             if isActive {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.title2)
-                    .foregroundColor(.green)
+                    .foregroundColor(.blue)
             }
         }
         .padding(.vertical, 10)
@@ -134,7 +123,7 @@ private struct ProfileRowView: View {
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isActive ? .green : Color.gray.opacity(0.2), lineWidth: isActive ? 2 : 1)
+                .stroke(isActive ? .blue : Color.gray.opacity(0.2), lineWidth: isActive ? 0.5 : 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -170,7 +159,6 @@ private struct LocalModelsSection: View {
     let ollamaBaseURL: String
     @Binding var sidebarWidth: CGFloat
 
-    // A private struct to hold metadata for display purposes
     struct ModelMetadata: Identifiable, Hashable {
         let id = UUID()
         let name: String
@@ -178,7 +166,6 @@ private struct LocalModelsSection: View {
         let sizeEstimate: String
     }
 
-    // A hardcoded list of known models to provide rich metadata
     private let knownModelsMetadata: [ModelMetadata] = [
         ModelMetadata(name: "llama3:8b", description: "Meta's latest generation 8B parameter model.", sizeEstimate: "4.7 GB"),
         ModelMetadata(name: "mistral:7b", description: "Popular 7B model known for efficiency and performance.", sizeEstimate: "4.1 GB"),
@@ -347,7 +334,8 @@ private struct OllamaStatusView: View {
             if ollamaService.serverStatus == .disconnected || ollamaService.serverStatus == .error {
                 Button {
                     Task {
-                        await ollamaService.checkServerStatusAndUpdateModels()
+                        // Use the shared service instance to perform the action
+                        await OllamaService.shared.checkServerStatusAndUpdateModels()
                     }
                 } label: {
                     Image(systemName: "arrow.clockwise")
