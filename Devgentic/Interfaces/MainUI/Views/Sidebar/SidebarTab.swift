@@ -12,7 +12,7 @@ import os
 enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations
-    case localModels
+    case ollama
     case explorer
     case promptLibrary
     case agents
@@ -28,7 +28,7 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "plus.bubble"
         case .conversations:
             return "message"
-        case .localModels:
+        case .ollama:
             return "cpu"
         // MARK: - Icon for Prompt Library
         case .promptLibrary:
@@ -48,12 +48,11 @@ enum SidebarTab: CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .newChat:
-            return "New Chat"
+            return "New Conversation"
         case .conversations:
             return "Conversations"
-        case .localModels:
-            return "Local AI Models" // Title remains the same, but behavior changes
-        // MARK: - Title for Prompt Library
+        case .ollama:
+            return "Ollama"
         case .promptLibrary:
             return "Prompt Library"
         case .agents:

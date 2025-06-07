@@ -17,11 +17,10 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct SideBarPaneView: View {
     // Binding to the selected tab state from the container view
     @Binding var selectedTab: SidebarTab?
-    // MARK: - New: Binding to the sidebarWidth
+    // Binding to the sidebarWidth
     @Binding var sidebarWidth: CGFloat
 
     // Access to the shared ViewModel (passed via environment from container)
-    // This viewModel instance now contains an ollamaService property.
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow // To open new windows for settings
 
@@ -42,15 +41,7 @@ struct SideBarPaneView: View {
                         .fontWeight(.semibold)
                     Spacer()
                     // Add settings button for specific tabs
-                    if tab == .localModels {
-                        Button {
-                            openWindow(id: "ollama-profiles")
-                        } label: {
-                            Image(systemName: "gearshape")
-                        }
-                        .buttonStyle(.plain)
-                        .help("Manage Ollama Profiles")
-                    } else if tab == .agents { // MARK: New: Agent settings button
+                    if tab == .agents { // MARK: New: Agent settings button
                         Button {
                             openWindow(id: "agent-settings")
                         } label: {
@@ -82,17 +73,11 @@ struct SideBarPaneView: View {
                     // Assuming ConversationListView is defined and uses EnvironmentObject
                     ConversationListView()
 
-                case .localModels:
-                    LocalModelDiscoveryGridView(
-                        ollamaService: viewModel.ollamaService,
-                        mainViewModel: viewModel,
-                        sidebarWidth: $sidebarWidth // Pass the sidebarWidth binding
-                    )
-                
-                // MARK: - Added case for promptLibrary
-                // This case should ideally not be hit if ActivityBarButton logic is correct,
-                // as .promptLibrary opens a panel, not this pane.
-                // Adding it to make the switch exhaustive.
+                case .ollama:
+                    // MARK: - UPDATED: Using the new OllamaSidebarView
+                    OllamaSidebarView(sidebarWidth: $sidebarWidth)
+                    // The viewModel is already available from the parent's environment
+
                 case .promptLibrary:
                     Spacer() // Or EmptyView(). The prompt library is a separate panel.
                     Text("Prompt Library is open in a separate panel.") // Placeholder if needed
@@ -106,7 +91,6 @@ struct SideBarPaneView: View {
 
                 case .settings:
                     // Settings also opens as a separate panel.
-                    // This case in SideBarPaneView might be redundant if selectedTab is never set to .settings.
                     Spacer() // Or EmptyView(). Settings is a separate panel.
                     Text("Settings are open in a separate panel.") // Placeholder if needed
                         .foregroundColor(.secondary)
@@ -127,25 +111,17 @@ struct SideBarPaneView: View {
     }
 }
 
-// Assuming ConversationListView, NewChatTabView, AgentsTabView, UserTabView are defined
-// and use @EnvironmentObject var viewModel: MainApplicationViewModel where needed.
-// LocalModelDiscoveryGridView is passed viewModel and ollamaService directly.
-
-// MARK: - Preview Provider
+// Preview Provider would remain the same, but ensure you add OllamaSidebarView to your project
+// so the preview can compile.
 struct SideBarPaneView_Previews: PreviewProvider {
     // Container to manage state and ViewModel creation for preview
     struct PreviewContainer: View {
-        @State var selectedTab: SidebarTab? = .agents // Set initial tab to agents for preview
+        @State var selectedTab: SidebarTab? = .ollama // Set initial tab to ollama for preview
         @State var previewSidebarWidth: CGFloat = 350 // Define a width for the preview
 
-        static let defaultOllamaService: OllamaService = {
+        static let mockOllamaService: OllamaService = {
             let service = OllamaService()
-            return service
-        }()
-
-        static let modelsOllamaService: OllamaService = {
-            let service = OllamaService()
-            service.localModels = ["mistral:7b", "phi3:mini"]
+            service.localModels = ["mistral:7b", "phi3:mini", "my-custom-model:latest"]
             service.serverStatus = .connected
             return service
         }()
@@ -154,13 +130,14 @@ struct SideBarPaneView_Previews: PreviewProvider {
             let store = OllamaProfileStore()
             // Ensure there's at least one profile for the view model to use
             if store.profiles.isEmpty {
-                store.profiles.append(OllamaProfile.defaultProfile())
+                var defaultProfile = OllamaProfile.defaultProfile()
+                defaultProfile.llmModelName = "mistral:7b" // Make one model active
+                store.profiles.append(defaultProfile)
                 store.selectedProfileID = store.profiles.first?.id
             }
             return store
         }()
         
-        // MARK: New: Mock AgentStore for preview
         static let mockAgentStore: AgentStore = {
             let store = AgentStore()
             if store.agents.isEmpty {
@@ -169,67 +146,21 @@ struct SideBarPaneView_Previews: PreviewProvider {
             return store
         }()
 
-
-        let convoViewModel: MainApplicationViewModel = MainApplicationViewModel(
-            ollamaService: defaultOllamaService,
+        let mainViewModel: MainApplicationViewModel = MainApplicationViewModel(
+            ollamaService: mockOllamaService,
             ollamaProfileStore: mockOllamaProfileStore,
-            agentStore: mockAgentStore // Pass the mock agent store
-        )
-        let modelsViewModel: MainApplicationViewModel = MainApplicationViewModel(
-            ollamaService: modelsOllamaService,
-            ollamaProfileStore: mockOllamaProfileStore,
-            agentStore: mockAgentStore // Pass the mock agent store
-        )
-        let agentsViewModel: MainApplicationViewModel = MainApplicationViewModel( // New ViewModel for agents tab
-            ollamaService: defaultOllamaService,
-            ollamaProfileStore: mockOllamaProfileStore,
-            agentStore: mockAgentStore // Pass the mock agent store
+            agentStore: mockAgentStore
         )
         
-        init() {
-            convoViewModel.conversations = [
-                Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Preview Chat 1"),
-                Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Preview Chat 2")
-            ]
-            if !convoViewModel.conversations.isEmpty {
-                convoViewModel.selectedConversationID = convoViewModel.conversations[0].id
-            }
-        }
-
         var body: some View {
-            HStack(spacing: 0) {
-                VStack {
-                    ForEach(SidebarTab.allCases) { tab in
-                        Button(tab.title) { selectedTab = tab }
-                            .padding(.bottom, 5)
-                    }
-                    Spacer()
-                }
-                .frame(width: 120) // Increased width for better readability of tab titles
-                .padding()
-
-                SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $previewSidebarWidth) // Pass width to SideBarPaneView
-                    .environmentObject(getViewModel(for: selectedTab)) // Dynamically select ViewModel
-                    .frame(width: previewSidebarWidth) // Frame SideBarPaneView with the preview width
-            }
-            .frame(height: 600)
-        }
-
-        // Helper to select the correct ViewModel for the environment object
-        private func getViewModel(for tab: SidebarTab?) -> MainApplicationViewModel {
-            switch tab {
-            case .localModels:
-                return modelsViewModel
-            case .agents: // MARK: New: Return agentsViewModel for .agents tab
-                return agentsViewModel
-            default:
-                return convoViewModel
-            }
+            SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $previewSidebarWidth)
+                .environmentObject(mainViewModel)
+                .frame(width: previewSidebarWidth, height: 600)
         }
     }
 
     static var previews: some View {
         PreviewContainer()
-            .previewDisplayName("Side Bar Pane (Interactive)")
+            .previewDisplayName("Side Bar Pane (Ollama)")
     }
 }

@@ -31,7 +31,7 @@ struct VSCodifiedSidebarContainerView: View {
         .newChat: 300,
         .conversations: 300,
         .explorer: 300,
-        .localModels: 500, // Custom wider width for local models
+        .ollama: 500,
         .agents: 300,
         .promptLibrary: 300,
         .settings: 300,

@@ -13,28 +13,29 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 // MARK: - AgentProfiler View
 struct AgentProfiler: View {
-    // Ensure MainApplicationViewModel is provided as an EnvironmentObject
-    // from the root of your application (e.g., in App.swift)
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    @Environment(\.dismiss) var dismiss // To dismiss the window
-    @Environment(\.openURL) var openURL // For opening URLs (e.g., agent documentation)
+    @Environment(\.dismiss) var dismiss
 
     @State private var selectedAgentID: UUID?
     @State private var showingAddAgentSheet = false
 
     // State for the new agent form
     @State private var newAgentName: String = ""
-    @State private var newAgentURL: String = "http://localhost:8000" // Default URL
+    @State private var newAgentURL: String = "http://localhost:8000"
     @State private var newAgentDescription: String = ""
-    @State private var newAgentTool: String = "None" // Default tool for new agent
+    @State private var newAgentTool: String = "None"
 
-    // MARK: New: Initializer to accept an optional agent ID for direct selection
+    // State to manage unsaved changes alert
+    @State private var detailHasUnsavedChanges = false
+    @State private var nextSelection: UUID? = nil
+    @State private var showUnsavedChangesAlert = false
+
     init(initialAgentID: UUID? = nil) {
         _selectedAgentID = State(initialValue: initialAgentID)
     }
 
     var body: some View {
-        NavigationView { // Use NavigationView for the split view
+        NavigationView {
             // MARK: - Left Pane: Agent List
             VStack(spacing: 0) {
                 HStack {
@@ -60,19 +61,21 @@ struct AgentProfiler: View {
 
                 Divider()
 
-                List(selection: $selectedAgentID) {
+                List {
                     ForEach(viewModel.agentStore.agents) { agent in
+                        // Using a simple Text view with a tap gesture for selection handling
                         Text(agent.name)
-                            .tag(agent.id)
+                            .padding(.vertical, 4) // Add some padding to make tap targets larger
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle()) // Make the whole area tappable
+                            .onTapGesture {
+                                handleSelection(agent.id)
+                            }
+                            // Apply background based on selection
+                            .listRowBackground(agent.id == selectedAgentID ? Color.accentColor.opacity(0.3) : Color.clear)
                             .contextMenu {
-                                Button("Delete") {
-                                    // In a real app, you'd show a confirmation dialog here
-                                    logger.info("Deleting agent: \(agent.name)")
-                                    viewModel.agentStore.deleteAgent(id: agent.id)
-                                    // After deletion, ensure a valid selection or nil
-                                    if selectedAgentID == agent.id {
-                                        selectedAgentID = viewModel.agentStore.agents.first?.id // Select first available
-                                    }
+                                Button("Delete", role: .destructive) {
+                                    handleDelete(agent.id)
                                 }
                             }
                     }
@@ -85,43 +88,57 @@ struct AgentProfiler: View {
 
             // MARK: - Right Pane: Agent Profile Settings
             Group {
-                if let selectedAgent = viewModel.agentStore.agents.first(where: { $0.id == selectedAgentID }) {
-                    // Pass a binding to the selected agent so AgentDetailView can modify it
-                    // and the changes are reflected in the store.
-                    AgentDetailView(agent: Binding(
-                        get: { selectedAgent },
+                // **FIX:** Check for the agent's existence but don't rely on finding an index here.
+                // The binding will be made safer to handle transient states during deletion.
+                if let selectedID = selectedAgentID,
+                   viewModel.agentStore.agents.contains(where: { $0.id == selectedID }) {
+                    
+                    // **FIX:** Create a more robust binding that finds the agent by ID each time.
+                    // This avoids capturing a stale index and prevents the "Index out of range" crash.
+                    let agentBinding = Binding<Agent>(
+                        get: {
+                            // Safely find the agent by its ID. If it has just been deleted,
+                            // this will return a default value to prevent a crash while the UI updates.
+                            guard let agent = viewModel.agentStore.agents.first(where: { $0.id == selectedID }) else {
+                                logger.warning("Binding 'get' could not find agent with ID \(selectedID.uuidString). This is expected transiently during deletion.")
+                                // Return a non-optional default agent. The view will be removed from the hierarchy
+                                // shortly after, so this is just a temporary, safe value.
+                                return Agent.defaultAgent()
+                            }
+                            return agent
+                        },
                         set: { updatedAgent in
+                            // The update function already safely finds the agent by its ID.
                             viewModel.agentStore.updateAgent(agent: updatedAgent)
                         }
-                    ))
-                    .environmentObject(viewModel) // Pass viewModel to detail view
+                    )
+                    
+                    AgentDetailView(
+                        agent: agentBinding,
+                        hasUnsavedChanges: $detailHasUnsavedChanges,
+                        onDelete: {
+                            // The delete action is handled in this parent view.
+                            handleDelete(selectedID)
+                        }
+                    )
+                    .environmentObject(viewModel)
                 } else {
                     Text("Select an Agent Profile or Add a New One")
                         .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(NSColor.controlBackgroundColor))// Background for the detail pane
+            .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(minWidth: 1000, minHeight: 400) // Minimum window size
-        // Removed the custom close button from the toolbar
-        // .toolbar {
-        //     ToolbarItem(placement: .navigation) {
-        //         Button {
-        //             dismiss()
-        //         } label: {
-        //             Image(systemName: "xmark.circle.fill")
-        //         }
-        //         .help("Close Window")
-        //     }
-        // }
+        .frame(minWidth: 1000, minHeight: 400)
         .sheet(isPresented: $showingAddAgentSheet) {
             AddAgentSheet(
                 isShowing: $showingAddAgentSheet,
                 newAgentName: $newAgentName,
                 newAgentURL: $newAgentURL,
                 newAgentDescription: $newAgentDescription,
-                newAgentTool: $newAgentTool // Pass the new agent tool binding
+                newAgentTool: $newAgentTool
             ) {
                 // Action to perform when "Add Agent" is confirmed
                 let newAgent = Agent(
@@ -134,24 +151,88 @@ struct AgentProfiler: View {
                     selectedAgentTool: newAgentTool // Use the selected tool from the form
                 )
                 viewModel.agentStore.addAgent(agent: newAgent)
-                selectedAgentID = newAgent.id // Automatically select the newly added agent
-                // Reset form fields are handled in the button action above
+                handleSelection(newAgent.id) // Use selection handler
             }
-            .environmentObject(viewModel) // Pass viewModel to the sheet if needed
+            .environmentObject(viewModel)
         }
         .onAppear {
-            // If an initialAgentID was provided via the initializer, select it.
-            // Otherwise, select the first agent if available.
-            if let initialID = selectedAgentID {
-                if !viewModel.agentStore.agents.contains(where: { $0.id == initialID }) {
-                    selectedAgentID = viewModel.agentStore.agents.first?.id
-                }
-            } else if selectedAgentID == nil, let firstAgent = viewModel.agentStore.agents.first {
-                selectedAgentID = firstAgent.id
+            // On first appear, ensure a valid agent is selected if possible.
+            if selectedAgentID == nil || !viewModel.agentStore.agents.contains(where: { $0.id == selectedAgentID }) {
+                selectedAgentID = viewModel.agentStore.agents.first?.id
             }
         }
+        .alert("Unsaved Changes", isPresented: $showUnsavedChangesAlert) {
+            Button("Discard Changes", role: .destructive) {
+                // Discard changes and proceed with navigation
+                detailHasUnsavedChanges = false
+                if let nextID = nextSelection {
+                    selectedAgentID = nextID
+                }
+                nextSelection = nil
+            }
+            Button("Cancel", role: .cancel) {
+                // Cancel navigation
+                nextSelection = nil
+            }
+        } message: {
+            Text("You have unsaved changes. If you continue, your changes will be lost.")
+        }
+    }
+
+    /// Safely handles the selection of an agent, checking for unsaved changes first.
+    private func handleSelection(_ tappedID: UUID) {
+        // Don't do anything if the same agent is tapped
+        guard tappedID != selectedAgentID else { return }
+
+        if detailHasUnsavedChanges {
+            // If there are changes, store the intended selection and show the alert
+            nextSelection = tappedID
+            showUnsavedChangesAlert = true
+        } else {
+            // If no changes, navigate immediately
+            selectedAgentID = tappedID
+        }
+    }
+
+    /// Safely handles the deletion of an agent and updates the selection to prevent crashes.
+    private func handleDelete(_ idToDelete: UUID) {
+        guard let indexToDelete = viewModel.agentStore.agents.firstIndex(where: { $0.id == idToDelete }) else {
+            logger.warning("Attempted to delete an agent that does not exist: \(idToDelete.uuidString)")
+            return
+        }
+
+        // **CRITICAL FIX**: If the agent being deleted is the currently selected one,
+        // we MUST change the selection to a valid one *before* altering the data source.
+        if selectedAgentID == idToDelete {
+            let agentsCount = viewModel.agentStore.agents.count
+            var nextAgentToSelectID: UUID? = nil
+            if agentsCount > 1 {
+                if indexToDelete == agentsCount - 1 {
+                    // If it's the last agent, select the one before it.
+                    nextAgentToSelectID = viewModel.agentStore.agents[indexToDelete - 1].id
+                } else {
+                    // Otherwise, select the one after it.
+                    nextAgentToSelectID = viewModel.agentStore.agents[indexToDelete + 1].id
+                }
+            }
+            // Update the selection state *before* the deletion happens.
+            selectedAgentID = nextAgentToSelectID
+        }
+
+        // Now, with the selection safely moved away, perform the deletion.
+        logger.info("Deleting agent with ID: \(idToDelete.uuidString)")
+        viewModel.agentStore.deleteAgent(id: idToDelete)
+        
+        // Final check: if no agents are left, ensure selection is nil.
+        if viewModel.agentStore.agents.isEmpty {
+            selectedAgentID = nil
+        }
+        
+        // As the context has changed, there are no "unsaved changes" to worry about.
+        detailHasUnsavedChanges = false
     }
 }
+
 
 // MARK: - AddAgentSheet (Updated)
 struct AddAgentSheet: View {

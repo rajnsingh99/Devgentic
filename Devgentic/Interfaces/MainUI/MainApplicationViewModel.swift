@@ -56,11 +56,30 @@ class MainApplicationViewModel: ObservableObject {
     @Published var isUserMessagesOnlyFilterActive: Bool = false
     @Published var attachedFiles: [FileSystemItem] = []
     @Published var voiceInputState: VoiceInputState = .idle
+    
+    @Published var selectedAgentID: UUID? {
+        didSet {
+            // **[MODIFIED]** When the selected agent changes, update the active status in the store.
+            agentStore.setActiveAgent(withId: selectedAgentID)
+            
+            // Save the selected agent ID so it persists across app launches
+            if let agentId = selectedAgentID {
+                UserDefaults.standard.set(agentId.uuidString, forKey: SettingsKeys.selectedAgentID)
+                logger.info("Selected Agent ID set to: \(agentId.uuidString)")
+            } else {
+                UserDefaults.standard.removeObject(forKey: SettingsKeys.selectedAgentID)
+                logger.info("Selected Agent ID cleared.")
+            }
+        }
+    }
 
     // --- Settings Properties ---
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .agent
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
-    @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
+    // MARK: Note: agentBaseURL and agentDelegationStrategy are @AppStorage properties
+    // For agent backend, the baseURL will primarily come from the selectedAgentID's Agent object.
+    // agentDelegationStrategy is still used as a global setting.
+    @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000" // Kept for potential fallback/initial value
     @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
     
     private let groupDateFormatter: DateFormatter = {
@@ -111,7 +130,7 @@ class MainApplicationViewModel: ObservableObject {
             return key1 > key2
         }
     }
-
+    
     // MARK: - Initialization
     init(ollamaService: OllamaService,
          ollamaProfileStore: OllamaProfileStore,
@@ -138,6 +157,22 @@ class MainApplicationViewModel: ObservableObject {
         observeConversationStoreChanges()
         
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
+        
+        // Initialize selectedAgentID from UserDefaults or default to first active agent
+        if let storedAgentIDString = UserDefaults.standard.string(forKey: SettingsKeys.selectedAgentID),
+           let storedAgentUUID = UUID(uuidString: storedAgentIDString),
+           agentStore.agents.contains(where: { $0.id == storedAgentUUID }) {
+            self.selectedAgentID = storedAgentUUID
+            logger.info("Initialized selectedAgentID from UserDefaults: \(storedAgentUUID.uuidString)")
+        } else {
+            // Default to the first active agent, or just the first agent if no active ones
+            self.selectedAgentID = agentStore.agents.first(where: { $0.isActive })?.id ?? agentStore.agents.first?.id
+            if let defaultAgentId = self.selectedAgentID {
+                logger.info("Initialized selectedAgentID to default/first agent: \(defaultAgentId.uuidString)")
+            } else {
+                logger.warning("No agents found in AgentStore during MainApplicationViewModel initialization.")
+            }
+        }
         
         if let currentProfile = ollamaProfileStore.currentProfile {
             self.ollamaService.ollamaBaseURL = currentProfile.baseURL
@@ -521,15 +556,50 @@ class MainApplicationViewModel: ObservableObject {
                 endpoint: "/api/generate",
                 payload: initialPayload
             )
-        } else {
-            let initialPayload: [String: Any] = [
-                "strategy": self.agentDelegationStrategy
-            ]
-            return BackendConfiguration(
-                url: self.agentBaseURL,
-                endpoint: "/chat",
-                payload: initialPayload
-            )
+        } else { // BackendType is .agent
+            // MARK: New: Use the selected agent's configuration
+            var agentConfigItems: [[String: Any]] = []
+            if let selectedAgentId = selectedAgentID,
+               let selectedAgent = agentStore.agents.first(where: { $0.id == selectedAgentId }) {
+                
+                var agentConfig: [String: Any] = [
+                    "base_url": selectedAgent.baseURL,
+                    "tools": selectedAgent.selectedAgentTool == "None" ? [] : [selectedAgent.selectedAgentTool] // Send as array of tools
+                ]
+                
+                if let linkedOllamaProfileID = selectedAgent.linkedOllamaProfileID,
+                   let linkedOllamaProfile = ollamaProfileStore.profiles.first(where: { $0.id == linkedOllamaProfileID }) {
+                    agentConfig["ollama_url"] = linkedOllamaProfile.baseURL
+                    agentConfig["model"] = linkedOllamaProfile.llmModelName
+                    logger.debug("Agent configuration will include linked Ollama profile: \(linkedOllamaProfile.profileName) (\(linkedOllamaProfile.llmModelName))")
+                } else {
+                    logger.debug("Selected agent '\(selectedAgent.name)' has no Ollama profile linked.")
+                }
+                agentConfigItems.append(agentConfig)
+                logger.info("DetermineBackendConfiguration: Using selected agent '\(selectedAgent.name)' config: \(agentConfig)")
+
+                let initialPayload: [String: Any] = [
+                    "strategy": self.agentDelegationStrategy,
+                    "agent_config": agentConfigItems // Pass as a list as expected by backend model
+                ]
+                return BackendConfiguration(
+                    url: selectedAgent.baseURL, // Use the selected agent's baseURL
+                    endpoint: "/chat",
+                    payload: initialPayload
+                )
+            } else {
+                // Fallback if no agent is selected or found.
+                // This might indicate an issue if the app expects an agent to always be selected.
+                logger.warning("No agent selected or found for agent backend. Using default agentBaseURL and delegation strategy.")
+                let initialPayload: [String: Any] = [
+                    "strategy": self.agentDelegationStrategy
+                ]
+                return BackendConfiguration(
+                    url: self.agentBaseURL, // Fallback to @AppStorage agentBaseURL
+                    endpoint: "/chat",
+                    payload: initialPayload
+                )
+            }
         }
     }
     

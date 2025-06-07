@@ -24,7 +24,7 @@ struct ActivityBarButton: View {
             return false
         } else if tab == .promptLibrary {
             return viewModel.showPromptLibrary // Assuming prompt library is still an overlay
-        } else if tab == .localModels {
+        } else if tab == .ollama {
             // For localModels, it's active if its content (LocalModelDiscoveryGridView) is visible in the sidebar
             return selectedTab == tab && isSidebarVisible
         }
@@ -77,7 +77,7 @@ struct ActivityBarButton: View {
             logger.debug("Toggled prompt library panel via button. Show: \(viewModel.showPromptLibrary)")
 
         // MARK: - Reverted: .localModels tab now re-activates sidebar pane, not opens new window
-        case .localModels:
+        case .ollama:
             if selectedTab == tab {
                 isSidebarVisible.toggle()
                 logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")

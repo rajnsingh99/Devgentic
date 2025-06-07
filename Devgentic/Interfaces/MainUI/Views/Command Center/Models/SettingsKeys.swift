@@ -21,6 +21,7 @@ struct SettingsKeys {
     static let agentPID = "agentPID"
     static let venvPythonPath = "venvPythonPath"
     static let venvName = "devgentic"
+    static let selectedAgentID = "selectedAgentID"
     
     // --- Ollama Advanced Parameters ---
     static let ollamaTemperature = "ollamaTemperature"
