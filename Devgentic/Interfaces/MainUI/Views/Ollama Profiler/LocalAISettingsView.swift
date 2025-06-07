@@ -13,297 +13,206 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 // MARK: - Local AI Settings Detail View
 struct LocalAISettingsView: View {
-    // MARK: - Corrected: Dependencies are now from the environment
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
+    @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
     private var ollamaService: OllamaService { mainViewModel.ollamaService }
     
+    // The original profile binding from the parent
     @Binding var ollamaProfile: OllamaProfile
+    
+    // A closure to handle deletion, provided by the parent view
+    var onDelete: () -> Void
 
+    // Local state for editing the profile
+    @State private var editableProfile: OllamaProfile
+    @State private var hasUnsavedChanges = false
+    
     @State private var showingRemovalConfirmation = false
     @State private var modelToRemoveFromName: String? = nil
-    
-    // State for editable profile name
-    @State private var editableProfileName: String
-    @State private var showUpdateFeedback = false
 
-    // MARK: - Corrected: Initializer no longer needs services passed in
-    init(ollamaProfileBinding: Binding<OllamaProfile>) {
+    init(ollamaProfileBinding: Binding<OllamaProfile>, onDelete: @escaping () -> Void) {
         self._ollamaProfile = ollamaProfileBinding
-        self._editableProfileName = State(initialValue: ollamaProfileBinding.wrappedValue.profileName)
-    }
-
-    var isProfileNameChanged: Bool {
-        editableProfileName.trimmingCharacters(in: .whitespacesAndNewlines) != ollamaProfile.profileName &&
-        !editableProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        self.onDelete = onDelete
+        // Initialize the local editable state from the binding's initial value
+        self._editableProfile = State(initialValue: ollamaProfileBinding.wrappedValue)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
-            Text("Local AI (Ollama) Profile: \(ollamaProfile.profileName)")
+            // --- Header ---
+            Text("Ollama Profile Settings")
                 .font(.title2)
                 .padding(.bottom, 5)
 
             Divider()
 
-            // --- Profile Name and Base URL ---
+            // --- Profile Details ---
             VStack(alignment: .leading, spacing: 10) {
-                Text("Profile Details:")
+                Text("Profile Details")
                     .font(.headline)
+                
                 HStack {
                     Text("Profile Name:")
                         .frame(width: 150, alignment: .leading)
-                    TextField("Profile Name", text: $editableProfileName)
+                    TextField("Profile Name", text: $editableProfile.profileName)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
-                    
-                    Button {
-                        let trimmedName = editableProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !trimmedName.isEmpty {
-                            ollamaProfile.profileName = trimmedName
-                            withAnimation { showUpdateFeedback = true }
-                            Task {
-                                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                                await MainActor.run {
-                                    withAnimation { showUpdateFeedback = false }
-                                }
-                            }
-                        }
-                    } label: {
-                        if showUpdateFeedback {
-                            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
-                        } else {
-                            Text("Update")
-                        }
+                    if editableProfile.profileName != ollamaProfile.profileName {
+                        Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
                     }
-                    .disabled(!isProfileNameChanged || showUpdateFeedback)
-                    .buttonStyle(.bordered)
-                    .frame(width: showUpdateFeedback ? 40 : 80)
                 }
+                
                 HStack {
                     Text("Base URL:")
                         .frame(width: 150, alignment: .leading)
-                    TextField("Ollama Base URL", text: $ollamaProfile.baseURL)
+                    TextField("Ollama Base URL", text: $editableProfile.baseURL)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .disabled(true)
                         .help("Base URL is set when the profile is created and cannot be changed.")
                 }
             }
+            .padding(.bottom, 10)
 
-            Divider()
-
-            // --- Displaying and Selecting Models ---
+            // --- Model Selection and Management ---
             VStack(alignment: .leading, spacing: 10) {
-                Text("Available Models:")
+                Text("Model Management")
                     .font(.headline)
 
                 HStack {
-                    Text("Ollama Model:")
+                    Text("Selected Model:")
                         .frame(width: 150, alignment: .leading)
 
                     if ollamaService.isLoadingModels {
-                        ProgressView("Loading Models...").controlSize(.small)
+                        ProgressView("Loading...").controlSize(.small)
                     } else if let error = ollamaService.modelLoadingError {
                         Text("Error: \(error)").foregroundColor(.red)
                     } else if ollamaService.localModels.isEmpty {
-                        Text("No models found. Ensure Ollama is running.").foregroundColor(.gray)
+                        Text("No models found.").foregroundColor(.gray)
                     } else {
-                        Picker("Select a model", selection: $ollamaProfile.llmModelName) {
+                        Picker("Select a model", selection: $editableProfile.llmModelName) {
                             ForEach(ollamaService.localModels, id: \.self) { Text($0).tag($0) }
                         }
                         .labelsHidden()
+                        if editableProfile.llmModelName != ollamaProfile.llmModelName {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                        }
                     }
                 }
                 .frame(minHeight: 22)
-
-                 if !ollamaService.isLoadingModels && ollamaService.modelLoadingError == nil && !ollamaService.localModels.isEmpty {
-                     Divider()
-                     Text("Installed Models:")
-                         .font(.subheadline)
-
-                     VStack(alignment: .leading) {
-                         ForEach(ollamaService.localModels, id: \.self) { modelName in
-                             HStack {
-                                 Text(modelName)
-                                     .frame(maxWidth: .infinity, alignment: .leading)
-
-                                 Button {
-                                     modelToRemoveFromName = modelName
-                                     showingRemovalConfirmation = true
-                                 } label: {
-                                     if ollamaService.isRemovingModel && ollamaService.removingModelName == modelName {
-                                         ProgressView().controlSize(.small)
-                                     } else {
-                                         Image(systemName: "trash")
-                                     }
-                                 }
-                                 .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel || ollamaProfile.llmModelName == modelName)
-                                 .foregroundColor(.red)
-                                 .buttonStyle(PlainButtonStyle())
-                                 .help("Remove \(modelName)")
-                             }
-                             .padding(.vertical, 2)
-                         }
-                     }
-                     .padding(.top, 5)
-                 }
             }
-
-            Divider()
-
-            // --- Pull Model Section ---
-            VStack(alignment: .leading, spacing: 10) {
-                 Text("Download New Model:")
-                     .font(.headline)
-
-                 HStack {
-                     Text("Model Name:")
-                          .frame(width: 150, alignment: .leading)
-                    
-                     // MARK: - Corrected: Bind to the view model's service property
-                     TextField("e.g., llama3:latest", text: $mainViewModel.ollamaService.modelToPull)
-                         .textFieldStyle(RoundedBorderTextFieldStyle())
-                         .disabled(ollamaService.isPullingModel || ollamaService.isRemovingModel)
-                         .onChange(of: ollamaService.modelToPull) { _,_ in ollamaService.clearPullActionStatus() }
-
-                     Button {
-                         Task {
-                             await ollamaService.pullModel(name: ollamaService.modelToPull, baseURL: ollamaProfile.baseURL)
-                         }
-                     } label: {
-                         if ollamaService.isPullingModel {
-                             ProgressView().controlSize(.small)
-                         } else { Image(systemName: "arrow.down.circle") }
-                     }
-                     .disabled(ollamaService.modelToPull.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || ollamaService.isPullingModel || ollamaService.isRemovingModel)
-                 }
-
-                 if ollamaService.isPullingModel {
-                     ProgressView(value: ollamaService.pullProgress).progressViewStyle(.linear)
-                     HStack {
-                         Text(ollamaService.pullStage.capitalized)
-                         Spacer()
-                         Text(String(format: "%.0f%%", ollamaService.pullProgress * 100))
-                     }
-                     .font(.caption).foregroundColor(.secondary)
-                 }
-                 if let error = ollamaService.modelPullError {
-                     Text("Pull Error: \(error)").foregroundColor(.red).font(.caption)
-                 }
-                 if let error = ollamaService.modelRemoveError {
-                     Text("Removal Error: \(error)").foregroundColor(.red).font(.caption)
-                 }
-            }
-
-            Divider()
-
-            // MARK: - Advanced Parameters
-             VStack(alignment: .leading, spacing: 10) {
-                 Text("Advanced Generation Parameters:").font(.headline)
-                 
-                 HStack {
-                     Text("Temperature:").frame(width: 150, alignment: .leading)
-                     Slider(value: $ollamaProfile.temperature, in: 0.0...2.0)
-                     Text("\(ollamaProfile.temperature, specifier: "%.2f")").frame(width: 40)
-                 }
-                 HStack {
-                     Text("Top K:").frame(width: 150, alignment: .leading)
-                     Stepper(value: $ollamaProfile.topK, in: 0...200) { Text("\(ollamaProfile.topK)") }
-                 }
-                 HStack {
-                     Text("Top P:").frame(width: 150, alignment: .leading)
-                     Slider(value: $ollamaProfile.topP, in: 0.0...1.0)
-                     Text("\(ollamaProfile.topP, specifier: "%.2f")").frame(width: 40)
-                 }
-                 HStack {
-                     Text("Repeat Penalty:").frame(width: 150, alignment: .leading)
-                     Slider(value: $ollamaProfile.repeatPenalty, in: 1.0...2.0)
-                     Text("\(ollamaProfile.repeatPenalty, specifier: "%.2f")").frame(width: 40)
-                 }
-                 HStack {
-                     Text("Context Window:").frame(width: 150, alignment: .leading)
-                     TextField("", value: $ollamaProfile.contextWindowSize, format: .number).textFieldStyle(.roundedBorder).frame(width: 80)
-                 }
-                 HStack {
-                     Text("GPU Layers:").frame(width: 150, alignment: .leading)
-                     Stepper(value: $ollamaProfile.gpuLayers, in: -1...100) { Text(ollamaProfile.gpuLayers == -1 ? "All" : "\(ollamaProfile.gpuLayers)") }
-                 }
-             }
+            .padding(.bottom, 10)
             
-             Divider().padding(.vertical, 5)
-
-             VStack(alignment: .leading, spacing: 10) {
-                 Text("File Handling Parameters:").font(.subheadline)
-                 HStack {
-                     Text("Max Inline Chars:").frame(width: 150, alignment: .leading)
-                     TextField("", value: $ollamaProfile.maxInlineChars, format: .number).textFieldStyle(.roundedBorder).frame(width: 80)
-                     Text("chars").foregroundColor(.gray)
-                 }
-                 HStack {
-                     Text("Max Attached Files:").frame(width: 150, alignment: .leading)
-                     Stepper(value: $ollamaProfile.maxAttachedFiles, in: 1...20) { Text("\(ollamaProfile.maxAttachedFiles) files") }
-                 }
-                 Picker("Text File Strategy:", selection: $ollamaProfile.textFileInclusionStrategy) {
-                     ForEach(TextFileInclusionStrategy.allCases) { Text($0.displayName).tag($0) }
-                 }
-                 Picker("Image Handling:", selection: $ollamaProfile.imageHandlingStrategy) {
-                     ForEach(OllamaImageHandlingStrategy.allCases) { Text($0.displayName).tag($0) }
-                 }
-                 Picker("Binary File Handling:", selection: $ollamaProfile.binaryFileHandlingStrategy) {
-                     ForEach(OllamaBinaryFileHandlingStrategy.allCases) { Text($0.displayName).tag($0) }
-                 }
-             }
+            // --- Advanced Parameters ---
+            DisclosureGroup("Advanced Parameters") {
+                VStack(alignment: .leading, spacing: 10) {
+                     HStack {
+                         Text("Temperature:").frame(width: 150, alignment: .leading)
+                         Slider(value: $editableProfile.temperature, in: 0.0...2.0)
+                         Text("\(editableProfile.temperature, specifier: "%.2f")").frame(width: 40)
+                         if editableProfile.temperature != ollamaProfile.temperature {
+                             Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                         }
+                     }
+                     HStack {
+                         Text("Top K:").frame(width: 150, alignment: .leading)
+                         Stepper(value: $editableProfile.topK, in: 0...200) { Text("\(editableProfile.topK)") }
+                         if editableProfile.topK != ollamaProfile.topK {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                         }
+                     }
+                     HStack {
+                         Text("Top P:").frame(width: 150, alignment: .leading)
+                         Slider(value: $editableProfile.topP, in: 0.0...1.0)
+                         Text("\(editableProfile.topP, specifier: "%.2f")").frame(width: 40)
+                         if editableProfile.topP != ollamaProfile.topP {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                         }
+                     }
+                     HStack {
+                         Text("Repeat Penalty:").frame(width: 150, alignment: .leading)
+                         Slider(value: $editableProfile.repeatPenalty, in: 1.0...2.0)
+                         Text("\(editableProfile.repeatPenalty, specifier: "%.2f")").frame(width: 40)
+                         if editableProfile.repeatPenalty != ollamaProfile.repeatPenalty {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                         }
+                     }
+                     HStack {
+                         Text("Context Window:").frame(width: 150, alignment: .leading)
+                         TextField("", value: $editableProfile.contextWindowSize, format: .number).textFieldStyle(.roundedBorder).frame(width: 80)
+                         if editableProfile.contextWindowSize != ollamaProfile.contextWindowSize {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                         }
+                     }
+                     HStack {
+                         Text("GPU Layers:").frame(width: 150, alignment: .leading)
+                         Stepper(value: $editableProfile.gpuLayers, in: -1...100) { Text(editableProfile.gpuLayers == -1 ? "All" : "\(editableProfile.gpuLayers)") }
+                         if editableProfile.gpuLayers != ollamaProfile.gpuLayers {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                         }
+                     }
+                }
+                .padding(.top)
+            }
+            .padding(.bottom, 10)
 
             Spacer()
+            
+            // --- Action Buttons ---
+            HStack {
+                // Show delete button only if there is more than one profile
+                if ollamaProfileStore.profiles.count > 1 {
+                    Button("Delete Profile") {
+                        showingRemovalConfirmation = true
+                    }
+                    .foregroundColor(.red)
+                    .buttonStyle(.bordered)
+                }
+                
+                Spacer()
+                
+                Button("Save") {
+                    saveChanges()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!hasUnsavedChanges || editableProfile.profileName.isEmpty)
+            }
         }
         .padding()
-        .confirmationDialog("Confirm Model Removal", isPresented: $showingRemovalConfirmation, presenting: modelToRemoveFromName) { modelName in
-            Button("Remove '\(modelName)'", role: .destructive) {
-                Task {
-                    await ollamaService.removeModel(name: modelName, baseURL: ollamaProfile.baseURL)
-                }
-            }
-        } message: { modelName in
-            Text("Are you sure you want to remove the model '\(modelName)'? This cannot be undone.")
-        }
-        .onDisappear {
-             ollamaService.clearAllModelActionStatuses()
-        }
-        .onChange(of: ollamaProfile.id) {
+        .onChange(of: editableProfile) { _, _ in checkForChanges() }
+        .onChange(of: ollamaProfile) { _, newProfile in
             // When the parent view switches which profile we are editing,
-            // reset the local editable name to match the new profile.
-            editableProfileName = ollamaProfile.profileName
+            // reset the local state.
+            resetState(with: newProfile)
         }
-    }
-}
-
-// MARK: - Preview Provider (Corrected)
-struct LocalAISettingsView_Previews: PreviewProvider {
-    static func createMockViewModel() -> MainApplicationViewModel {
-        let profileStore = OllamaProfileStore()
-        let defaultProfile = OllamaProfile.defaultProfile()
-        profileStore.profiles = [defaultProfile]
-        profileStore.selectedProfileID = defaultProfile.id
-        
-        let vm = MainApplicationViewModel(
-            ollamaProfileStore: profileStore,
-            agentStore: AgentStore()
-        )
-        return vm
+        .confirmationDialog("Delete Ollama Profile", isPresented: $showingRemovalConfirmation, presenting: ollamaProfile) { profile in
+            Button("Delete '\(profile.profileName)'", role: .destructive) {
+                onDelete()
+            }
+        } message: { profile in
+            Text("Are you sure you want to remove the profile '\(profile.profileName)'? This action cannot be undone.")
+        }
     }
     
-    @State static var mockProfile = OllamaProfile.defaultProfile()
-
-    static var previews: some View {
-        let viewModel = createMockViewModel()
-        
-        // Configure the shared service for the preview
-        let service = OllamaService.shared
-        service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
-        service.llmModelName = "mistral:7b"
-        service.serverStatus = .connected
-        
-        return LocalAISettingsView(ollamaProfileBinding: $mockProfile)
-            .environmentObject(viewModel)
-            .frame(width: 500, height: 1100)
-            .previewDisplayName("Default State")
+    /// Checks if any of the editable fields differ from the original profile data.
+    private func checkForChanges() {
+        if editableProfile != ollamaProfile {
+            hasUnsavedChanges = true
+        } else {
+            hasUnsavedChanges = false
+        }
+    }
+    
+    /// Saves the changes from the local state back to the binding.
+    private func saveChanges() {
+        ollamaProfile = editableProfile
+        hasUnsavedChanges = false
+        logger.info("Saved changes for Ollama profile: \(editableProfile.profileName)")
+    }
+    
+    /// Resets the local state to match the provided profile.
+    private func resetState(with newProfile: OllamaProfile) {
+        if editableProfile != newProfile {
+            editableProfile = newProfile
+            hasUnsavedChanges = false
+        }
     }
 }

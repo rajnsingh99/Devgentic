@@ -115,18 +115,17 @@ struct DevgenticApp: App {
                 .environmentObject(ollamaProfileStore)
         }
 
-        // MARK: - Ollama Profiles Window
-        WindowGroup(id: "ollama-profiles") {
+        // MARK: - Ollama Profiles Window (FIXED)
+        // Added the title "Ollama Profiles" to the WindowGroup initializer.
+        WindowGroup("Ollama Profiles", id: "ollama-profiles") {
             OllamaProfilesView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(ollamaProfileStore)
         }
         
-        // MARK: - Agent Settings Window (FIXED)
-        // This WindowGroup now correctly handles being opened with or without a specific agent ID.
-        WindowGroup(id: "agent-settings", for: UUID.self) { $agentID in
-            // Pass the optional agentID directly to the AgentProfiler.
-            // The AgentProfiler's onAppear block is already designed to handle a nil initialID.
+        // MARK: - Agent Settings Window
+        // Updated to handle nil agentID correctly for direct window opening.
+        WindowGroup("Agent Settings", id: "agent-settings", for: UUID.self) { $agentID in
             AgentProfiler(initialAgentID: $agentID.wrappedValue)
                .environmentObject(mainApplicationViewModel)
         }

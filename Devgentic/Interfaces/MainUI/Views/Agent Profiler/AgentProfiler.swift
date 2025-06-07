@@ -16,7 +16,7 @@ struct AgentProfiler: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.dismiss) var dismiss
 
-    // The initial ID passed when the window is opened. This is a stable property.
+    // The initial ID passed when the window is opened.
     let initialAgentID: UUID?
     
     // The internal state that drives the UI selection.
@@ -32,20 +32,20 @@ struct AgentProfiler: View {
 
     // State to manage unsaved changes alert
     @State private var detailHasUnsavedChanges = false
-    @State private var nextSelection: UUID? = nil
     @State private var showUnsavedChangesAlert = false
+    @State private var pendingSelectionID: UUID?
 
     init(initialAgentID: UUID?) {
-        // In init, we only store the initial ID. We don't touch @State variables here.
         self.initialAgentID = initialAgentID
     }
 
     var body: some View {
-        NavigationView {
-            // MARK: - Left Pane: Agent List
+        // MARK: - FIX: Replaced NavigationView with NavigationSplitView
+        NavigationSplitView {
+            // MARK: - Sidebar (Master View)
             VStack(spacing: 0) {
                 HStack {
-                    Text("Agents")
+                    Text("Add Agent")
                         .font(.title3)
                         .fontWeight(.semibold)
                     Spacer()
@@ -58,133 +58,120 @@ struct AgentProfiler: View {
                         showingAddAgentSheet = true
                     } label: {
                         Image(systemName: "plus.circle.fill")
+                            .foregroundColor(.blue)
                     }
                     .buttonStyle(.plain)
                     .help("Add New Agent Profile")
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding()
 
-                Divider()
-
-                List {
+                List(selection: $selectedAgentID) {
                     ForEach(viewModel.agentStore.agents) { agent in
                         Text(agent.name)
-                            .padding(.vertical, 4)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .onTapGesture { handleSelection(agent.id) }
-                            .listRowBackground(agent.id == selectedAgentID ? Color.accentColor.opacity(0.3) : Color.clear)
+                            .tag(agent.id) // Use .tag for selection
                             .contextMenu {
-                                Button("Delete", role: .destructive) { handleDelete(agent.id) }
+                                if viewModel.agentStore.agents.count > 1 {
+                                    Button("Delete", role: .destructive) { handleDelete(agent.id) }
+                                }
                             }
                     }
                 }
                 .listStyle(.sidebar)
-                .frame(minWidth: 180)
             }
-            .background(Color(NSColor.windowBackgroundColor))
-
-
-            // MARK: - Right Pane: Agent Profile Settings
-            Group {
-                if let selectedID = selectedAgentID,
-                   viewModel.agentStore.agents.contains(where: { $0.id == selectedID }) {
-                    
-                    let agentBinding = Binding<Agent>(
-                        get: {
-                            guard let agent = viewModel.agentStore.agents.first(where: { $0.id == selectedID }) else {
-                                logger.warning("Binding 'get' could not find agent with ID \(selectedID.uuidString).")
-                                return Agent.defaultAgent()
-                            }
-                            return agent
-                        },
-                        set: { updatedAgent in
-                            viewModel.agentStore.updateAgent(agent: updatedAgent)
-                        }
-                    )
-                    
-                    // We assume AgentDetailView exists and is correct.
-                    // If this screen is still blank, the issue lies within AgentDetailView.
-                    AgentDetailView(
-                        agent: agentBinding,
-                        hasUnsavedChanges: $detailHasUnsavedChanges,
-                        onDelete: { handleDelete(selectedID) }
-                    )
-                    .environmentObject(viewModel)
-                } else {
-                    Text("Select an Agent Profile or Add a New One")
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+            .frame(minWidth: 220)
+            
+        } detail: {
+            // MARK: - Detail View
+            if let agentID = selectedAgentID,
+               let index = viewModel.agentStore.agents.firstIndex(where: { $0.id == agentID }) {
+                
+                let agentBinding = $viewModel.agentStore.agents[index]
+                
+                // We pass a binding to the agent and a binding for the unsaved changes flag
+                AgentDetailView(
+                    agent: agentBinding,
+                    hasUnsavedChanges: $detailHasUnsavedChanges,
+                    onDelete: { handleDelete(agentID) }
+                )
+                .environmentObject(viewModel)
+                
+            } else {
+                Text("Select an Agent Profile or Add a New One")
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(NSColor.controlBackgroundColor))
         }
-        .frame(minWidth: 1000, minHeight: 400)
+        .frame(minWidth: 800, minHeight: 400)
         .sheet(isPresented: $showingAddAgentSheet) {
             AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription, newAgentTool: $newAgentTool) {
                 let newAgent = Agent(id: UUID(), name: newAgentName, description: newAgentDescription, isActive: true, baseURL: newAgentURL, linkedOllamaProfileID: nil, selectedAgentTool: newAgentTool)
                 viewModel.agentStore.addAgent(agent: newAgent)
-                handleSelection(newAgent.id)
+                // Select the new agent after adding it
+                selectedAgentID = newAgent.id
             }
             .environmentObject(viewModel)
         }
-        // MARK: - Corrected: Use onAppear to reliably set the initial state
         .onAppear {
-            logger.debug("AgentProfiler appeared with initialAgentID: \(initialAgentID?.uuidString ?? "nil")")
-            // If an initial agent ID was passed and it's valid, select it.
-            if let id = initialAgentID, viewModel.agentStore.agents.contains(where: { $0.id == id }) {
-                selectedAgentID = id
-            } else {
-                // Otherwise, fall back to the first agent in the store.
-                selectedAgentID = viewModel.agentStore.agents.first?.id
+            if selectedAgentID == nil {
+                // If an initial agent ID was passed and it's valid, select it.
+                if let id = initialAgentID, viewModel.agentStore.agents.contains(where: { $0.id == id }) {
+                    selectedAgentID = id
+                } else {
+                    // Otherwise, fall back to the first agent in the store.
+                    selectedAgentID = viewModel.agentStore.agents.first?.id
+                }
             }
-            logger.debug("onAppear finished. selectedAgentID is now: \(selectedAgentID?.uuidString ?? "nil")")
+        }
+        .onChange(of: selectedAgentID) { oldValue, newValue in
+            // When selection changes away from a view with unsaved changes, show an alert.
+            if oldValue != nil && detailHasUnsavedChanges {
+                pendingSelectionID = newValue // Store where the user intended to go
+                showUnsavedChangesAlert = true
+                // Revert the selection visually until the user makes a choice in the alert
+                selectedAgentID = oldValue
+            } else {
+                // If there are no unsaved changes, just clear the flag for the new view.
+                detailHasUnsavedChanges = false
+            }
         }
         .alert("Unsaved Changes", isPresented: $showUnsavedChangesAlert) {
             Button("Discard Changes", role: .destructive) {
-                detailHasUnsavedChanges = false
-                if let nextID = nextSelection { selectedAgentID = nextID }
-                nextSelection = nil
+                detailHasUnsavedChanges = false // Reset the flag
+                // Now, proceed to the destination the user originally clicked
+                selectedAgentID = pendingSelectionID
+                pendingSelectionID = nil
             }
-            Button("Cancel", role: .cancel) { nextSelection = nil }
+            Button("Cancel", role: .cancel) {
+                pendingSelectionID = nil // Forget the pending destination
+            }
         } message: {
             Text("You have unsaved changes. If you continue, your changes will be lost.")
         }
     }
 
-    private func handleSelection(_ tappedID: UUID) {
-        guard tappedID != selectedAgentID else { return }
-
-        if detailHasUnsavedChanges {
-            nextSelection = tappedID
-            showUnsavedChangesAlert = true
-        } else {
-            selectedAgentID = tappedID
-        }
-    }
-
     private func handleDelete(_ idToDelete: UUID) {
+        guard viewModel.agentStore.agents.count > 1 else {
+            logger.warning("Attempted to delete the last agent. This should not be possible.")
+            return
+        }
+        
         guard let indexToDelete = viewModel.agentStore.agents.firstIndex(where: { $0.id == idToDelete }) else {
             return
         }
 
+        // Determine the next selection before deleting
         if selectedAgentID == idToDelete {
-            let agentsCount = viewModel.agentStore.agents.count
-            if agentsCount > 1 {
-                if indexToDelete == agentsCount - 1 {
-                    selectedAgentID = viewModel.agentStore.agents[indexToDelete - 1].id
-                } else {
-                    selectedAgentID = viewModel.agentStore.agents[indexToDelete + 1].id
-                }
+            if indexToDelete == viewModel.agentStore.agents.count - 1 {
+                // If it's the last agent in the list, select the one before it
+                selectedAgentID = viewModel.agentStore.agents[indexToDelete - 1].id
             } else {
-                selectedAgentID = nil
+                // Otherwise, select the one after it
+                selectedAgentID = viewModel.agentStore.agents[indexToDelete + 1].id
             }
         }
 
         viewModel.agentStore.deleteAgent(id: idToDelete)
-        detailHasUnsavedChanges = false
+        detailHasUnsavedChanges = false // Deleting discards any unsaved changes
     }
 }
 

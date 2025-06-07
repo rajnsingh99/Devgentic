@@ -102,7 +102,7 @@ struct AgentDetailView: View {
 
                 HStack {
                     Picker(selection: $selectedOllamaProfileID) {
-                        Text("None").tag(nil as UUID?)
+                        // Enhancement 1: Removed the "None" option.
                         ForEach(viewModel.ollamaProfileStore.profiles) { profile in
                             Text(profile.profileName).tag(profile.id as UUID?)
                         }
@@ -169,11 +169,14 @@ struct AgentDetailView: View {
             HStack {
                 Spacer() // Pushes buttons to the right
                 
-                Button("Delete Agent") {
-                    showingDeleteConfirm = true // Trigger confirmation alert
+                // Enhancement 2: Only show delete button if there is more than one agent.
+                if viewModel.agentStore.agents.count > 1 {
+                    Button("Delete") {
+                        showingDeleteConfirm = true // Trigger confirmation alert
+                    }
+                    .foregroundColor(.red)
+                    .buttonStyle(.bordered)
                 }
-                .foregroundColor(.red)
-                .buttonStyle(.bordered)
                 
                 Button("Save") {
                     saveChanges()
@@ -194,6 +197,12 @@ struct AgentDetailView: View {
         // Reset local state if the underlying agent changes from the parent
         .onChange(of: agent) { newAgent in
             resetState(with: newAgent)
+        }
+        // Set a default Ollama profile if none is selected
+        .onAppear {
+            if selectedOllamaProfileID == nil {
+                selectedOllamaProfileID = viewModel.ollamaProfileStore.profiles.first?.id
+            }
         }
         // Alert for delete confirmation
         .alert("Delete Agent?", isPresented: $showingDeleteConfirm) {
