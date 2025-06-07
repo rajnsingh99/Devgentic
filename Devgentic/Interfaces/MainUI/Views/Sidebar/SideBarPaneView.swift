@@ -115,12 +115,12 @@ struct SideBarPaneView_Previews: PreviewProvider {
     static func createMockViewModel() -> MainApplicationViewModel {
         let profileStore = OllamaProfileStore()
         if profileStore.profiles.isEmpty {
-            profileStore.profiles.append(OllamaProfile.defaultProfile())
+            profileStore.profiles.append(OllamaProfileModel.defaultProfile())
             profileStore.selectedProfileID = profileStore.profiles.first?.id
         }
         let agentStore = AgentStore()
         if agentStore.agents.isEmpty {
-            agentStore.agents.append(Agent.defaultAgent())
+            agentStore.agents.append(AgentProfileModel.defaultAgent())
         }
         
         // Correctly initialize without the OllamaService parameter

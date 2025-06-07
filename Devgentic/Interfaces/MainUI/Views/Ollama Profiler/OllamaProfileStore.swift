@@ -14,7 +14,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// Manages the collection of Ollama profiles, including persistence and selection.
 class OllamaProfileStore: ObservableObject {
     // Published properties
-    @Published var profiles: [OllamaProfile] {
+    @Published var profiles: [OllamaProfileModel] {
         didSet {
             // Save profiles whenever the array changes
             saveProfiles()
@@ -70,7 +70,7 @@ class OllamaProfileStore: ObservableObject {
 
         // If no profiles exist after loading (or if loading failed and profiles is still empty), create a default one.
         if self.profiles.isEmpty {
-            let defaultProfile = OllamaProfile.defaultProfile()
+            let defaultProfile = OllamaProfileModel.defaultProfile()
             self.profiles.append(defaultProfile) // This will trigger didSet for profiles
             self.selectedProfileID = defaultProfile.id // Set selectedProfileID after profiles is populated
             logger.info("No profiles found or loaded, created and selected a default profile.")
@@ -85,13 +85,13 @@ class OllamaProfileStore: ObservableObject {
     }
 
     /// Returns the currently selected Ollama profile.
-    var currentProfile: OllamaProfile? {
+    var currentProfile: OllamaProfileModel? {
         guard let selectedID = selectedProfileID else { return nil }
         return profiles.first(where: { $0.id == selectedID })
     }
 
     /// Adds a new Ollama profile to the store.
-    func addProfile(profile: OllamaProfile) {
+    func addProfile(profile: OllamaProfileModel) {
         // Prevent adding duplicates by ID, though UUID should make this rare
         if !profiles.contains(where: { $0.id == profile.id }) {
             profiles.append(profile)
@@ -102,7 +102,7 @@ class OllamaProfileStore: ObservableObject {
     }
 
     /// Updates an existing Ollama profile in the store.
-    func updateProfile(profile: OllamaProfile) {
+    func updateProfile(profile: OllamaProfileModel) {
         if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
             profiles[index] = profile
             logger.info("Updated Ollama profile: '\(profile.profileName)' (ID: \(profile.id.uuidString))")
@@ -118,7 +118,7 @@ class OllamaProfileStore: ObservableObject {
     }
 
     /// Loads Ollama profiles from a JSON file on disk.
-    private func loadProfilesFromDisk() -> [OllamaProfile] {
+    private func loadProfilesFromDisk() -> [OllamaProfileModel] {
         guard let directory = profilesDirectory else {
             logger.error("Profiles directory not available, cannot load profiles.")
             return []
@@ -133,7 +133,7 @@ class OllamaProfileStore: ObservableObject {
         do {
             let data = try Data(contentsOf: fileURL)
             let decoder = JSONDecoder()
-            let loadedProfiles = try decoder.decode([OllamaProfile].self, from: data)
+            let loadedProfiles = try decoder.decode([OllamaProfileModel].self, from: data)
             logger.info("Successfully loaded \(loadedProfiles.count) Ollama profiles from disk.")
             return loadedProfiles
         } catch {

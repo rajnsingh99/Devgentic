@@ -11,7 +11,7 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentStore")
 
 class AgentStore: ObservableObject {
-    @Published var agents: [Agent] {
+    @Published var agents: [AgentProfileModel] {
         didSet {
             saveAgents()
         }
@@ -39,7 +39,7 @@ class AgentStore: ObservableObject {
         }
 
         if self.agents.isEmpty {
-            let defaultAgent = Agent.defaultAgent()
+            let defaultAgent = AgentProfileModel.defaultAgent()
             self.agents.append(defaultAgent)
             logger.info("No agents found or loaded, created a default DevAgent.")
         } else {
@@ -51,7 +51,7 @@ class AgentStore: ObservableObject {
         }
     }
 
-    func addAgent(agent: Agent) {
+    func addAgent(agent: AgentProfileModel) {
         if !agents.contains(where: { $0.id == agent.id }) {
             var newAgent = agent
             // If the new agent is marked as active, deactivate all others.
@@ -69,7 +69,7 @@ class AgentStore: ObservableObject {
         }
     }
 
-    func updateAgent(agent: Agent) {
+    func updateAgent(agent: AgentProfileModel) {
         if let index = agents.firstIndex(where: { $0.id == agent.id }) {
             var updatedAgent = agent
             // If the updated agent is being set to active, ensure all others are not.
@@ -109,7 +109,7 @@ class AgentStore: ObservableObject {
         }
     }
 
-    private func loadAgentsFromDisk() -> [Agent] {
+    private func loadAgentsFromDisk() -> [AgentProfileModel] {
         guard let directory = agentsDirectory else { return [] }
         let fileURL = directory.appendingPathComponent(storageFileName)
 
@@ -118,7 +118,7 @@ class AgentStore: ObservableObject {
         do {
             let data = try Data(contentsOf: fileURL)
             let decoder = JSONDecoder()
-            let loadedAgents = try decoder.decode([Agent].self, from: data)
+            let loadedAgents = try decoder.decode([AgentProfileModel].self, from: data)
             return loadedAgents
         } catch {
             logger.error("Failed to load agents from disk: \(error.localizedDescription)")

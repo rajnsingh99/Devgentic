@@ -2,267 +2,209 @@
 //  AgentDetailView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 03/06/25.
+//  Created by Raj Singh on 08/06/25.
 //
 
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentDetailView")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentDetailViewV3")
 
 struct AgentDetailView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    @Binding var agent: Agent // Receives a Binding to the agent
     
-    // Binding to communicate dirty state to parent
+    @Binding var agent: AgentProfileModel
     @Binding var hasUnsavedChanges: Bool
     
-    // Closure to handle deletion, provided by the parent view
+    // Closure to handle the deletion action, provided by the parent
     var onDelete: () -> Void
 
-    // State for editable fields
-    @State private var editableAgentName: String
-    @State private var editableAgentURL: String
-    @State private var editableAgentDescription: String
-    @State private var selectedOllamaProfileID: UUID?
-    @State private var selectedAgentTool: String
-
-    // State for confirmation dialogs
+    @State private var editableAgent: AgentProfileModel
     @State private var showingDeleteConfirm = false
 
-    init(agent: Binding<Agent>, hasUnsavedChanges: Binding<Bool>, onDelete: @escaping () -> Void) {
-        _agent = agent
-        _hasUnsavedChanges = hasUnsavedChanges
+    init(agent: Binding<AgentProfileModel>, hasUnsavedChanges: Binding<Bool>, onDelete: @escaping () -> Void) {
+        self._agent = agent
+        self._hasUnsavedChanges = hasUnsavedChanges
         self.onDelete = onDelete
-        
-        // Initialize local state from the wrappedValue of the binding
-        let initialAgent = agent.wrappedValue
-        _editableAgentName = State(initialValue: initialAgent.name)
-        _editableAgentURL = State(initialValue: initialAgent.baseURL)
-        _editableAgentDescription = State(initialValue: initialAgent.description)
-        _selectedOllamaProfileID = State(initialValue: initialAgent.linkedOllamaProfileID)
-        _selectedAgentTool = State(initialValue: initialAgent.selectedAgentTool)
+        self._editableAgent = State(initialValue: agent.wrappedValue)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // MARK: - Profile Details Section
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Profile Details")
-                    .font(.headline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 15) {
+                // --- Header ---
+                Text("Agent Profile Settings")
+                    .font(.title2)
+                    .fontWeight(.bold)
                     .padding(.bottom, 5)
 
-                HStack {
-                    Text("Profile Name:")
-                        .frame(width: 120, alignment: .leading)
-                    TextField("", text: $editableAgentName)
-                        .textFieldStyle(.roundedBorder)
-                    // Show indicator if changed
-                    if editableAgentName != agent.name {
-                        Image(systemName: "circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.system(size: 8))
-                    }
-                }
+                Divider()
 
-                HStack {
-                    Text("Agent URL:")
-                        .frame(width: 120, alignment: .leading)
-                    TextField("", text: $editableAgentURL)
-                        .textFieldStyle(.roundedBorder)
-                    if editableAgentURL != agent.baseURL {
-                        Image(systemName: "circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.system(size: 8))
-                    }
-                }
-                
-                HStack {
-                    Text("Description:")
-                        .frame(width: 120, alignment: .leading)
-                    TextField("", text: $editableAgentDescription)
-                        .textFieldStyle(.roundedBorder)
-                    if editableAgentDescription != agent.description {
-                        Image(systemName: "circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.system(size: 8))
-                    }
-                }
-            }
-            .padding(.vertical, 10)
-            .padding(.horizontal)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(8)
-
-            // MARK: - LLM Integration Section
-            VStack(alignment: .leading, spacing: 10) {
-                Text("LLM Integration")
-                    .font(.headline)
-                    .padding(.bottom, 5)
-
-                HStack {
-                    Picker(selection: $selectedOllamaProfileID) {
-                        // Enhancement 1: Removed the "None" option.
-                        ForEach(viewModel.ollamaProfileStore.profiles) { profile in
-                            Text(profile.profileName).tag(profile.id as UUID?)
+                // --- Profile Details Section ---
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Profile Details")
+                        .font(.headline)
+                    
+                    HStack {
+                        Text("Profile Name:")
+                            .frame(width: 120, alignment: .leading)
+                        TextField("Agent Name", text: $editableAgent.name)
+                            .textFieldStyle(.roundedBorder)
+                        if editableAgent.name != agent.name {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
                         }
-                    } label: {
+                    }
+                    
+                    HStack {
+                        Text("Agent URL:")
+                            .frame(width: 120, alignment: .leading)
+                        TextField("Agent URL", text: $editableAgent.baseURL)
+                            .textFieldStyle(.roundedBorder)
+                        if editableAgent.baseURL != agent.baseURL {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                        }
+                    }
+                    
+                    HStack {
+                        Text("Description:")
+                            .frame(width: 120, alignment: .leading)
+                        TextField("Description", text: $editableAgent.description)
+                            .textFieldStyle(.roundedBorder)
+                        if editableAgent.description != agent.description {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                        }
+                    }
+                }
+                .padding(.vertical, 10)
+
+                Divider()
+
+                // --- LLM Integration Section ---
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("LLM Integration")
+                        .font(.headline)
+
+                    HStack {
                         Text("Ollama Profile:")
                             .frame(width: 120, alignment: .leading)
+                        Picker("Ollama Profile", selection: $editableAgent.linkedOllamaProfileID) {
+                            ForEach(viewModel.ollamaProfileStore.profiles) { profile in
+                                Text(profile.profileName).tag(profile.id as UUID?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        
+                        if editableAgent.linkedOllamaProfileID != agent.linkedOllamaProfileID {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                        }
                     }
-                    .help("Select an Ollama profile for this agent to use.")
-                    .pickerStyle(.menu)
-                    
-                    if selectedOllamaProfileID != agent.linkedOllamaProfileID {
-                        Image(systemName: "circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.system(size: 8))
+
+                    HStack {
+                        Text("LLM Model:")
+                            .frame(width: 120, alignment: .leading)
+                        Text(viewModel.ollamaProfileStore.profiles.first(where: { $0.id == editableAgent.linkedOllamaProfileID })?.llmModelName ?? "No model selected")
+                            .foregroundColor(.secondary)
+                        Spacer()
                     }
                 }
+                .padding(.vertical, 10)
 
-                HStack {
-                    Text("LLM Model:")
-                        .frame(width: 120, alignment: .leading)
-                    Text(viewModel.ollamaProfileStore.profiles.first(where: { $0.id == selectedOllamaProfileID })?.llmModelName ?? "No LLM model selected.")
-                        .foregroundColor(.secondary)
-                    Spacer()
-                }
-            }
-            .padding(.vertical, 10)
-            .padding(.horizontal)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(8)
+                Divider()
+                
+                // --- Agent Capabilities Section ---
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Agent Capabilities")
+                        .font(.headline)
 
-            // MARK: - Agent Capabilities Section
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Agent Capabilities")
-                    .font(.headline)
-                    .padding(.bottom, 5)
-
-                HStack {
-                    Picker(selection: $selectedAgentTool) {
-                        Text("None").tag("None")
-                        Text("Code Interpreter").tag("Code Interpreter")
-                        Text("Web Search").tag("Web Search")
-                    } label: {
+                    HStack {
                         Text("Agent Tools:")
                             .frame(width: 120, alignment: .leading)
-                    }
-                    .help("Select tools available to this agent.")
-                    .pickerStyle(.menu)
-                    
-                    if selectedAgentTool != agent.selectedAgentTool {
-                        Image(systemName: "circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.system(size: 8))
+                        Picker("Agent Tools", selection: $editableAgent.selectedAgentTool) {
+                            Text("None").tag("None")
+                            Text("Code Interpreter").tag("Code Interpreter")
+                            Text("Web Search").tag("Web Search")
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        
+                        if editableAgent.selectedAgentTool != agent.selectedAgentTool {
+                            Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
+                        }
                     }
                 }
-            }
-            .padding(.vertical, 10)
-            .padding(.horizontal)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(8)
-            
-            Spacer() // Pushes content to the top and buttons to the bottom
-
-            // MARK: - Action Buttons
-            HStack {
-                Spacer() // Pushes buttons to the right
+                .padding(.vertical, 10)
                 
-                // Enhancement 2: Only show delete button if there is more than one agent.
-                if viewModel.agentStore.agents.count > 1 {
-                    Button("Delete") {
-                        showingDeleteConfirm = true // Trigger confirmation alert
-                    }
-                    .foregroundColor(.red)
-                    .buttonStyle(.bordered)
-                }
-                
-                Button("Save") {
-                    saveChanges()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!hasUnsavedChanges || !isAgentDataValid()) // Disable if no changes or data is invalid
+                Spacer()
             }
         }
-        .navigationTitle(agent.name)
         .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        // Check for changes whenever an editable field is modified
-        .onChange(of: editableAgentName) { _ in checkForChanges() }
-        .onChange(of: editableAgentURL) { _ in checkForChanges() }
-        .onChange(of: editableAgentDescription) { _ in checkForChanges() }
-        .onChange(of: selectedOllamaProfileID) { _ in checkForChanges() }
-        .onChange(of: selectedAgentTool) { _ in checkForChanges() }
-        // Reset local state if the underlying agent changes from the parent
-        .onChange(of: agent) { newAgent in
+        
+        // --- Action Buttons ---
+        HStack {
+            if viewModel.agentStore.agents.count > 1 {
+                Button("Delete Profile") {
+                    showingDeleteConfirm = true
+                }
+                .foregroundColor(.red)
+                .buttonStyle(.bordered)
+            }
+            
+            Spacer()
+            
+            Button("Save") {
+                saveChanges()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!hasUnsavedChanges || !isAgentDataValid())
+        }
+        .padding([.horizontal, .bottom])
+
+        .onChange(of: editableAgent) { _, _ in checkForChanges() }
+        .onChange(of: agent) { _, newAgent in
             resetState(with: newAgent)
         }
-        // Set a default Ollama profile if none is selected
         .onAppear {
-            if selectedOllamaProfileID == nil {
-                selectedOllamaProfileID = viewModel.ollamaProfileStore.profiles.first?.id
+            if editableAgent.linkedOllamaProfileID == nil {
+                editableAgent.linkedOllamaProfileID = viewModel.ollamaProfileStore.profiles.first?.id
             }
         }
-        // Alert for delete confirmation
         .alert("Delete Agent?", isPresented: $showingDeleteConfirm) {
-            Button("Delete", role: .destructive) {
-                // Call the onDelete closure provided by the parent
-                onDelete()
-            }
+            Button("Delete", role: .destructive) { onDelete() }
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Are you sure you want to delete the agent named \"\(agent.name)\"? This action cannot be undone.")
         }
     }
     
-    /// Checks if any of the editable fields differ from the original agent data.
+    // --- Helper Functions ---
     private func checkForChanges() {
-        let changed = editableAgentName != agent.name ||
-                      editableAgentURL != agent.baseURL ||
-                      editableAgentDescription != agent.description ||
-                      selectedOllamaProfileID != agent.linkedOllamaProfileID ||
-                      selectedAgentTool != agent.selectedAgentTool
-        
+        let changed = editableAgent != agent
         if changed != hasUnsavedChanges {
             hasUnsavedChanges = changed
         }
     }
 
-    /// Saves the changes from the local state back to the agent binding.
     private func saveChanges() {
-        var updatedAgent = agent
-        updatedAgent.name = editableAgentName.trimmingCharacters(in: .whitespacesAndNewlines)
-        updatedAgent.baseURL = editableAgentURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        updatedAgent.description = editableAgentDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        updatedAgent.linkedOllamaProfileID = selectedOllamaProfileID
-        updatedAgent.selectedAgentTool = selectedAgentTool
+        var finalAgent = editableAgent
+        finalAgent.name = editableAgent.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        finalAgent.baseURL = editableAgent.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        finalAgent.description = editableAgent.description.trimmingCharacters(in: .whitespacesAndNewlines)
         
-        // This assignment updates the binding, triggering the parent's update logic
-        agent = updatedAgent
-        
-        // Once saved, there are no longer unsaved changes
+        agent = finalAgent // Update the binding
         hasUnsavedChanges = false
-        logger.info("Saved changes for agent: \(updatedAgent.name)")
+        logger.info("Saved changes for agent: \(agent.name)")
     }
     
-    /// Resets the local state to match the provided agent.
-    private func resetState(with newAgent: Agent) {
-        // This function is called when the parent switches the agent we're editing
-        logger.debug("Resetting AgentDetailView state for new agent: \(newAgent.name)")
-        editableAgentName = newAgent.name
-        editableAgentURL = newAgent.baseURL
-        editableAgentDescription = newAgent.description
-        selectedOllamaProfileID = newAgent.linkedOllamaProfileID
-        selectedAgentTool = newAgent.selectedAgentTool
-        // After resetting, ensure the dirty state is cleared
-        hasUnsavedChanges = false
+    private func resetState(with newAgent: AgentProfileModel) {
+        if editableAgent != newAgent {
+            editableAgent = newAgent
+            hasUnsavedChanges = false
+        }
     }
 
-    /// Validates the agent data to enable/disable the save button.
     private func isAgentDataValid() -> Bool {
-        // Name and URL should not be empty.
-        return !editableAgentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-               !editableAgentURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !editableAgent.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+               !editableAgent.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

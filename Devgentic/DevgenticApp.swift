@@ -26,7 +26,6 @@ struct DevgenticApp: App {
         let profileStore = OllamaProfileStore()
         let agStore = AgentStore()
         
-        // MARK: - Step 3 Change: Initialize the view model correctly
         // The viewModel now uses OllamaService.shared internally.
         let viewModel = MainApplicationViewModel(
             ollamaProfileStore: profileStore,
@@ -108,15 +107,14 @@ struct DevgenticApp: App {
         }
         
         // MARK: - Command Centre (Settings) Window
-        WindowGroup(id: "command-centre") {
+        WindowGroup("Command Centre", id: "command-centre") {
             CommandCentreView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(agentManager)
                 .environmentObject(ollamaProfileStore)
         }
 
-        // MARK: - Ollama Profiles Window (FIXED)
-        // Added the title "Ollama Profiles" to the WindowGroup initializer.
+        // MARK: - Ollama Profiles Window
         WindowGroup("Ollama Profiles", id: "ollama-profiles") {
             OllamaProfilesView()
                 .environmentObject(mainApplicationViewModel)
@@ -124,12 +122,11 @@ struct DevgenticApp: App {
         }
         
         // MARK: - Agent Settings Window
-        // Updated to handle nil agentID correctly for direct window opening.
         WindowGroup("Agent Settings", id: "agent-settings", for: UUID.self) { $agentID in
-            AgentProfiler(initialAgentID: $agentID.wrappedValue)
+            // Using the V3 profiler view to test the smooth transition
+            AgentProfilerView_V3()
                .environmentObject(mainApplicationViewModel)
         }
-        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 800, height: 600)
     }
 }

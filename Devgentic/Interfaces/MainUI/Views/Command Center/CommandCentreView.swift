@@ -109,7 +109,7 @@ struct CommandCentreView_Previews: PreviewProvider {
         // Create a mock OllamaProfileStore for previews
         let mockOllamaProfileStore: OllamaProfileStore = {
             let store = OllamaProfileStore()
-            store.profiles = [OllamaProfile.defaultProfile()]
+            store.profiles = [OllamaProfileModel.defaultProfile()]
             store.selectedProfileID = store.profiles.first?.id
             return store
         }()

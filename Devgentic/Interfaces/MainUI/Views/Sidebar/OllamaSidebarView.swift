@@ -70,7 +70,7 @@ private struct OllamaProfilesSection: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Add New Ollama Profile")
                 .popover(isPresented: $showingAddProfilePopover, arrowEdge: .bottom) {
-                    AddOllamaProfilePopover()
+                    OllamaAddProfilePopover()
                         .environmentObject(ollamaProfileStore)
                 }
             }
@@ -88,7 +88,7 @@ private struct OllamaProfilesSection: View {
 // MARK: - Profile Row (Card Style)
 private struct ProfileRowView: View {
     @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
-    let profile: OllamaProfile
+    let profile: OllamaProfileModel
     @State private var showingDeleteConfirmation = false
 
     var isActive: Bool {

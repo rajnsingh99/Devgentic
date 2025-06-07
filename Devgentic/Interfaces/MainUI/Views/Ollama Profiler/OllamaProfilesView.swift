@@ -10,8 +10,6 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaProfilesView")
 
-/// The main window for managing Ollama profiles.
-/// It displays a master-detail interface for selecting and configuring different Ollama instances.
 struct OllamaProfilesView: View {
     @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
     @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
@@ -19,13 +17,10 @@ struct OllamaProfilesView: View {
     @State private var selectedProfileID: UUID?
     @State private var showingAddProfilePopover = false
     @State private var showDeleteConfirmation = false
-    @State private var profileToDelete: OllamaProfile?
+    @State private var profileToDelete: OllamaProfileModel?
 
     var body: some View {
-        // MARK: - FIX: Replaced NavigationView with NavigationSplitView
-        // NavigationSplitView is the modern, correct way to create master-detail interfaces on macOS.
         NavigationSplitView {
-            // MARK: - Sidebar (Master View)
             VStack(spacing: 0) {
                 HStack {
                     Text("Add Profile")
@@ -41,7 +36,7 @@ struct OllamaProfilesView: View {
                     .buttonStyle(.plain)
                     .help("Add New Ollama Profile")
                     .popover(isPresented: $showingAddProfilePopover) {
-                        AddOllamaProfilePopover()
+                        OllamaAddProfilePopover()
                             .environmentObject(ollamaProfileStore)
                     }
                 }
@@ -74,18 +69,16 @@ struct OllamaProfilesView: View {
                 }
                 .listStyle(.sidebar)
             }
-            .frame(minWidth: 220) // Set a minimum width for the sidebar
+            .frame(minWidth: 220)
             
         } detail: {
-            // MARK: - Detail View
-            // The content of the detail view is now determined by the selectedProfileID.
             if let profileID = selectedProfileID,
                let index = ollamaProfileStore.profiles.firstIndex(where: { $0.id == profileID }) {
                 
                 let profileBinding = $ollamaProfileStore.profiles[index]
                 
                 ScrollView {
-                    LocalAISettingsView(
+                    OllamaDetailView(
                         ollamaProfileBinding: profileBinding,
                         onDelete: { handleDelete(profileID) }
                     )
@@ -94,20 +87,17 @@ struct OllamaProfilesView: View {
                     .padding(20)
                 }
             } else {
-                // This placeholder now correctly appears when no profile is selected.
                 Text("Select an Ollama Profile")
                     .font(.title)
                     .foregroundColor(.secondary)
             }
         }
         .onAppear {
-            // Set the initial selection if one isn't already set
             if selectedProfileID == nil {
                  selectedProfileID = ollamaProfileStore.profiles.first?.id
             }
         }
         .onChange(of: ollamaProfileStore.selectedProfileID) { _, newID in
-            // Keep local selection in sync with the global selection from the store
             selectedProfileID = newID
         }
         .confirmationDialog("Delete Ollama Profile", isPresented: $showDeleteConfirmation, presenting: profileToDelete) { profile in
@@ -122,19 +112,14 @@ struct OllamaProfilesView: View {
 
     private func handleDelete(_ idToDelete: UUID) {
         guard let indexToDelete = ollamaProfileStore.profiles.firstIndex(where: { $0.id == idToDelete }) else { return }
-
-        // Determine new selection before deleting
         if selectedProfileID == idToDelete {
              if ollamaProfileStore.profiles.count > 1 {
                  if indexToDelete == ollamaProfileStore.profiles.count - 1 {
-                     // If it's the last one, select the one before it
                      selectedProfileID = ollamaProfileStore.profiles[indexToDelete - 1].id
                  } else {
-                     // Otherwise, select the next one
                      selectedProfileID = ollamaProfileStore.profiles[indexToDelete + 1].id
                  }
              } else {
-                 // Nothing left to select
                  selectedProfileID = nil
              }
         }
@@ -148,8 +133,8 @@ struct OllamaProfilesView_Previews: PreviewProvider {
     static func createMockViewModel() -> MainApplicationViewModel {
         let profileStore = OllamaProfileStore()
         if profileStore.profiles.isEmpty {
-            let defaultProfile = OllamaProfile.defaultProfile()
-            let remoteProfile = OllamaProfile(
+            let defaultProfile = OllamaProfileModel.defaultProfile()
+            let remoteProfile = OllamaProfileModel(
                 id: UUID(), profileName: "Remote Server", baseURL: "http://192.168.1.100:11434",
                 llmModelName: "llama2:7b", temperature: 0.7, topK: 30, topP: 0.8,
                 repeatPenalty: 1.0, contextWindowSize: 2048, gpuLayers: 0,

@@ -173,14 +173,14 @@ class MainApplicationViewModel: ObservableObject {
         // MARK: - Corrected: Centralized logic to sync OllamaService on profile change
         ollamaProfileStore.$selectedProfileID
             .combineLatest(ollamaProfileStore.$profiles)
-            .compactMap { selectedID, profiles -> OllamaProfile? in // Explicit return type
+            .compactMap { selectedID, profiles -> OllamaProfileModel? in // Explicit return type
                 guard let id = selectedID else { return nil }
                 return profiles.first { $0.id == id }
             }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             // MARK: - Corrected: Added explicit type annotation to fix inference errors
-            .sink { [weak self] (newProfile: OllamaProfile) in
+            .sink { [weak self] (newProfile: OllamaProfileModel) in
                 guard let self = self else { return }
                 logger.info("MainApplicationViewModel: Active profile changed to '\(newProfile.profileName)'. Updating OllamaService.")
                 

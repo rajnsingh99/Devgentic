@@ -48,10 +48,10 @@ struct AgentsTabView: View {
 
 // MARK: - AgentRowView (Updated)
 struct AgentRowView: View {
-    let agent: Agent
+    let agent: AgentProfileModel
     @EnvironmentObject var viewModel: MainApplicationViewModel
 
-    private var linkedOllamaProfile: OllamaProfile? {
+    private var linkedOllamaProfile: OllamaProfileModel? {
         if let profileID = agent.linkedOllamaProfileID {
             return viewModel.ollamaProfileStore.profiles.first(where: { $0.id == profileID })
         }
@@ -101,8 +101,8 @@ struct AgentsTabView_Previews: PreviewProvider {
     static var previews: some View {
         let mockOllamaProfileStore: OllamaProfileStore = {
             let store = OllamaProfileStore()
-            let defaultProfile = OllamaProfile.defaultProfile()
-            let remoteProfile = OllamaProfile(
+            let defaultProfile = OllamaProfileModel.defaultProfile()
+            let remoteProfile = OllamaProfileModel(
                 id: UUID(),
                 profileName: "Remote Ollama",
                 baseURL: "http://remote:11434",
@@ -117,10 +117,10 @@ struct AgentsTabView_Previews: PreviewProvider {
 
         let mockAgentStore: AgentStore = {
             let store = AgentStore()
-            var defaultAgent = Agent.defaultAgent()
+            var defaultAgent = AgentProfileModel.defaultAgent()
             defaultAgent.isActive = true
-            let testAgent = Agent(id: UUID(), name: "Test Agent", description: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, selectedAgentTool: "Web Search")
-            let inactiveAgent = Agent(id: UUID(), name: "Inactive Agent", description: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, selectedAgentTool: "None")
+            let testAgent = AgentProfileModel(id: UUID(), name: "Test Agent", description: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, selectedAgentTool: "Web Search")
+            let inactiveAgent = AgentProfileModel(id: UUID(), name: "Inactive Agent", description: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, selectedAgentTool: "None")
             store.agents = [defaultAgent, testAgent, inactiveAgent]
             return store
         }()

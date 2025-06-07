@@ -480,7 +480,7 @@ struct ChatInputAreaView: View {
 // MARK: - Agent Selector Popup View (Enhanced)
 private struct AgentSelectorPopup: View {
     @Binding var selectedAgentID: UUID?
-    let agents: [Agent]
+    let agents: [AgentProfileModel]
     let ollamaProfileStore: OllamaProfileStore // Added to get LLM names
     @Binding var isPresented: Bool
 
@@ -523,7 +523,7 @@ private struct AgentSelectorPopup: View {
     }
     
     // Helper function to find the LLM name from the linked profile
-    private func llmName(for agent: Agent) -> String {
+    private func llmName(for agent: AgentProfileModel) -> String {
         guard let profileID = agent.linkedOllamaProfileID,
               let profile = ollamaProfileStore.profiles.first(where: { $0.id == profileID }) else {
             return "Default LLM"
