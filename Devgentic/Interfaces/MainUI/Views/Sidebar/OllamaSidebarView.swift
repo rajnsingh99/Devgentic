@@ -18,11 +18,6 @@ struct OllamaSidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // The status view now gets the service instance from the environment view model
-            OllamaStatusView(ollamaService: viewModel.ollamaService)
-                .padding(.horizontal)
-                .padding(.bottom, 10)
-
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     OllamaProfilesSection()
@@ -55,6 +50,7 @@ struct OllamaSidebarView: View {
 private struct OllamaProfilesSection: View {
     @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
     @State private var showingAddProfilePopover = false
+    @State private var isHoveringAddButton = false
 
     var body: some View {
         VStack(alignment: .leading) {
@@ -66,8 +62,12 @@ private struct OllamaProfilesSection: View {
                     showingAddProfilePopover = true
                 } label: {
                     Image(systemName: "plus.circle")
+                        .foregroundColor(isHoveringAddButton ? .blue : .primary)
                 }
                 .buttonStyle(PlainButtonStyle())
+                .onHover { hovering in
+                    isHoveringAddButton = hovering
+                }
                 .help("Add New Ollama Profile")
                 .popover(isPresented: $showingAddProfilePopover, arrowEdge: .bottom) {
                     OllamaAddProfilePopover()
@@ -196,9 +196,13 @@ private struct LocalModelsSection: View {
 
     var body: some View {
         VStack(alignment: .leading) {
-            Text("Local LLMs")
-                .font(.headline)
-                .padding(.bottom, 5)
+            HStack {
+                Text("Local LLMs")
+                    .font(.headline)
+                Spacer()
+                OllamaStatusView(ollamaService: ollamaService)
+            }
+            .padding(.bottom, 5)
             
             if ollamaService.isLoadingModels {
                 HStack(spacing: 8) {
@@ -320,16 +324,12 @@ private struct LocalModelCard: View {
 // MARK: - Ollama Status View
 private struct OllamaStatusView: View {
     @ObservedObject var ollamaService: OllamaService
-    @Environment(\.openWindow) var openWindow
 
     var body: some View {
         HStack {
             Image(systemName: ollamaService.serverStatus.systemImageName)
                 .foregroundColor(ollamaService.serverStatus.color)
-            Text("Ollama Status: \(ollamaService.serverStatus.description)")
-                .font(.callout)
-
-            Spacer()
+                .help("Ollama Status: \(ollamaService.serverStatus.description)")
 
             if ollamaService.serverStatus == .disconnected || ollamaService.serverStatus == .error {
                 Button {
@@ -346,14 +346,6 @@ private struct OllamaStatusView: View {
             } else if ollamaService.serverStatus == .checking {
                  ProgressView().controlSize(.small)
             }
-
-            Button {
-                openWindow(id: "ollama-profiles")
-            } label: {
-                Image(systemName: "gearshape")
-            }
-            .buttonStyle(.plain)
-            .help("Manage Ollama Profiles & Settings")
-        }.padding(.top, 10)
+        }
     }
 }

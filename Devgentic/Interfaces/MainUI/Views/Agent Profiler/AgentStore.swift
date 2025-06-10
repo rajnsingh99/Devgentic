@@ -13,12 +13,18 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 class AgentStore: ObservableObject {
     @Published var agents: [AgentProfileModel] {
         didSet {
-            saveAgents()
+            // Only save if the agents array is not empty.
+            // This prevents writing an empty array to disk, which would
+            // trigger the default agent creation on next launch.
+            if !agents.isEmpty {
+                saveAgents()
+            }
         }
     }
 
     private let storageFileName = "agents.json"
     private var agentsDirectory: URL?
+    private var storageFileURL: URL?
 
     init() {
         self.agents = []
@@ -27,27 +33,29 @@ class AgentStore: ObservableObject {
             do {
                 try FileManager.default.createDirectory(at: devgenticDir, withIntermediateDirectories: true, attributes: nil)
                 self.agentsDirectory = devgenticDir
+                self.storageFileURL = devgenticDir.appendingPathComponent(storageFileName)
             } catch {
                 logger.error("Failed to create agents directory: \(error.localizedDescription)")
-                self.agentsDirectory = nil
             }
         }
 
         let loadedAgents = loadAgentsFromDisk()
-        if !loadedAgents.isEmpty {
-            self.agents = loadedAgents
+        
+        // Check if the storage file exists. If it doesn't, it's a true first launch.
+        if !FileManager.default.fileExists(atPath: storageFileURL?.path ?? "") {
+             logger.info("Agents file does not exist. Creating default agent for first launch.")
+             let defaultAgent = AgentProfileModel.defaultAgent()
+             self.agents.append(defaultAgent)
+             // The didSet will handle saving.
+        } else {
+             self.agents = loadedAgents
+             logger.info("Loaded \(self.agents.count) agents from disk.")
         }
 
-        if self.agents.isEmpty {
-            let defaultAgent = AgentProfileModel.defaultAgent()
-            self.agents.append(defaultAgent)
-            logger.info("No agents found or loaded, created a default DevAgent.")
-        } else {
-            // Ensure there's always at least one active agent if none are explicitly set
-            if !self.agents.contains(where: { $0.isActive }) {
-                self.agents[0].isActive = true
-                logger.info("No active agent found on load. Set the first agent '\(self.agents[0].name)' to active.")
-            }
+        // This logic remains to ensure an active agent if needed, but it won't run on an intentionally empty list.
+        if !self.agents.isEmpty && !self.agents.contains(where: { $0.isActive }) {
+            self.agents[0].isActive = true
+            logger.info("No active agent found on load. Set the first agent '\(self.agents[0].name)' to active.")
         }
     }
 
@@ -74,7 +82,7 @@ class AgentStore: ObservableObject {
             var updatedAgent = agent
             // If the updated agent is being set to active, ensure all others are not.
             if updatedAgent.isActive {
-                self.setActiveAgent(withId: updatedAgent.id)
+                setActiveAgent(withId: updatedAgent.id)
             } else {
                 agents[index] = updatedAgent
                 // If we just deactivated the only active agent, make the first agent active
@@ -94,6 +102,11 @@ class AgentStore: ObservableObject {
             agents[0].isActive = true
             logger.info("Deleted agent was active. Setting first agent '\(self.agents[0].name)' as new active agent.")
         }
+
+        // If all agents are deleted, we need to remove the file from disk.
+        if agents.isEmpty {
+            deleteStorageFile()
+        }
     }
 
     /// **[NEW]** Sets a specific agent as active and deactivates all others.
@@ -110,32 +123,28 @@ class AgentStore: ObservableObject {
     }
 
     private func loadAgentsFromDisk() -> [AgentProfileModel] {
-        guard let directory = agentsDirectory else { return [] }
-        let fileURL = directory.appendingPathComponent(storageFileName)
-
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        guard let fileURL = storageFileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
 
         do {
             let data = try Data(contentsOf: fileURL)
+            // If data is empty, it means user deleted all agents. Return an empty array.
+            guard !data.isEmpty else {
+                logger.info("Agents file is empty, returning no agents.")
+                return []
+            }
             let decoder = JSONDecoder()
             let loadedAgents = try decoder.decode([AgentProfileModel].self, from: data)
             return loadedAgents
         } catch {
             logger.error("Failed to load agents from disk: \(error.localizedDescription)")
             // Attempt to delete corrupted file
-            do {
-                try FileManager.default.removeItem(at: fileURL)
-                logger.info("Corrupted agents file deleted.")
-            } catch {
-                logger.error("Failed to delete corrupted agents file: \(error.localizedDescription)")
-            }
+            deleteStorageFile()
             return []
         }
     }
 
     private func saveAgents() {
-        guard let directory = agentsDirectory else { return }
-        let fileURL = directory.appendingPathComponent(storageFileName)
+        guard let fileURL = storageFileURL else { return }
 
         do {
             let encoder = JSONEncoder()
@@ -145,6 +154,16 @@ class AgentStore: ObservableObject {
             logger.trace("Successfully saved agents to disk.")
         } catch {
             logger.error("Failed to save agents to disk: \(error.localizedDescription)")
+        }
+    }
+    
+    private func deleteStorageFile() {
+        guard let fileURL = storageFileURL, FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+            logger.info("Successfully deleted empty/corrupted agents storage file.")
+        } catch {
+            logger.error("Failed to delete agents storage file: \(error.localizedDescription)")
         }
     }
 }

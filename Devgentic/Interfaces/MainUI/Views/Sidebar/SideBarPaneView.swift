@@ -24,6 +24,9 @@ struct SideBarPaneView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow // To open new windows for settings
 
+    // State for hover effect on settings buttons
+    @State private var isHoveringSettingsButton = false
+
     init(selectedTab: Binding<SidebarTab?>, sidebarWidth: Binding<CGFloat>) {
         self._selectedTab = selectedTab
         self._sidebarWidth = sidebarWidth
@@ -45,9 +48,25 @@ struct SideBarPaneView: View {
                             openWindow(id: "agent-settings")
                         } label: {
                             Image(systemName: "gearshape")
+                                .foregroundColor(isHoveringSettingsButton ? .blue : .primary)
                         }
                         .buttonStyle(.plain)
+                        .onHover { hovering in
+                            isHoveringSettingsButton = hovering
+                        }
                         .help("Agent Settings")
+                    } else if tab == .ollama {
+                        Button {
+                            openWindow(id: "ollama-profiles")
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .foregroundColor(isHoveringSettingsButton ? .blue : .primary)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in
+                            isHoveringSettingsButton = hovering
+                        }
+                        .help("Manage Ollama Profiles & Settings")
                     }
                 }
                 .padding(.horizontal)

@@ -29,4 +29,22 @@ enum VoiceInputState: Equatable {
         case .error(let msg): return "error(\(msg.prefix(30)))"
         }
     }
+    
+    var isSessionActive: Bool {
+        switch self {
+        case .recording, .processing:
+            return true
+        default:
+            return false
+        }
+    }
+    
+    var canTransitionToError: Bool {
+        switch self {
+        case .permissionsDeniedMic, .permissionsDeniedSpeech:
+            return false
+        default:
+            return true
+        }
+    }
 }

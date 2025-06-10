@@ -119,8 +119,8 @@ struct AgentsTabView_Previews: PreviewProvider {
             let store = AgentStore()
             var defaultAgent = AgentProfileModel.defaultAgent()
             defaultAgent.isActive = true
-            let testAgent = AgentProfileModel(id: UUID(), name: "Test Agent", description: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, selectedAgentTool: "Web Search")
-            let inactiveAgent = AgentProfileModel(id: UUID(), name: "Inactive Agent", description: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, selectedAgentTool: "None")
+            let testAgent = AgentProfileModel(id: UUID(), name: "Test Agent", role: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, selectedAgentTool: "Web Search")
+            let inactiveAgent = AgentProfileModel(id: UUID(), name: "Inactive Agent", role: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, selectedAgentTool: "None")
             store.agents = [defaultAgent, testAgent, inactiveAgent]
             return store
         }()

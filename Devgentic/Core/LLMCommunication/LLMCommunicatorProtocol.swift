@@ -9,20 +9,29 @@ import Foundation
 
 /// Protocol defining the contract for a service that communicates with an LLM backend.
 protocol LLMCommunicatorProtocol {
-    /// Sends a message, constructed from various parts, to the specified LLM backend.
+    /// Sends a message constructed from string parts to a backend (e.g., Ollama).
     /// - Parameters:
-    ///   - parts: An array of `MessagePart` objects representing the structured message to send.
-    ///   - backendType: The target `BackendType` (e.g., .ollama, .agent).
-    ///   - backendConfig: Configuration specific to the backend, like API keys, URLs, model parameters.
-    ///                    This will use `MainApplicationViewModel.BackendConfiguration` or a refined version.
-    ///   - conversationHistory: Optional: An array of previous `ChatMessage` objects for context.
-    ///                          (This can be added later if context management is centralized here)
-    /// - Returns: An `LLMResponse` object containing the parsed content and raw response.
-    /// - Throws: An error if the communication fails at a network level or if critical parsing/setup fails.
+    ///   - parts: An array of `MessagePart` objects for string-based prompt construction.
+    ///   - backendType: The target backend. Should be `.ollama`.
+    ///   - config: Configuration for the backend connection.
+    /// - Returns: An `LLMResponse` object.
+    /// - Throws: An error if communication fails.
     func sendMessage(
         parts: [MessagePart],
         to backendType: BackendType,
-        config: BackendConfiguration // Using existing config struct for now
-        // conversationHistory: [ChatMessage]? = nil // Example for future context handling
+        config: BackendConfiguration
+    ) async throws -> LLMResponse
+
+    /// Sends a structured, Codable payload to a backend (e.g., the Agent).
+    /// - Parameters:
+    ///   - payload: A `ChatRequestPayload` struct that will be encoded to JSON.
+    ///   - backendType: The target backend. Should be `.agent`.
+    ///   - config: Configuration for the backend connection.
+    /// - Returns: An `LLMResponse` object.
+    /// - Throws: An error if communication fails.
+    func sendMessage(
+        payload: ChatRequestPayload,
+        to backendType: BackendType,
+        config: BackendConfiguration
     ) async throws -> LLMResponse
 }

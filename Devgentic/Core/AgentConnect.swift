@@ -21,13 +21,13 @@ struct AgentConnect {
 
     // MARK: - Post Data to Agent (POST Request)
 
-    /// Sends data to a specified endpoint on the agent server using POST.
+    /// Sends pre-encoded JSON data to a specified endpoint on the agent server using POST.
     /// - Parameters:
     ///   - endpoint: The specific API endpoint on the agent server (e.g., "/chat").
-    ///   - payload: A dictionary representing the JSON payload to send.
+    ///   - payloadData: The `ChatRequestPayload` struct already encoded into `Data`.
     /// - Returns: The raw `Data` received from the server.
-    /// - Throws: An error if the URL is invalid, serialization fails, or the network request fails.
-    func postToAgentServer(endpoint: String, payload: [String: Any]) async throws -> Data {
+    /// - Throws: An error if the URL is invalid or the network request fails.
+    func postToAgentServer(endpoint: String, payloadData: Data) async throws -> Data {
         guard let url = URL(string: baseURL + endpoint) else {
             logger.error("Invalid URL constructed for agent server: \(self.baseURL)\(endpoint)")
             throw URLError(.badURL)
@@ -37,15 +37,10 @@ struct AgentConnect {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        // Set a reasonable timeout for agent requests
-        request.timeoutInterval = 60.0 // 60 seconds
+        request.timeoutInterval = 120.0 // Increased timeout for potentially long-running agent tasks
 
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
-        } catch {
-            logger.error("Failed to serialize JSON payload for agent: \(error.localizedDescription)")
-            throw error // Re-throw serialization error
-        }
+        // Assign the pre-encoded data directly to the httpBody
+        request.httpBody = payloadData
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

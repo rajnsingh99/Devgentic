@@ -17,6 +17,9 @@ struct VSCodifiedSidebarContainerView: View {
     @Binding var isSidebarVisible: Bool
     @Binding var sidebarWidth: CGFloat
     
+    // State to track hover over the divider
+    @State private var isHoveringOnDivider = false
+    
     private let minSidebarWidth: CGFloat = 300
     private let maxSidebarWidth: CGFloat = 1000
     private let activityBarWidth: CGFloat = 50
@@ -49,9 +52,11 @@ struct VSCodifiedSidebarContainerView: View {
                     .frame(width: sidebarWidth)
                     .transition(.move(edge: .leading))
 
+                // The draggable divider
                 Divider()
-                    .frame(width: 8)
-                    .background(Color.gray.opacity(0.01))
+                    .frame(width: 2)
+                    // Change background based on hover state for better visual feedback
+                    .background(isHoveringOnDivider ? Color.blue.opacity(0.5) : Color.gray.opacity(0.01))
                     .contentShape(Rectangle())
                     .gesture(
                         DragGesture(minimumDistance: 1)
@@ -60,6 +65,15 @@ struct VSCodifiedSidebarContainerView: View {
                                 self.sidebarWidth = min(max(newWidth, self.minSidebarWidth), self.maxSidebarWidth)
                             }
                     )
+                    // Add hover effect to change cursor
+                    .onHover { hovering in
+                        self.isHoveringOnDivider = hovering
+                        if hovering {
+                            NSCursor.resizeLeftRight.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
             }
         }
         .frame(maxHeight: .infinity)
@@ -132,4 +146,3 @@ struct VSCodifiedSidebarContainerView_Previews: PreviewProvider {
         PreviewWrapper()
     }
 }
-

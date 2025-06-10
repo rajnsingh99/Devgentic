@@ -87,7 +87,7 @@ struct AgentProfilerView_V3: View {
         }
         .sheet(isPresented: $showingAddAgentSheet) {
             AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription, newAgentTool: $newAgentTool) {
-                let newAgent = AgentProfileModel(id: UUID(), name: newAgentName, description: newAgentDescription, isActive: true, baseURL: newAgentURL, linkedOllamaProfileID: nil, selectedAgentTool: newAgentTool)
+                let newAgent = AgentProfileModel(id: UUID(), name: newAgentName, role: newAgentDescription, isActive: true, baseURL: newAgentURL, linkedOllamaProfileID: nil, selectedAgentTool: newAgentTool)
                 agentStore.addAgent(agent: newAgent)
                 selectedAgentID = newAgent.id
             }

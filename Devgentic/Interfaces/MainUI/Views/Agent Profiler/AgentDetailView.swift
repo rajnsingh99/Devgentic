@@ -66,11 +66,11 @@ struct AgentDetailView: View {
                     }
                     
                     HStack {
-                        Text("Description:")
+                        Text("Role:")
                             .frame(width: 120, alignment: .leading)
-                        TextField("Description", text: $editableAgent.description)
+                        TextField("Role", text: $editableAgent.role)
                             .textFieldStyle(.roundedBorder)
-                        if editableAgent.description != agent.description {
+                        if editableAgent.role != agent.role {
                             Image(systemName: "circle.fill").foregroundColor(.blue).font(.system(size: 8))
                         }
                     }
@@ -189,7 +189,7 @@ struct AgentDetailView: View {
         var finalAgent = editableAgent
         finalAgent.name = editableAgent.name.trimmingCharacters(in: .whitespacesAndNewlines)
         finalAgent.baseURL = editableAgent.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        finalAgent.description = editableAgent.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        finalAgent.role = editableAgent.role.trimmingCharacters(in: .whitespacesAndNewlines)
         
         agent = finalAgent // Update the binding
         hasUnsavedChanges = false

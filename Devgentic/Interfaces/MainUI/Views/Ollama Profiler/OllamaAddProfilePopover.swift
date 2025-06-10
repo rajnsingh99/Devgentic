@@ -157,7 +157,7 @@ struct OllamaAddProfilePopover: View {
 
         // Proceed with network check if no duplicate URL found
         // Assuming AIConnect.checkOllamaServerStatus is an async function
-        let isConnected = await AIConnect.checkOllamaServerStatus(baseURL: trimmedURL)
+        let isConnected = await OllamaConnect.checkOllamaServerStatus(baseURL: trimmedURL)
 
         if isConnected {
             urlCheckStatus = .valid

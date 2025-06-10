@@ -1,9 +1,14 @@
-// Services/AIConnect.swift
+//
+//  OllamaConnect.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 10/06/25.
+//
 
 import Foundation
-import os // Import os for logging
+import os 
 
-// Logger for AIConnect
+// Logger for OllamaConnect
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.Devgentic", category: "AIConnect")
 
 // Define a struct to hold the progress information we'll pass back
@@ -15,7 +20,7 @@ struct ModelPullProgress {
     let error: String?      // Error message from a streamed error object (optional)
 }
 
-struct AIConnect {
+struct OllamaConnect {
 
     // Note: The 'baseURL' property here isn't used by the static methods below,
     // as they accept the base URL dynamically. Consider if this property is still needed

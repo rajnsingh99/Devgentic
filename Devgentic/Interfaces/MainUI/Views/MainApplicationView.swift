@@ -21,7 +21,7 @@ struct MainApplicationView: View {
     // --- View State ---
     @FocusState private var isInputFocused: Bool
     @State private var isSidebarVisible: Bool = true
-    @State private var currentSidebarPaneWidth: CGFloat = 280
+    @State private var currentSidebarPaneWidth: CGFloat = 300
     
     private let activityBarWidth: CGFloat = 50
     private var totalSidebarWidth: CGFloat {

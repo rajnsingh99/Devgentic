@@ -317,18 +317,25 @@ class MainApplicationViewModel: ObservableObject {
         self.isSending = true
 
         Task {
-            let agentMessagesForThisTurn = await assembleAndSend(
+            // Updated: The result is now a tuple containing messages and a potential error string.
+            let (agentMessagesForThisTurn, errorMessage) = await assembleAndSend(
                 conversationID: conversationIDToUse,
                 userQuery: plainUserQueryFromEditor,
                 files: filesToProcess
             )
 
-            if !agentMessagesForThisTurn.isEmpty {
+            // Create a single array of messages to append, including any errors.
+            var allNewMessages = agentMessagesForThisTurn
+            if let errorMsg = errorMessage {
+                allNewMessages.append(ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: .error(title: "Error", details: errorMsg)))
+            }
+            
+            if !allNewMessages.isEmpty {
                 guard var targetConversation = store.getConversation(withId: conversationIDToUse) else {
                     self.isSending = false
                     return
                 }
-                targetConversation.messages.append(contentsOf: agentMessagesForThisTurn)
+                targetConversation.messages.append(contentsOf: allNewMessages)
                 targetConversation.timestamp = Date()
                 store.updateConversation(targetConversation)
             }
@@ -339,15 +346,103 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
     
-    private func assembleAndSend(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async -> [ChatMessage] {
-        var generatedMessages: [ChatMessage] = []
+    private func assembleAndSend(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async -> ([ChatMessage], String?) {
+        do {
+            switch selectedBackend {
+            case .ollama:
+                // Ollama logic remains largely the same, but now returns a tuple.
+                let (messages, error) = try await sendToOllama(conversationID: conversationID, userQuery: userQuery, files: files)
+                let errorString = error?.localizedDescription
+                return (messages, errorString)
+                
+            case .agent:
+                // Agent logic is now handled by a dedicated function.
+                let (messages, error) = try await sendToAgent(conversationID: conversationID, userQuery: userQuery, files: files)
+                let errorString = error?.localizedDescription
+                return (messages, errorString)
+            }
+        } catch {
+            // This top-level catch handles errors from the sendTo... functions themselves (e.g., config errors before sending).
+            let userFriendlyError = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
+            return ([], userFriendlyError)
+        }
+    }
+
+    // MARK: - Agent Payload Construction and Sending
+    private func sendToAgent(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
+        guard let selectedAgent = agentStore.agents.first(where: { $0.id == selectedAgentID }) else {
+            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No agent is selected or the selected agent could not be found."])
+        }
         
+        guard let linkedOllamaProfile = ollamaProfileStore.profiles.first(where: { $0.id == selectedAgent.linkedOllamaProfileID }) else {
+            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent is not linked to a valid Ollama profile."])
+        }
+
+        // 1. Assemble LLMSettingsPayload
+        let llmSettings = LLMSettingsPayload(
+            provider: "ollama", // Hardcoded as agents are backed by Ollama in this design
+            baseURL: linkedOllamaProfile.baseURL,
+            modelName: linkedOllamaProfile.llmModelName,
+            temperature: linkedOllamaProfile.temperature,
+            topK: linkedOllamaProfile.topK,
+            topP: linkedOllamaProfile.topP,
+            repeatPenalty: linkedOllamaProfile.repeatPenalty,
+            contextWindowSize: linkedOllamaProfile.contextWindowSize,
+            gpuLayers: linkedOllamaProfile.gpuLayers
+        )
+
+        // 2. Assemble AgentConfigItemPayload
+        let agentConfig = AgentConfigItemPayload(
+            id: selectedAgent.id.uuidString,
+            role: selectedAgent.role,
+            tools: selectedAgent.selectedAgentTool == "None" ? [] : [selectedAgent.selectedAgentTool],
+            llmSettings: llmSettings
+        )
+
+        // 3. Assemble FileObjectPayloads
+        let fileObjects = files.map { fileItem -> FileObjectPayload in
+            let mimeType = fileProcessorService.getFileMimeType(for: fileItem.url)
+            // In the future, you might get size_bytes from file attributes.
+            return FileObjectPayload(uri: fileItem.url.absoluteString, name: fileItem.name, mimeType: mimeType, sizeBytes: nil, language: nil)
+        }
+
+        // 4. Assemble MessageContentPayload
+        let messageContent = MessageContentPayload(prompt: userQuery, files: fileObjects)
+
+        // 5. Assemble RequestMetadataPayload
+        let metadata = RequestMetadataPayload(clientRequestId: UUID().uuidString)
+
+        // 6. Assemble the final ChatRequestPayload
+        let payload = ChatRequestPayload(
+            conversationId: conversationID.uuidString,
+            messageContent: messageContent,
+            agentConfig: [agentConfig], // Sent as an array with one item
+            metadata: metadata
+        )
+        
+        let agentBaseURL = selectedAgent.baseURL
+        
+        // Use a generic BackendConfiguration, setting the correct endpoint path
+        let backendConfig = BackendConfiguration(url: agentBaseURL, endpoint: "/agent/chat", payload: [:])
+
+        // Send the structured payload
+        let llmResponse = try await self.llmCommunicator.sendMessage(payload: payload, to: .agent, config: backendConfig)
+        let messages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
+        
+        return (messages, llmResponse.error)
+    }
+
+    // MARK: - Ollama Payload Construction and Sending (Refactored for consistency)
+    private func sendToOllama(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
+        var generatedMessages: [ChatMessage] = []
+
         let currentOllamaProfile = self.ollamaProfileStore.currentProfile
         
+        // The messageAssemblerService is still useful for Ollama's string-based prompt
         let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
             userQuery: userQuery,
             attachedFiles: files,
-            for: self.selectedBackend,
+            for: .ollama,
             ollamaModelDetails: OllamaModelInfo(name: currentOllamaProfile?.llmModelName ?? "", displayName: "", sizeDescription: ""),
             maxInlineCharsOllama: currentOllamaProfile?.maxInlineChars ?? 5000,
             maxFilesForOllama: currentOllamaProfile?.maxAttachedFiles ?? 5,
@@ -361,58 +456,37 @@ class MainApplicationViewModel: ObservableObject {
             generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: warningContent))
         }
 
-        // MARK: - Corrected: Use pattern matching to filter parts
         let processableParts = messageParts.filter { part in
-            if let fileRep = part.fileRepresentation {
-                if case .unprocessable = fileRep {
-                    return false
-                }
-            }
+            if let fileRep = part.fileRepresentation, case .unprocessable = fileRep { return false }
             return true
         }
 
-        // MARK: - Corrected: Check for .file case correctly
         if !processableParts.contains(where: { !$0.content.isEmpty || $0.type == .file }) {
-            logger.info("No processable content to send to LLM.")
-            return generatedMessages
+            logger.info("No processable content to send to Ollama.")
+            return (generatedMessages, nil)
         }
         
-        if self.selectedBackend == .ollama {
-            if ollamaService.serverStatus != .connected {
-                let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(ollamaService.serverStatus.description) at \(ollamaService.ollamaBaseURL)"
-                let errorContent = MessageContent.error(title: "Connection Error", details: errorMsg)
-                generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent))
-                return generatedMessages
-            }
+        if ollamaService.serverStatus != .connected {
+            let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(ollamaService.serverStatus.description) at \(ollamaService.ollamaBaseURL)"
+            throw NSError(domain: "OllamaConnectionError", code: 503, userInfo: [NSLocalizedDescriptionKey: errorMsg])
         }
-        
+
         let baseBackendConfig = self.determineBackendConfiguration()
         var finalPartsToSend = processableParts
         if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
              finalPartsToSend.insert(.text("Context File: \(filePath)\n\n"), at: 0)
         }
-
-        do {
-            let llmResponse = try await self.llmCommunicator.sendMessage(parts: finalPartsToSend, to: self.selectedBackend, config: baseBackendConfig)
-            generatedMessages.append(contentsOf: llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) })
-            if let commError = llmResponse.error {
-                let errorContent = MessageContent.error(title: "LLM Error", details: commError.localizedDescription)
-                generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent))
-            }
-        } catch {
-            let errorText = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
-            let errorContent = MessageContent.error(title: "Communication Error", details: errorText)
-            generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent))
-            if selectedBackend == .ollama, (error as? URLError)?.isConnectionError == true {
-                ollamaService.serverStatus = .disconnected
-            }
-        }
         
-        return generatedMessages
+        let llmResponse = try await self.llmCommunicator.sendMessage(parts: finalPartsToSend, to: .ollama, config: baseBackendConfig)
+        let newMessages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
+        generatedMessages.append(contentsOf: newMessages)
+        
+        return (generatedMessages, llmResponse.error)
     }
 
-
     private func determineBackendConfiguration() -> BackendConfiguration {
+         // This function now only needs to provide configuration for the Ollama backend.
+         // Agent configuration is now assembled directly in `sendToAgent`.
         if let currentProfile = ollamaProfileStore.currentProfile, self.selectedBackend == .ollama {
             let advancedOptions: [String: Any] = [
                 "temperature": currentProfile.temperature, "top_k": currentProfile.topK,
@@ -423,29 +497,10 @@ class MainApplicationViewModel: ObservableObject {
             let initialPayload: [String: Any] = ["model": modelName, "stream": false, "options": advancedOptions]
             return BackendConfiguration(url: ollamaService.ollamaBaseURL, endpoint: "/api/generate", payload: initialPayload)
         
-        } else { // BackendType is .agent
-            var agentConfigItems: [[String: Any]] = []
-            if let selectedAgentId = selectedAgentID,
-               let selectedAgent = agentStore.agents.first(where: { $0.id == selectedAgentId }) {
-                
-                var agentConfig: [String: Any] = [
-                    "base_url": selectedAgent.baseURL,
-                    "tools": selectedAgent.selectedAgentTool == "None" ? [] : [selectedAgent.selectedAgentTool]
-                ]
-                
-                if let linkedOllamaProfileID = selectedAgent.linkedOllamaProfileID,
-                   let linkedOllamaProfile = ollamaProfileStore.profiles.first(where: { $0.id == linkedOllamaProfileID }) {
-                    agentConfig["ollama_url"] = linkedOllamaProfile.baseURL
-                    agentConfig["model"] = linkedOllamaProfile.llmModelName
-                }
-                agentConfigItems.append(agentConfig)
-
-                let initialPayload: [String: Any] = ["strategy": self.agentDelegationStrategy, "agent_config": agentConfigItems]
-                return BackendConfiguration(url: selectedAgent.baseURL, endpoint: "/chat", payload: initialPayload)
-            } else {
-                let initialPayload: [String: Any] = ["strategy": self.agentDelegationStrategy]
-                return BackendConfiguration(url: self.agentBaseURL, endpoint: "/chat", payload: initialPayload)
-            }
+        } else {
+             // Return a default or empty configuration for the agent, as it's no longer used for payload creation.
+             // The URL will be sourced from the agent's profile directly.
+            return BackendConfiguration(url: self.agentBaseURL, endpoint: "/agent/chat", payload: [:])
         }
     }
     
@@ -680,22 +735,3 @@ extension URLError {
     }
 }
 
-extension VoiceInputState {
-    var isSessionActive: Bool {
-        switch self {
-        case .recording, .processing:
-            return true
-        default:
-            return false
-        }
-    }
-    
-    var canTransitionToError: Bool {
-        switch self {
-        case .permissionsDeniedMic, .permissionsDeniedSpeech:
-            return false
-        default:
-            return true
-        }
-    }
-}

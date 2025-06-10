@@ -15,7 +15,7 @@ class QuickAccessViewModel: ObservableObject {
     @Published var isSending: Bool = false
     
     // MARK: - Dependencies
-    private let aiConnect = AIConnect()
+    private let aiConnect = OllamaConnect()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "QuickAccessViewModel")
     
     // MARK: - Properties for ConversationStore Integration
@@ -116,7 +116,7 @@ class QuickAccessViewModel: ObservableObject {
             let baseURLString = self.aiConnect.baseURL
 
             // --- Perform API Call ---
-            let isConnected = await AIConnect.checkOllamaServerStatus(baseURL: baseURLString)
+            let isConnected = await OllamaConnect.checkOllamaServerStatus(baseURL: baseURLString)
             guard isConnected else {
                 let errorMsg = "Quick Access: Cannot connect to Ollama server at \(baseURLString)."
                 logger.error("\(errorMsg)")

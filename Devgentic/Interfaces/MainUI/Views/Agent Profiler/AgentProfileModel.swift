@@ -11,7 +11,7 @@ import SwiftUI
 struct AgentProfileModel: Codable, Identifiable, Hashable {
     let id: UUID
     var name: String
-    var description: String
+    var role: String
     var isActive: Bool // Whether the agent is currently active/enabled
     var baseURL: String // MARK: New: Agent's base URL
     var linkedOllamaProfileID: UUID? // MARK: New: Optional link to an OllamaProfile
@@ -21,11 +21,11 @@ struct AgentProfileModel: Codable, Identifiable, Hashable {
         AgentProfileModel(
             id: UUID(),
             name: "DevAgent",
-            description: "Your personal development assistant.",
+            role: "Your personal development assistant.",
             isActive: true,
-            baseURL: "http://localhost:8000", // Default agent URL
-            linkedOllamaProfileID: nil, // No Ollama profile linked by default
-            selectedAgentTool: "None" // No tool selected by default
+            baseURL: "http://localhost:8000",
+            linkedOllamaProfileID: nil,
+            selectedAgentTool: "None"
         )
     }
 }

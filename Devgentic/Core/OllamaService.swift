@@ -55,7 +55,7 @@ class OllamaService: ObservableObject {
         isLoadingModels = true
         modelLoadingError = nil
         
-        let isConnected = await AIConnect.checkOllamaServerStatus(baseURL: ollamaBaseURL)
+        let isConnected = await OllamaConnect.checkOllamaServerStatus(baseURL: ollamaBaseURL)
         
         if isConnected {
             serverStatus = .connected
@@ -89,7 +89,7 @@ class OllamaService: ObservableObject {
         logger.info("Loading local Ollama models from \(self.ollamaBaseURL)...")
         
         do {
-            let models = try await AIConnect.fetchLocalOllamaModels(baseURL: ollamaBaseURL)
+            let models = try await OllamaConnect.fetchLocalOllamaModels(baseURL: ollamaBaseURL)
             self.localModels = models.sorted()
             self.modelLoadingError = nil
             logger.info("Loaded \(self.localModels.count) local Ollama models.")
@@ -132,7 +132,7 @@ class OllamaService: ObservableObject {
             return
         }
         // Use the passed baseURL for the check
-        guard await AIConnect.checkOllamaServerStatus(baseURL: baseURL) else {
+        guard await OllamaConnect.checkOllamaServerStatus(baseURL: baseURL) else {
             self.modelPullError = "Cannot pull model: Ollama server at \(baseURL) is not connected."
             logger.warning("Pull model attempt failed: \(self.modelPullError!)")
             self.serverStatus = .disconnected // Update status if connection failed
@@ -152,7 +152,7 @@ class OllamaService: ObservableObject {
         logger.info("Attempting to pull model: \(trimmedModelName) with streaming from \(baseURL).")
         
         do {
-            try await AIConnect.pullOllamaModel(name: trimmedModelName, baseURL: baseURL) { progressUpdate in
+            try await OllamaConnect.pullOllamaModel(name: trimmedModelName, baseURL: baseURL) { progressUpdate in
                 // The closure is already running on the MainActor because the class is @MainActor
                 self.pullStage = progressUpdate.status
                 self.pullTotalBytes = progressUpdate.total
@@ -225,7 +225,7 @@ class OllamaService: ObservableObject {
             return
         }
         // Use the passed baseURL for the check
-        guard await AIConnect.checkOllamaServerStatus(baseURL: baseURL) else {
+        guard await OllamaConnect.checkOllamaServerStatus(baseURL: baseURL) else {
             self.modelRemoveError = "Cannot remove model: Ollama server at \(baseURL) is not connected."
             logger.warning("Remove model attempt failed: \(self.modelRemoveError!)")
             self.serverStatus = .disconnected // Update status if connection failed
@@ -241,7 +241,7 @@ class OllamaService: ObservableObject {
         logger.info("Attempting to remove model: \(trimmedModelName) from \(baseURL).")
 
         do {
-            try await AIConnect.removeOllamaModel(name: trimmedModelName, baseURL: baseURL)
+            try await OllamaConnect.removeOllamaModel(name: trimmedModelName, baseURL: baseURL)
             logger.info("Model \(trimmedModelName) removed successfully.")
             await loadLocalModels() // Reload models for the current ollamaBaseURL
             self.removingModelName = nil
