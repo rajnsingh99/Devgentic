@@ -12,8 +12,6 @@ langchain-community
 langchain-ollama
 langchain-chroma
 ollama
-mem0ai
-pydantic # Added for API model validation
-sentence-transformers # Added for embedding models, often a dependency for langchain-community embeddings
-chromadb # Added for vector store management
-# Add any other specific dependencies your agent_launcher.py will need
+pydantic
+sentence-transformers
+chromadb

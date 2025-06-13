@@ -1,4 +1,3 @@
-# devgentic_agent/main.py
 import uvicorn
 from fastapi import FastAPI
 import signal
@@ -12,7 +11,7 @@ from .config import (
 )
 
 # Import the API router from controllers
-from .controllers import chat_controller
+from . import chat_controller
 
 # --- FastAPI App Initialization ---
 # Ensure that tool managers are initialized when their modules are imported.
