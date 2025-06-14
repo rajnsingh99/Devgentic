@@ -1,11 +1,10 @@
-# devgentic_agent/tools/chroma_conversation_storage.py
 import sys
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 
-# Importing the new interface
 from .conversation_storage_interface import ConversationStorage
-from .vectorstore_client import vector_store_manager # Reusing the existing ChromaDB manager
+from .vectorstore_client import vector_store_manager
+
 
 class ChromaConversationStorage(ConversationStorage):
     """
@@ -31,7 +30,6 @@ class ChromaConversationStorage(ConversationStorage):
     def add_message(self, data: str, user_id: str, role: str, metadata: Optional[Dict] = None) -> bool:
         """
         Adds a single chat message to ChromaDB.
-        Messages are stored as documents with metadata to identify them as chat history.
         """
         if self.initialization_error:
             print(f"ChromaDB conversation storage not available: {self.initialization_error}", file=sys.stderr)
@@ -40,8 +38,8 @@ class ChromaConversationStorage(ConversationStorage):
         message_metadata = {
             "conversation_id": user_id,
             "role": role,
-            "timestamp": datetime.now().isoformat(), # Store timestamp for ordering
-            "type": "chat_message", # Custom type to distinguish from other RAG documents
+            "timestamp": datetime.now().isoformat(),
+            "type": "chat_message",
         }
         if metadata:
             message_metadata.update(metadata)
@@ -51,82 +49,75 @@ class ChromaConversationStorage(ConversationStorage):
             metadatas=[message_metadata]
         )
         if success:
-            print(f"Added chat message to ChromaDB for user_id: {user_id}, role: {role}. Doc ID: {doc_ids[0] if doc_ids else 'N/A'}")
+            print(
+                f"Added chat message to ChromaDB for user_id: {user_id}, role: {role}. Doc ID: {doc_ids[0] if doc_ids else 'N/A'}")
         else:
             print(f"Error adding chat message to ChromaDB for user_id {user_id}.", file=sys.stderr)
         return success
 
     def get_history(self, user_id: str, limit: int = 10) -> List[Any]:
         """
-        Retrieves chat messages from ChromaDB for a given conversation ID.
-        This attempts to retrieve documents tagged as 'chat_message' for the specific conversation ID.
+        Retrieves chat messages from ChromaDB for a given conversation ID using a metadata filter.
         """
-        if self.initialization_error:
+        if self.initialization_error or not self.vector_store_manager.vectorstore:
             print(f"ChromaDB conversation storage not available: {self.initialization_error}", file=sys.stderr)
             return []
 
-        # ChromaDB's retriever primarily uses semantic similarity.
-        # To get chronological history, we might need to retrieve broadly and then filter/sort.
-        # A direct metadata filter for get_history functionality is generally more robust
-        # but the retriever's invoke method focuses on semantic search.
-        # For a true chronological retrieval, directly querying the collection with WHERE clauses
-        # would be better, but we are using the simpler retriever abstraction here.
-        # We will retrieve based on a general query to ensure we get *all* chat messages for the user.
-        # The 'query' here is generic to ensure it hits relevant documents,
-        # but the primary filtering will be on metadata after retrieval.
-
-        # A more robust solution for getting exact history might involve:
-        # 1. Extending vectorstore_client.py to expose direct Chroma collection querying.
-        # 2. Or, for simplicity, using a broad query and filtering results.
-        # For now, we'll use a broad query and filter by metadata.
-        # Note: This approach might not be perfectly efficient for very large histories
-        # as it still relies on semantic search for initial retrieval.
-
-        # Query that encourages retrieval of conversation messages.
-        # This is a heuristic; direct metadata filtering (if exposed by vectorstore_client) is better.
-        query_text = f"Show me the conversation history for user {user_id}"
-
-        # Retrieve documents using the existing retriever
-        # We assume the retriever might return more than just chat messages,
-        # so we filter post-retrieval.
+        print(f"\n--- Retrieving history for conversation_id: {user_id} (limit: {limit}) ---", file=sys.stdout)
         try:
-            docs = self.vector_store_manager.retrieve_documents(query=query_text)
-            
-            # Filter and sort by timestamp
-            conversation_messages = []
-            for doc in docs:
-                # Ensure it's a chat message for this conversation_id
-                if (doc.metadata.get("type") == "chat_message" and
-                    doc.metadata.get("conversation_id") == user_id):
-                    conversation_messages.append({
-                        "role": doc.metadata.get("role", "unknown"),
-                        "text": doc.page_content,
-                        "timestamp": doc.metadata.get("timestamp"),
-                        "metadata": doc.metadata # Include all metadata if useful
+            # Use a direct metadata filter to get all documents for a conversation_id.
+            results = self.vector_store_manager.vectorstore.get(
+                where={"conversation_id": user_id},
+                include=["metadatas", "documents"]
+            )
+
+            raw_doc_count = len(results.get('documents', []))
+            print(f"Step 1: Found {raw_doc_count} raw documents in ChromaDB for this conversation_id.", file=sys.stdout)
+
+            if not results or not results.get('documents'):
+                print("--- History retrieval finished: No documents found. ---\n", file=sys.stdout)
+                return []
+
+            # Combine the retrieved metadata and documents into a single list of objects
+            combined_docs = []
+            for i, doc_content in enumerate(results['documents']):
+                meta = results['metadatas'][i]
+                # We can add a secondary check here if other document types might share a conversation_id
+                if meta.get("type") == "chat_message":
+                    combined_docs.append({
+                        "role": meta.get("role", "unknown"),
+                        "text": doc_content,
+                        "timestamp": meta.get("timestamp"),
+                        "metadata": meta
                     })
-            
-            # Sort chronologically
-            conversation_messages.sort(key=lambda x: x.get("timestamp", ""))
-            
-            # Apply limit
-            return conversation_messages[-limit:] if limit else conversation_messages
+
+            print(f"Step 2: Assembled {len(combined_docs)} messages of type 'chat_message'.", file=sys.stdout)
+
+            # Sort chronologically by timestamp
+            combined_docs.sort(key=lambda x: x.get("timestamp", ""))
+            print(f"Step 3: Sorted {len(combined_docs)} messages chronologically.", file=sys.stdout)
+
+            # Apply the limit to get the most recent messages
+            final_history = combined_docs[-limit:]
+            print(f"Step 4: Returning the last {len(final_history)} messages due to limit.", file=sys.stdout)
+            print(f"--- History retrieval finished for conversation_id: {user_id} ---\n", file=sys.stdout)
+
+            return final_history
 
         except Exception as e:
-            print(f"Error retrieving chat history from ChromaDB for user_id {user_id}: {e}", file=sys.stderr)
+            print(f"Error retrieving chat history directly from ChromaDB for user_id {user_id}: {e}", file=sys.stderr)
             return []
 
     def is_available(self) -> Tuple[str, str | None]:
         """
         Checks the availability of the ChromaDB conversation storage.
-        Delegates to the underlying vector_store_manager's status.
         """
         status, msg = self.vector_store_manager.get_status()
         if self.initialization_error:
             return "error", self.initialization_error
-        # Translate vector store status to conversation storage status
+
         if status == "ok":
             return "ok", "ChromaDB conversation storage is available."
         elif status == "degraded":
             return "degraded", f"ChromaDB conversation storage degraded: {msg}"
         return "error", f"ChromaDB conversation storage error: {msg}"
-
