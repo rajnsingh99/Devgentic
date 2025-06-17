@@ -1,40 +1,51 @@
-"""
-This file will define the Pydantic models for interacting with the full Agentic architecture.
-The agent is designed to handle complex tasks that go beyond simple RAG, such as
-understanding and reasoning about user-provided files.
+# filename: Models/agent_models.py
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, List, Union
 
-Future Implementation Details:
-- The `AgentChatRequest` will be more complex than other chat requests.
-- It will need to support a list of file URIs that the agent's 'read_file_content'
-  tool can access.
-- It may also include a 'goal' or 'objective' field to guide the agent's reasoning process.
-- The response from the agent might also be more structured, potentially including not just
-  the final answer but also the chain of thought or the sequence of tools it used.
-"""
-from pydantic import BaseModel, Field
-from typing import Optional, List
+# Import the specific LLM settings from other models to be reused
+from .ollama_models import LLMSettings as OllamaLLMSettings
+from .remote_models import RemoteLLMSettings
+from .remote_models import FileObject
 
-# --- Placeholder for a File Object for the Agent ---
-class AgentFileObject(BaseModel):
+
+class AgentConfig(BaseModel):
     """
-    Represents a file that the agent can access using its tools.
-    This re-introduces file handling, but in a structured, tool-oriented way.
+    Defines the configuration for a single agent within the orchestration hierarchy.
     """
-    uri: str = Field(..., description="The local URI of the file for the agent to read.")
-    name: Optional[str] = None
+    # FIXED: Added model_config to allow population by alias and added aliases to fields
+    model_config = {"populate_by_name": True}
+
+    agent_id: str = Field(..., alias="agentId", description="A unique identifier for this agent within the request.")
+    parent_id: Optional[str] = Field(None, alias="parentId",
+                                     description="The agent_id of the parent agent. 'null' designates the root agent.")
+    role_objective: str = Field(..., alias="roleObjective",
+                                description="A clear, high-level objective for this specific agent.")
+    tools: List[str] = Field(default_factory=list, description="A list of tool names this agent is allowed to use.")
+
+    llm_settings: Union[OllamaLLMSettings, RemoteLLMSettings] = Field(..., alias="llmSettings",
+                                                                      discriminator='provider')
 
 
-# --- Placeholder for Future Agent Chat Request ---
-class AgentTaskRequest(BaseModel):
+class AgentOrchestrationRequest(BaseModel):
     """
-    (Template) Request model for the /agent/execute endpoint.
-    This model is designed to give the agent a complex task, potentially involving files.
+    The main request model for the /agent/orchestrate endpoint. It defines the
+    entire multi-agent hierarchy and the overall task.
     """
     model_config = {"populate_by_name": True}
-    conversation_id: str = Field(..., alias="conversationId")
-    objective: str = Field(..., description="The high-level goal for the agent to achieve.")
-    files: Optional[List[AgentFileObject]] = Field(None, description="A list of files for the agent to use as context.")
-    # The agent might use a simplified LLM settings model, as its configuration
-    # is often more about the agent's framework (e.g., ReAct) than the LLM's temperature.
-    metadata: Optional[dict] = None
 
+    conversation_id: str = Field(..., alias="conversationId")
+    files: Optional[List[FileObject]] = Field(default_factory=list,
+                                              description="A list of files available to the entire orchestration.")
+    agent_configs: List[AgentConfig] = Field(..., alias="agentConfigs", min_length=1)
+
+    @model_validator(mode='after')
+    def check_for_single_root_agent(self) -> 'AgentOrchestrationRequest':
+        """
+        Validates that there is exactly one root agent (parent_id is null)
+        in the list of agent configurations.
+        """
+        root_agents = [agent for agent in self.agent_configs if agent.parent_id is None]
+        if len(root_agents) != 1:
+            raise ValueError(
+                f"The agent configuration must have exactly one root agent (parent_id: null), but {len(root_agents)} were found.")
+        return self

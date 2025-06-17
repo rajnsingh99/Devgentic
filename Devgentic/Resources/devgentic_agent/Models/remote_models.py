@@ -1,45 +1,77 @@
-"""
-This file will define the Pydantic models for chat requests to remote LLM providers
-like OpenAI (ChatGPT), Google (Gemini), or Anthropic (Claude).
-
-Future Implementation Details:
-- A `RemoteChatRequest` model will be created.
-- It will include a 'provider' field (e.g., "openai", "google") to specify the target service.
-- It will need a mechanism to handle API keys, likely passed in a secure header or
-  as part of the request body for the service to use.
-- The `LLMSettings` within this request will differ from the Ollama model, as it will
-  need to support provider-specific parameters (e.g., 'model' for GPT-4 vs. Gemini-Pro).
-- This will allow the Swift app to send a single request format to the `/remote/chat`
-  endpoint, with the backend handling the logic of routing to the correct provider.
-"""
-
-from pydantic import BaseModel, Field, HttpUrl
+# filename: Models/remote_models.py
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Literal
 
-# --- Placeholder for Future Remote LLMSettings ---
+# --- File Object Model ---
+# This can be a common model, but we define it here for clarity.
+class FileObject(BaseModel):
+    """Represents a file to be processed."""
+    uri: str = Field(..., description="The local URI of the file.")
+    name: Optional[str] = None
+
+    @field_validator('uri')
+    @classmethod
+    def uri_must_be_valid(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('File URI must not be empty.')
+        # A more robust validation could check for file existence or scheme.
+        return v
+
+# --- Models for Remote Providers ---
+
 class RemoteLLMSettings(BaseModel):
     """
-    (Template) Configuration for remote LLM providers.
-    This will be expanded to include provider-specific options.
+    Configuration for remote LLM providers like OpenAI, Google, etc.
     """
     model_config = {"populate_by_name": True}
-    # The provider will be crucial for the factory pattern in the remote_service
-    provider: Literal["openai", "google", "anthropic"] = Field(..., alias="provider")
-    model_name: str = Field(..., alias="modelName")
-    # API Key management will be a key consideration here.
-    # It might be handled via environment variables on the server or passed per request.
-    api_key: Optional[str] = Field(None, alias="apiKey")
+
+    provider: Literal["openai", "google", "anthropic"] = Field(
+        ...,
+        alias="provider",
+        description="The name of the remote provider."
+    )
+    model_name: str = Field(
+        ...,
+        alias="modelName",
+        description="The specific model name for the chosen provider (e.g., 'gpt-4o-mini', 'gemini-1.5-flash-latest')."
+    )
+    api_key: str = Field(
+        ...,
+        alias="apiKey",
+        description="The API key for the remote service."
+    )
+    context_window_size: Optional[int] = Field(
+        default=None,
+        ge=0,
+        alias='contextWindowSize',
+        description="The context window size for the model, used for token management."
+    )
+
+    @field_validator('api_key', 'model_name')
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Field must not be empty or consist only of whitespace.')
+        return v
 
 
-# --- Placeholder for Future Remote Chat Request ---
 class RemoteChatRequest(BaseModel):
     """
-    (Template) Request model for the /remote/chat endpoint.
-    This will serve as the contract for all interactions with external LLM providers.
+    Request model for the /remote/chat endpoint.
+    MODIFIED: Now includes a list of files.
     """
     model_config = {"populate_by_name": True}
+
     conversation_id: str = Field(..., alias="conversationId")
     prompt: str
+    # ADDED: files field to accept a list of file objects
+    files: Optional[List[FileObject]] = Field(default_factory=list, description="A list of files to be included as context.")
     llm_settings: RemoteLLMSettings = Field(..., alias="llmSettings")
     metadata: Optional[dict] = None
 
+    @field_validator('conversation_id', 'prompt')
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError('Field must not be empty or consist only of whitespace.')
+        return v

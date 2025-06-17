@@ -5,6 +5,7 @@
 #  Created by Raj Singh on 19/05/25.
 #
 
+httpx
 fastapi
 uvicorn[standard]
 langchain
@@ -16,3 +17,9 @@ pydantic
 sentence-transformers
 chromadb
 tiktoken
+langchainhub
+langchain-openai
+langchain-google-genai
+langchain-anthropic
+openai
+google-generativeai

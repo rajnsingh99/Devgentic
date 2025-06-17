@@ -1,13 +1,19 @@
+# filename: Models/ollama_models.py
 from pydantic import BaseModel, Field, HttpUrl, field_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any, Literal
+
 
 class LLMSettings(BaseModel):
     """Configuration specific to the Language Model provider."""
     model_config = {"populate_by_name": True}
-    provider: str = Field("ollama", pattern="^(ollama)$")
+
+    # FIXED: The provider field must be a Literal for the discriminator to work.
+    provider: Literal["ollama"] = "ollama"
+
     base_url: HttpUrl = Field(..., alias='base_url')
     model_name: str = Field(..., alias='model_name')
     context_window_size: Optional[int] = Field(default=None, ge=0, alias='context_window_size')
+
 
 class OllamaChatRequest(BaseModel):
     """Request model for the /ollama/chat endpoint."""
@@ -24,11 +30,13 @@ class OllamaChatRequest(BaseModel):
             raise ValueError('Field must not be empty or consist only of whitespace.')
         return v
 
+
 class AddDocumentRequest(BaseModel):
     """Request model for the /add_document endpoint."""
     text: str
     source: Optional[str] = "default_source"
     metadata: Optional[Dict[str, Any]] = None
+
 
 class AddDocumentResponse(BaseModel):
     """Response model for the /add_document endpoint."""
