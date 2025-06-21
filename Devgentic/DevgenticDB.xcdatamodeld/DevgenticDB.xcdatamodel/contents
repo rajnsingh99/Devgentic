@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788" systemVersion="24F74" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+    <entity name="ChatMessageEntity" representedClassName="ChatMessageEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="code_content" optional="YES" attributeType="String"/>
+        <attribute name="code_language" optional="YES" attributeType="String"/>
+        <attribute name="conversationId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="error_details" optional="YES" attributeType="String"/>
+        <attribute name="error_title" optional="YES" attributeType="String"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="image_url" optional="YES" attributeType="String"/>
+        <attribute name="messageType" optional="YES" attributeType="String"/>
+        <attribute name="senderType" optional="YES" attributeType="String"/>
+        <attribute name="text_content" optional="YES" attributeType="String"/>
+        <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ConversationEntity" inverseName="messages" inverseEntity="ConversationEntity"/>
+    </entity>
+    <entity name="ConversationEntity" representedClassName="ConversationEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="userDefinedTitle" optional="YES" attributeType="String"/>
+        <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>
+    </entity>
+</model>

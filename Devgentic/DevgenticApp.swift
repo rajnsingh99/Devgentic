@@ -12,13 +12,16 @@ struct DevgenticApp: App {
     // Environment variable to open new windows
     @Environment(\.openWindow) var openWindow
     
+    // Get the Core Data service singleton.
+    private let coreDataService = CoreDataPersistenceService.shared
+    
     // Create the persistent stores as StateObjects first.
     @StateObject private var ollamaProfileStore = OllamaProfileStore()
     @StateObject private var agentStore = AgentStore()
     @StateObject private var agentManager = AgentManager()
+    @StateObject private var toolStore = ToolStore()
 
     // MARK: - The single, shared MainApplicationViewModel instance
-    // It is initialized with the stores, and internally uses the OllamaService.shared singleton.
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
 
     init() {
@@ -26,7 +29,6 @@ struct DevgenticApp: App {
         let profileStore = OllamaProfileStore()
         let agStore = AgentStore()
         
-        // The viewModel now uses OllamaService.shared internally.
         let viewModel = MainApplicationViewModel(
             ollamaProfileStore: profileStore,
             agentStore: agStore
@@ -43,11 +45,12 @@ struct DevgenticApp: App {
         WindowGroup {
             if isOnboardingComplete {
                 MainApplicationView()
-                    // Inject the main view model, which contains all necessary services and stores.
                     .environmentObject(mainApplicationViewModel)
                     .environmentObject(agentManager)
-                    .environmentObject(ollamaProfileStore) // Kept for views that might need it directly
-                    .environmentObject(agentStore)       // Kept for views that might need it directly
+                    .environmentObject(ollamaProfileStore)
+                    .environmentObject(agentStore)
+                    .environmentObject(toolStore)
+                    .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
                     .onAppear {
                         agentManager.startAgentIfNeeded()
                     }
@@ -55,8 +58,6 @@ struct DevgenticApp: App {
                 AgentOnboardingRootView(
                     onComplete: { isOnboardingComplete = true },
                     onAgentReady: { agentURL, agentPID in
-                        // This placeholder logic remains from the original file.
-                        // A more robust solution would pass the correct python path.
                         let placeholderVenvPath = ""
                         agentManager.onboardingDidComplete(
                             agentURL: agentURL,
@@ -123,9 +124,9 @@ struct DevgenticApp: App {
         
         // MARK: - Agent Settings Window
         WindowGroup("Agent Settings", id: "agent-settings", for: UUID.self) { $agentID in
-            // Using the V3 profiler view to test the smooth transition
             AgentProfilerView_V3()
                .environmentObject(mainApplicationViewModel)
+               .environmentObject(toolStore)
         }
         .defaultSize(width: 800, height: 600)
     }

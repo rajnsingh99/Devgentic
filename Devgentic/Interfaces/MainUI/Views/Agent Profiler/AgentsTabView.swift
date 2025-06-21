@@ -1,10 +1,4 @@
-//
-//  AgentsTabView.swift
-//  Devgentic
-//
-//  Created by Raj Singh on 03/06/25.
-//
-
+// filename: Views/AgentsTabView.swift
 import SwiftUI
 import os
 
@@ -46,7 +40,7 @@ struct AgentsTabView: View {
     }
 }
 
-// MARK: - AgentRowView (Updated)
+// MARK: - AgentRowView
 struct AgentRowView: View {
     let agent: AgentProfileModel
     @EnvironmentObject var viewModel: MainApplicationViewModel
@@ -96,7 +90,7 @@ struct AgentRowView: View {
     }
 }
 
-// MARK: - Preview Provider (Corrected)
+// MARK: - Preview Provider
 struct AgentsTabView_Previews: PreviewProvider {
     static var previews: some View {
         let mockOllamaProfileStore: OllamaProfileStore = {
@@ -119,13 +113,13 @@ struct AgentsTabView_Previews: PreviewProvider {
             let store = AgentStore()
             var defaultAgent = AgentProfileModel.defaultAgent()
             defaultAgent.isActive = true
-            let testAgent = AgentProfileModel(id: UUID(), name: "Test Agent", role: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, selectedAgentTool: "Web Search")
-            let inactiveAgent = AgentProfileModel(id: UUID(), name: "Inactive Agent", role: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, selectedAgentTool: "None")
+            // --- MODIFIED: Fixed the initializers to use `tools: []` ---
+            let testAgent = AgentProfileModel(id: UUID(), name: "Test Agent", role: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, tools: [])
+            let inactiveAgent = AgentProfileModel(id: UUID(), name: "Inactive Agent", role: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, tools: [])
             store.agents = [defaultAgent, testAgent, inactiveAgent]
             return store
         }()
 
-        // MARK: - Corrected: Initialize view model without OllamaService
         let mockMainApplicationViewModel = MainApplicationViewModel(
             ollamaProfileStore: mockOllamaProfileStore,
             agentStore: mockAgentStore
@@ -137,7 +131,6 @@ struct AgentsTabView_Previews: PreviewProvider {
             .previewLayout(.sizeThatFits)
             .previewDisplayName("Agents Tab View")
             .onAppear {
-                // MARK: - Corrected: Configure the SHARED service instance for the preview
                 let service = OllamaService.shared
                 service.serverStatus = .connected
             }

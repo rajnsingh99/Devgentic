@@ -1,10 +1,4 @@
-//
-//  AgentProfileView.swift
-//  Devgentic
-//
-//  Created by Raj Singh on 08/06/25.
-//
-
+// filename: Views/AgentProfileView.swift
 import SwiftUI
 import os
 
@@ -12,6 +6,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct AgentProfilerView_V3: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
+    // --- ADDED: EnvironmentObject for the ToolStore ---
+    @EnvironmentObject var toolStore: ToolStore
     private var agentStore: AgentStore { viewModel.agentStore }
 
     @State private var selectedAgentID: UUID?
@@ -26,7 +22,6 @@ struct AgentProfilerView_V3: View {
     @State private var newAgentName: String = ""
     @State private var newAgentURL: String = "http://localhost:8000"
     @State private var newAgentDescription: String = ""
-    @State private var newAgentTool: String = "None"
 
     var body: some View {
         NavigationSplitView {
@@ -39,7 +34,6 @@ struct AgentProfilerView_V3: View {
                         newAgentName = ""
                         newAgentURL = "http://localhost:8000"
                         newAgentDescription = ""
-                        newAgentTool = "None"
                         showingAddAgentSheet = true
                     } label: {
                         Image(systemName: "plus.circle.fill")
@@ -78,6 +72,8 @@ struct AgentProfilerView_V3: View {
                     onDelete: { handleDelete(agentID) }
                 )
                 .environmentObject(viewModel)
+                // --- MODIFIED: Pass the toolStore to the detail view ---
+                .environmentObject(toolStore)
 
             } else {
                 Text("Select an Agent Profile or Add a New One")
@@ -86,8 +82,8 @@ struct AgentProfilerView_V3: View {
             }
         }
         .sheet(isPresented: $showingAddAgentSheet) {
-            AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription, newAgentTool: $newAgentTool) {
-                let newAgent = AgentProfileModel(id: UUID(), name: newAgentName, role: newAgentDescription, isActive: true, baseURL: newAgentURL, linkedOllamaProfileID: nil, selectedAgentTool: newAgentTool)
+            AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription) {
+                let newAgent = AgentProfileModel(id: UUID(), name: newAgentName, role: newAgentDescription, isActive: true, baseURL: newAgentURL, linkedOllamaProfileID: nil, tools: [])
                 agentStore.addAgent(agent: newAgent)
                 selectedAgentID = newAgent.id
             }
@@ -109,7 +105,7 @@ struct AgentProfilerView_V3: View {
         }
         .alert("Unsaved Changes", isPresented: $showUnsavedChangesAlert) {
             Button("Discard Changes", role: .destructive) {
-                detailHasUnsavedChanges = false // Reset the flag
+                detailHasUnsavedChanges = false
                 selectedAgentID = pendingSelectionID
                 pendingSelectionID = nil
             }
@@ -150,7 +146,6 @@ struct AddAgentSheet: View {
     @Binding var newAgentName: String
     @Binding var newAgentURL: String
     @Binding var newAgentDescription: String
-    @Binding var newAgentTool: String
     var onAdd: () -> Void
 
     var body: some View {
@@ -159,11 +154,6 @@ struct AddAgentSheet: View {
             TextField("Agent Name (e.g., My Dev Agent)", text: $newAgentName)
             TextField("Agent URL (e.g., http://localhost:8000)", text: $newAgentURL)
             TextField("Description (e.g., My personal coding assistant)", text: $newAgentDescription)
-            Picker("Default Tool:", selection: $newAgentTool) {
-                Text("None").tag("None")
-                Text("Code Interpreter").tag("Code Interpreter")
-                Text("Web Search").tag("Web Search")
-            }.pickerStyle(.menu)
             HStack {
                 Button("Cancel") { isShowing = false }.buttonStyle(.bordered)
                 Button("Add Agent") {
@@ -179,4 +169,3 @@ struct AddAgentSheet: View {
         .frame(minWidth: 400, minHeight: 300)
     }
 }
-

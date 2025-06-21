@@ -6,36 +6,27 @@
 //
 
 // AppDelegate.swift
-import SwiftUI // For @main if DevgenticApp uses it, or AppKit for traditional AppDelegate
+import SwiftUI
 import os
-import HotKey // Assuming HotKey is used as per the provided AppDelegate content
-
-// Assuming ConversationStore and SettingsKeys are defined elsewhere
-// For AgentManager functionality, ensure SettingsKeys includes:
-// agentBaseURL, defaultAgentModel, agentPID, venvPythonPath, isOnboardingComplete, selectedBackend
+import HotKey
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AppDelegate")
     
-    // Make AgentManager accessible
-    private(set) var agentManager: AgentManager? // Changed to private(set)
+    private(set) var agentManager: AgentManager?
     
-    // Static shared instance of AppDelegate to access its properties like agentManager
     static var shared: AppDelegate {
         return NSApplication.shared.delegate as! AppDelegate
     }
 
-    // Properties from the provided AppDelegate
-    var contentWindow: QuickAccessPanelView? // Assuming QuickAccessPanelView is a custom NSPanel or NSWindow subclass
+    var contentWindow: QuickAccessPanelView?
     var hotKey: HotKey?
     private var isTogglingWindow = false
-    private let sessionTimeoutDuration: TimeInterval = 1800 // 30 minutes in seconds
-
+    private let sessionTimeoutDuration: TimeInterval = 1800
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.logger.info("Application did finish launching.")
-        // Initialize AgentManager
         agentManager = AgentManager()
         Self.logger.info("AgentManager initialized in AppDelegate.")
         
@@ -46,7 +37,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Self.logger.info("Onboarding not yet complete. Agent will not be started automatically by AppDelegate.")
         }
         
-        // Setup from the provided AppDelegate
         setupHotkey()
         setupNotificationObserver()
     }
@@ -55,17 +45,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Self.logger.info("Application will terminate. Stopping agent via AgentManager.")
         agentManager?.stopAgent(reason: "Application shutting down")
         
-        // Cleanup from the provided AppDelegate
         NotificationCenter.default.removeObserver(
             self,
-            name: SettingsKeys.showQuickAccessPanelNotification, // Make sure this key is defined
+            name: SettingsKeys.showQuickAccessPanelNotification,
             object: nil
         )
-        hotKey = nil // Deinit of HotKey should handle unregistering
+        hotKey = nil
         Self.logger.info("AppDelegate cleaned up hotkey and observers.")
+        
+        // Save any pending Core Data changes on exit.
+        CoreDataPersistenceService.shared.saveContext()
     }
 
-    // --- Methods from the provided AppDelegate ---
     private func setupHotkey() {
         hotKey = HotKey(key: .space, modifiers: [.option])
         hotKey?.keyDownHandler = { [weak self] in
@@ -78,7 +69,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func setupNotificationObserver() {
-        // Ensure SettingsKeys.showQuickAccessPanelNotification is correctly defined
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleShowQuickAccessPanelNotification(_:)),
@@ -132,7 +122,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let defaults = UserDefaults.standard
-        let lastCloseTime = defaults.double(forKey: SettingsKeys.quickAccessLastCloseTime) // Ensure key is defined
+        let lastCloseTime = defaults.double(forKey: SettingsKeys.quickAccessLastCloseTime)
         let currentTime = Date().timeIntervalSince1970
         let elapsedTime = currentTime - lastCloseTime
         var shouldResumeSession = false
@@ -141,9 +131,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
              Self.logger.info("AppDelegate: Forcing expansion due to transfer request.")
              if lastCloseTime > 0 && elapsedTime > sessionTimeoutDuration {
                  Self.logger.info("AppDelegate: Session timed out during transfer. Starting new conversation session.")
-                 // _ = ConversationStore.shared.startNewQuickAccessConversationSession() // Ensure ConversationStore is accessible
+                 // Your logic for starting a new session would go here.
                  defaults.removeObject(forKey: SettingsKeys.quickAccessLastCloseTime)
-                 defaults.removeObject(forKey: SettingsKeys.quickAccessWasExpandedOnClose) // Ensure key is defined
+                 defaults.removeObject(forKey: SettingsKeys.quickAccessWasExpandedOnClose)
                  shouldResumeSession = false
              } else {
                  shouldResumeSession = true
@@ -153,18 +143,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Self.logger.info("AppDelegate: Quick Access session is within timeout. Resuming.")
         } else if lastCloseTime > 0 {
             Self.logger.info("AppDelegate: Quick Access session timed out. Starting new.")
-            // _ = ConversationStore.shared.startNewQuickAccessConversationSession()
+            // Your logic for starting a new session would go here.
             defaults.removeObject(forKey: SettingsKeys.quickAccessLastCloseTime)
             defaults.removeObject(forKey: SettingsKeys.quickAccessWasExpandedOnClose)
             shouldResumeSession = false
         } else {
             Self.logger.info("AppDelegate: No last close time found. Starting fresh.")
-            // _ = ConversationStore.shared.getOrCreateQuickAccessConversation() // Ensure ConversationStore is accessible
              shouldResumeSession = false
         }
 
         Self.logger.debug("AppDelegate: Creating new QuickAccessPanelView instance. ShouldResumeSession: \(shouldResumeSession), ForceExpandVisual: \(forceExpand)")
-        // Ensure QuickAccessPanelView and its initializer are correctly defined
         let panel = QuickAccessPanelView(shouldResumeSession: shouldResumeSession, forceExpandVisual: forceExpand)
         contentWindow = panel
         
@@ -188,8 +176,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     deinit {
-        // This might not be called for AppDelegate in typical app lifecycle,
-        // cleanup is usually done in applicationWillTerminate.
         Self.logger.info("AppDelegate deinit.")
     }
 }

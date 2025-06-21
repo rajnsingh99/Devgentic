@@ -20,7 +20,7 @@ private let attachedFilesLogger = Logger(subsystem: Bundle.main.bundleIdentifier
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
-    private let store = ConversationStore.shared
+    private let persistenceService = CoreDataPersistenceService.shared
     
     private let fileProcessorService: FileProcessorService
     private let messageAssemblerService: MessageAssemblerService
@@ -86,45 +86,29 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Computed Properties
     var currentChatMessages: [ChatMessage] {
-        guard let selectedID = selectedConversationID,
-              let conversation = self.conversations.first(where: { $0.id == selectedID }) else {
-            return []
-        }
-        let messagesToDisplay = conversation.messages.sorted { $0.timestamp < $1.timestamp }
-        if isUserMessagesOnlyFilterActive {
-            return messagesToDisplay.filter { $0.sender == .user }
-        } else {
-            return messagesToDisplay
-        }
+            guard let selectedID = selectedConversationID,
+                  let conversationEntity = persistenceService.getConversation(withId: selectedID) else {
+                return []
+            }
+            
+            let messagesToDisplay = (conversationEntity.messages as? Set<ChatMessageEntity> ?? [])
+                .map { $0.toChatMessageStruct() }
+                .sorted { $0.timestamp < $1.timestamp }
+
+            if isUserMessagesOnlyFilterActive {
+                return messagesToDisplay.filter { $0.sender == .user }
+            } else {
+                return messagesToDisplay
+            }
     }
 
     var currentConversationTitle: String {
-        guard let conversation = self.conversations.first(where: { $0.id == selectedConversationID }) else {
-            return self.conversations.isEmpty ? "Devgentic" : "Select Chat"
-        }
-        return conversation.displayTitle
-    }
-
-    var groupedConversations: [String: [Conversation]] {
-        let grouped = self.conversations.reduce(into: [String: [Conversation]]()) { result, conversation in
-            let groupKey = self.groupKey(for: conversation.timestamp)
-            result[groupKey, default: []].append(conversation)
-        }
-        return grouped.mapValues { $0.sorted { $0.timestamp > $1.timestamp } }
-    }
-
-    var sortedGroupKeys: [String] {
-        let dateFormatter = self.groupDateFormatter
-        return groupedConversations.keys.sorted { key1, key2 in
-            if key1 == "Today" { return true }
-            if key2 == "Today" { return false }
-            if key1 == "Yesterday" { return true }
-            if key2 == "Yesterday" { return false }
-            if let date1 = dateFormatter.date(from: key1), let date2 = dateFormatter.date(from: key2) {
-                return date1 > date2
+            guard let selectedID = selectedConversationID,
+                  let conversationEntity = persistenceService.getConversation(withId: selectedID) else {
+                return "Devgentic" // Default title remains.
             }
-            return key1 > key2
-        }
+            // Use the struct's displayTitle logic by converting the entity.
+            return conversationEntity.toConversationStruct().displayTitle
     }
     
     // MARK: - Initialization
@@ -146,10 +130,6 @@ class MainApplicationViewModel: ObservableObject {
         
         self.llmCommunicator = llmCommunicator ?? DefaultLLMCommunicator(fileProcessorService: self.fileProcessorService)
 
-        self.conversations = store.getAllConversations()
-        validateSelectedConversation()
-        observeConversationStoreChanges()
-        
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
         
         if let storedAgentIDString = UserDefaults.standard.string(forKey: SettingsKeys.selectedAgentID),
@@ -223,26 +203,6 @@ class MainApplicationViewModel: ObservableObject {
             }
         }
     }
-
-    private func observeConversationStoreChanges() {
-        store.$conversations
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] updatedConversationsFromStore in
-                self?.conversations = updatedConversationsFromStore
-                self?.validateSelectedConversation()
-            }
-            .store(in: &cancellables)
-    }
-    
-    private func validateSelectedConversation() {
-        if let currentSelectedID = selectedConversationID {
-            if !conversations.contains(where: { $0.id == currentSelectedID }) {
-                selectedConversationID = conversations.first?.id
-            }
-        } else if !conversations.isEmpty {
-            selectedConversationID = conversations.first?.id
-        }
-    }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)
     func toggleUserMessagesFilter() {
@@ -254,13 +214,7 @@ class MainApplicationViewModel: ObservableObject {
         if showPromptLibrary { showPromptLibrary = false }
         userInput = ""
         clearAttachedFiles()
-        
-        let currentConversations = store.getAllConversations()
-        if let mostRecentConv = currentConversations.first(where: {$0.messages.isEmpty}) {
-            selectedConversationID = mostRecentConv.id
-        } else {
-            _ = createAndSelectNewConversation()
-        }
+        createAndSelectNewConversation()
         isUserMessagesOnlyFilterActive = false
     }
 
@@ -270,12 +224,12 @@ class MainApplicationViewModel: ObservableObject {
         if showPromptLibrary { showPromptLibrary = false }
         
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
-        store.addConversation(newConversation)
+        persistenceService.addConversation(from: newConversation)
         selectedConversationID = newConversation.id
         isUserMessagesOnlyFilterActive = false
         return newConversation.id
     }
-
+    
     // MARK: - Message Sending Logic
     func sendMessage(attributedString: NSAttributedString) {
         if showSettings { showSettings = false }
@@ -295,23 +249,21 @@ class MainApplicationViewModel: ObservableObject {
         }
 
         var conversationIDToUse: UUID
-        if let currentID = selectedConversationID, store.getConversation(withId: currentID) != nil {
+        if let currentID = selectedConversationID, persistenceService.getConversation(withId: currentID) != nil {
             conversationIDToUse = currentID
         } else {
             conversationIDToUse = createAndSelectNewConversation()
         }
         
-        guard var targetConversationForUserMessage = store.getConversation(withId: conversationIDToUse) else {
+        guard var targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
             logger.error("CRITICAL: Could not find conversation object for ID: \(conversationIDToUse.uuidString) before sending user message.")
             isSending = false
             return
         }
 
         if !plainUserQueryFromEditor.isEmpty {
-            let userMessageForDisplay = ChatMessage(conversationId: conversationIDToUse, sender: .user, content: .plainText(plainUserQueryFromEditor))
-            targetConversationForUserMessage.messages.append(userMessageForDisplay)
-            targetConversationForUserMessage.timestamp = Date()
-            store.updateConversation(targetConversationForUserMessage)
+            let userMessage = ChatMessage(conversationId: conversationIDToUse, sender: .user, content: .plainText(plainUserQueryFromEditor))
+            persistenceService.addMessage(userMessage, to: targetConversationEntity)
         }
         
         self.isSending = true
@@ -330,14 +282,9 @@ class MainApplicationViewModel: ObservableObject {
                 allNewMessages.append(ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: .error(title: "Error", details: errorMsg)))
             }
             
-            if !allNewMessages.isEmpty {
-                guard var targetConversation = store.getConversation(withId: conversationIDToUse) else {
-                    self.isSending = false
-                    return
-                }
-                targetConversation.messages.append(contentsOf: allNewMessages)
-                targetConversation.timestamp = Date()
-                store.updateConversation(targetConversation)
+            if !allNewMessages.isEmpty, let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
+                // Add the new batch of messages from the agent.
+                persistenceService.addMessages(allNewMessages, to: targetEntity)
             }
             
             self.userInput = ""
@@ -395,7 +342,7 @@ class MainApplicationViewModel: ObservableObject {
         let agentConfig = AgentConfigItemPayload(
             id: selectedAgent.id.uuidString,
             role: selectedAgent.role,
-            tools: selectedAgent.selectedAgentTool == "None" ? [] : [selectedAgent.selectedAgentTool],
+            tools: selectedAgent.tools.map { $0.id },
             llmSettings: llmSettings
         )
 
@@ -646,31 +593,24 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     func deleteConversation(conversationID: UUID) {
-        store.deleteConversation(withId: conversationID)
+        persistenceService.deleteConversation(with: conversationID)
+        // The UI will update automatically. Just clear the selection if it was the one deleted.
         if selectedConversationID == conversationID {
-            selectedConversationID = conversations.first(where: { $0.id != conversationID })?.id
-        }
-    }
-
-    func deleteMultipleConversations(ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        store.deleteConversations(withIds: ids)
-        if let currentSelected = selectedConversationID, ids.contains(currentSelected) {
-            selectedConversationID = conversations.first(where: { !ids.contains($0.id) })?.id
+            selectedConversationID = nil
         }
     }
     
-    func deleteConversationsInGroup(groupKey: String) {
-        let idsToDelete = Set(self.conversations.filter { self.groupKey(for: $0.timestamp) == groupKey }.map { $0.id })
-        if idsToDelete.isEmpty { return }
-        deleteMultipleConversations(ids: idsToDelete)
+    func deleteMultipleConversations(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        for id in ids { persistenceService.deleteConversation(with: id) }
+        if let currentSelected = selectedConversationID, ids.contains(currentSelected) { selectedConversationID = nil }
     }
     
     func renameConversation(conversationID: UUID, newTitle: String) {
-        guard var conversationToRename = store.getConversation(withId: conversationID) else { return }
+        guard let conversationToRename = persistenceService.getConversation(withId: conversationID) else { return }
         let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         conversationToRename.userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
-        store.updateConversation(conversationToRename)
+        persistenceService.saveContext()
     }
 
 
