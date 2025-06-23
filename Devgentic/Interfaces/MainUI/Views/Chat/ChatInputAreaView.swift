@@ -20,6 +20,7 @@ struct ChatInputAreaView: View {
 
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
+    @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
 
     // MARK: - State for Suggestions & Popups
     @State private var showPromptSuggestions: Bool = false
@@ -47,6 +48,11 @@ struct ChatInputAreaView: View {
     private let cornerRadiusValue: CGFloat = 12
     private let textEditorMinHeight: CGFloat = 24
     private let textEditorMaxHeight: CGFloat = 200
+    
+    private var isInputEnabled: Bool {
+            // Input is disabled if there's no active profile, or during other specific states.
+            ollamaProfileStore.currentProfile != nil && !isSending && !showSettings
+    }
 
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
         [
@@ -140,17 +146,15 @@ struct ChatInputAreaView: View {
         .background(VisualEffectBlur(material: .hudWindow))
         .cornerRadius(cornerRadiusValue)
         .overlay( RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(Color.gray.opacity(0.4), lineWidth: 1) )
+        .opacity(isInputEnabled ? 1.0 : 0.6)
     }
 
     private var editorAndPlaceholderArea: some View {
-        ZStack(alignment: .topLeading) {
-            CustomTextEditor(
+            ZStack(alignment: .topLeading) {
+                CustomTextEditor(
                 text: $userInput,
                 onCommit: { attributedString in
-                    logger.debug("onCommit from CustomTextEditor (Enter pressed). Text to send: \"\(attributedString.string.prefix(50))\"")
-                     if !showPromptSuggestions && !showFileSuggestions {
-                        self.onSendMessage(attributedString)
-                     }
+                    if isInputEnabled { self.onSendMessage(attributedString) }
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
@@ -165,12 +169,10 @@ struct ChatInputAreaView: View {
                     self.editorTextView = nsTextViewInstance
                 }
             )
-            .fixedSize(horizontal: false, vertical: true)
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
-
-            if userInput.isEmpty && !isInputFocused.wrappedValue && mainViewModel.attachedFiles.isEmpty {
+            if userInput.isEmpty && !isInputFocused.wrappedValue {
                 Text(placeholderText)
-                    .font(Font.system(size: NSFont.systemFontSize))
+                    .font(.system(size: NSFont.systemFontSize))
                     .foregroundColor(Color(NSColor.placeholderTextColor))
                     .padding(.leading, 5).padding(.top, 3)
                     .allowsHitTesting(false)
@@ -178,10 +180,12 @@ struct ChatInputAreaView: View {
         }
         .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
         .focused(isInputFocused)
-        .disabled(isSending || showSettings || (hasInputText && mainViewModel.voiceInputState == .processing) )
+        // MODIFIED: The editor is directly disabled based on the new computed property.
+        .disabled(!isInputEnabled)
     }
     
     private var placeholderText: String {
+        if ollamaProfileStore.currentProfile == nil { return "Please configure an Ollama Profile to start..." }
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
         if userInput.isEmpty {
             switch mainViewModel.voiceInputState {
@@ -195,32 +199,30 @@ struct ChatInputAreaView: View {
     }
 
     private var toolbarArea: some View {
-        HStack(spacing: 12) {
-            Button(action: openFilePicker) {
-                Image(systemName: "plus").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .disabled(isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing)
-            .help("Attach files")
+            HStack(spacing: 12) {
+                Button(action: openFilePicker) {
+                    Image(systemName: "plus").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Attach files")
 
-            Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
-                Image(systemName: "globe").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .disabled(isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing)
-            .help("Web Search (Not Implemented)")
+                Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
+                    Image(systemName: "globe").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Web Search (Not Implemented)")
 
-            // MARK: New: Agent Picker Button
-            agentPickerButton()
-                .disabled(isSending || showSettings || mainViewModel.voiceInputState == .recording || mainViewModel.voiceInputState == .processing)
-            
-            Spacer()
-            
-            dynamicActionButton
+                agentPickerButton()
+
+                Spacer()
+                
+                dynamicActionButton
+            }
+            .padding(.horizontal, 15)
+            .padding(.bottom, 10)
+            // MODIFIED: The entire toolbar is disabled if input is not enabled.
+            .disabled(!isInputEnabled)
         }
-        .padding(.horizontal, 15)
-        .padding(.bottom, 10)
-    }
 
     // MARK: - Agent Picker Button (Updated to trigger pop-up)
     @ViewBuilder

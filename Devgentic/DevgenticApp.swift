@@ -114,6 +114,7 @@ struct DevgenticApp: App {
                 .environmentObject(agentManager)
                 .environmentObject(ollamaProfileStore)
         }
+        .defaultSize(width: 850, height: 700)
 
         // MARK: - Ollama Profiles Window
         WindowGroup("Ollama Profiles", id: "ollama-profiles") {
@@ -121,6 +122,7 @@ struct DevgenticApp: App {
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(ollamaProfileStore)
         }
+        .defaultSize(width: 850, height: 700)
         
         // MARK: - Agent Settings Window
         WindowGroup("Agent Settings", id: "agent-settings", for: UUID.self) { $agentID in
@@ -128,6 +130,6 @@ struct DevgenticApp: App {
                .environmentObject(mainApplicationViewModel)
                .environmentObject(toolStore)
         }
-        .defaultSize(width: 800, height: 600)
+        .defaultSize(width: 850, height: 700)
     }
 }

@@ -14,7 +14,9 @@ struct OllamaProfilesView: View {
     @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
     @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
 
+    // This state now drives the selection in the List.
     @State private var selectedProfileID: UUID?
+
     @State private var showingAddProfilePopover = false
     @State private var showDeleteConfirmation = false
     @State private var profileToDelete: OllamaProfileModel?
@@ -22,8 +24,9 @@ struct OllamaProfilesView: View {
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
+                // --- Header to Add Profiles ---
                 HStack {
-                    Text("Add Profile")
+                    Text("Ollama Profiles")
                         .font(.headline)
                     Spacer()
                     Button {
@@ -42,27 +45,29 @@ struct OllamaProfilesView: View {
                 }
                 .padding()
 
+                // --- Profiles List ---
                 List(selection: $selectedProfileID) {
                     ForEach(ollamaProfileStore.profiles) { profile in
                         HStack {
                             Text(profile.profileName)
                             Spacer()
+                            // Show a checkmark for the globally selected active profile
                             if ollamaProfileStore.selectedProfileID == profile.id {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundColor(.green)
                                     .help("Active Profile")
                             }
                         }
-                        .tag(profile.id) // Use .tag for selection
+                        .tag(profile.id)
                         .contextMenu {
                             Button("Set as Active") {
+                                // Set the global active profile
                                 ollamaProfileStore.selectedProfileID = profile.id
                             }
-                            if ollamaProfileStore.profiles.count > 1 && ollamaProfileStore.selectedProfileID != profile.id {
-                                Button("Delete Profile", role: .destructive) {
-                                    profileToDelete = profile
-                                    showDeleteConfirmation = true
-                                }
+                            // MODIFIED: Removed condition to allow deleting any profile
+                            Button("Delete Profile", role: .destructive) {
+                                profileToDelete = profile
+                                showDeleteConfirmation = true
                             }
                         }
                     }
@@ -72,9 +77,11 @@ struct OllamaProfilesView: View {
             .frame(minWidth: 220)
             
         } detail: {
+            // --- Detail View ---
             if let profileID = selectedProfileID,
                let index = ollamaProfileStore.profiles.firstIndex(where: { $0.id == profileID }) {
                 
+                // Binding to the profile in the store's array
                 let profileBinding = $ollamaProfileStore.profiles[index]
                 
                 ScrollView {
@@ -87,18 +94,36 @@ struct OllamaProfilesView: View {
                     .padding(20)
                 }
             } else {
-                Text("Select an Ollama Profile")
-                    .font(.title)
-                    .foregroundColor(.secondary)
+                // --- Placeholder for when no profile is selected or none exist ---
+                VStack(spacing: 10) {
+                     Image(systemName: "rectangle.stack.badge.plus")
+                         .font(.largeTitle)
+                         .foregroundColor(.secondary)
+                     Text(ollamaProfileStore.profiles.isEmpty ? "No Ollama Profiles" : "Select a Profile")
+                         .font(.title)
+                     Text(ollamaProfileStore.profiles.isEmpty ? "Click the '+' button to add a new profile." : "Select a profile from the list to view its details.")
+                         .foregroundColor(.secondary)
+                         .multilineTextAlignment(.center)
+                         .frame(maxWidth: 300)
+                }
             }
         }
         .onAppear {
+            // Sync local selection with the global selection from the store
             if selectedProfileID == nil {
-                 selectedProfileID = ollamaProfileStore.profiles.first?.id
+                 selectedProfileID = ollamaProfileStore.selectedProfileID ?? ollamaProfileStore.profiles.first?.id
             }
         }
         .onChange(of: ollamaProfileStore.selectedProfileID) { _, newID in
+            // Keep local selection in sync with global changes
             selectedProfileID = newID
+        }
+        .onChange(of: selectedProfileID) { _, newID in
+            // When the user actively selects a profile in this view,
+            // update the globally active profile as well.
+            if ollamaProfileStore.selectedProfileID != newID {
+                ollamaProfileStore.selectedProfileID = newID
+            }
         }
         .confirmationDialog("Delete Ollama Profile", isPresented: $showDeleteConfirmation, presenting: profileToDelete) { profile in
              Button("Delete '\(profile.profileName)'", role: .destructive) {
@@ -110,61 +135,29 @@ struct OllamaProfilesView: View {
          }
     }
 
+    /// Handles the deletion of a profile.
     private func handleDelete(_ idToDelete: UUID) {
+        // Find the index before telling the store to delete.
         guard let indexToDelete = ollamaProfileStore.profiles.firstIndex(where: { $0.id == idToDelete }) else { return }
+
+        // If the profile being deleted is the one selected in the sidebar, plan to select another.
         if selectedProfileID == idToDelete {
              if ollamaProfileStore.profiles.count > 1 {
-                 if indexToDelete == ollamaProfileStore.profiles.count - 1 {
+                 // Select the previous item, or the next if it's the first
+                 if indexToDelete > 0 {
                      selectedProfileID = ollamaProfileStore.profiles[indexToDelete - 1].id
                  } else {
+                     // If there's a next item (count > 1), select it
                      selectedProfileID = ollamaProfileStore.profiles[indexToDelete + 1].id
                  }
              } else {
+                 // This was the last profile, so no selection is possible.
                  selectedProfileID = nil
              }
         }
         
+        // Tell the store to delete the profile from Core Data.
+        // The store will handle updating its `profiles` array and the `selectedProfileID`.
         ollamaProfileStore.deleteProfile(id: idToDelete)
-    }
-}
-
-// MARK: - Preview Provider
-struct OllamaProfilesView_Previews: PreviewProvider {
-    static func createMockViewModel() -> MainApplicationViewModel {
-        let profileStore = OllamaProfileStore()
-        if profileStore.profiles.isEmpty {
-            let defaultProfile = OllamaProfileModel.defaultProfile()
-            let remoteProfile = OllamaProfileModel(
-                id: UUID(), profileName: "Remote Server", baseURL: "http://192.168.1.100:11434",
-                llmModelName: "llama2:7b", temperature: 0.7, topK: 30, topP: 0.8,
-                repeatPenalty: 1.0, contextWindowSize: 2048, gpuLayers: 0,
-                maxInlineChars: 2000, maxAttachedFiles: 3,
-                textFileInclusionStrategy: .alwaysUsePaths,
-                imageHandlingStrategy: .doNotInclude,
-                binaryFileHandlingStrategy: .doNotInclude
-            )
-            profileStore.profiles = [defaultProfile, remoteProfile]
-            profileStore.selectedProfileID = defaultProfile.id
-        }
-        
-        return MainApplicationViewModel(
-            ollamaProfileStore: profileStore,
-            agentStore: AgentStore()
-        )
-    }
-
-    static var previews: some View {
-        let mockViewModel = createMockViewModel()
-        
-        OllamaProfilesView()
-            .environmentObject(mockViewModel)
-            .environmentObject(mockViewModel.ollamaProfileStore)
-            .frame(width: 900, height: 700)
-            .previewDisplayName("Ollama Profiles Window")
-            .onAppear {
-                let service = OllamaService.shared
-                service.serverStatus = .connected
-                service.localModels = ["gemma:2b", "llama3:8b", "mistral:7b"]
-            }
     }
 }

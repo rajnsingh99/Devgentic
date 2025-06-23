@@ -8,44 +8,75 @@
 import SwiftUI
 import os
 
-// Logger (Optional)
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LocalAISettingsView")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaDetailView")
 
-// MARK: - Local AI Settings Detail View
 struct OllamaDetailView: View {
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
     @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
     private var ollamaService: OllamaService { mainViewModel.ollamaService }
     
-    // The original profile binding from the parent
     @Binding var ollamaProfile: OllamaProfileModel
-    
-    // A closure to handle deletion, provided by the parent view
     var onDelete: () -> Void
 
-    // Local state for editing the profile
     @State private var editableProfile: OllamaProfileModel
     @State private var hasUnsavedChanges = false
-    
     @State private var showingRemovalConfirmation = false
-    @State private var modelToRemoveFromName: String? = nil
 
     init(ollamaProfileBinding: Binding<OllamaProfileModel>, onDelete: @escaping () -> Void) {
         self._ollamaProfile = ollamaProfileBinding
         self.onDelete = onDelete
-        // Initialize the local editable state from the binding's initial value
         self._editableProfile = State(initialValue: ollamaProfileBinding.wrappedValue)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
-            // --- Header ---
             Text("Ollama Profile Settings")
                 .font(.title2)
                 .padding(.bottom, 5)
 
             Divider()
 
+            // --- Full content of the view ---
+            fullBodyContent
+        }
+        .padding()
+        .onChange(of: editableProfile) { _, _ in checkForChanges() }
+        .onChange(of: ollamaProfile) { _, newProfile in
+            resetState(with: newProfile)
+        }
+        .confirmationDialog("Delete Ollama Profile", isPresented: $showingRemovalConfirmation, presenting: ollamaProfile) { profile in
+            Button("Delete '\(profile.profileName)'", role: .destructive) {
+                onDelete()
+            }
+        } message: { profile in
+            Text("Are you sure you want to remove the profile '\(profile.profileName)'? This action cannot be undone.")
+        }
+    }
+    
+    private func checkForChanges() {
+        hasUnsavedChanges = editableProfile != ollamaProfile
+    }
+    
+    private func saveChanges() {
+        // Update the binding to reflect changes immediately in the parent view.
+        ollamaProfile = editableProfile
+        // Call the store's method to persist the changes to Core Data.
+        ollamaProfileStore.updateProfile(profile: editableProfile)
+        hasUnsavedChanges = false
+        logger.info("Saved changes for Ollama profile: \(editableProfile.profileName)")
+    }
+    
+    private func resetState(with newProfile: OllamaProfileModel) {
+        if editableProfile != newProfile {
+            editableProfile = newProfile
+            hasUnsavedChanges = false
+        }
+    }
+    
+    // Full body content (for completeness, even though parts are unchanged)
+    @ViewBuilder
+    private var fullBodyContent: some View {
+        VStack(alignment: .leading, spacing: 15) {
             // --- Profile Details ---
             VStack(alignment: .leading, spacing: 10) {
                 Text("Profile Details")
@@ -158,14 +189,12 @@ struct OllamaDetailView: View {
             
             // --- Action Buttons ---
             HStack {
-                // Show delete button only if there is more than one profile
-                if ollamaProfileStore.profiles.count > 1 {
-                    Button("Delete Profile") {
-                        showingRemovalConfirmation = true
-                    }
-                    .foregroundColor(.red)
-                    .buttonStyle(.bordered)
+                // MODIFIED: Removed the condition. The delete button is now always visible.
+                Button("Delete Profile") {
+                    showingRemovalConfirmation = true
                 }
+                .foregroundColor(.red)
+                .buttonStyle(.bordered)
                 
                 Spacer()
                 
@@ -175,44 +204,6 @@ struct OllamaDetailView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!hasUnsavedChanges || editableProfile.profileName.isEmpty)
             }
-        }
-        .padding()
-        .onChange(of: editableProfile) { _, _ in checkForChanges() }
-        .onChange(of: ollamaProfile) { _, newProfile in
-            // When the parent view switches which profile we are editing,
-            // reset the local state.
-            resetState(with: newProfile)
-        }
-        .confirmationDialog("Delete Ollama Profile", isPresented: $showingRemovalConfirmation, presenting: ollamaProfile) { profile in
-            Button("Delete '\(profile.profileName)'", role: .destructive) {
-                onDelete()
-            }
-        } message: { profile in
-            Text("Are you sure you want to remove the profile '\(profile.profileName)'? This action cannot be undone.")
-        }
-    }
-    
-    /// Checks if any of the editable fields differ from the original profile data.
-    private func checkForChanges() {
-        if editableProfile != ollamaProfile {
-            hasUnsavedChanges = true
-        } else {
-            hasUnsavedChanges = false
-        }
-    }
-    
-    /// Saves the changes from the local state back to the binding.
-    private func saveChanges() {
-        ollamaProfile = editableProfile
-        hasUnsavedChanges = false
-        logger.info("Saved changes for Ollama profile: \(editableProfile.profileName)")
-    }
-    
-    /// Resets the local state to match the provided profile.
-    private func resetState(with newProfile: OllamaProfileModel) {
-        if editableProfile != newProfile {
-            editableProfile = newProfile
-            hasUnsavedChanges = false
         }
     }
 }

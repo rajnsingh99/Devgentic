@@ -13,9 +13,9 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 
 // MARK: - Main View
 struct MainApplicationView: View {
-    // --- ViewModel ---
-    // MODIFIED: Changed from @StateObject to @EnvironmentObject
     @EnvironmentObject private var viewModel: MainApplicationViewModel
+    @EnvironmentObject private var ollamaProfileStore: OllamaProfileStore
+    @Environment(\.openWindow) var openWindow
     @StateObject private var explorerViewModel = ExplorerViewModel() // This remains a @StateObject owned by MainApplicationView
 
     // --- View State ---
@@ -31,6 +31,10 @@ struct MainApplicationView: View {
     // --- Constants for UI adjustments ---
     private let chatHistoryBottomPadding: CGFloat = 130
     private let inputAreaCornerRadius: CGFloat = 12
+    
+    private var isChatReady: Bool {
+        ollamaProfileStore.currentProfile != nil
+    }
 
     // MARK: - Body
     var body: some View {
@@ -90,17 +94,12 @@ struct MainApplicationView: View {
                     }
                     .frame(maxHeight: .infinity, alignment: .top)
                     .overlay {
-                        if viewModel.selectedConversationID == nil && viewModel.conversations.isEmpty {
-                            Text("Start a new conversation to begin.")
+                        if !isChatReady {
+                            NoProfileConfiguredView(openWindow: openWindow)
+                        } else if viewModel.selectedConversationID == nil {
+                            // This part handles conversation selection prompts
+                            Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
                                 .font(.title3)
-                                .foregroundColor(.gray.opacity(0.7))
-                        } else if viewModel.selectedConversationID == nil && !viewModel.conversations.isEmpty {
-                            Text("Select a conversation or start a new one.")
-                                .font(.title3)
-                                .foregroundColor(.gray.opacity(0.7))
-                        } else if viewModel.isUserMessagesOnlyFilterActive && viewModel.currentChatMessages.isEmpty && viewModel.selectedConversationID != nil {
-                            Text("No user messages in this conversation yet.")
-                                .font(.callout)
                                 .foregroundColor(.gray.opacity(0.7))
                         }
                     }
@@ -208,6 +207,38 @@ struct MainApplicationView: View {
      }
 }
 
+// MARK: - No Profile Configured View
+struct NoProfileConfiguredView: View {
+    var openWindow: OpenWindowAction
+
+    var body: some View {
+        VStack(spacing: 15) {
+            Image(systemName: "person.badge.plus")
+                .font(.system(size: 50))
+                .foregroundColor(.secondary)
+
+            Text("No Ollama Profile Configured")
+                .font(.title2)
+                .fontWeight(.bold)
+
+            Text("You need to set up an Ollama profile before you can start chatting.")
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 350)
+            
+            Button("Configure Profiles...") {
+                // This opens the dedicated window for managing Ollama profiles
+                openWindow(id: "ollama-profiles")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
+    }
+}
+
+
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
         // MODIFIED: Inject MainApplicationViewModel and ExplorerViewModel for the preview
@@ -218,3 +249,5 @@ struct MainApplicationView_ZStack_Previews: PreviewProvider {
             .previewDisplayName("Main View with Resizable Sidebar")
     }
 }
+
+
