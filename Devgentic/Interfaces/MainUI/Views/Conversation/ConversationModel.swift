@@ -1,4 +1,10 @@
-// Models/Conversation.swift
+//
+//  ConversationModel.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 03/05/25.
+//
+
 import Foundation
 
 struct Conversation: Identifiable, Codable, Equatable {

@@ -1,4 +1,10 @@
-// filename: Views/AgentProfileView.swift
+//
+//  AgentProfilerView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 03/06/25.
+//
+
 import SwiftUI
 import os
 
@@ -6,7 +12,6 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct AgentProfilerView_V3: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    // --- ADDED: EnvironmentObject for the ToolStore ---
     @EnvironmentObject var toolStore: ToolStore
     private var agentStore: AgentStore { viewModel.agentStore }
 
@@ -44,16 +49,17 @@ struct AgentProfilerView_V3: View {
                     .help("Add New Agent Profile")
                 }
                 .padding()
+                
+                Divider()
 
                 List(selection: $selectedAgentID) {
                     ForEach(agentStore.agents) { agent in
                         Text(agent.name)
                             .tag(agent.id)
                             .contextMenu {
-                                if agentStore.agents.count > 1 {
-                                    Button("Delete", role: .destructive) { handleDelete(agent.id) }
-                                }
+                                Button("Delete", role: .destructive) { handleDelete(agent.id) }
                             }
+                            .padding(5)
                     }
                 }
                 .listStyle(.sidebar)
@@ -72,7 +78,6 @@ struct AgentProfilerView_V3: View {
                     onDelete: { handleDelete(agentID) }
                 )
                 .environmentObject(viewModel)
-                // --- MODIFIED: Pass the toolStore to the detail view ---
                 .environmentObject(toolStore)
 
             } else {
@@ -83,7 +88,17 @@ struct AgentProfilerView_V3: View {
         }
         .sheet(isPresented: $showingAddAgentSheet) {
             AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription) {
-                let newAgent = AgentProfileModel(id: UUID(), name: newAgentName, role: newAgentDescription, isActive: true, baseURL: newAgentURL, linkedOllamaProfileID: nil, tools: [])
+                let activeOllamaProfileID = viewModel.ollamaProfileStore.selectedProfileID
+                
+                let newAgent = AgentProfileModel(
+                    id: UUID(),
+                    name: newAgentName,
+                    role: newAgentDescription,
+                    isActive: true,
+                    baseURL: newAgentURL,
+                    linkedOllamaProfileID: activeOllamaProfileID, // Assign active profile
+                    tools: []
+                )
                 agentStore.addAgent(agent: newAgent)
                 selectedAgentID = newAgent.id
             }
@@ -118,20 +133,19 @@ struct AgentProfilerView_V3: View {
     }
 
     private func handleDelete(_ idToDelete: UUID) {
-        guard agentStore.agents.count > 1 else {
-            logger.warning("Attempted to delete the last agent. This is not allowed.")
-            return
-        }
-        
         guard let indexToDelete = agentStore.agents.firstIndex(where: { $0.id == idToDelete }) else {
             return
         }
 
         if selectedAgentID == idToDelete {
-            if indexToDelete == agentStore.agents.count - 1 {
-                selectedAgentID = agentStore.agents[indexToDelete - 1].id
+            if agentStore.agents.count > 1 {
+                if indexToDelete == agentStore.agents.count - 1 {
+                    selectedAgentID = agentStore.agents[indexToDelete - 1].id
+                } else {
+                    selectedAgentID = agentStore.agents[indexToDelete + 1].id
+                }
             } else {
-                selectedAgentID = agentStore.agents[indexToDelete + 1].id
+                selectedAgentID = nil
             }
         }
 
@@ -167,5 +181,46 @@ struct AddAgentSheet: View {
         .textFieldStyle(.roundedBorder)
         .padding(30)
         .frame(minWidth: 400, minHeight: 300)
+    }
+}
+
+// MARK: - Preview Provider
+struct AgentProfilerView_V3_Previews: PreviewProvider {
+    static var previews: some View {
+        let mockOllamaProfileStore: OllamaProfileStore = {
+            let store = OllamaProfileStore()
+            let defaultProfile = OllamaProfileModel.defaultProfile()
+            store.profiles = [defaultProfile]
+            store.selectedProfileID = defaultProfile.id
+            return store
+        }()
+
+        let mockAgentStore: AgentStore = {
+            let store = AgentStore()
+            var agent1 = AgentProfileModel.defaultAgent()
+            agent1.name = "Developer Agent"
+            agent1.linkedOllamaProfileID = mockOllamaProfileStore.profiles.first?.id
+            
+            var agent2 = AgentProfileModel.defaultAgent()
+            agent2.name = "Research Assistant"
+            agent2.role = "Helps with research and data gathering."
+            agent2.isActive = false
+            
+            store.agents = [agent1, agent2]
+            return store
+        }()
+
+        let mockToolStore = ToolStore()
+        
+        let mockMainViewModel = MainApplicationViewModel(
+            ollamaProfileStore: mockOllamaProfileStore,
+            agentStore: mockAgentStore
+        )
+
+        AgentProfilerView_V3()
+            .environmentObject(mockMainViewModel)
+            .environmentObject(mockToolStore)
+            .frame(width: 800, height: 600)
+            .previewDisplayName("Agent Profiler View")
     }
 }

@@ -6,20 +6,37 @@
 //
 
 import SwiftUI
+import CoreData
+import os
 
-/// Manages the available tool configurations (providers) for the application.
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolStore")
+
+/// Manages the available tool configurations (providers) for the application by fetching them from Core Data.
 class ToolStore: ObservableObject {
-    @Published var providers: [ToolConfigModel]
+    @Published var providers: [ToolConfigModel] = []
+    
+    private let persistenceService: CoreDataServiceProtocol
 
-    init() {
-        self.providers = ToolStore.createMockData()
+    init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared) {
+        self.persistenceService = persistenceService
+        // Since API calls will populate this, we will call loadProviders
+        // whenever the data is expected to change. For now, init is a good place.
+        loadProviders()
     }
 
-    // Creates mock data for demonstration purposes.
-    // In a real application, this data would likely be fetched from a server.
+    /// Fetches tool configurations from Core Data and updates the published `providers` array.
+    func loadProviders() {
+        let configEntities = persistenceService.fetchToolConfigs()
+        
+        DispatchQueue.main.async {
+            self.providers = configEntities.map { $0.toToolConfigModel() }
+            logger.info("Successfully loaded \(self.providers.count) tool providers from Core Data.")
+        }
+    }
+
+    // This static function can be kept for creating mock data for previews or future testing.
     static func createMockData() -> [ToolConfigModel] {
         return [
-            // MCP Provider Example
             ToolConfigModel(
                 id: UUID(),
                 displayName: "GitHub MCP Server",
@@ -33,7 +50,6 @@ class ToolStore: ObservableObject {
                     ProvidedTool(id: "gh_get_repo_details", description: "Fetches details about a specific repository.")
                 ]
             ),
-            // Custom Tool Provider Example
             ToolConfigModel(
                 id: UUID(),
                 displayName: "Web Search",
@@ -43,17 +59,6 @@ class ToolStore: ObservableObject {
                 description: "A custom tool for searching the web.",
                 availableTools: [
                     ProvidedTool(id: "internal_web_search", description: "Performs a web search with a given query and returns the results.")
-                ]
-            ),
-            // Another Custom Tool
-            ToolConfigModel(
-                id: UUID(),
-                displayName: "Code Interpreter",
-                toolType: .custom,
-                provider: "Internal",
-                description: "A sandboxed environment to execute code.",
-                availableTools: [
-                    ProvidedTool(id: "internal_code_interpreter", description: "Executes a given Python code snippet in a secure sandbox.")
                 ]
             )
         ]

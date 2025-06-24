@@ -1,4 +1,10 @@
-// filename: Views/AgentDetailView.swift
+//
+//  AgentDetailView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 03/06/25.
+//
+
 import SwiftUI
 import os
 
@@ -30,11 +36,6 @@ struct AgentDetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 15) {
-                Text("Agent Profile Settings")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.bottom, 5)
-                Divider()
                 profileDetailsSection
                 Divider()
                 llmIntegrationSection
@@ -88,7 +89,6 @@ struct AgentDetailView: View {
         }.padding(.vertical, 10)
     }
     
-    // This section is now simplified to prevent compiler timeouts.
     private var agentCapabilitiesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Agent Capabilities").font(.headline)
@@ -102,8 +102,6 @@ struct AgentDetailView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     
-                    // The grid is now part of the same formRow content, removing the vertical gap
-                    // and gets a background as requested.
                     if !editableAgent.tools.isEmpty {
                         LazyVGrid(columns: toolCapsuleColumns, alignment: .leading, spacing: 8) {
                             ForEach(editableAgent.tools) { selectedTool in
@@ -114,7 +112,6 @@ struct AgentDetailView: View {
                         }
                         .padding(12)
                         .background(
-                            // Use a standard control background that adapts to light/dark mode
                             RoundedRectangle(cornerRadius: 8)
                                 .fill(Color(nsColor: .controlBackgroundColor))
                         )
@@ -125,7 +122,6 @@ struct AgentDetailView: View {
         .padding(.vertical, 10)
     }
     
-    // This function builds the content for the tool selection menu.
     @ViewBuilder
     private func toolMenuContent() -> some View {
         ForEach(toolStore.providers) { provider in
@@ -142,11 +138,10 @@ struct AgentDetailView: View {
 
     private var actionButtons: some View {
         HStack {
-            if viewModel.agentStore.agents.count > 1 {
-                Button("Delete Profile") { showingDeleteConfirm = true }
-                    .foregroundColor(.red)
-                    .buttonStyle(.bordered)
-            }
+            Button("Delete Profile") { showingDeleteConfirm = true }
+                .foregroundColor(.red)
+                .buttonStyle(.bordered)
+            
             Spacer()
             Button("Save") { saveChanges() }
                 .buttonStyle(.borderedProminent)
@@ -172,7 +167,6 @@ struct AgentDetailView: View {
     // MARK: - Functions
 
     private func addTool(_ tool: ProvidedTool, from provider: ToolConfigModel) {
-        // FIXED: Using tool.id for the displayName as ProvidedTool doesn't have a name property.
         let newSelectedTool = SelectedTool(id: tool.id, providerID: provider.id, displayName: tool.id)
         if !editableAgent.tools.contains(newSelectedTool) {
             editableAgent.tools.append(newSelectedTool)
@@ -188,11 +182,16 @@ struct AgentDetailView: View {
     }
 
     private func saveChanges() {
+        // First, apply the changes from the local editable state to the binding
         agent.name = editableAgent.name.trimmingCharacters(in: .whitespacesAndNewlines)
         agent.baseURL = editableAgent.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         agent.role = editableAgent.role.trimmingCharacters(in: .whitespacesAndNewlines)
         agent.linkedOllamaProfileID = editableAgent.linkedOllamaProfileID
         agent.tools = editableAgent.tools
+        
+        // MODIFIED: Explicitly call the agent store to persist the changes to Core Data.
+        // This is the crucial step to ensure data is saved correctly.
+        viewModel.agentStore.updateAgent(agent: agent)
         
         hasUnsavedChanges = false
         logger.info("Saved changes for agent: \(agent.name)")
@@ -210,6 +209,7 @@ struct AgentDetailView: View {
         !editableAgent.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
+
 
 // MARK: - Supporting Views
 

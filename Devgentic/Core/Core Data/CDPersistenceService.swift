@@ -1,4 +1,10 @@
-// Services/CoreDataPersistenceService.swift
+//
+//  CDPersistenceService.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 20/06/25.
+//
+
 import Foundation
 import CoreData
 import os
@@ -15,6 +21,16 @@ protocol CoreDataServiceProtocol {
     func addOllamaProfile(from model: OllamaProfileModel)
     func updateOllamaProfile(entity: OllamaProfileEntity, with model: OllamaProfileModel)
 
+    // Agent Profile Methods
+    func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
+    func fetchAgentProfiles() -> [AgentProfileEntity]
+    func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext)
+    func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel)
+    func deleteAgentProfile(with id: UUID)
+     
+    func fetchToolConfigs() -> [ToolConfigEntity]
+    func getProvidedTool(withId toolId: String, providerId: UUID) -> ProvidedToolEntity?
+    
     func saveContext()
 }
 
@@ -28,12 +44,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     // MARK: - Private Properties
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CoreDataPersistenceService")
 
-    // --- FIX: 'private' removed to make it internally accessible ---
-    /// The persistent container for the Core Data stack.
-    /// This needs to be accessible within the module to inject its context into the SwiftUI environment.
     lazy var persistentContainer: NSPersistentContainer = {
-    // -------------------------------------------------------------
-        // The name "ChatModel" must match the name of your .xcdatamodeld file.
+    
         let container = NSPersistentContainer(name: "DevgenticDB")
         
         container.loadPersistentStores { (storeDescription, error) in
@@ -201,6 +213,94 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             logger.warning("Tried to delete an Ollama profile with ID \(id.uuidString), but it was not found.")
         }
     }
+    
+    func getAgentProfile(withId id: UUID) -> AgentProfileEntity? {
+            let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+            do {
+                return try viewContext.fetch(request).first
+            } catch {
+                logger.error("Failed to fetch AgentProfile with ID \(id.uuidString): \(error.localizedDescription)")
+                return nil
+            }
+        }
+
+        func fetchAgentProfiles() -> [AgentProfileEntity] {
+            let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+            do {
+                return try viewContext.fetch(request)
+            } catch {
+                logger.error("Failed to fetch all AgentProfiles: \(error.localizedDescription)")
+                return []
+            }
+        }
+        
+        func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext) {
+            let newAgent = AgentProfileEntity(context: context)
+            updateAgentProfile(entity: newAgent, with: model) // Use the update logic to populate
+            logger.info("Adding new Agent Profile '\(model.name)' to context.")
+            saveContext()
+        }
+
+        func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel) {
+            let context = entity.managedObjectContext ?? viewContext
+            
+            entity.id = model.id
+            entity.name = model.name
+            entity.role = model.role
+            entity.baseURL = model.baseURL
+            entity.isActive = model.isActive
+            entity.linkedOllamaProfileID = model.linkedOllamaProfileID
+
+            // Handle the tools relationship
+            let currentSelectedTools = entity.mutableSetValue(forKey: "tools")
+            currentSelectedTools.removeAllObjects() // Clear existing tools to sync
+
+            for selectedToolModel in model.tools {
+                if let providedToolEntity = getProvidedTool(withId: selectedToolModel.id, providerId: selectedToolModel.providerID) {
+                    let newSelectedToolEntity = SelectedToolEntity(context: context)
+                    newSelectedToolEntity.id = UUID() // Give the relationship entity its own unique ID
+                    newSelectedToolEntity.providedTool = providedToolEntity // Link to the actual tool
+                    currentSelectedTools.add(newSelectedToolEntity)
+                }
+            }
+
+            logger.trace("Updating attributes for Agent Profile: \(model.name)")
+            saveContext()
+        }
+
+        func deleteAgentProfile(with id: UUID) {
+            if let agentToDelete = getAgentProfile(withId: id) {
+                viewContext.delete(agentToDelete)
+                logger.info("Deleting Agent Profile with ID \(id.uuidString) from context.")
+                saveContext()
+            }
+        }
+
+        // MARK: - Tooling Implementations
+        
+        func fetchToolConfigs() -> [ToolConfigEntity] {
+            let request: NSFetchRequest<ToolConfigEntity> = ToolConfigEntity.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "displayName", ascending: true)]
+            do {
+                return try viewContext.fetch(request)
+            } catch {
+                logger.error("Failed to fetch ToolConfigs: \(error.localizedDescription)")
+                return []
+            }
+        }
+        
+        func getProvidedTool(withId toolId: String, providerId: UUID) -> ProvidedToolEntity? {
+            let request: NSFetchRequest<ProvidedToolEntity> = ProvidedToolEntity.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@ AND toolConfig.id == %@", toolId, providerId as CVarArg)
+            do {
+                return try viewContext.fetch(request).first
+            } catch {
+                logger.error("Failed to fetch ProvidedTool with ID \(toolId): \(error.localizedDescription)")
+                return nil
+            }
+        }
 
 
     // MARK: - Private Helper Methods
@@ -239,6 +339,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 }
+
+
 
 
 // MARK: - NSManagedObject Subclass Extensions
@@ -305,6 +407,71 @@ extension OllamaProfileEntity {
             textFileInclusionStrategy: TextFileInclusionStrategy(rawValue: self.textFileInclusionStrategy ?? "") ?? .preferInlining,
             imageHandlingStrategy: OllamaImageHandlingStrategy(rawValue: self.imageHandlingStrategy ?? "") ?? .doNotInclude,
             binaryFileHandlingStrategy: OllamaBinaryFileHandlingStrategy(rawValue: self.binaryFileHandlingStrategy ?? "") ?? .doNotInclude
+        )
+    }
+}
+
+extension AgentProfileEntity {
+    func toAgentProfileModel() -> AgentProfileModel {
+        let selectedToolsSet = self.tools as? Set<SelectedToolEntity> ?? []
+        let selectedToolsArray = selectedToolsSet.map { $0.toSelectedToolModel() }
+        
+        return AgentProfileModel(
+            id: self.id ?? UUID(),
+            name: self.name ?? "Unnamed Agent",
+            role: self.role ?? "",
+            isActive: self.isActive,
+            baseURL: self.baseURL ?? "",
+            linkedOllamaProfileID: self.linkedOllamaProfileID,
+            tools: selectedToolsArray
+        )
+    }
+}
+
+extension ToolConfigEntity {
+    func toToolConfigModel() -> ToolConfigModel {
+        let availableToolsSet = self.availableTools as? Set<ProvidedToolEntity> ?? []
+        let availableToolsArray = availableToolsSet.map { $0.toProvidedToolModel() }
+        
+        return ToolConfigModel(
+            id: self.id ?? UUID(),
+            displayName: self.displayName ?? "Unnamed Provider",
+            toolType: ToolConfigModel.ToolType(rawValue: self.toolType ?? "custom") ?? .custom,
+            provider: self.provider ?? "",
+            sourceURL: self.sourceURL,
+            description: self.configDescription,
+            availableTools: availableToolsArray
+        )
+    }
+}
+
+extension ProvidedToolEntity {
+    func toProvidedToolModel() -> ProvidedTool {
+        // FIXED: The compiler error suggests that `self.id` might be a UUID in your
+        // Core Data model, while the `ProvidedTool` struct expects a String.
+        // This safely handles the conversion if `self.id` is a UUID by using its
+        // string representation. If it's already a string, it will be used directly.
+        // NOTE: This assumes a mismatch. The ideal fix is to ensure the Core Data
+        // model attribute for `ProvidedToolEntity.id` is of type String.
+        let stringId = (self.id as? UUID)?.uuidString ?? (self.id as? String) ?? "unknown_tool"
+
+        return ProvidedTool(
+            id: stringId,
+            description: self.toolDescription ?? ""
+        )
+    }
+}
+
+extension SelectedToolEntity {
+    func toSelectedToolModel() -> SelectedTool {
+        // The display name for the tool should be human-readable.
+        // Using the tool's ID is a good fallback.
+        let toolID = (self.providedTool?.id as? UUID)?.uuidString ?? (self.providedTool?.id as? String) ?? "unknown_tool"
+
+        return SelectedTool(
+            id: toolID,
+            providerID: self.providedTool?.toolConfig?.id ?? UUID(),
+            displayName: toolID
         )
     }
 }
