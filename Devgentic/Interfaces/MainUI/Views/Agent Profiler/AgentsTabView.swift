@@ -1,4 +1,4 @@
-// filename: Views/AgentsTabView.swift
+// AgentsTabView.swift
 import SwiftUI
 import os
 
@@ -20,10 +20,10 @@ struct AgentsTabView: View {
                     VStack(spacing: 10) {
                         ForEach(viewModel.agentStore.agents) { agent in
                             AgentRowView(agent: agent)
-                                .environmentObject(viewModel)
                                 .padding(.horizontal)
                                 .onTapGesture {
-                                    viewModel.selectedAgentID = agent.id
+                                    // Use the new centralized selection property
+                                    viewModel.agentStore.selectedAgentID = agent.id
                                 }
                                 .onTapGesture(count: 2) {
                                     logger.info("Double-tapped agent: \(agent.name). Opening Agent Profiler for ID: \(agent.id.uuidString)")
@@ -44,6 +44,11 @@ struct AgentsTabView: View {
 struct AgentRowView: View {
     let agent: AgentProfileModel
     @EnvironmentObject var viewModel: MainApplicationViewModel
+
+    // Check if this agent is the currently selected one
+    private var isAgentActive: Bool {
+        viewModel.agentStore.selectedAgentID == agent.id
+    }
 
     private var linkedOllamaProfile: OllamaProfileModel? {
         if let profileID = agent.linkedOllamaProfileID {
@@ -71,7 +76,8 @@ struct AgentRowView: View {
             }
             Spacer()
             
-            if agent.isActive {
+            // Display checkmark if the agent is active
+            if isAgentActive {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.blue)
                     .font(.title2)
@@ -82,57 +88,57 @@ struct AgentRowView: View {
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(agent.isActive ? Color.blue : Color.clear, lineWidth: agent.isActive ? 0.5 : 1)
+                .stroke(isAgentActive ? Color.blue : Color.gray.opacity(0.2), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.15), radius: 3, x: 0, y: 1)
+        .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
         .contentShape(Rectangle())
-        .animation(.easeInOut(duration: 0.2), value: agent.isActive)
+        .animation(.easeInOut(duration: 0.2), value: isAgentActive)
     }
 }
 
-// MARK: - Preview Provider
+// MARK: - Preview Provider (FIXED)
+
 struct AgentsTabView_Previews: PreviewProvider {
-    static var previews: some View {
-        let mockOllamaProfileStore: OllamaProfileStore = {
-            let store = OllamaProfileStore()
-            let defaultProfile = OllamaProfileModel.defaultProfile()
-            let remoteProfile = OllamaProfileModel(
-                id: UUID(),
-                profileName: "Remote Ollama",
-                baseURL: "http://remote:11434",
-                llmModelName: "llama3:8b",
-                temperature: 0.7, topK: 30, topP: 0.8, repeatPenalty: 1.0, contextWindowSize: 2048, gpuLayers: 0,
-                maxInlineChars: 2000, maxAttachedFiles: 2, textFileInclusionStrategy: .preferInlining, imageHandlingStrategy: .includePathWithWarning, binaryFileHandlingStrategy: .includePathWithWarning
-            )
-            store.profiles = [defaultProfile, remoteProfile]
-            store.selectedProfileID = defaultProfile.id
-            return store
-        }()
-
-        let mockAgentStore: AgentStore = {
-            let store = AgentStore()
-            var defaultAgent = AgentProfileModel.defaultAgent()
-            defaultAgent.isActive = true
-            // --- MODIFIED: Fixed the initializers to use `tools: []` ---
-            let testAgent = AgentProfileModel(id: UUID(), name: "Test Agent", role: "Another agent for testing.", isActive: false, baseURL: "http://test:8000", linkedOllamaProfileID: mockOllamaProfileStore.profiles[1].id, tools: [])
-            let inactiveAgent = AgentProfileModel(id: UUID(), name: "Inactive Agent", role: "This agent is not active.", isActive: false, baseURL: "http://inactive:8000", linkedOllamaProfileID: nil, tools: [])
-            store.agents = [defaultAgent, testAgent, inactiveAgent]
-            return store
-        }()
-
-        let mockMainApplicationViewModel = MainApplicationViewModel(
-            ollamaProfileStore: mockOllamaProfileStore,
-            agentStore: mockAgentStore
+    // 1. Create a static, fully configured mock view model.
+    // This separates data setup from the View return, fixing the build error.
+    static var mockViewModel: MainApplicationViewModel = {
+        // Create mock stores. For previews, we don't need real persistence.
+        let ollamaProfileStore = OllamaProfileStore()
+        let agentStore = AgentStore()
+        
+        // Create a mock ollama profile to link to an agent
+        let mockOllamaProfile = OllamaProfileModel(
+            id: UUID(),
+            profileName: "Local Llama 3",
+            baseURL: "http://localhost:11434",
+            llmModelName: "llama3:8b",
+            temperature: 0.8, topK: 40, topP: 0.9, repeatPenalty: 1.1, contextWindowSize: 4096, gpuLayers: -1, maxInlineChars: 5000, maxAttachedFiles: 5, textFileInclusionStrategy: .preferInlining, imageHandlingStrategy: .includePathWithWarning, binaryFileHandlingStrategy: .includePathWithWarning
         )
+        ollamaProfileStore.profiles = [mockOllamaProfile]
 
+        // Create mock agents
+        let agent1 = AgentProfileModel(id: UUID(), name: "Developer Agent", role: "Your personal development assistant.", baseURL: "http://localhost:8000", linkedOllamaProfileID: mockOllamaProfile.id, tools: [])
+        let agent2 = AgentProfileModel(id: UUID(), name: "Research Assistant", role: "Helps with research and data gathering.", baseURL: "http://localhost:8001", linkedOllamaProfileID: nil, tools: [])
+        
+        // Populate the agent store
+        agentStore.agents = [agent1, agent2]
+        agentStore.selectedAgentID = agent1.id // Set the first agent as active for the preview
+
+        // Create the main view model with the mock stores
+        let viewModel = MainApplicationViewModel(
+            ollamaProfileStore: ollamaProfileStore,
+            agentStore: agentStore
+        )
+        return viewModel
+    }()
+
+    // 2. The previews property simply returns the view with the mock data.
+    // This structure is clean and reliable for SwiftUI Previews.
+    static var previews: some View {
         AgentsTabView()
-            .environmentObject(mockMainApplicationViewModel)
+            .environmentObject(mockViewModel)
             .frame(width: 350, height: 500)
             .previewLayout(.sizeThatFits)
             .previewDisplayName("Agents Tab View")
-            .onAppear {
-                let service = OllamaService.shared
-                service.serverStatus = .connected
-            }
     }
 }

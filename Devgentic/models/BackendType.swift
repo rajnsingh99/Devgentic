@@ -5,6 +5,7 @@ import Foundation
 enum BackendType: String, CaseIterable, Identifiable {
     case ollama = "Ollama"
     case agent = "Agent"
+   
 
     var id: String { self.rawValue }
 }

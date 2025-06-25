@@ -68,18 +68,15 @@ struct AgentProfileModel: Codable, Identifiable, Hashable {
     let id: UUID
     var name: String
     var role: String
-    var isActive: Bool // Whether the agent is currently active/enabled
-    var baseURL: String // Agent's base URL
-    var linkedOllamaProfileID: UUID? // Optional link to an OllamaProfile
-    
+    var baseURL: String
+    var linkedOllamaProfileID: UUID?
     var tools: [SelectedTool]
-
+    
     static func defaultAgent() -> AgentProfileModel {
         AgentProfileModel(
             id: UUID(),
             name: "DevAgent",
             role: "Your personal development assistant.",
-            isActive: true,
             baseURL: "http://localhost:8000",
             linkedOllamaProfileID: nil,
             tools: []

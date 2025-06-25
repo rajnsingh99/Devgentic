@@ -11,10 +11,16 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentStore")
 
-// REMOVED: @MainActor from the class declaration to fix initializer access issue.
 class AgentStore: ObservableObject {
     @Published var agents: [AgentProfileModel] = []
     
+    @Published var selectedAgentID: UUID? {
+        didSet {
+            UserDefaults.standard.set(selectedAgentID?.uuidString, forKey: "selectedAgentID")
+            logger.info("Selected agent ID changed to: \(self.selectedAgentID?.uuidString ?? "nil")")
+        }
+    }
+
     private let persistenceService: CoreDataServiceProtocol
     private let viewContext: NSManagedObjectContext
 
@@ -22,107 +28,65 @@ class AgentStore: ObservableObject {
         self.persistenceService = persistenceService
         self.viewContext = (persistenceService as! CoreDataPersistenceService).viewContext
         
-        // MODIFIED: Call to an actor-isolated function must be in an async context.
-        Task {
+        // FIXED: Explicitly run the task on the @MainActor to guarantee all UI-related
+        // @Published properties are updated on the main thread.
+        Task { @MainActor in
             await loadAgents()
+            
+            if let savedIDString = UserDefaults.standard.string(forKey: "selectedAgentID"),
+               let savedID = UUID(uuidString: savedIDString),
+               agents.contains(where: { $0.id == savedID }) {
+                self.selectedAgentID = savedID
+            } else {
+                self.selectedAgentID = agents.first?.id
+            }
         }
     }
+    
+    var currentAgent: AgentProfileModel? {
+        guard let selectedID = selectedAgentID else { return nil }
+        return agents.first(where: { $0.id == selectedID })
+    }
 
-    /// Fetches agent profiles from Core Data and updates the published `agents` array.
-    @MainActor // ADDED: Ensures this function, which modifies a @Published property, runs on the main thread.
+    @MainActor
     func loadAgents() {
         let agentEntities = persistenceService.fetchAgentProfiles()
         self.agents = agentEntities.map { $0.toAgentProfileModel() }
         logger.info("AgentStore: Loaded \(self.agents.count) agents from Core Data.")
-        
-        if !self.agents.isEmpty && !self.agents.contains(where: { $0.isActive }) {
-            self.agents[0].isActive = true
-            self.updateAgent(agent: self.agents[0])
-        }
     }
 
-    /// Adds a new agent to the local store and persists it to Core Data.
-    @MainActor // ADDED: Ensures UI-related changes run on the main thread.
+    @MainActor
     func addAgent(agent: AgentProfileModel) {
-        var newAgent = agent
-        
-        if newAgent.isActive {
-            for i in 0..<agents.count {
-                agents[i].isActive = false
-            }
-        }
-        
-        agents.append(newAgent)
-        
-        persistenceService.addAgentProfile(from: newAgent, in: viewContext)
-        logger.info("Added new agent '\(newAgent.name)' and updated the store.")
+        agents.append(agent)
+        persistenceService.addAgentProfile(from: agent, in: viewContext)
+        self.selectedAgentID = agent.id
+        logger.info("Added new agent '\(agent.name)' and set it as active.")
     }
 
-    /// Updates an existing agent in the local store and persists the change to Core Data.
-    @MainActor // ADDED: Ensures UI-related changes run on the main thread.
+    @MainActor
     func updateAgent(agent: AgentProfileModel) {
         guard let index = agents.firstIndex(where: { $0.id == agent.id }) else {
             logger.warning("AgentStore: Could not find agent with ID \(agent.id.uuidString) to update.")
             return
         }
         
-        var agentToUpdate = agent
+        agents[index] = agent
         
-        if agentToUpdate.isActive {
-            for i in 0..<agents.count where agents[i].id != agentToUpdate.id {
-                if agents[i].isActive {
-                    agents[i].isActive = false
-                    if let entityToDeactivate = persistenceService.getAgentProfile(withId: agents[i].id) {
-                        persistenceService.updateAgentProfile(entity: entityToDeactivate, with: agents[i])
-                    }
-                }
-            }
-        }
-        
-        agents[index] = agentToUpdate
-        
-        if let entityToUpdate = persistenceService.getAgentProfile(withId: agentToUpdate.id) {
-            persistenceService.updateAgentProfile(entity: entityToUpdate, with: agentToUpdate)
-            logger.info("Updated agent '\(agentToUpdate.name)' and persisted changes.")
+        if let entityToUpdate = persistenceService.getAgentProfile(withId: agent.id) {
+            persistenceService.updateAgentProfile(entity: entityToUpdate, with: agent)
+            logger.info("Updated agent '\(agent.name)' and persisted changes.")
         }
     }
 
-    /// Deletes an agent from the local store and Core Data.
-    @MainActor // ADDED: Ensures UI-related changes run on the main thread.
+    @MainActor
     func deleteAgent(id: UUID) {
-        guard let indexToDelete = agents.firstIndex(where: { $0.id == id }) else {
-            logger.warning("AgentStore: Could not find agent with ID \(id.uuidString) to delete.")
-            return
-        }
-        
-        let wasActive = agents[indexToDelete].isActive
-        
-        agents.remove(at: indexToDelete)
-        
+        agents.removeAll { $0.id == id }
         persistenceService.deleteAgentProfile(with: id)
         logger.info("Deleted agent with ID \(id.uuidString).")
         
-        if wasActive && !agents.isEmpty {
-            agents[0].isActive = true
-            if let entityToActivate = persistenceService.getAgentProfile(withId: agents[0].id) {
-                persistenceService.updateAgentProfile(entity: entityToActivate, with: agents[0])
-                logger.info("Made agent '\(self.agents[0].name)' active after deletion.")
-            }
-        }
-    }
-
-    /// Sets a specific agent as active, deactivates others, and persists the change.
-    @MainActor // ADDED: Ensures UI-related changes run on the main thread.
-    func setActiveAgent(withId agentId: UUID?) {
-        guard let id = agentId, let agentToActivate = agents.first(where: { $0.id == id }) else {
-            logger.warning("AgentStore: Tried to set active agent with nil or invalid ID.")
-            return
-        }
-
-        var mutableAgent = agentToActivate
-        if !mutableAgent.isActive {
-            mutableAgent.isActive = true
-            updateAgent(agent: mutableAgent)
+        if selectedAgentID == id {
+            selectedAgentID = agents.first?.id
+            logger.info("Deleted agent was active. New active agent is '\(self.currentAgent?.name ?? "none")'.")
         }
     }
 }

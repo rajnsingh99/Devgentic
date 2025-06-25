@@ -59,20 +59,15 @@ class MainApplicationViewModel: ObservableObject {
     @Published var attachedFiles: [FileSystemItem] = []
     @Published var voiceInputState: VoiceInputState = .idle
     
-    @Published var selectedAgentID: UUID? {
-        didSet {
-            agentStore.setActiveAgent(withId: selectedAgentID)
-            if let agentId = selectedAgentID {
-                UserDefaults.standard.set(agentId.uuidString, forKey: SettingsKeys.selectedAgentID)
-                logger.info("Selected Agent ID set to: \(agentId.uuidString)")
-            } else {
-                UserDefaults.standard.removeObject(forKey: SettingsKeys.selectedAgentID)
-                logger.info("Selected Agent ID cleared.")
-            }
+    var selectedAgentID: UUID? {
+        get {
+            agentStore.selectedAgentID
+        }
+        set {
+            agentStore.selectedAgentID = newValue
         }
     }
 
-    // --- Settings Properties ---
     @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .agent
     @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
     @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
@@ -132,14 +127,6 @@ class MainApplicationViewModel: ObservableObject {
 
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
         
-        if let storedAgentIDString = UserDefaults.standard.string(forKey: SettingsKeys.selectedAgentID),
-           let storedAgentUUID = UUID(uuidString: storedAgentIDString),
-           agentStore.agents.contains(where: { $0.id == storedAgentUUID }) {
-            self.selectedAgentID = storedAgentUUID
-        } else {
-            self.selectedAgentID = agentStore.agents.first(where: { $0.isActive })?.id ?? agentStore.agents.first?.id
-        }
-        
         checkVoiceInputPermissionsAndAvailability()
         
         self.speechRecognitionService.$speechRecognizerAvailable
@@ -173,6 +160,8 @@ class MainApplicationViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+        
+        setupBindings()
     }
  
     convenience init() {
@@ -202,6 +191,20 @@ class MainApplicationViewModel: ObservableObject {
                 await self.stopVoiceCaptureAndFinalize(customError: "ViewModel deinitializing")
             }
         }
+    }
+    
+    private func setupBindings() {
+        agentStore.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+            
+        ollamaProfileStore.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)

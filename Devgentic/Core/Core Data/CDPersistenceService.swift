@@ -250,7 +250,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             entity.name = model.name
             entity.role = model.role
             entity.baseURL = model.baseURL
-            entity.isActive = model.isActive
             entity.linkedOllamaProfileID = model.linkedOllamaProfileID
 
             // Handle the tools relationship
@@ -420,7 +419,6 @@ extension AgentProfileEntity {
             id: self.id ?? UUID(),
             name: self.name ?? "Unnamed Agent",
             role: self.role ?? "",
-            isActive: self.isActive,
             baseURL: self.baseURL ?? "",
             linkedOllamaProfileID: self.linkedOllamaProfileID,
             tools: selectedToolsArray

@@ -94,7 +94,6 @@ struct AgentProfilerView_V3: View {
                     id: UUID(),
                     name: newAgentName,
                     role: newAgentDescription,
-                    isActive: true,
                     baseURL: newAgentURL,
                     linkedOllamaProfileID: activeOllamaProfileID, // Assign active profile
                     tools: []
@@ -204,7 +203,6 @@ struct AgentProfilerView_V3_Previews: PreviewProvider {
             var agent2 = AgentProfileModel.defaultAgent()
             agent2.name = "Research Assistant"
             agent2.role = "Helps with research and data gathering."
-            agent2.isActive = false
             
             store.agents = [agent1, agent2]
             return store
