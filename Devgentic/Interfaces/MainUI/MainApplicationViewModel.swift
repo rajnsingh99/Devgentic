@@ -102,7 +102,6 @@ class MainApplicationViewModel: ObservableObject {
                   let conversationEntity = persistenceService.getConversation(withId: selectedID) else {
                 return "Devgentic" // Default title remains.
             }
-            // Use the struct's displayTitle logic by converting the entity.
             return conversationEntity.toConversationStruct().displayTitle
     }
     
@@ -137,16 +136,14 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // MARK: - Corrected: Centralized logic to sync OllamaService on profile change
         ollamaProfileStore.$selectedProfileID
             .combineLatest(ollamaProfileStore.$profiles)
-            .compactMap { selectedID, profiles -> OllamaProfileModel? in // Explicit return type
+            .compactMap { selectedID, profiles -> OllamaProfileModel? in
                 guard let id = selectedID else { return nil }
                 return profiles.first { $0.id == id }
             }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            // MARK: - Corrected: Added explicit type annotation to fix inference errors
             .sink { [weak self] (newProfile: OllamaProfileModel) in
                 guard let self = self else { return }
                 logger.info("MainApplicationViewModel: Active profile changed to '\(newProfile.profileName)'. Updating OllamaService.")
@@ -247,6 +244,19 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
+        guard ollamaProfileStore.currentProfile != nil else {
+            let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
+            let errorMessage = ChatMessage(
+                conversationId: conversationIDToUse,
+                sender: .agent,
+                content: .error(title: "Ollama Profile Not Selected", details: "Please select an active Ollama profile from the sidebar, or configure a new one to send messages.")
+            )
+            if let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
+                persistenceService.addMessage(errorMessage, to: targetEntity)
+            }
+            return
+        }
+
         if voiceInputState.isSessionActive {
             self.stopVoiceCaptureAndFinalize(customError: nil)
         }
@@ -258,7 +268,7 @@ class MainApplicationViewModel: ObservableObject {
             conversationIDToUse = createAndSelectNewConversation()
         }
         
-        guard var targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
+        guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
             logger.error("CRITICAL: Could not find conversation object for ID: \(conversationIDToUse.uuidString) before sending user message.")
             isSending = false
             return
@@ -272,21 +282,18 @@ class MainApplicationViewModel: ObservableObject {
         self.isSending = true
 
         Task {
-            // Updated: The result is now a tuple containing messages and a potential error string.
             let (agentMessagesForThisTurn, errorMessage) = await assembleAndSend(
                 conversationID: conversationIDToUse,
                 userQuery: plainUserQueryFromEditor,
                 files: filesToProcess
             )
 
-            // Create a single array of messages to append, including any errors.
             var allNewMessages = agentMessagesForThisTurn
             if let errorMsg = errorMessage {
                 allNewMessages.append(ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: .error(title: "Error", details: errorMsg)))
             }
             
             if !allNewMessages.isEmpty, let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
-                // Add the new batch of messages from the agent.
                 persistenceService.addMessages(allNewMessages, to: targetEntity)
             }
             
@@ -300,25 +307,22 @@ class MainApplicationViewModel: ObservableObject {
         do {
             switch selectedBackend {
             case .ollama:
-                // Ollama logic remains largely the same, but now returns a tuple.
                 let (messages, error) = try await sendToOllama(conversationID: conversationID, userQuery: userQuery, files: files)
-                let errorString = error?.localizedDescription
-                return (messages, errorString)
+                return (messages, error?.localizedDescription)
                 
             case .agent:
-                // Agent logic is now handled by a dedicated function.
+                // MODIFIED: This function is now completely rewritten
                 let (messages, error) = try await sendToAgent(conversationID: conversationID, userQuery: userQuery, files: files)
-                let errorString = error?.localizedDescription
-                return (messages, errorString)
+                return (messages, error?.localizedDescription)
             }
         } catch {
-            // This top-level catch handles errors from the sendTo... functions themselves (e.g., config errors before sending).
             let userFriendlyError = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.selectedBackend)
             return ([], userFriendlyError)
         }
     }
 
     // MARK: - Agent Payload Construction and Sending
+    // MODIFIED: This function is rewritten to use the new AgentOrchestrationRequest model
     private func sendToAgent(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
         guard let selectedAgent = agentStore.agents.first(where: { $0.id == selectedAgentID }) else {
             throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No agent is selected or the selected agent could not be found."])
@@ -328,54 +332,39 @@ class MainApplicationViewModel: ObservableObject {
             throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent is not linked to a valid Ollama profile."])
         }
 
-        // 1. Assemble LLMSettingsPayload
-        let llmSettings = LLMSettingsPayload(
-            provider: "ollama", // Hardcoded as agents are backed by Ollama in this design
-            baseURL: linkedOllamaProfile.baseURL,
+        // 1. Create LLMSettings
+        let llmSettings = OllamaLLMSettings(
+            baseUrl: linkedOllamaProfile.baseURL,
             modelName: linkedOllamaProfile.llmModelName,
-            temperature: linkedOllamaProfile.temperature,
-            topK: linkedOllamaProfile.topK,
-            topP: linkedOllamaProfile.topP,
-            repeatPenalty: linkedOllamaProfile.repeatPenalty,
-            contextWindowSize: linkedOllamaProfile.contextWindowSize,
-            gpuLayers: linkedOllamaProfile.gpuLayers
+            contextWindowSize: linkedOllamaProfile.contextWindowSize
         )
 
-        // 2. Assemble AgentConfigItemPayload
-        let agentConfig = AgentConfigItemPayload(
-            id: selectedAgent.id.uuidString,
-            role: selectedAgent.role,
+        // 2. Create the root AgentConfig
+        // The user's query becomes the main objective for the root agent.
+        let rootAgentConfig = AgentConfig(
+            agentId: selectedAgent.id.uuidString,
+            parentId: nil, // This is the root agent
+            roleObjective: userQuery,
             tools: selectedAgent.tools.map { $0.id },
-            llmSettings: llmSettings
+            llmSettings: .ollama(llmSettings) // Wrap in the enum case
         )
 
-        // 3. Assemble FileObjectPayloads
-        let fileObjects = files.map { fileItem -> FileObjectPayload in
-            let mimeType = fileProcessorService.getFileMimeType(for: fileItem.url)
-            // In the future, you might get size_bytes from file attributes.
-            return FileObjectPayload(uri: fileItem.url.absoluteString, name: fileItem.name, mimeType: mimeType, sizeBytes: nil, language: nil)
+        // 3. Create FileObjects
+        let fileObjects = files.map { fileItem -> FileObject in
+            return FileObject(uri: fileItem.url.absoluteString, name: fileItem.name)
         }
 
-        // 4. Assemble MessageContentPayload
-        let messageContent = MessageContentPayload(prompt: userQuery, files: fileObjects)
-
-        // 5. Assemble RequestMetadataPayload
-        let metadata = RequestMetadataPayload(clientRequestId: UUID().uuidString)
-
-        // 6. Assemble the final ChatRequestPayload
-        let payload = ChatRequestPayload(
+        // 4. Assemble the final AgentOrchestrationRequest
+        let payload = AgentOrchestrationRequest(
             conversationId: conversationID.uuidString,
-            messageContent: messageContent,
-            agentConfig: [agentConfig], // Sent as an array with one item
-            metadata: metadata
+            files: fileObjects,
+            agentConfigs: [rootAgentConfig] // Array containing just the root agent
         )
         
+        // 5. Send the request
         let agentBaseURL = selectedAgent.baseURL
-        
-        // Use a generic BackendConfiguration, setting the correct endpoint path
         let backendConfig = BackendConfiguration(url: agentBaseURL, endpoint: "/agent/chat", payload: [:])
 
-        // Send the structured payload
         let llmResponse = try await self.llmCommunicator.sendMessage(payload: payload, to: .agent, config: backendConfig)
         let messages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
         
@@ -388,7 +377,6 @@ class MainApplicationViewModel: ObservableObject {
 
         let currentOllamaProfile = self.ollamaProfileStore.currentProfile
         
-        // The messageAssemblerService is still useful for Ollama's string-based prompt
         let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
             userQuery: userQuery,
             attachedFiles: files,
@@ -435,8 +423,6 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func determineBackendConfiguration() -> BackendConfiguration {
-         // This function now only needs to provide configuration for the Ollama backend.
-         // Agent configuration is now assembled directly in `sendToAgent`.
         if let currentProfile = ollamaProfileStore.currentProfile, self.selectedBackend == .ollama {
             let advancedOptions: [String: Any] = [
                 "temperature": currentProfile.temperature, "top_k": currentProfile.topK,
@@ -448,8 +434,6 @@ class MainApplicationViewModel: ObservableObject {
             return BackendConfiguration(url: ollamaService.ollamaBaseURL, endpoint: "/api/generate", payload: initialPayload)
         
         } else {
-             // Return a default or empty configuration for the agent, as it's no longer used for payload creation.
-             // The URL will be sourced from the agent's profile directly.
             return BackendConfiguration(url: self.agentBaseURL, endpoint: "/agent/chat", payload: [:])
         }
     }
@@ -597,7 +581,6 @@ class MainApplicationViewModel: ObservableObject {
     
     func deleteConversation(conversationID: UUID) {
         persistenceService.deleteConversation(with: conversationID)
-        // The UI will update automatically. Just clear the selection if it was the one deleted.
         if selectedConversationID == conversationID {
             selectedConversationID = nil
         }
@@ -677,4 +660,3 @@ extension URLError {
         return code == .cannotConnectToHost || code == .cannotFindHost || code == .networkConnectionLost
     }
 }
-

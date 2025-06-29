@@ -49,9 +49,11 @@ struct ChatInputAreaView: View {
     private let textEditorMinHeight: CGFloat = 24
     private let textEditorMaxHeight: CGFloat = 200
     
+    // MODIFIED: isInputEnabled no longer checks for an active profile.
+    // The input area will remain enabled, with behavior handled by the placeholder text
+    // and the sendMessage action in the ViewModel.
     private var isInputEnabled: Bool {
-            // Input is disabled if there's no active profile, or during other specific states.
-            ollamaProfileStore.currentProfile != nil && !isSending && !showSettings
+        !isSending && !showSettings
     }
 
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
@@ -180,7 +182,6 @@ struct ChatInputAreaView: View {
         }
         .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
         .focused(isInputFocused)
-        // MODIFIED: The editor is directly disabled based on the new computed property.
         .disabled(!isInputEnabled)
     }
     
@@ -220,7 +221,6 @@ struct ChatInputAreaView: View {
             }
             .padding(.horizontal, 15)
             .padding(.bottom, 10)
-            // MODIFIED: The entire toolbar is disabled if input is not enabled.
             .disabled(!isInputEnabled)
         }
 

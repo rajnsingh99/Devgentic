@@ -30,7 +30,7 @@ protocol LLMCommunicatorProtocol {
     /// - Returns: An `LLMResponse` object.
     /// - Throws: An error if communication fails.
     func sendMessage(
-        payload: ChatRequestPayload,
+        payload: AgentOrchestrationRequest,
         to backendType: BackendType,
         config: BackendConfiguration
     ) async throws -> LLMResponse

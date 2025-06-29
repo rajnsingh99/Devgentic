@@ -1,134 +1,120 @@
 //
-//  AgentAPIModels.swift
+//  AgentApiModel.swift
 //  Devgentic
 //
 //  Created by Raj Singh on 09/06/25.
 //
+//  MODIFIED: This file has been completely updated to match the new
+//  backend AgentOrchestrationRequest Pydantic model.
+//
 
 import Foundation
 
-// MARK: - Main Chat Request Payload
-// This is the root object that will be encoded into JSON and sent to the /agent/chat endpoint.
+// MARK: - Root Payload: AgentOrchestrationRequest
 
-struct ChatRequestPayload: Codable {
-    /// Mandatory. Unique identifier for the conversation.
+struct AgentOrchestrationRequest: Codable {
     let conversationId: String
+    let files: [FileObject]
+    let agentConfigs: [AgentConfig]
 
-    /// The user's message, including the prompt and any associated files.
-    let messageContent: MessageContentPayload
-
-    /// Mandatory. Configuration for the agent(s) processing this request.
-    let agentConfig: [AgentConfigItemPayload]
-
-    /// Metadata associated with the chat request.
-    let metadata: RequestMetadataPayload
+    enum CodingKeys: String, CodingKey {
+        case conversationId = "conversationId"
+        case files
+        case agentConfigs = "agentConfigs"
+    }
 }
 
-// MARK: - Nested Payload Structures
+// MARK: - FileObject
 
-/// Represents the content of the user's message.
-struct MessageContentPayload: Codable {
-    /// Mandatory. The user's textual prompt.
-    let prompt: String
-
-    /// Optional. List of file objects associated with the prompt. Defaults to an empty array.
-    let files: [FileObjectPayload]
-}
-
-/// Represents a single file associated with the message.
-struct FileObjectPayload: Codable {
-    /// Mandatory. URI of the file (e.g., "file:///path/to/file.txt").
+struct FileObject: Codable {
     let uri: String
-
-    /// Optional. Display name of the file.
     let name: String?
-
-    /// Optional. MIME type of the file (e.g., "text/plain").
-    let mimeType: String?
-
-    /// Optional. Size of the file in bytes.
-    let sizeBytes: Int?
-    
-    /// Optional. Programming language of the file, if applicable.
-    let language: String?
-
-    enum CodingKeys: String, CodingKey {
-        case uri, name
-        case mimeType = "mime_type"
-        case sizeBytes = "size_bytes"
-        case language
-    }
 }
 
-/// Defines the configuration for a single agent instance to be orchestrated.
-struct AgentConfigItemPayload: Codable {
-    /// Mandatory. A unique identifier for this agent configuration instance.
-    let id: String
+// MARK: - AgentConfig
 
-    /// Optional. A descriptive role or name for this agent configuration.
-    let role: String?
-
-    /// Optional. List of tools or capabilities this agent instance should have.
+struct AgentConfig: Codable {
+    let agentId: String
+    let parentId: String?
+    let roleObjective: String
     let tools: [String]
+    let llmSettings: LLMSettings
 
-    /// The configuration for the backing Language Model.
-    let llmSettings: LLMSettingsPayload
-    
     enum CodingKeys: String, CodingKey {
-        case id, role, tools
-        case llmSettings = "llm_settings"
+        case agentId = "agentId"
+        case parentId = "parentId"
+        case roleObjective = "roleObjective"
+        case tools
+        case llmSettings = "llmSettings"
     }
 }
 
-/// Configuration specific to the Language Model provider.
-struct LLMSettingsPayload: Codable {
-    /// The LLM provider (e.g., "ollama"). Defaults to "ollama".
-    let provider: String
+// MARK: - LLMSettings (Handles multiple providers)
 
-    /// Mandatory. Base URL of the LLM instance.
-    let baseURL: String
+// This enum uses associated values to represent the different LLM setting structures.
+enum LLMSettings: Codable {
+    case ollama(OllamaLLMSettings)
+    case remote(RemoteLLMSettings)
 
-    /// Mandatory. Name of the LLM model to use (e.g., "gemma:2b").
+    // Custom Codable implementation to handle the discriminated union
+    // based on the 'provider' field.
+    
+    private enum CodingKeys: String, CodingKey {
+        case provider
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let provider = try container.decode(String.self, forKey: .provider)
+        
+        let singleValueContainer = try decoder.singleValueContainer()
+        switch provider {
+        case "ollama":
+            self = .ollama(try singleValueContainer.decode(OllamaLLMSettings.self))
+        case "openai", "google", "anthropic":
+            self = .remote(try singleValueContainer.decode(RemoteLLMSettings.self))
+        default:
+            throw DecodingError.dataCorruptedError(in: singleValueContainer, debugDescription: "Unknown LLM provider: \(provider)")
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .ollama(let settings):
+            try container.encode(settings)
+        case .remote(let settings):
+            try container.encode(settings)
+        }
+    }
+}
+
+// MARK: - Provider-Specific LLMSettings
+
+struct OllamaLLMSettings: Codable {
+    let provider: String = "ollama"
+    let baseUrl: String
     let modelName: String
-
-    /// Optional. Controls randomness (0.0-2.0).
-    let temperature: Double?
-
-    /// Optional. Limits sampling to the k most likely tokens.
-    let topK: Int?
-
-    /// Optional. Cumulative probability threshold for nucleus sampling.
-    let topP: Double?
-
-    /// Optional. Penalizes token repetition.
-    let repeatPenalty: Double?
-
-    /// Optional. Context window size for the model.
     let contextWindowSize: Int?
 
-    /// Optional. Number of GPU layers to use (-1 for all).
-    let gpuLayers: Int?
+    enum CodingKeys: String, CodingKey {
+        case provider
+        case baseUrl = "base_url"
+        case modelName = "model_name"
+        case contextWindowSize = "context_window_size"
+    }
+}
+
+struct RemoteLLMSettings: Codable {
+    let provider: String // "openai", "google", or "anthropic"
+    let modelName: String
+    let apiKey: String
+    let contextWindowSize: Int?
     
     enum CodingKeys: String, CodingKey {
         case provider
-        case baseURL = "base_url"
-        case modelName = "model_name"
-        case temperature
-        case topK = "top_k"
-        case topP = "top_p"
-        case repeatPenalty = "repeat_penalty"
-        case contextWindowSize = "context_window_size"
-        case gpuLayers = "gpu_layers"
-    }
-}
-
-
-/// Metadata associated with the chat request.
-struct RequestMetadataPayload: Codable {
-    /// A client-generated request ID for tracing purposes.
-    let clientRequestId: String
-    
-    enum CodingKeys: String, CodingKey {
-        case clientRequestId = "client_request_id"
+        case modelName = "modelName"
+        case apiKey = "apiKey"
+        case contextWindowSize = "contextWindowSize"
     }
 }

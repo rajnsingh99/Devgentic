@@ -35,7 +35,7 @@ class DefaultLLMCommunicator: LLMCommunicatorProtocol {
     
     // MARK: - New method for sending structured Agent payloads
     func sendMessage(
-        payload: ChatRequestPayload,
+        payload: AgentOrchestrationRequest,
         to backendType: BackendType,
         config: BackendConfiguration
     ) async throws -> LLMResponse {

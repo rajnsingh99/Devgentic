@@ -32,10 +32,6 @@ struct MainApplicationView: View {
     private let chatHistoryBottomPadding: CGFloat = 130
     private let inputAreaCornerRadius: CGFloat = 12
     
-    private var isChatReady: Bool {
-        ollamaProfileStore.currentProfile != nil
-    }
-
     // MARK: - Body
     var body: some View {
         ZStack(alignment: .leading) {
@@ -94,9 +90,10 @@ struct MainApplicationView: View {
                     }
                     .frame(maxHeight: .infinity, alignment: .top)
                     .overlay {
-                        if !isChatReady {
-                            NoProfileConfiguredView(openWindow: openWindow)
-                        } else if viewModel.selectedConversationID == nil {
+                        // MODIFIED: Removed the 'NoProfileConfiguredView' overlay.
+                        // The placeholder text in ChatInputAreaView and the error message on send
+                        // now handle the case where no profile is selected.
+                        if viewModel.selectedConversationID == nil {
                             // This part handles conversation selection prompts
                             Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
                                 .font(.title3)
@@ -207,37 +204,7 @@ struct MainApplicationView: View {
      }
 }
 
-// MARK: - No Profile Configured View
-struct NoProfileConfiguredView: View {
-    var openWindow: OpenWindowAction
-
-    var body: some View {
-        VStack(spacing: 15) {
-            Image(systemName: "person.badge.plus")
-                .font(.system(size: 50))
-                .foregroundColor(.secondary)
-
-            Text("No Ollama Profile Configured")
-                .font(.title2)
-                .fontWeight(.bold)
-
-            Text("You need to set up an Ollama profile before you can start chatting.")
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 350)
-            
-            Button("Configure Profiles...") {
-                // This opens the dedicated window for managing Ollama profiles
-                openWindow(id: "ollama-profiles")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.8))
-    }
-}
-
+// REMOVED: The NoProfileConfiguredView is no longer needed here.
 
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
@@ -249,5 +216,3 @@ struct MainApplicationView_ZStack_Previews: PreviewProvider {
             .previewDisplayName("Main View with Resizable Sidebar")
     }
 }
-
-
