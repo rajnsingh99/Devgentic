@@ -35,7 +35,8 @@ struct AgentProfileModel: Codable, Identifiable, Hashable {
     var name: String
     var role: String
     var baseURL: String
-    var linkedOllamaProfileID: UUID?
+    // --- MODIFIED: This property is now linked to the unified integration model ---
+    var linkedIntegrationID: UUID?
     var tools: [SelectedTool]
 
     static func defaultAgent() -> AgentProfileModel {
@@ -44,7 +45,8 @@ struct AgentProfileModel: Codable, Identifiable, Hashable {
             name: "DevAgent",
             role: "Your personal development assistant.",
             baseURL: "http://localhost:8000",
-            linkedOllamaProfileID: nil,
+            // --- MODIFIED: Changed property name ---
+            linkedIntegrationID: nil,
             tools: []
         )
     }

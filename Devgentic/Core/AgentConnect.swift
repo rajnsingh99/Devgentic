@@ -26,14 +26,31 @@ struct AgentConnect {
             logger.error("Invalid URL constructed for agent server: \(self.baseURL)\(endpoint)")
             throw URLError(.badURL)
         }
-        logger.debug("AgentConnect attempting POST to: \(url.absoluteString)")
-
+        
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        
+        // --- MODIFIED: Added more standard headers to mimic Postman ---
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 120.0 // Increased timeout for potentially long-running agent tasks
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("DevgenticApp/1.0", forHTTPHeaderField: "User-Agent")
+        // --- END MODIFICATION ---
 
+        request.timeoutInterval = 120.0 // Increased timeout for potentially long-running agent tasks
         request.httpBody = payloadData
+
+        // --- NEW: Detailed Request Logging ---
+        logger.debug("--- Sending Agent Request ---")
+        logger.debug("URL: \(request.url?.absoluteString ?? "N/A")")
+        logger.debug("Method: \(request.httpMethod ?? "N/A")")
+        logger.debug("Headers: \(request.allHTTPHeaderFields ?? [:])")
+        if let body = String(data: payloadData, encoding: .utf8) {
+            logger.debug("Body:\n\(body)")
+        } else {
+            logger.warning("Could not decode request body to string for logging.")
+        }
+        logger.debug("---------------------------")
+        // --- END NEW LOGGING ---
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

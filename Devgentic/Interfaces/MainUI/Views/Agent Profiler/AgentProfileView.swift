@@ -32,7 +32,7 @@ struct AgentProfilerView_V3: View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 HStack {
-                    Text("Add Agent")
+                    Text("Agents")
                         .font(.headline)
                     Spacer()
                     Button {
@@ -41,17 +41,13 @@ struct AgentProfilerView_V3: View {
                         newAgentDescription = ""
                         showingAddAgentSheet = true
                     } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.accentColor)
+                        Image(systemName: "plus")
                     }
                     .buttonStyle(.plain)
                     .help("Add New Agent Profile")
                 }
                 .padding()
                 
-                Divider()
-
                 List(selection: $selectedAgentID) {
                     ForEach(agentStore.agents) { agent in
                         Text(agent.name)
@@ -59,7 +55,6 @@ struct AgentProfilerView_V3: View {
                             .contextMenu {
                                 Button("Delete", role: .destructive) { handleDelete(agent.id) }
                             }
-                            .padding(5)
                     }
                 }
                 .listStyle(.sidebar)
@@ -88,14 +83,16 @@ struct AgentProfilerView_V3: View {
         }
         .sheet(isPresented: $showingAddAgentSheet) {
             AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription) {
-                let activeOllamaProfileID = viewModel.ollamaProfileStore.selectedProfileID
+                // --- MODIFIED: Use the new llmIntegrationStore ---
+                let activeIntegrationID = viewModel.llmIntegrationStore.selectedIntegrationID
                 
                 let newAgent = AgentProfileModel(
                     id: UUID(),
                     name: newAgentName,
                     role: newAgentDescription,
                     baseURL: newAgentURL,
-                    linkedOllamaProfileID: activeOllamaProfileID, // Assign active profile
+                    // --- MODIFIED: Use the new property name ---
+                    linkedIntegrationID: activeIntegrationID,
                     tools: []
                 )
                 agentStore.addAgent(agent: newAgent)
@@ -183,14 +180,15 @@ struct AddAgentSheet: View {
     }
 }
 
-// MARK: - Preview Provider
+// MARK: - Preview Provider (Corrected)
 struct AgentProfilerView_V3_Previews: PreviewProvider {
     static var previews: some View {
-        let mockOllamaProfileStore: OllamaProfileStore = {
-            let store = OllamaProfileStore()
-            let defaultProfile = OllamaProfileModel.defaultProfile()
-            store.profiles = [defaultProfile]
-            store.selectedProfileID = defaultProfile.id
+        // --- MODIFIED: Use the new LLMIntegrationStore for previews ---
+        let mockLlmIntegrationStore: LLMIntegrationStore = {
+            let store = LLMIntegrationStore()
+            let defaultIntegration = LLMIntegrationModel.defaultOllama()
+            store.integrations = [defaultIntegration]
+            store.selectedIntegrationID = defaultIntegration.id
             return store
         }()
 
@@ -198,7 +196,8 @@ struct AgentProfilerView_V3_Previews: PreviewProvider {
             let store = AgentStore()
             var agent1 = AgentProfileModel.defaultAgent()
             agent1.name = "Developer Agent"
-            agent1.linkedOllamaProfileID = mockOllamaProfileStore.profiles.first?.id
+            // --- MODIFIED: Link to the new integration ID ---
+            agent1.linkedIntegrationID = mockLlmIntegrationStore.integrations.first?.id
             
             var agent2 = AgentProfileModel.defaultAgent()
             agent2.name = "Research Assistant"
@@ -211,7 +210,8 @@ struct AgentProfilerView_V3_Previews: PreviewProvider {
         let mockToolStore = ToolStore()
         
         let mockMainViewModel = MainApplicationViewModel(
-            ollamaProfileStore: mockOllamaProfileStore,
+            // --- MODIFIED: Pass the new store ---
+            llmIntegrationStore: mockLlmIntegrationStore,
             agentStore: mockAgentStore
         )
 

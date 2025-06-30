@@ -47,6 +47,25 @@ struct AgentConfig: Codable {
         case tools
         case llmSettings = "llmSettings"
     }
+    
+    // --- NEW: Custom encoder to ensure parentId is encoded as null ---
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(agentId, forKey: .agentId)
+        
+        // This explicitly encodes the parentId key with a null value if it's nil,
+        // which is required by the Python backend.
+        if let parentId = self.parentId {
+            try container.encode(parentId, forKey: .parentId)
+        } else {
+            try container.encodeNil(forKey: .parentId)
+        }
+        
+        try container.encode(roleObjective, forKey: .roleObjective)
+        try container.encode(tools, forKey: .tools)
+        try container.encode(llmSettings, forKey: .llmSettings)
+    }
+    // --- END NEW ---
 }
 
 // MARK: - LLMSettings (Handles multiple providers)

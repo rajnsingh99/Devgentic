@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788" systemVersion="24F74" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788.4" systemVersion="24F74" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
     <entity name="AgentProfileEntity" representedClassName="AgentProfileEntity" syncable="YES" codeGenerationType="class">
         <attribute name="baseURL" attributeType="String"/>
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
@@ -28,6 +28,19 @@
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="userDefinedTitle" optional="YES" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>
+    </entity>
+    <entity name="LLMIntegrationEntity" representedClassName="LLMIntegrationEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="apiKey" optional="YES" attributeType="String"/>
+        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="displayName" attributeType="String"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="lastSelected" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="ollamaBaseURL" optional="YES" attributeType="String"/>
+        <attribute name="ollamaModelName" optional="YES" attributeType="String"/>
+        <attribute name="providerType" optional="YES" attributeType="String"/>
+        <attribute name="remoteModelName" optional="YES" attributeType="String"/>
+        <attribute name="remoteProvider" optional="YES" attributeType="String"/>
+        <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
     </entity>
     <entity name="OllamaProfileEntity" representedClassName="OllamaProfileEntity" syncable="YES" codeGenerationType="class">
         <attribute name="baseURL" optional="YES" attributeType="String"/>

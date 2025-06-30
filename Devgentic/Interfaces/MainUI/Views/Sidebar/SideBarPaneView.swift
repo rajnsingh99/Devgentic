@@ -29,7 +29,7 @@ struct SideBarPaneView: View {
                         Button { openWindow(id: "agent-settings") } label: { Image(systemName: "gearshape") }
                             .buttonStyle(.plain).onHover { isHoveringSettingsButton = $0 }.help("Agent Settings")
                     } else if tab == .ollama {
-                        Button { openWindow(id: "ollama-profiles") } label: { Image(systemName: "gearshape") }
+                        Button { openWindow(id: "llm-integrations") } label: { Image(systemName: "gearshape") }
                             .buttonStyle(.plain).onHover { isHoveringSettingsButton = $0 }.help("Manage Ollama Profiles & Settings")
                     }
                 }
@@ -42,7 +42,7 @@ struct SideBarPaneView: View {
                 case .newChat: NewChatTabView()
                 case .explorer: ExplorerView()
                 case .conversations: ConversationListView()
-                case .ollama: OllamaSidebarView(sidebarWidth: $sidebarWidth)
+                case .ollama: LLMIntegrationsSidebarView(sidebarWidth: $sidebarWidth)
                 case .agents: AgentsTabView()
                 case .promptLibrary, .settings, .user, .none:
                     Spacer()
@@ -61,7 +61,6 @@ struct SideBarPaneView: View {
 // MARK: - Preview Provider
 struct SideBarPaneView_Previews: PreviewProvider {
     static func createMockViewModel() -> MainApplicationViewModel {
-        let profileStore = OllamaProfileStore()
         let agentStore = AgentStore()
         
         // Ensures the mock data uses the correct initializer for AgentProfileModel
@@ -71,7 +70,7 @@ struct SideBarPaneView_Previews: PreviewProvider {
         }
         
         return MainApplicationViewModel(
-            ollamaProfileStore: profileStore,
+            llmIntegrationStore: LLMIntegrationStore(),
             agentStore: agentStore
         )
     }

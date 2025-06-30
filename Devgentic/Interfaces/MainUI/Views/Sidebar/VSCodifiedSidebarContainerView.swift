@@ -101,7 +101,7 @@ struct VSCodifiedSidebarContainerView_Previews: PreviewProvider {
 
         // MARK: - Corrected: Initializer for the view model no longer takes OllamaService
         @StateObject var vm = MainApplicationViewModel(
-            ollamaProfileStore: OllamaProfileStore()
+            llmIntegrationStore: LLMIntegrationStore()
         )
 
         var body: some View {

@@ -14,7 +14,6 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 // MARK: - Main View
 struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
-    @EnvironmentObject private var ollamaProfileStore: OllamaProfileStore
     @Environment(\.openWindow) var openWindow
     @StateObject private var explorerViewModel = ExplorerViewModel() // This remains a @StateObject owned by MainApplicationView
 
@@ -35,7 +34,6 @@ struct MainApplicationView: View {
     // MARK: - Body
     var body: some View {
         ZStack(alignment: .leading) {
-            // --- Main Content Area (Header, Chat History + Input) ---
             VStack(spacing: 0) {
                 ChatHeaderView(
                     chatTitle: viewModel.currentConversationTitle,
@@ -90,11 +88,7 @@ struct MainApplicationView: View {
                     }
                     .frame(maxHeight: .infinity, alignment: .top)
                     .overlay {
-                        // MODIFIED: Removed the 'NoProfileConfiguredView' overlay.
-                        // The placeholder text in ChatInputAreaView and the error message on send
-                        // now handle the case where no profile is selected.
                         if viewModel.selectedConversationID == nil {
-                            // This part handles conversation selection prompts
                             Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
                                 .font(.title3)
                                 .foregroundColor(.gray.opacity(0.7))
@@ -151,8 +145,7 @@ struct MainApplicationView: View {
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
         }
-        // .environmentObject(viewModel) // This is not strictly needed here if viewModel is @EnvironmentObject and children access it the same way
-        .environmentObject(explorerViewModel) // explorerViewModel is owned by this view, so it's passed to its children here
+        .environmentObject(explorerViewModel)
         .opacity(viewModel.windowOpacity)
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
@@ -204,11 +197,8 @@ struct MainApplicationView: View {
      }
 }
 
-// REMOVED: The NoProfileConfiguredView is no longer needed here.
-
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
-        // MODIFIED: Inject MainApplicationViewModel and ExplorerViewModel for the preview
         MainApplicationView()
             .environmentObject(MainApplicationViewModel())
             .environmentObject(ExplorerViewModel())

@@ -22,7 +22,6 @@ struct AgentsTabView: View {
                             AgentRowView(agent: agent)
                                 .padding(.horizontal)
                                 .onTapGesture {
-                                    // Use the new centralized selection property
                                     viewModel.agentStore.selectedAgentID = agent.id
                                 }
                                 .onTapGesture(count: 2) {
@@ -45,14 +44,15 @@ struct AgentRowView: View {
     let agent: AgentProfileModel
     @EnvironmentObject var viewModel: MainApplicationViewModel
 
-    // Check if this agent is the currently selected one
     private var isAgentActive: Bool {
         viewModel.agentStore.selectedAgentID == agent.id
     }
 
-    private var linkedOllamaProfile: OllamaProfileModel? {
-        if let profileID = agent.linkedOllamaProfileID {
-            return viewModel.ollamaProfileStore.profiles.first(where: { $0.id == profileID })
+    // --- MODIFIED: This now fetches from the new LLMIntegrationStore ---
+    private var linkedIntegration: LLMIntegrationModel? {
+        if let integrationID = agent.linkedIntegrationID {
+            // Use the new llmIntegrationStore from the viewModel
+            return viewModel.llmIntegrationStore.integrations.first { $0.id == integrationID }
         }
         return nil
     }
@@ -64,19 +64,21 @@ struct AgentRowView: View {
                     .font(.headline)
                     .foregroundColor(.primary)
 
-                if let profile = linkedOllamaProfile {
-                    Text("\(profile.profileName) - \(profile.llmModelName)")
+                // --- MODIFIED: Updated logic to display info from the new model ---
+                if let integration = linkedIntegration {
+                    // Display the integration's display name and the specific model name
+                    let modelName = integration.ollamaModelName ?? integration.remoteModelName ?? "N/A"
+                    Text("\(integration.displayName) - \(modelName)")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 } else {
-                    Text("No Ollama profile linked")
+                    Text("No LLM integration linked")
                         .font(.subheadline)
                         .foregroundColor(.gray)
                 }
             }
             Spacer()
             
-            // Display checkmark if the agent is active
             if isAgentActive {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.blue)
@@ -96,44 +98,54 @@ struct AgentRowView: View {
     }
 }
 
-// MARK: - Preview Provider (FIXED)
-
+// MARK: - Preview Provider (Updated for new data model)
 struct AgentsTabView_Previews: PreviewProvider {
-    // 1. Create a static, fully configured mock view model.
-    // This separates data setup from the View return, fixing the build error.
     static var mockViewModel: MainApplicationViewModel = {
-        // Create mock stores. For previews, we don't need real persistence.
-        let ollamaProfileStore = OllamaProfileStore()
+        // --- MODIFIED: Create mock LLMIntegrationStore ---
+        let llmIntegrationStore = LLMIntegrationStore()
         let agentStore = AgentStore()
         
-        // Create a mock ollama profile to link to an agent
-        let mockOllamaProfile = OllamaProfileModel(
+        // Create a mock LLM integration to link to an agent
+        let mockIntegration = LLMIntegrationModel(
             id: UUID(),
-            profileName: "Local Llama 3",
-            baseURL: "http://localhost:11434",
-            llmModelName: "llama3:8b",
-            temperature: 0.8, topK: 40, topP: 0.9, repeatPenalty: 1.1, contextWindowSize: 4096, gpuLayers: -1, maxInlineChars: 5000, maxAttachedFiles: 5, textFileInclusionStrategy: .preferInlining, imageHandlingStrategy: .includePathWithWarning, binaryFileHandlingStrategy: .includePathWithWarning
+            displayName: "Local Llama 3",
+            providerType: .ollama,
+            ollamaBaseURL: "http://localhost:11434",
+            ollamaModelName: "llama3:8b"
         )
-        ollamaProfileStore.profiles = [mockOllamaProfile]
+        llmIntegrationStore.integrations = [mockIntegration]
 
-        // Create mock agents
-        let agent1 = AgentProfileModel(id: UUID(), name: "Developer Agent", role: "Your personal development assistant.", baseURL: "http://localhost:8000", linkedOllamaProfileID: mockOllamaProfile.id, tools: [])
-        let agent2 = AgentProfileModel(id: UUID(), name: "Research Assistant", role: "Helps with research and data gathering.", baseURL: "http://localhost:8001", linkedOllamaProfileID: nil, tools: [])
+        // Create mock agents and link them to the new integration
+        let agent1 = AgentProfileModel(
+            id: UUID(),
+            name: "Developer Agent",
+            role: "Your personal development assistant.",
+            baseURL: "http://localhost:8000",
+            // --- MODIFIED: Use new property name ---
+            linkedIntegrationID: mockIntegration.id,
+            tools: []
+        )
+        let agent2 = AgentProfileModel(
+            id: UUID(),
+            name: "Research Assistant",
+            role: "Helps with research and data gathering.",
+            baseURL: "http://localhost:8001",
+            linkedIntegrationID: nil,
+            tools: []
+        )
         
-        // Populate the agent store
         agentStore.agents = [agent1, agent2]
-        agentStore.selectedAgentID = agent1.id // Set the first agent as active for the preview
+        agentStore.selectedAgentID = agent1.id
 
-        // Create the main view model with the mock stores
+        // Create the main view model with the new mock store
         let viewModel = MainApplicationViewModel(
-            ollamaProfileStore: ollamaProfileStore,
+            // --- MODIFIED: Pass new store to initializer ---
+            llmIntegrationStore: llmIntegrationStore,
             agentStore: agentStore
         )
         return viewModel
     }()
 
-    // 2. The previews property simply returns the view with the mock data.
-    // This structure is clean and reliable for SwiftUI Previews.
     static var previews: some View {
         AgentsTabView()
             .environmentObject(mockViewModel)

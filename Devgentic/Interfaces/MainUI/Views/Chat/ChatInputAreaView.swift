@@ -20,7 +20,7 @@ struct ChatInputAreaView: View {
 
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
-    @EnvironmentObject var ollamaProfileStore: OllamaProfileStore
+    @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
 
     // MARK: - State for Suggestions & Popups
     @State private var showPromptSuggestions: Bool = false
@@ -186,7 +186,7 @@ struct ChatInputAreaView: View {
     }
     
     private var placeholderText: String {
-        if ollamaProfileStore.currentProfile == nil { return "Please configure an Ollama Profile to start..." }
+        if llmIntegrationStore.integrations.isEmpty { return "Please configure an LLM Integration to start..." }
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
         if userInput.isEmpty {
             switch mainViewModel.voiceInputState {
@@ -227,33 +227,25 @@ struct ChatInputAreaView: View {
     // MARK: - Agent Picker Button (Updated to trigger pop-up)
     @ViewBuilder
     private func agentPickerButton() -> some View {
-        Button(action: {
-            self.showingAgentSelectorPopup = true
-        }) {
+        Button(action: { self.showingAgentSelectorPopup = true }) {
             HStack(spacing: 4) {
-                Image(systemName: "person.2.fill")
-                    .font(.system(size: 12))
-                
+                Image(systemName: "person.2.fill").font(.system(size: 12))
                 if let selectedAgent = mainViewModel.agentStore.agents.first(where: { $0.id == mainViewModel.selectedAgentID }) {
                     Text(selectedAgent.name)
                 } else {
                     Text("Select Agent")
                 }
-                
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.gray.opacity(0.2))
-            .cornerRadius(6)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Color.gray.opacity(0.2)).cornerRadius(6)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingAgentSelectorPopup, arrowEdge: .bottom) {
             AgentSelectorPopup(
                 selectedAgentID: $mainViewModel.selectedAgentID,
                 agents: mainViewModel.agentStore.agents,
-                ollamaProfileStore: mainViewModel.ollamaProfileStore, // Pass the store
+                llmIntegrationStore: self.llmIntegrationStore, // Pass the new store
                 isPresented: $showingAgentSelectorPopup
             )
         }
@@ -483,7 +475,7 @@ struct ChatInputAreaView: View {
 private struct AgentSelectorPopup: View {
     @Binding var selectedAgentID: UUID?
     let agents: [AgentProfileModel]
-    let ollamaProfileStore: OllamaProfileStore // Added to get LLM names
+    let llmIntegrationStore: LLMIntegrationStore
     @Binding var isPresented: Bool
 
     var body: some View {
@@ -526,10 +518,16 @@ private struct AgentSelectorPopup: View {
     
     // Helper function to find the LLM name from the linked profile
     private func llmName(for agent: AgentProfileModel) -> String {
-        guard let profileID = agent.linkedOllamaProfileID,
-              let profile = ollamaProfileStore.profiles.first(where: { $0.id == profileID }) else {
-            return "Default LLM"
+        guard let integrationID = agent.linkedIntegrationID,
+                let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID }) else {
+            return "No LLM Linked"
         }
-        return profile.llmModelName
+        
+        switch integration.providerType {
+        case .ollama:
+            return integration.ollamaModelName ?? "Default Ollama Model"
+        case .remote:
+            return integration.remoteModelName ?? "Default Remote Model"
+        }
     }
 }

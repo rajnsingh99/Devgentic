@@ -31,6 +31,13 @@ protocol CoreDataServiceProtocol {
     func fetchToolConfigs() -> [ToolConfigEntity]
     func getProvidedTool(withId toolId: String, providerId: UUID) -> ProvidedToolEntity?
     
+    // LLM Integration Methods
+    func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity?
+    func fetchLLMIntegrations() -> [LLMIntegrationEntity]
+    func addLLMIntegration(from model: LLMIntegrationModel)
+    func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel)
+    func deleteLLMIntegration(with id: UUID)
+    
     func saveContext()
 }
 
@@ -250,7 +257,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             entity.name = model.name
             entity.role = model.role
             entity.baseURL = model.baseURL
-            entity.linkedOllamaProfileID = model.linkedOllamaProfileID
 
             // Handle the tools relationship
             let currentSelectedTools = entity.mutableSetValue(forKey: "tools")
@@ -300,6 +306,73 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 return nil
             }
         }
+    
+    // MARK: - LLM Integration Methods
+    
+    /// Fetches a single LLMIntegration by its UUID.
+        func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity? {
+            let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+            do {
+                return try viewContext.fetch(request).first
+            } catch {
+                logger.error("Failed to fetch LLMIntegrationEntity with ID \(id.uuidString): \(error.localizedDescription)")
+                return nil
+            }
+        }
+
+        /// Fetches all LLMIntegrations, sorted by display name.
+        func fetchLLMIntegrations() -> [LLMIntegrationEntity] {
+            let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "displayName", ascending: true)]
+            do {
+                return try viewContext.fetch(request)
+            } catch {
+                logger.error("Failed to fetch all LLMIntegrationEntity objects: \(error.localizedDescription)")
+                return []
+            }
+        }
+
+        /// Creates a new `LLMIntegrationEntity` from a model struct.
+        func addLLMIntegration(from model: LLMIntegrationModel) {
+            let newIntegration = LLMIntegrationEntity(context: viewContext)
+            updateLLMIntegration(entity: newIntegration, with: model) // Use the update logic to populate
+            logger.info("Adding new LLM Integration '\(model.displayName)' to context.")
+            saveContext()
+        }
+
+        /// Updates an existing `LLMIntegrationEntity` with data from a model struct.
+        func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel) {
+            entity.id = model.id
+            entity.displayName = model.displayName
+            entity.providerType = model.providerType.rawValue
+            entity.lastSelected = model.lastSelected
+            entity.ollamaBaseURL = model.ollamaBaseURL
+            entity.ollamaModelName = model.ollamaModelName
+            entity.remoteProvider = model.remoteProvider?.rawValue
+            entity.apiKey = model.apiKey
+            entity.remoteModelName = model.remoteModelName
+            
+            if let temp = model.temperature {
+                entity.temperature = temp
+            }
+            if let ctxSize = model.contextWindowSize {
+                entity.contextWindowSize = Int64(ctxSize)
+            }
+
+            logger.trace("Updating attributes for LLM Integration: \(model.displayName)")
+            saveContext()
+        }
+
+        /// Deletes an LLMIntegration by its UUID.
+        func deleteLLMIntegration(with id: UUID) {
+            if let integrationToDelete = getLLMIntegration(withId: id) {
+                viewContext.delete(integrationToDelete)
+                logger.info("Deleting LLM Integration with ID \(id.uuidString) from context.")
+                saveContext()
+            }
+        }
+
 
 
     // MARK: - Private Helper Methods
@@ -420,7 +493,6 @@ extension AgentProfileEntity {
             name: self.name ?? "Unnamed Agent",
             role: self.role ?? "",
             baseURL: self.baseURL ?? "",
-            linkedOllamaProfileID: self.linkedOllamaProfileID,
             tools: selectedToolsArray
         )
     }
@@ -473,3 +545,23 @@ extension SelectedToolEntity {
         )
     }
 }
+
+extension LLMIntegrationEntity {
+    /// Converts a Core Data entity back to a plain Swift struct.
+    func toLLMIntegrationModel() -> LLMIntegrationModel {
+        LLMIntegrationModel(
+            id: self.id ?? UUID(),
+            displayName: self.displayName ?? "Unnamed Integration",
+            providerType: ProviderType(rawValue: self.providerType ?? "ollama") ?? .ollama,
+            lastSelected: self.lastSelected,
+            ollamaBaseURL: self.ollamaBaseURL,
+            ollamaModelName: self.ollamaModelName,
+            remoteProvider: RemoteProvider(rawValue: self.remoteProvider ?? ""),
+            apiKey: self.apiKey,
+            remoteModelName: self.remoteModelName,
+            temperature: self.temperature,
+            contextWindowSize: Int(self.contextWindowSize)
+        )
+    }
+}
+

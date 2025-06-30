@@ -104,31 +104,31 @@ struct CommandCentreView: View {
 }
 
 // MARK: - Preview Provider (Corrected)
-struct CommandCentreView_Previews: PreviewProvider {
-    static var previews: some View {
-        // Create a mock OllamaProfileStore for previews
-        let mockOllamaProfileStore: OllamaProfileStore = {
-            let store = OllamaProfileStore()
-            store.profiles = [OllamaProfileModel.defaultProfile()]
-            store.selectedProfileID = store.profiles.first?.id
-            return store
-        }()
-
-        // MARK: - Corrected: Initialize the view model without the OllamaService argument
-        let mockViewModel = MainApplicationViewModel(
-            ollamaProfileStore: mockOllamaProfileStore
-        )
-
-        CommandCentreView()
-            .environmentObject(mockViewModel)
-            .frame(width: 800, height: 500)
-            .previewDisplayName("Command Centre Preview")
-            .onAppear {
-                // MARK: - Corrected: Configure the SHARED OllamaService instance for this preview
-                let service = OllamaService.shared
-                service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
-                service.llmModelName = "mistral:7b"
-                service.serverStatus = .connected
-            }
-    }
-}
+//struct CommandCentreView_Previews: PreviewProvider {
+//    static var previews: some View {
+//        // Create a mock OllamaProfileStore for previews
+//        let mockOllamaProfileStore: OllamaProfileStore = {
+//            let store = OllamaProfileStore()
+//            store.profiles = [OllamaProfileModel.defaultProfile()]
+//            store.selectedProfileID = store.profiles.first?.id
+//            return store
+//        }()
+//
+//        // MARK: - Corrected: Initialize the view model without the OllamaService argument
+//        let mockViewModel = MainApplicationViewModel(
+//            ollamaProfileStore: mockOllamaProfileStore
+//        )
+//
+//        CommandCentreView()
+//            .environmentObject(mockViewModel)
+//            .frame(width: 800, height: 500)
+//            .previewDisplayName("Command Centre Preview")
+//            .onAppear {
+//                // MARK: - Corrected: Configure the SHARED OllamaService instance for this preview
+//                let service = OllamaService.shared
+//                service.localModels = ["llama3:8b", "mistral:7b", "gemma:2b"]
+//                service.llmModelName = "mistral:7b"
+//                service.serverStatus = .connected
+//            }
+//    }
+//}

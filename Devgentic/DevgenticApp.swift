@@ -16,7 +16,7 @@ struct DevgenticApp: App {
     private let coreDataService = CoreDataPersistenceService.shared
     
     // Create the persistent stores as StateObjects first.
-    @StateObject private var ollamaProfileStore = OllamaProfileStore()
+    @StateObject private var llmIntegrationStore = LLMIntegrationStore()
     @StateObject private var agentStore = AgentStore()
     @StateObject private var agentManager = AgentManager()
     @StateObject private var toolStore = ToolStore()
@@ -26,16 +26,16 @@ struct DevgenticApp: App {
 
     init() {
         // Create the stores that will be passed to the view model
-        let profileStore = OllamaProfileStore()
+        let integrationStore = LLMIntegrationStore()
         let agStore = AgentStore()
         
         let viewModel = MainApplicationViewModel(
-            ollamaProfileStore: profileStore,
+            llmIntegrationStore: integrationStore,
             agentStore: agStore
         )
         
         // Initialize the StateObjects
-        self._ollamaProfileStore = StateObject(wrappedValue: profileStore)
+        self._llmIntegrationStore = StateObject(wrappedValue: integrationStore)
         self._agentStore = StateObject(wrappedValue: agStore)
         self._mainApplicationViewModel = StateObject(wrappedValue: viewModel)
     }
@@ -47,7 +47,7 @@ struct DevgenticApp: App {
                 MainApplicationView()
                     .environmentObject(mainApplicationViewModel)
                     .environmentObject(agentManager)
-                    .environmentObject(ollamaProfileStore)
+                    .environmentObject(llmIntegrationStore)
                     .environmentObject(agentStore)
                     .environmentObject(toolStore)
                     .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
@@ -82,8 +82,8 @@ struct DevgenticApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
 
-                Button("Ollama Profiles...") {
-                    openWindow(id: "ollama-profiles")
+                Button("LLM Integrations...") {
+                    openWindow(id: "llm-integrations")
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             }
@@ -112,16 +112,16 @@ struct DevgenticApp: App {
             CommandCentreView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(agentManager)
-                .environmentObject(ollamaProfileStore)
+                .environmentObject(llmIntegrationStore)
         }
         .defaultSize(width: 850, height: 700)
 
-        // MARK: - Ollama Profiles Window
-        WindowGroup("Ollama Profiles", id: "ollama-profiles") {
-            OllamaProfilesView()
-                .environmentObject(mainApplicationViewModel)
-                .environmentObject(ollamaProfileStore)
-        }
+        // MARK: - LLM Integrations Window
+        WindowGroup("LLM Integrations", id: "llm-integrations") {
+                    LLMIntegrationsView()
+                        .environmentObject(mainApplicationViewModel)
+                        .environmentObject(llmIntegrationStore)
+                }
         .defaultSize(width: 850, height: 700)
         
         // MARK: - Agent Settings Window

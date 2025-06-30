@@ -28,7 +28,7 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Use the OllamaService singleton
     @ObservedObject var ollamaService = OllamaService.shared
-    @ObservedObject var ollamaProfileStore: OllamaProfileStore
+    @ObservedObject var llmIntegrationStore: LLMIntegrationStore
     @ObservedObject var agentStore: AgentStore
 
     // MARK: - Voice Input Services
@@ -106,7 +106,7 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Initialization
-    init(ollamaProfileStore: OllamaProfileStore,
+    init(llmIntegrationStore: LLMIntegrationStore,
          agentStore: AgentStore = AgentStore(),
          audioEngineService: AudioEngineService = AudioEngineService(),
          speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
@@ -114,7 +114,7 @@ class MainApplicationViewModel: ObservableObject {
          messageAssemblerService: MessageAssemblerService? = nil,
          llmCommunicator: LLMCommunicatorProtocol? = nil
     ) {
-        self.ollamaProfileStore = ollamaProfileStore
+        self.llmIntegrationStore = llmIntegrationStore
         self.agentStore = agentStore
         self.audioEngineService = audioEngineService
         self.speechRecognitionService = speechRecognitionService
@@ -136,21 +136,22 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        ollamaProfileStore.$selectedProfileID
-            .combineLatest(ollamaProfileStore.$profiles)
-            .compactMap { selectedID, profiles -> OllamaProfileModel? in
+        llmIntegrationStore.$selectedIntegrationID
+            .combineLatest(llmIntegrationStore.$integrations)
+            .compactMap { selectedID, integrations -> LLMIntegrationModel? in
                 guard let id = selectedID else { return nil }
-                return profiles.first { $0.id == id }
+                return integrations.first { $0.id == id }
             }
+            .filter { $0.providerType == .ollama } // Only react to Ollama profiles for this service
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] (newProfile: OllamaProfileModel) in
+            .sink { [weak self] (newIntegration: LLMIntegrationModel) in
                 guard let self = self else { return }
-                logger.info("MainApplicationViewModel: Active profile changed to '\(newProfile.profileName)'. Updating OllamaService.")
+                logger.info("MainApplicationViewModel: Active Ollama integration changed to '\(newIntegration.displayName)'. UpdatinOllamaService.")
                 
                 let service = OllamaService.shared
-                service.ollamaBaseURL = newProfile.baseURL
-                service.llmModelName = newProfile.llmModelName
+                service.ollamaBaseURL = newIntegration.ollamaBaseURL ?? ""
+                service.llmModelName = newIntegration.ollamaModelName ?? ""
                 
                 Task {
                     await service.checkServerStatusAndUpdateModels()
@@ -165,11 +166,11 @@ class MainApplicationViewModel: ObservableObject {
         let fpService = FileProcessorService()
         let maService = MessageAssemblerService(fileProcessorService: fpService)
         let comm = DefaultLLMCommunicator(fileProcessorService: fpService)
-        let ollamaProfileStore = OllamaProfileStore()
+        let llmIntegrationStore = LLMIntegrationStore()
         let agentStore = AgentStore()
 
         self.init(
-            ollamaProfileStore: ollamaProfileStore,
+            llmIntegrationStore: llmIntegrationStore,
             agentStore: agentStore,
             fileProcessorService: fpService,
             messageAssemblerService: maService,
@@ -197,7 +198,7 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
             
-        ollamaProfileStore.objectWillChange
+        llmIntegrationStore.objectWillChange
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
@@ -244,18 +245,31 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
-        guard ollamaProfileStore.currentProfile != nil else {
-            let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
-            let errorMessage = ChatMessage(
-                conversationId: conversationIDToUse,
-                sender: .agent,
-                content: .error(title: "Ollama Profile Not Selected", details: "Please select an active Ollama profile from the sidebar, or configure a new one to send messages.")
-            )
-            if let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
-                persistenceService.addMessage(errorMessage, to: targetEntity)
+        // --- MODIFIED VALIDATION LOGIC ---
+        // The validation now depends on the selected backend.
+        if selectedBackend == .ollama {
+            guard let currentIntegration = llmIntegrationStore.currentIntegration, currentIntegration.providerType == .ollama else {
+                let errorMsg = ChatMessage(conversationId: selectedConversationID ?? UUID(), sender: .agent, content: .error(title: "OllaIntegration Not Selected", details: "Please select an active Ollama integration to use this backend."))
+                if let convId = selectedConversationID, let entity = persistenceService.getConversation(withId: convId) {
+                    persistenceService.addMessage(errorMsg, to: entity)
+                }
+                return
             }
-            return
+        } else if selectedBackend == .agent {
+            guard selectedAgentID != nil else {
+                let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
+                let errorMessage = ChatMessage(
+                    conversationId: conversationIDToUse,
+                    sender: .agent,
+                    content: .error(title: "Agent Not Selected", details: "Please select an agent from the input area to use the Agent backend.")
+                )
+                if let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
+                    persistenceService.addMessage(errorMessage, to: targetEntity)
+                }
+                return
+            }
         }
+        // --- END MODIFIED VALIDATION LOGIC ---
 
         if voiceInputState.isSessionActive {
             self.stopVoiceCaptureAndFinalize(customError: nil)
@@ -307,8 +321,8 @@ class MainApplicationViewModel: ObservableObject {
         do {
             switch selectedBackend {
             case .ollama:
-                let (messages, error) = try await sendToOllama(conversationID: conversationID, userQuery: userQuery, files: files)
-                return (messages, error?.localizedDescription)
+//                let (messages, error) = try await sendToOllama(conversationID: conversationID, userQuery: userQuery, files: files)
+                return ([], "")
                 
             case .agent:
                 // MODIFIED: This function is now completely rewritten
@@ -328,15 +342,21 @@ class MainApplicationViewModel: ObservableObject {
             throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No agent is selected or the selected agent could not be found."])
         }
         
-        guard let linkedOllamaProfile = ollamaProfileStore.profiles.first(where: { $0.id == selectedAgent.linkedOllamaProfileID }) else {
-            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent is not linked to a valid Ollama profile."])
+        guard let linkedIntegration = llmIntegrationStore.integrations.first(where: { $0.id == selectedAgent.linkedIntegrationID }) else {
+            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent is not linked to a valid LLM integration."])
+        }
+
+        guard linkedIntegration.providerType == .ollama,
+                let baseUrl = linkedIntegration.ollamaBaseURL,
+                let modelName = linkedIntegration.ollamaModelName else {
+            throw NSError(domain: "AgentConfigError", code: 400, userInfo: [NSLocalizedDescriptionKey: "The agent's linked LLM integration must be a configured Ollama provider."])
         }
 
         // 1. Create LLMSettings
         let llmSettings = OllamaLLMSettings(
-            baseUrl: linkedOllamaProfile.baseURL,
-            modelName: linkedOllamaProfile.llmModelName,
-            contextWindowSize: linkedOllamaProfile.contextWindowSize
+            baseUrl: baseUrl,
+            modelName: modelName,
+            contextWindowSize: linkedIntegration.contextWindowSize ?? 4096
         )
 
         // 2. Create the root AgentConfig
@@ -372,66 +392,71 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     // MARK: - Ollama Payload Construction and Sending (Refactored for consistency)
-    private func sendToOllama(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
-        var generatedMessages: [ChatMessage] = []
-
-        let currentOllamaProfile = self.ollamaProfileStore.currentProfile
-        
-        let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
-            userQuery: userQuery,
-            attachedFiles: files,
-            for: .ollama,
-            ollamaModelDetails: OllamaModelInfo(name: currentOllamaProfile?.llmModelName ?? "", displayName: "", sizeDescription: ""),
-            maxInlineCharsOllama: currentOllamaProfile?.maxInlineChars ?? 5000,
-            maxFilesForOllama: currentOllamaProfile?.maxAttachedFiles ?? 5,
-            textFileStrategy: currentOllamaProfile?.textFileInclusionStrategy ?? .preferInlining,
-            imageHandlingStrategy: currentOllamaProfile?.imageHandlingStrategy ?? .includePathWithWarning,
-            binaryFileHandlingStrategy: currentOllamaProfile?.binaryFileHandlingStrategy ?? .includePathWithWarning
-        )
-
-        if !processingWarnings.isEmpty {
-            let warningContent = MessageContent.error(title: "File Processing Notice", details: "- " + processingWarnings.joined(separator: "\n- "))
-            generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: warningContent))
-        }
-
-        let processableParts = messageParts.filter { part in
-            if let fileRep = part.fileRepresentation, case .unprocessable = fileRep { return false }
-            return true
-        }
-
-        if !processableParts.contains(where: { !$0.content.isEmpty || $0.type == .file }) {
-            logger.info("No processable content to send to Ollama.")
-            return (generatedMessages, nil)
-        }
-        
-        if ollamaService.serverStatus != .connected {
-            let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(ollamaService.serverStatus.description) at \(ollamaService.ollamaBaseURL)"
-            throw NSError(domain: "OllamaConnectionError", code: 503, userInfo: [NSLocalizedDescriptionKey: errorMsg])
-        }
-
-        let baseBackendConfig = self.determineBackendConfiguration()
-        var finalPartsToSend = processableParts
-        if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
-             finalPartsToSend.insert(.text("Context File: \(filePath)\n\n"), at: 0)
-        }
-        
-        let llmResponse = try await self.llmCommunicator.sendMessage(parts: finalPartsToSend, to: .ollama, config: baseBackendConfig)
-        let newMessages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
-        generatedMessages.append(contentsOf: newMessages)
-        
-        return (generatedMessages, llmResponse.error)
-    }
+//    private func sendToOllama(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
+//        var generatedMessages: [ChatMessage] = []
+//
+//        guard let currentIntegration = llmIntegrationStore.currentIntegration, currentIntegration.providerType == .ollama else {
+//                    throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No active Ollama integration found."])
+//        }
+//        
+//        let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
+//            userQuery: userQuery,
+//            attachedFiles: files,
+//            for: .ollama,
+//            ollamaModelDetails: OllamaModelInfo(name: currentOllamaProfile?.llmModelName ?? "", displayName: "", sizeDescription: ""),
+//            maxInlineCharsOllama: currentOllamaProfile?.maxInlineChars ?? 5000,
+//            maxFilesForOllama: currentOllamaProfile?.maxAttachedFiles ?? 5,
+//            textFileStrategy: currentOllamaProfile?.textFileInclusionStrategy ?? .preferInlining,
+//            imageHandlingStrategy: currentOllamaProfile?.imageHandlingStrategy ?? .includePathWithWarning,
+//            binaryFileHandlingStrategy: currentOllamaProfile?.binaryFileHandlingStrategy ?? .includePathWithWarning
+//        )
+//
+//        if !processingWarnings.isEmpty {
+//            let warningContent = MessageContent.error(title: "File Processing Notice", details: "- " + processingWarnings.joined(separator: "\n- "))
+//            generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: warningContent))
+//        }
+//
+//        let processableParts = messageParts.filter { part in
+//            if let fileRep = part.fileRepresentation, case .unprocessable = fileRep { return false }
+//            return true
+//        }
+//
+////        if !processableParts.contains(where: { !$0.content.isEmpty || $0.type == .file }) {
+////            logger.info("No processable content to send to Ollama.")
+////            return (generatedMessages, nil)
+////        }
+//        
+//        if ollamaService.serverStatus != .connected {
+//            let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(ollamaService.serverStatus.description) at \(ollamaService.ollamaBaseURL)"
+//            throw NSError(domain: "OllamaConnectionError", code: 503, userInfo: [NSLocalizedDescriptionKey: errorMsg])
+//        }
+//
+//        let baseBackendConfig = self.determineBackendConfiguration()
+//        var finalPartsToSend = processableParts
+////        if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
+////            finalPartsToSend.insert(MessagePart(type: .text, content: "Context File: \(filePath)\n\n", fileRepresentation: LLMFileRepresentation?), at: 0)
+////        }
+//        
+//        let llmResponse = try await self.llmCommunicator.sendMessage(parts: finalPartsToSend, to: .ollama, config: baseBackendConfig)
+//        let newMessages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
+//        generatedMessages.append(contentsOf: newMessages)
+//        
+//        return (generatedMessages, llmResponse.error)
+//    }
 
     private func determineBackendConfiguration() -> BackendConfiguration {
-        if let currentProfile = ollamaProfileStore.currentProfile, self.selectedBackend == .ollama {
+        if let currentIntegration = llmIntegrationStore.currentIntegration,
+            currentIntegration.providerType == .ollama,
+            self.selectedBackend == .ollama,
+            let baseUrl = currentIntegration.ollamaBaseURL {
+            
             let advancedOptions: [String: Any] = [
-                "temperature": currentProfile.temperature, "top_k": currentProfile.topK,
-                "top_p": currentProfile.topP, "repeat_penalty": currentProfile.repeatPenalty,
-                "num_ctx": currentProfile.contextWindowSize, "num_gpu": currentProfile.gpuLayers
+                "temperature": currentIntegration.temperature ?? 0.8,
+                "num_ctx": currentIntegration.contextWindowSize ?? 4096
             ]
-            let modelName = ollamaService.llmModelName.isEmpty ? "default_model_name" : ollamaService.llmModelName
+            let modelName = currentIntegration.ollamaModelName ?? "default_model_name"
             let initialPayload: [String: Any] = ["model": modelName, "stream": false, "options": advancedOptions]
-            return BackendConfiguration(url: ollamaService.ollamaBaseURL, endpoint: "/api/generate", payload: initialPayload)
+            return BackendConfiguration(url: baseUrl, endpoint: "/api/generate", payload: initialPayload)
         
         } else {
             return BackendConfiguration(url: self.agentBaseURL, endpoint: "/agent/chat", payload: [:])
