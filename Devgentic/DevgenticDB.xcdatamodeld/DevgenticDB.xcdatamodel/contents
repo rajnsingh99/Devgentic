@@ -42,23 +42,6 @@
         <attribute name="remoteProvider" optional="YES" attributeType="String"/>
         <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
     </entity>
-    <entity name="OllamaProfileEntity" representedClassName="OllamaProfileEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="baseURL" optional="YES" attributeType="String"/>
-        <attribute name="binaryFileHandlingStrategy" optional="YES" attributeType="String"/>
-        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="gpuLayers" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="imageHandlingStrategy" optional="YES" attributeType="String"/>
-        <attribute name="llmModelName" optional="YES" attributeType="String"/>
-        <attribute name="maxAttachedFiles" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="maxInlineChars" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="profileName" optional="YES" attributeType="String"/>
-        <attribute name="repeatPenalty" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
-        <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
-        <attribute name="textFileInclusionStrategy" optional="YES" attributeType="String"/>
-        <attribute name="topK" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="topP" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
-    </entity>
     <entity name="ProvidedToolEntity" representedClassName="ProvidedToolEntity" syncable="YES" codeGenerationType="class">
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="toolDescription" optional="YES" attributeType="String"/>

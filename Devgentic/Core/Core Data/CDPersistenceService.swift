@@ -15,12 +15,6 @@ protocol CoreDataServiceProtocol {
     func getConversation(withId id: UUID) -> ConversationEntity?
     func deleteConversation(with id: UUID)
 
-    // Ollama Profile Methods
-    func getOllamaProfile(withId id: UUID) -> OllamaProfileEntity?
-    func deleteOllamaProfile(with id: UUID)
-    func addOllamaProfile(from model: OllamaProfileModel)
-    func updateOllamaProfile(entity: OllamaProfileEntity, with model: OllamaProfileModel)
-
     // Agent Profile Methods
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
     func fetchAgentProfiles() -> [AgentProfileEntity]
@@ -164,60 +158,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             }
             conversation.timestamp = Date()
             self.saveContext()
-        }
-    }
-    
-    // MARK: - Ollama Profile CRUD Operations (NEW)
-        
-        /// Fetches a single Ollama profile by its UUID.
-    func getOllamaProfile(withId id: UUID) -> OllamaProfileEntity? {
-        let fetchRequest: NSFetchRequest<OllamaProfileEntity> = OllamaProfileEntity.fetchRequest()
-        fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        
-        do {
-            return try viewContext.fetch(fetchRequest).first
-        } catch {
-            logger.error("Failed to fetch Ollama profile with ID \(id.uuidString): \(error.localizedDescription)")
-            return nil
-        }
-    }
-    /// Creates a new `OllamaProfileEntity` from an `OllamaProfileModel` struct.
-    func addOllamaProfile(from model: OllamaProfileModel) {
-        let newProfile = OllamaProfileEntity(context: viewContext)
-        updateOllamaProfile(entity: newProfile, with: model)
-        logger.info("Adding new Ollama profile '\(model.profileName)' to context.")
-        saveContext()
-    }
-    
-    /// Updates an existing `OllamaProfileEntity` with data from an `OllamaProfileModel`.
-    func updateOllamaProfile(entity: OllamaProfileEntity, with model: OllamaProfileModel) {
-        entity.id = model.id
-        entity.profileName = model.profileName
-        entity.baseURL = model.baseURL
-        entity.llmModelName = model.llmModelName
-        entity.temperature = model.temperature
-        entity.topK = Int64(model.topK)
-        entity.topP = model.topP
-        entity.repeatPenalty = model.repeatPenalty
-        entity.contextWindowSize = Int64(model.contextWindowSize)
-        entity.gpuLayers = Int64(model.gpuLayers)
-        entity.maxInlineChars = Int64(model.maxInlineChars)
-        entity.maxAttachedFiles = Int64(model.maxAttachedFiles)
-        entity.textFileInclusionStrategy = model.textFileInclusionStrategy.rawValue
-        entity.imageHandlingStrategy = model.imageHandlingStrategy.rawValue
-        entity.binaryFileHandlingStrategy = model.binaryFileHandlingStrategy.rawValue
-        
-        logger.trace("Updating attributes for Ollama profile: \(model.profileName)")
-        saveContext()
-    }
-    /// Deletes an Ollama profile by its UUID.
-    func deleteOllamaProfile(with id: UUID) {
-        if let profileToDelete = getOllamaProfile(withId: id) {
-            viewContext.delete(profileToDelete)
-            logger.info("Deleting Ollama profile with ID \(id.uuidString) from context.")
-            saveContext()
-        } else {
-            logger.warning("Tried to delete an Ollama profile with ID \(id.uuidString), but it was not found.")
         }
     }
     
@@ -456,29 +396,6 @@ extension ChatMessageEntity {
             timestamp: self.timestamp ?? Date(),
             sender: SenderRole(rawValue: self.senderType ?? "user") ?? .user,
             content: content
-        )
-    }
-}
-
-extension OllamaProfileEntity {
-    /// Converts a Core Data entity back to a plain Swift struct.
-    func toOllamaProfileModel() -> OllamaProfileModel {
-        return OllamaProfileModel(
-            id: self.id ?? UUID(),
-            profileName: self.profileName ?? "Unnamed Profile",
-            baseURL: self.baseURL ?? "",
-            llmModelName: self.llmModelName ?? "",
-            temperature: self.temperature,
-            topK: Int(self.topK),
-            topP: self.topP,
-            repeatPenalty: self.repeatPenalty,
-            contextWindowSize: Int(self.contextWindowSize),
-            gpuLayers: Int(self.gpuLayers),
-            maxInlineChars: Int(self.maxInlineChars),
-            maxAttachedFiles: Int(self.maxAttachedFiles),
-            textFileInclusionStrategy: TextFileInclusionStrategy(rawValue: self.textFileInclusionStrategy ?? "") ?? .preferInlining,
-            imageHandlingStrategy: OllamaImageHandlingStrategy(rawValue: self.imageHandlingStrategy ?? "") ?? .doNotInclude,
-            binaryFileHandlingStrategy: OllamaBinaryFileHandlingStrategy(rawValue: self.binaryFileHandlingStrategy ?? "") ?? .doNotInclude
         )
     }
 }
