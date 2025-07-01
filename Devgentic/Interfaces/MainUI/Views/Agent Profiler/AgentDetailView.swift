@@ -12,7 +12,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct AgentDetailView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    @EnvironmentObject var toolStore: ToolStore
+    
+    @StateObject private var toolStore = ToolStore()
     
     @Binding var agent: AgentProfileModel
     @Binding var hasUnsavedChanges: Bool
@@ -22,9 +23,12 @@ struct AgentDetailView: View {
     @State private var editableAgent: AgentProfileModel
     @State private var showingDeleteConfirm = false
     @State private var showingSelectIntegrationSheet = false
+    @State private var showingSelectToolSheet = false
 
-    private let toolCapsuleColumns = [
-        GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 5)
+    // Definition for the two-column grid layout for tools.
+    private let toolGridColumns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
     ]
 
     init(agent: Binding<AgentProfileModel>, hasUnsavedChanges: Binding<Bool>, onDelete: @escaping () -> Void) {
@@ -36,7 +40,7 @@ struct AgentDetailView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 15) {
+            VStack(alignment: .leading, spacing: 20) {
                 profileDetailsSection
                 Divider()
                 llmIntegrationSection
@@ -46,12 +50,17 @@ struct AgentDetailView: View {
             }
         }
         .padding()
-        .safeAreaInset(edge: .bottom) {
-            actionButtons
-        }
+        .safeAreaInset(edge: .bottom) { actionButtons }
         .sheet(isPresented: $showingSelectIntegrationSheet) {
             SelectLLMIntegrationView(selectedIntegrationID: $editableAgent.linkedIntegrationID)
                 .environmentObject(viewModel.llmIntegrationStore)
+        }
+        .sheet(isPresented: $showingSelectToolSheet) {
+            SelectToolView(selectedTools: $editableAgent.tools)
+                .environmentObject(toolStore)
+        }
+        .task(id: editableAgent.baseURL) {
+            await toolStore.fetchAvailableTools(baseURL: editableAgent.baseURL)
         }
         .onChange(of: editableAgent) { _, _ in checkForChanges() }
         .onChange(of: agent) { _, newAgent in resetState(with: newAgent) }
@@ -66,22 +75,52 @@ struct AgentDetailView: View {
     // MARK: - View Components
 
     private var profileDetailsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Profile Details").font(.headline)
-            formRow(label: "Agent Name:") { TextField("Agent Name", text: $editableAgent.name) }
-            formRow(label: "Agent URL:") { TextField("Agent URL", text: $editableAgent.baseURL) }
-            formRow(label: "Role:") { TextField("Role", text: $editableAgent.role, axis: .vertical).lineLimit(3...5) }
-        }.padding(.vertical, 10)
+        VStack(alignment: .leading, spacing: 12) {
+            formRow(label: "Name:") {
+                TextField("Name", text: $editableAgent.name)
+                    .textFieldStyle(.plain)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+            }
+            
+            formRow(label: "Agent URL:") {
+                TextField("Agent URL", text: $editableAgent.baseURL)
+                    .textFieldStyle(.plain)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+            }
+            
+            formRow(label: "Instructions:") {
+                let placeholder = """
+                                - You are a senior software architect specializing in secure backend services.
+                                - Your goal is to analyze user requirements and generate robust, scalable code.
+                                - Always format code in markdown blocks. Explain your design choices clearly.
+                                - Do not use deprecated libraries. Prioritize performance over readability if necessary.
+                                """
+                TextField(placeholder, text: $editableAgent.role, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(8...20)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .controlBackgroundColor))
+                    )
+            }
+        }
     }
 
     private var llmIntegrationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("LLM Provider").font(.headline)
                 Spacer()
-                Button("Change...") {
-                    showingSelectIntegrationSheet = true
-                }
+                Button("Link Provider...") { showingSelectIntegrationSheet = true }
             }
             
             if let integrationID = editableAgent.linkedIntegrationID,
@@ -91,43 +130,51 @@ struct AgentDetailView: View {
                 ContentUnavailableView {
                     Label("No LLM Provider Linked", systemImage: "link.badge.plus")
                 } description: {
-                    Text("Link an LLM provider to enable this agent.")
+                    Text("Link a LLM provider to enable this agent.")
                 }
                 .frame(maxWidth: .infinity)
                 .padding()
                 .background(Color(nsColor: .controlBackgroundColor))
                 .cornerRadius(8)
             }
-        }.padding(.vertical, 10)
+        }
     }
     
     private var agentCapabilitiesSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Agent Capabilities").font(.headline)
-            formRow(label: "Agent Tools:") {
-                VStack(alignment: .leading, spacing: 12) {
-                    Menu { toolMenuContent() } label: { Text("Add Tool...") }
-                    if !editableAgent.tools.isEmpty {
-                        LazyVGrid(columns: toolCapsuleColumns, alignment: .leading, spacing: 8) {
-                            ForEach(editableAgent.tools) { tool in
-                                ToolCapsuleView(tool: tool) { removeTool(withId: tool.id) }
-                            }
-                        }
-                        .padding(12)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-                    }
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Agent Capabilities").font(.headline)
+                Spacer()
+                Button("Select Tools...") { showingSelectToolSheet = true }
+                .disabled(toolStore.isLoading)
             }
-        }.padding(.vertical, 10)
-    }
-    
-    @ViewBuilder
-    private func toolMenuContent() -> some View {
-        ForEach(toolStore.providers) { provider in
-            Section(header: Text(provider.displayName)) {
-                ForEach(provider.availableTools) { tool in
-                    Button(tool.id) { addTool(tool, from: provider) }
-                    .disabled(editableAgent.tools.contains { $0.id == tool.id && $0.providerID == provider.id })
+            
+            if toolStore.isLoading {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Loading tools from agent URL...").foregroundColor(.secondary)
+                }
+            } else if let error = toolStore.errorMessage {
+                Label(error, systemImage: "xmark.octagon.fill")
+                    .foregroundColor(.red).font(.caption)
+            } else if editableAgent.tools.isEmpty {
+                 ContentUnavailableView {
+                    Label("No Tools Selected", systemImage: "wrench.and.screwdriver")
+                } description: {
+                    Text("Click 'Select Tools' to add capabilities to this agent.")
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(8)
+            } else {
+                LazyVGrid(columns: toolGridColumns, alignment: .leading, spacing: 12) {
+                    ForEach(editableAgent.tools) { tool in
+                        let details = toolStore.availableTools.first { $0.toolName == tool.toolName }
+                        SelectedToolRowView(tool: tool, toolDetails: details) {
+                            removeTool(withId: tool.id)
+                        }
+                    }
                 }
             }
         }
@@ -135,30 +182,29 @@ struct AgentDetailView: View {
 
     private var actionButtons: some View {
         HStack {
-            Button("Delete Profile") { showingDeleteConfirm = true }.foregroundColor(.red).buttonStyle(.bordered)
+            Button("Delete", role: .destructive) { showingDeleteConfirm = true }
             Spacer()
+            Button("Revert") { resetState(with: agent) }.disabled(!hasUnsavedChanges)
             Button("Save") { saveChanges() }.buttonStyle(.borderedProminent).disabled(!hasUnsavedChanges || !isAgentDataValid())
         }
-        .padding().background(.bar)
+        .padding()
     }
     
-    @ViewBuilder
     private func formRow<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .top) {
-            Text(label).frame(width: 120, alignment: .leading).padding(.top, 5)
+            Text(label).frame(width: 100, alignment: .trailing).padding(.top, 5)
             content()
-            Spacer()
         }
     }
     
     // MARK: - Functions
-    private func addTool(_ tool: ProvidedTool, from provider: ToolConfigModel) {
-        let newSelectedTool = SelectedTool(id: tool.id, providerID: provider.id, displayName: tool.id)
-        if !editableAgent.tools.contains(newSelectedTool) { editableAgent.tools.append(newSelectedTool) }
+    private func removeTool(withId toolId: String) {
+        editableAgent.tools.removeAll { $0.id == toolId }
     }
-
-    private func removeTool(withId toolId: String) { editableAgent.tools.removeAll { $0.id == toolId } }
-    private func checkForChanges() { hasUnsavedChanges = (editableAgent != agent) }
+    
+    private func checkForChanges() {
+        hasUnsavedChanges = (editableAgent != agent)
+    }
 
     private func saveChanges() {
         agent.name = editableAgent.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -171,7 +217,10 @@ struct AgentDetailView: View {
     }
     
     private func resetState(with newAgent: AgentProfileModel) {
-        if editableAgent != newAgent { editableAgent = newAgent; hasUnsavedChanges = false }
+        if editableAgent != newAgent {
+            editableAgent = newAgent
+            hasUnsavedChanges = false
+        }
     }
 
     private func isAgentDataValid() -> Bool {
@@ -188,107 +237,119 @@ private struct LLMIntegrationCardView: View {
     var body: some View {
         HStack(spacing: 15) {
             Image(systemName: integration.providerType == .ollama ? "shippingbox.fill" : "cloud.fill")
-                .font(.largeTitle)
-                .foregroundColor(.accentColor)
-                .frame(width: 50)
+                .font(.largeTitle).foregroundColor(.accentColor).frame(width: 50)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(integration.displayName).font(.headline)
-                
-                if integration.providerType == .ollama {
-                    Text("Ollama (Local)").font(.subheadline).foregroundColor(.secondary)
-                    Text("Model: \(integration.ollamaModelName ?? "Not Set")").font(.caption).foregroundColor(.secondary)
-                } else {
-                    Text(integration.remoteProvider?.rawValue ?? "Remote API").font(.subheadline).foregroundColor(.secondary)
-                    Text("Model: \(integration.remoteModelName ?? "Not Set")").font(.caption).foregroundColor(.secondary)
-                }
+                let modelName = integration.ollamaModelName ?? integration.remoteModelName ?? "Not Set"
+                Text("Model: \(modelName)").font(.caption).foregroundColor(.secondary)
             }
             Spacer()
         }
         .padding()
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
     }
 }
 
-private struct ToolCapsuleView: View {
+private struct SelectedToolRowView: View {
     let tool: SelectedTool
+    let toolDetails: ToolModel?
     let onRemove: () -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
-            Text(tool.displayName).font(.system(size: 12)).lineLimit(1)
-            Button(action: onRemove) {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundColor(.primary.opacity(0.5))
+        HStack(spacing: 12) {
+            Image(systemName: "wrench.and.screwdriver.fill")
+                .font(.title3)
+                .foregroundColor(.accentColor)
+                .frame(width: 30, alignment: .center)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tool.displayName)
+                    .fontWeight(.semibold)
+                
+                if let description = toolDetails?.description, !description.isEmpty {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
-            .buttonStyle(.plain).background(Circle().fill(.primary.opacity(0.15)))
+
+            Spacer()
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.body)
+                    .foregroundColor(.secondary.opacity(0.5))
+            }
+            .buttonStyle(.plain)
+            .help("Remove this tool")
         }
-        .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(Color.primary.opacity(0.08)).cornerRadius(20)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(8)
     }
 }
 
-//
-//// MARK: - Preview Provider
-//
-//struct AgentDetailView_PreviewContainer: View {
-//    @State private var agent: AgentProfileModel
-//    @State private var hasUnsavedChanges = false
-//    
-//    private let viewModel: MainApplicationViewModel
-//    private let toolStore: ToolStore
-//
-//    init() {
-//        // Initialize mock stores
-//        let ollamaProfileStore = OllamaProfileStore()
-//        let agentStore = AgentStore()
-//        let ts = ToolStore()
-//        
-//        // Create a mock agent profile
-//        var mockAgent = AgentProfileModel.defaultAgent()
-//        
-//        // Add some mock tools to the agent for a more complete preview
-//        if let provider = ts.providers.first, let tool = provider.availableTools.first {
-//            mockAgent.tools.append(SelectedTool(id: tool.id, providerID: provider.id, displayName: tool.id))
-//        }
-//        if let provider = ts.providers.last, let tool = provider.availableTools.first {
-//             mockAgent.tools.append(SelectedTool(id: tool.id, providerID: provider.id, displayName: tool.id))
-//        }
-//        
-//        // Setup the stores with mock data
-//        agentStore.agents = [mockAgent]
-//        // We need at least one Ollama profile for the picker to work
-//        if ollamaProfileStore.profiles.isEmpty {
-//            ollamaProfileStore.profiles.append(OllamaProfileModel.defaultProfile())
-//        }
-//        mockAgent.linkedOllamaProfileID = ollamaProfileStore.profiles.first?.id
-//
-//        // Initialize state and environment objects
-//        _agent = State(initialValue: mockAgent)
-//        viewModel = MainApplicationViewModel(ollamaProfileStore: ollamaProfileStore, agentStore: agentStore)
-//        toolStore = ts
-//    }
-//
-//    var body: some View {
-//        AgentDetailView(
-//            agent: $agent,
-//            hasUnsavedChanges: $hasUnsavedChanges,
-//            onDelete: { print("Delete action triggered in preview.") }
-//        )
-//        .environmentObject(viewModel)
-//        .environmentObject(toolStore)
-//    }
-//}
-//
-//struct AgentDetailView_Previews: PreviewProvider {
-//    static var previews: some View {
-//        AgentDetailView_PreviewContainer()
-//            .frame(width: 650)
-//            .previewLayout(.sizeThatFits)
-//            .padding()
-//    }
-//}
+// MARK: - Preview Provider
+#if DEBUG
+struct AgentDetailView_Previews: PreviewProvider {
+    
+    // A stateful container to host the AgentDetailView for previewing.
+    struct PreviewContainer: View {
+        @State private var agent: AgentProfileModel
+        @State private var hasUnsavedChanges = false
+        
+        private let viewModel: MainApplicationViewModel
+
+        init() {
+            // 1. Create mock stores
+            let llmIntegrationStore = LLMIntegrationStore()
+            let agentStore = AgentStore()
+            
+            // 2. Create a mock LLM integration
+            let mockIntegration = LLMIntegrationModel.defaultOllama()
+            llmIntegrationStore.integrations = [mockIntegration]
+            llmIntegrationStore.selectedIntegrationID = mockIntegration.id
+
+            // 3. Create a mock agent and link it to the integration
+            var mockAgent = AgentProfileModel.defaultAgent()
+            mockAgent.name = "Multi-Tool Agent"
+            mockAgent.linkedIntegrationID = mockIntegration.id
+            
+            // 4. Create 10 mock tools for the agent
+            mockAgent.tools = (1...10).map { i in
+                SelectedTool(toolName: "sample_tool_\(i)", displayName: "Sample Tool \(i)")
+            }
+            
+            agentStore.agents = [mockAgent]
+            
+            // 5. Initialize the main view model with mock data
+            self.viewModel = MainApplicationViewModel(
+                llmIntegrationStore: llmIntegrationStore,
+                agentStore: agentStore
+            )
+            
+            // 6. Initialize the state for the container
+            self._agent = State(initialValue: mockAgent)
+        }
+
+        var body: some View {
+            AgentDetailView(
+                agent: $agent,
+                hasUnsavedChanges: $hasUnsavedChanges,
+                onDelete: { print("Delete action triggered in preview.") }
+            )
+            .environmentObject(viewModel)
+        }
+    }
+
+    static var previews: some View {
+        PreviewContainer()
+            .frame(width: 700, height: 700)
+    }
+}
+#endif

@@ -117,7 +117,7 @@ struct DevgenticApp: App {
         .defaultSize(width: 850, height: 700)
 
         // MARK: - LLM Integrations Window
-        WindowGroup("LLM Integrations", id: "llm-integrations") {
+        WindowGroup("LLM Provider", id: "llm-integrations") {
                     LLMIntegrationsView()
                         .environmentObject(mainApplicationViewModel)
                         .environmentObject(llmIntegrationStore)
@@ -125,8 +125,8 @@ struct DevgenticApp: App {
         .defaultSize(width: 850, height: 700)
         
         // MARK: - Agent Settings Window
-        WindowGroup("Agent Settings", id: "agent-settings", for: UUID.self) { $agentID in
-            AgentProfilerView_V3()
+        WindowGroup("Agent Configuration", id: "agent-config", for: UUID.self) { $agentID in
+            AgentProfilerView()
                .environmentObject(mainApplicationViewModel)
                .environmentObject(toolStore)
         }

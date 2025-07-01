@@ -21,9 +21,6 @@ protocol CoreDataServiceProtocol {
     func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext)
     func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel)
     func deleteAgentProfile(with id: UUID)
-     
-    func fetchToolConfigs() -> [ToolConfigEntity]
-    func getProvidedTool(withId toolId: String, providerId: UUID) -> ProvidedToolEntity?
     
     // LLM Integration Methods
     func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity?
@@ -190,25 +187,24 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             saveContext()
         }
 
-        func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel) {
-            let context = entity.managedObjectContext ?? viewContext
+    func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel) {
+        let context = entity.managedObjectContext ?? viewContext
             
             entity.id = model.id
             entity.name = model.name
             entity.role = model.role
             entity.baseURL = model.baseURL
-
-            // Handle the tools relationship
+            entity.linkedIntegrationID = model.linkedIntegrationID
+            
             let currentSelectedTools = entity.mutableSetValue(forKey: "tools")
-            currentSelectedTools.removeAllObjects() // Clear existing tools to sync
+            currentSelectedTools.removeAllObjects()
 
             for selectedToolModel in model.tools {
-                if let providedToolEntity = getProvidedTool(withId: selectedToolModel.id, providerId: selectedToolModel.providerID) {
-                    let newSelectedToolEntity = SelectedToolEntity(context: context)
-                    newSelectedToolEntity.id = UUID() // Give the relationship entity its own unique ID
-                    newSelectedToolEntity.providedTool = providedToolEntity // Link to the actual tool
-                    currentSelectedTools.add(newSelectedToolEntity)
-                }
+                let newSelectedToolEntity = SelectedToolEntity(context: context)
+                newSelectedToolEntity.id = UUID() // A unique ID for the Core Data entity itself
+                newSelectedToolEntity.toolName = selectedToolModel.toolName
+                newSelectedToolEntity.displayName = selectedToolModel.displayName
+                currentSelectedTools.add(newSelectedToolEntity)
             }
 
             logger.trace("Updating attributes for Agent Profile: \(model.name)")
@@ -220,30 +216,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 viewContext.delete(agentToDelete)
                 logger.info("Deleting Agent Profile with ID \(id.uuidString) from context.")
                 saveContext()
-            }
-        }
-
-        // MARK: - Tooling Implementations
-        
-        func fetchToolConfigs() -> [ToolConfigEntity] {
-            let request: NSFetchRequest<ToolConfigEntity> = ToolConfigEntity.fetchRequest()
-            request.sortDescriptors = [NSSortDescriptor(key: "displayName", ascending: true)]
-            do {
-                return try viewContext.fetch(request)
-            } catch {
-                logger.error("Failed to fetch ToolConfigs: \(error.localizedDescription)")
-                return []
-            }
-        }
-        
-        func getProvidedTool(withId toolId: String, providerId: UUID) -> ProvidedToolEntity? {
-            let request: NSFetchRequest<ProvidedToolEntity> = ProvidedToolEntity.fetchRequest()
-            request.predicate = NSPredicate(format: "id == %@ AND toolConfig.id == %@", toolId, providerId as CVarArg)
-            do {
-                return try viewContext.fetch(request).first
-            } catch {
-                logger.error("Failed to fetch ProvidedTool with ID \(toolId): \(error.localizedDescription)")
-                return nil
             }
         }
     
@@ -410,55 +382,19 @@ extension AgentProfileEntity {
             name: self.name ?? "Unnamed Agent",
             role: self.role ?? "",
             baseURL: self.baseURL ?? "",
+            linkedIntegrationID: self.linkedIntegrationID,
             tools: selectedToolsArray
         )
     }
 }
 
-extension ToolConfigEntity {
-    func toToolConfigModel() -> ToolConfigModel {
-        let availableToolsSet = self.availableTools as? Set<ProvidedToolEntity> ?? []
-        let availableToolsArray = availableToolsSet.map { $0.toProvidedToolModel() }
-        
-        return ToolConfigModel(
-            id: self.id ?? UUID(),
-            displayName: self.displayName ?? "Unnamed Provider",
-            toolType: ToolConfigModel.ToolType(rawValue: self.toolType ?? "custom") ?? .custom,
-            provider: self.provider ?? "",
-            sourceURL: self.sourceURL,
-            description: self.configDescription,
-            availableTools: availableToolsArray
-        )
-    }
-}
-
-extension ProvidedToolEntity {
-    func toProvidedToolModel() -> ProvidedTool {
-        // FIXED: The compiler error suggests that `self.id` might be a UUID in your
-        // Core Data model, while the `ProvidedTool` struct expects a String.
-        // This safely handles the conversion if `self.id` is a UUID by using its
-        // string representation. If it's already a string, it will be used directly.
-        // NOTE: This assumes a mismatch. The ideal fix is to ensure the Core Data
-        // model attribute for `ProvidedToolEntity.id` is of type String.
-        let stringId = (self.id as? UUID)?.uuidString ?? (self.id as? String) ?? "unknown_tool"
-
-        return ProvidedTool(
-            id: stringId,
-            description: self.toolDescription ?? ""
-        )
-    }
-}
 
 extension SelectedToolEntity {
     func toSelectedToolModel() -> SelectedTool {
-        // The display name for the tool should be human-readable.
-        // Using the tool's ID is a good fallback.
-        let toolID = (self.providedTool?.id as? UUID)?.uuidString ?? (self.providedTool?.id as? String) ?? "unknown_tool"
-
+        // Directly map the stored attributes to the new simplified model.
         return SelectedTool(
-            id: toolID,
-            providerID: self.providedTool?.toolConfig?.id ?? UUID(),
-            displayName: toolID
+            toolName: self.toolName ?? "unknown_tool",
+            displayName: self.displayName ?? "Unknown Tool"
         )
     }
 }

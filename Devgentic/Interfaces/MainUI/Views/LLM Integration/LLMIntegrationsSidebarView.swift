@@ -173,11 +173,6 @@ private struct LocalModelsSection: View {
     @ObservedObject var ollamaService: OllamaService
     let ollamaBaseURL: String
     @Binding var sidebarWidth: CGFloat
-
-    // ... The rest of this view and its sub-views (LocalModelCard, OllamaStatusView)
-    // can remain the same as they were in the original OllamaSidebarView,
-    // as their logic is already driven by the OllamaService and a base URL.
-    // The only change needed is in LocalModelCard to use the new llmIntegrationStore.
     
     var body: some View {
         VStack(alignment: .leading) {
@@ -188,8 +183,6 @@ private struct LocalModelsSection: View {
                 OllamaStatusView(ollamaService: ollamaService)
             }
             .padding(.bottom, 5)
-            
-            // ... The rest of the body for this view remains the same
         }
     }
 }
@@ -204,21 +197,17 @@ private struct LocalModelCard: View {
     
     @State private var showingRemovalConfirmation = false
 
-    // Updated logic to check against the active integration
     var isSelectedForChat: Bool {
         viewModel.llmIntegrationStore.currentIntegration?.ollamaModelName == modelName
     }
 
     var body: some View {
-        // ... The body of this view remains visually the same, but the `isSelectedForChat`
-        // property above is now correctly wired to the new store.
-        Text("Card for \(modelName)") // Placeholder content
+        Text("Card for \(modelName)")
     }
 }
 
 // MARK: - Ollama Status View (Unchanged)
 private struct OllamaStatusView: View {
     @ObservedObject var ollamaService: OllamaService
-    // ... This view remains unchanged ...
     var body: some View { Text("Status") }
 }

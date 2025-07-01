@@ -4,7 +4,7 @@
         <attribute name="baseURL" attributeType="String"/>
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="isActive" attributeType="Boolean" usesScalarValueType="YES"/>
-        <attribute name="linkedOllamaProfileID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="linkedIntegrationID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="name" attributeType="String"/>
         <attribute name="role" optional="YES" attributeType="String"/>
         <relationship name="tools" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="SelectedToolEntity" inverseName="agentProfile" inverseEntity="SelectedToolEntity"/>
@@ -42,25 +42,10 @@
         <attribute name="remoteProvider" optional="YES" attributeType="String"/>
         <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
     </entity>
-    <entity name="ProvidedToolEntity" representedClassName="ProvidedToolEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="toolDescription" optional="YES" attributeType="String"/>
-        <relationship name="selectedBy" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="SelectedToolEntity" inverseName="providedTool" inverseEntity="SelectedToolEntity"/>
-        <relationship name="toolConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ToolConfigEntity" inverseName="availableTools" inverseEntity="ToolConfigEntity"/>
-    </entity>
     <entity name="SelectedToolEntity" representedClassName="SelectedToolEntity" syncable="YES" codeGenerationType="class">
         <attribute name="displayName" optional="YES" attributeType="String"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="toolName" optional="YES" attributeType="String"/>
         <relationship name="agentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="AgentProfileEntity" inverseName="tools" inverseEntity="AgentProfileEntity"/>
-        <relationship name="providedTool" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ProvidedToolEntity" inverseName="selectedBy" inverseEntity="ProvidedToolEntity"/>
-    </entity>
-    <entity name="ToolConfigEntity" representedClassName="ToolConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="configDescription" optional="YES" attributeType="String"/>
-        <attribute name="displayName" optional="YES" attributeType="String"/>
-        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="provider" optional="YES" attributeType="String"/>
-        <attribute name="sourceURL" optional="YES" attributeType="String"/>
-        <attribute name="toolType" optional="YES" attributeType="String"/>
-        <relationship name="availableTools" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ProvidedToolEntity" inverseName="toolConfig" inverseEntity="ProvidedToolEntity"/>
     </entity>
 </model>

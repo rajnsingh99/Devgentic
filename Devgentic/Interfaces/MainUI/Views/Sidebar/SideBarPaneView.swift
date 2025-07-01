@@ -26,7 +26,7 @@ struct SideBarPaneView: View {
                     Text(tab.title).font(.title3).fontWeight(.semibold)
                     Spacer()
                     if tab == .agents {
-                        Button { openWindow(id: "agent-settings") } label: { Image(systemName: "gearshape") }
+                        Button { openWindow(id: "agent-config") } label: { Image(systemName: "gearshape") }
                             .buttonStyle(.plain).onHover { isHoveringSettingsButton = $0 }.help("Agent Settings")
                     } else if tab == .ollama {
                         Button { openWindow(id: "llm-integrations") } label: { Image(systemName: "gearshape") }

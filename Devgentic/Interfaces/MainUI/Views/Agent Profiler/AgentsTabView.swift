@@ -1,10 +1,15 @@
-// AgentsTabView.swift
+//
+//  AgentsTabView.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 03/06/25.
+//
+
 import SwiftUI
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentTabView")
 
-// MARK: - AgentsTabView
 struct AgentsTabView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
@@ -26,7 +31,7 @@ struct AgentsTabView: View {
                                 }
                                 .onTapGesture(count: 2) {
                                     logger.info("Double-tapped agent: \(agent.name). Opening Agent Profiler for ID: \(agent.id.uuidString)")
-                                    openWindow(id: "agent-settings", value: agent.id)
+                                    openWindow(id: "agent-config", value: agent.id)
                                 }
                         }
                     }

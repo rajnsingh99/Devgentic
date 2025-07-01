@@ -18,43 +18,34 @@ enum ProviderType: String, Codable, CaseIterable, Identifiable {
 /// Specifies the supported remote API providers.
 enum RemoteProvider: String, Codable, CaseIterable, Identifiable {
     case openAI = "OpenAI"
+    // --- NEW: Added Anthropic and Google ---
     case anthropic = "Anthropic"
     case google = "Google"
-    // Future providers can be added here
     
     var id: String { self.rawValue }
 }
 
-/// A unified model to represent a single LLM provider configuration,
-/// which can be either a local Ollama instance or a remote API-based service.
+/// A unified model to represent a single LLM provider configuration.
 struct LLMIntegrationModel: Codable, Identifiable, Hashable {
     let id: UUID
     var displayName: String
     var providerType: ProviderType
-    var lastSelected: Date? // Used for sorting or defaulting
+    var lastSelected: Date?
 
-    // --- Ollama-Specific Properties ---
     var ollamaBaseURL: String?
     var ollamaModelName: String?
 
-    // --- Remote API-Specific Properties ---
     var remoteProvider: RemoteProvider?
-    var apiKey: String? // Note: For production, use Keychain for secure storage.
+    var apiKey: String?
     var remoteModelName: String?
     
-    // --- Common Advanced Parameters (Optional) ---
-    // These can be expanded later if needed
     var temperature: Double?
     var contextWindowSize: Int?
 
-    // MARK: - Initializers & Defaults
-
-    /// Creates a default, empty model.
     static func new() -> LLMIntegrationModel {
         LLMIntegrationModel(id: UUID(), displayName: "New Integration", providerType: .ollama)
     }
     
-    /// Provides a default instance for a local Ollama setup.
     static func defaultOllama() -> LLMIntegrationModel {
         LLMIntegrationModel(
             id: UUID(),

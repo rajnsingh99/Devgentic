@@ -8,113 +8,113 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentProfilerView_V3")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentProfilerView")
 
-struct AgentProfilerView_V3: View {
+struct AgentProfilerView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    @EnvironmentObject var toolStore: ToolStore
     private var agentStore: AgentStore { viewModel.agentStore }
 
     @State private var selectedAgentID: UUID?
     @State private var showingAddAgentSheet = false
-    
-    // State for managing unsaved changes
     @State private var detailHasUnsavedChanges = false
     @State private var showUnsavedChangesAlert = false
     @State private var pendingSelectionID: UUID?
     
-    // State for the new agent form
     @State private var newAgentName: String = ""
-    @State private var newAgentURL: String = "http://localhost:8000"
-    @State private var newAgentDescription: String = ""
+    @State private var newAgentURL: String = "http://127.0.0.1:8000"
+    @State private var newAgentRole: String = ""
 
     var body: some View {
         NavigationSplitView {
-            VStack(spacing: 0) {
-                HStack {
-                    Text("Agents")
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        newAgentName = ""
-                        newAgentURL = "http://localhost:8000"
-                        newAgentDescription = ""
-                        showingAddAgentSheet = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(.plain)
-                    .help("Add New Agent Profile")
-                }
-                .padding()
-                
-                List(selection: $selectedAgentID) {
-                    ForEach(agentStore.agents) { agent in
-                        Text(agent.name)
-                            .tag(agent.id)
-                            .contextMenu {
-                                Button("Delete", role: .destructive) { handleDelete(agent.id) }
-                            }
-                    }
-                }
-                .listStyle(.sidebar)
-            }
-            .frame(minWidth: 220)
-            
+            agentList
         } detail: {
-            if let agentID = selectedAgentID,
-               let index = agentStore.agents.firstIndex(where: { $0.id == agentID }) {
-                
-                let agentBinding = $viewModel.agentStore.agents[index]
-                
-                AgentDetailView(
-                    agent: agentBinding,
-                    hasUnsavedChanges: $detailHasUnsavedChanges,
-                    onDelete: { handleDelete(agentID) }
-                )
-                .environmentObject(viewModel)
-                .environmentObject(toolStore)
-
-            } else {
-                Text("Select an Agent Profile or Add a New One")
-                    .font(.title)
-                    .foregroundColor(.secondary)
-            }
+            agentDetail
         }
-        .sheet(isPresented: $showingAddAgentSheet) {
-            AddAgentSheet(isShowing: $showingAddAgentSheet, newAgentName: $newAgentName, newAgentURL: $newAgentURL, newAgentDescription: $newAgentDescription) {
-                // --- MODIFIED: Use the new llmIntegrationStore ---
-                let activeIntegrationID = viewModel.llmIntegrationStore.selectedIntegrationID
-                
-                let newAgent = AgentProfileModel(
-                    id: UUID(),
-                    name: newAgentName,
-                    role: newAgentDescription,
-                    baseURL: newAgentURL,
-                    // --- MODIFIED: Use the new property name ---
-                    linkedIntegrationID: activeIntegrationID,
-                    tools: []
-                )
-                agentStore.addAgent(agent: newAgent)
-                selectedAgentID = newAgent.id
-            }
-            .environmentObject(viewModel)
-        }
+        .sheet(isPresented: $showingAddAgentSheet) { addAgentSheet }
         .onAppear {
             if selectedAgentID == nil {
                  selectedAgentID = agentStore.agents.first?.id
             }
         }
         .onChange(of: selectedAgentID) { oldValue, newValue in
-            if oldValue != nil && detailHasUnsavedChanges {
-                pendingSelectionID = newValue
-                showUnsavedChangesAlert = true
-                selectedAgentID = oldValue
-            } else {
-                detailHasUnsavedChanges = false
-            }
+            handleSelectionChange(oldValue: oldValue, newValue: newValue)
         }
         .alert("Unsaved Changes", isPresented: $showUnsavedChangesAlert) {
+            unsavedChangesAlertButtons
+        }
+    }
+
+    private var agentList: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Agents").font(.headline)
+                Spacer()
+                Button {
+                    resetNewAgentForm()
+                    showingAddAgentSheet = true
+                } label: { Image(systemName: "plus") }
+                .buttonStyle(.plain).help("Add New Agent Profile")
+            }
+            .padding()
+            
+            List(selection: $selectedAgentID) {
+                ForEach(agentStore.agents) { agent in
+                    Text(agent.name)
+                        .tag(agent.id)
+                        .contextMenu {
+                            Button("Delete", role: .destructive) { handleDelete(agent.id) }
+                        }
+                }
+            }
+            .listStyle(.sidebar)
+        }
+        .frame(minWidth: 220)
+    }
+
+    @ViewBuilder
+    private var agentDetail: some View {
+        if let agentID = selectedAgentID,
+           let index = agentStore.agents.firstIndex(where: { $0.id == agentID }) {
+            
+            let agentBinding = $viewModel.agentStore.agents[index]
+            
+            AgentDetailView(
+                agent: agentBinding,
+                hasUnsavedChanges: $detailHasUnsavedChanges,
+                onDelete: { handleDelete(agentID) }
+            )
+            .environmentObject(viewModel)
+            // NOTE: The old ToolStore is no longer injected here.
+            // AgentDetailView now manages its own ToolStore instance.
+        } else {
+            Text("Select an Agent Profile or Add a New One")
+                .font(.title).foregroundColor(.secondary)
+        }
+    }
+
+    private var addAgentSheet: some View {
+        VStack(spacing: 20) {
+            Text("Add New Agent Profile").font(.title2).fontWeight(.bold)
+            TextField("Agent Name (e.g., My Dev Agent)", text: $newAgentName)
+            TextField("Agent URL (e.g., http://127.0.0.1:8000)", text: $newAgentURL)
+            TextField("Role / Description", text: $newAgentRole, axis: .vertical).lineLimit(2...4)
+            HStack {
+                Button("Cancel") { showingAddAgentSheet = false }.buttonStyle(.bordered)
+                Button("Add Agent") {
+                    addNewAgent()
+                    showingAddAgentSheet = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newAgentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .padding(30)
+        .frame(minWidth: 450, minHeight: 300)
+    }
+    
+    private var unsavedChangesAlertButtons: some View {
+        Group {
             Button("Discard Changes", role: .destructive) {
                 detailHasUnsavedChanges = false
                 selectedAgentID = pendingSelectionID
@@ -123,23 +123,47 @@ struct AgentProfilerView_V3: View {
             Button("Cancel", role: .cancel) {
                 pendingSelectionID = nil
             }
-        } message: {
-            Text("You have unsaved changes. If you continue, your changes will be lost.")
+        }
+    }
+    
+    // MARK: - Logic
+    private func resetNewAgentForm() {
+        newAgentName = ""
+        newAgentURL = "http://127.0.0.1:8000"
+        newAgentRole = ""
+    }
+    
+    private func addNewAgent() {
+        let newAgent = AgentProfileModel(
+            id: UUID(),
+            name: newAgentName,
+            role: newAgentRole,
+            baseURL: newAgentURL,
+            linkedIntegrationID: viewModel.llmIntegrationStore.selectedIntegrationID,
+            tools: []
+        )
+        agentStore.addAgent(agent: newAgent)
+        selectedAgentID = newAgent.id
+    }
+    
+    private func handleSelectionChange(oldValue: UUID?, newValue: UUID?) {
+        if oldValue != nil && detailHasUnsavedChanges {
+            pendingSelectionID = newValue
+            showUnsavedChangesAlert = true
+            selectedAgentID = oldValue
+        } else {
+            detailHasUnsavedChanges = false
         }
     }
 
     private func handleDelete(_ idToDelete: UUID) {
-        guard let indexToDelete = agentStore.agents.firstIndex(where: { $0.id == idToDelete }) else {
-            return
-        }
+        guard let indexToDelete = agentStore.agents.firstIndex(where: { $0.id == idToDelete }) else { return }
 
         if selectedAgentID == idToDelete {
             if agentStore.agents.count > 1 {
-                if indexToDelete == agentStore.agents.count - 1 {
-                    selectedAgentID = agentStore.agents[indexToDelete - 1].id
-                } else {
-                    selectedAgentID = agentStore.agents[indexToDelete + 1].id
-                }
+                selectedAgentID = (indexToDelete == agentStore.agents.count - 1)
+                    ? agentStore.agents[indexToDelete - 1].id
+                    : agentStore.agents[indexToDelete + 1].id
             } else {
                 selectedAgentID = nil
             }
@@ -150,40 +174,10 @@ struct AgentProfilerView_V3: View {
     }
 }
 
-// MARK: - AddAgentSheet
-struct AddAgentSheet: View {
-    @Binding var isShowing: Bool
-    @Binding var newAgentName: String
-    @Binding var newAgentURL: String
-    @Binding var newAgentDescription: String
-    var onAdd: () -> Void
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("Add New Agent Profile").font(.title2).fontWeight(.bold)
-            TextField("Agent Name (e.g., My Dev Agent)", text: $newAgentName)
-            TextField("Agent URL (e.g., http://localhost:8000)", text: $newAgentURL)
-            TextField("Description (e.g., My personal coding assistant)", text: $newAgentDescription)
-            HStack {
-                Button("Cancel") { isShowing = false }.buttonStyle(.bordered)
-                Button("Add Agent") {
-                    onAdd()
-                    isShowing = false
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(newAgentName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newAgentURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .textFieldStyle(.roundedBorder)
-        .padding(30)
-        .frame(minWidth: 400, minHeight: 300)
-    }
-}
 
 // MARK: - Preview Provider (Corrected)
 struct AgentProfilerView_V3_Previews: PreviewProvider {
     static var previews: some View {
-        // --- MODIFIED: Use the new LLMIntegrationStore for previews ---
         let mockLlmIntegrationStore: LLMIntegrationStore = {
             let store = LLMIntegrationStore()
             let defaultIntegration = LLMIntegrationModel.defaultOllama()
@@ -196,7 +190,6 @@ struct AgentProfilerView_V3_Previews: PreviewProvider {
             let store = AgentStore()
             var agent1 = AgentProfileModel.defaultAgent()
             agent1.name = "Developer Agent"
-            // --- MODIFIED: Link to the new integration ID ---
             agent1.linkedIntegrationID = mockLlmIntegrationStore.integrations.first?.id
             
             var agent2 = AgentProfileModel.defaultAgent()
@@ -210,12 +203,11 @@ struct AgentProfilerView_V3_Previews: PreviewProvider {
         let mockToolStore = ToolStore()
         
         let mockMainViewModel = MainApplicationViewModel(
-            // --- MODIFIED: Pass the new store ---
             llmIntegrationStore: mockLlmIntegrationStore,
             agentStore: mockAgentStore
         )
 
-        AgentProfilerView_V3()
+        AgentProfilerView()
             .environmentObject(mockMainViewModel)
             .environmentObject(mockToolStore)
             .frame(width: 800, height: 600)

@@ -12,14 +12,12 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct LLMIntegrationsView: View {
     @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
-    // Add viewModel to pass it down to the detail view
     @EnvironmentObject var viewModel: MainApplicationViewModel
     
     @State private var showingAddIntegrationPopover = false
 
     var body: some View {
         NavigationSplitView {
-            // Sidebar with a list of all integrations
             VStack(alignment: .leading) {
                 HStack {
                     Text("Providers")
@@ -48,13 +46,11 @@ struct LLMIntegrationsView: View {
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
-            // --- MODIFIED: Safely unwrap the binding to the detail view ---
             if let selectedID = llmIntegrationStore.selectedIntegrationID,
                let index = llmIntegrationStore.integrations.firstIndex(where: { $0.id == selectedID }) {
                 
-                // By finding the index, we can create a direct, non-optional binding.
                 LLMIntegrationDetailView(integration: $llmIntegrationStore.integrations[index])
-                    .environmentObject(viewModel) // Pass the viewModel down
+                    .environmentObject(viewModel)
                     .environmentObject(llmIntegrationStore)
 
             } else {
@@ -98,7 +94,6 @@ private struct IntegrationRowView: View {
 // MARK: - Preview Provider
 struct LLMIntegrationsView_Previews: PreviewProvider {
     static var previews: some View {
-        // Create mock stores for the preview
         let integrationStore = LLMIntegrationStore()
         let agentStore = AgentStore()
         
@@ -108,7 +103,6 @@ struct LLMIntegrationsView_Previews: PreviewProvider {
         ]
         integrationStore.selectedIntegrationID = integrationStore.integrations.first?.id
         
-        // Create a mock viewModel to satisfy the environment dependency
         let mockViewModel = MainApplicationViewModel(
             llmIntegrationStore: integrationStore,
             agentStore: agentStore
