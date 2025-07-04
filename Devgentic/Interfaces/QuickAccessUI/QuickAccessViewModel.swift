@@ -85,7 +85,7 @@ class QuickAccessViewModel: ObservableObject {
             logger.error("Cannot send message, conversation entity \(originalConversationId.uuidString) not found.")
             return
         }
-        persistenceService.addMessage(userMessage, to: conversationEntity)
+//        persistenceService.addMessage(userMessage, to: conversationEntity)
 
         isSending = true
 
@@ -115,9 +115,9 @@ class QuickAccessViewModel: ObservableObject {
             }
             
             // Handle the response.
-            if let targetEntity = persistenceService.getConversation(withId: originalConversationId) {
-                persistenceService.addMessages(resultingAgentMessages, to: targetEntity)
-            }
+//            if let targetEntity = persistenceService.getConversation(withId: originalConversationId) {
+//                persistenceService.addMessages(resultingAgentMessages, to: targetEntity)
+//            }
             
             self.isSending = false
         }

@@ -15,6 +15,11 @@ protocol CoreDataServiceProtocol {
     func getConversation(withId id: UUID) -> ConversationEntity?
     func deleteConversation(with id: UUID)
 
+    // --- MODIFIED: Message methods are now async ---
+    func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async
+    func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async
+    // --- END MODIFICATION ---
+
     // Agent Profile Methods
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
     func fetchAgentProfiles() -> [AgentProfileEntity]
@@ -134,16 +139,18 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
     // MARK: - Message Handling
     
+    // --- MODIFIED: Method is now async ---
     /// Adds a single message to a conversation entity and saves the context.
-    func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) {
-        addMessages([message], to: conversation)
+    func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async {
+        await addMessages([message], to: conversation)
     }
 
+    // --- MODIFIED: Method is now async and uses await on context.perform ---
     /// Adds an array of messages to a conversation entity and saves the context.
-    func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) {
+    func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async {
         let context = conversation.managedObjectContext ?? self.viewContext
         
-        context.perform {
+        await context.perform {
             for message in messages {
                 let newMessageEntity = ChatMessageEntity(context: context)
                 newMessageEntity.id = message.id
@@ -153,9 +160,13 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 self.mapMessageContent(from: message.content, to: newMessageEntity)
                 conversation.addToMessages(newMessageEntity)
             }
+            // Update the conversation's timestamp to reflect recent activity
             conversation.timestamp = Date()
+            
+            // Save the context within the perform block to ensure it's done on the correct queue.
             self.saveContext()
         }
+        logger.debug("Finished async addMessages for \(messages.count) messages.")
     }
     
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity? {
@@ -417,4 +428,3 @@ extension LLMIntegrationEntity {
         )
     }
 }
-

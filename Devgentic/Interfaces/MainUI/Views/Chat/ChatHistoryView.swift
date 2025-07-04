@@ -9,7 +9,6 @@ struct ChatHistoryView: View {
     let messages: [ChatMessage]
     let isSending: Bool
     let hasSelectedConversation: Bool
-    let chatHistoryBottomPadding: CGFloat // <<-- NEW parameter
 
     // Define a subtle color for the divider, adaptable to light/dark mode
     private var dividerColor: Color {
@@ -22,7 +21,8 @@ struct ChatHistoryView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) { // Set spacing to 0, manage with padding
+            // The Spacer has been removed to align content to the top
+            VStack(alignment: .leading, spacing: 0) {
                 if hasSelectedConversation {
                     ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                         if index > 0 {
@@ -64,13 +64,13 @@ struct ChatHistoryView: View {
                     .id("thinkingIndicator")
                 }
             }
-            .padding(.top, 20) // Keep original top padding
-            .padding(.bottom, chatHistoryBottomPadding) // <<-- APPLY PADDING HERE
-            .padding(.horizontal, 50) // Keep original horizontal padding
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .padding(.top, 20) // Give some space at the top of the entire list
+            .padding(.horizontal, 50)
+            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, alignment: .topLeading) // Align content to the top
         }
         .background(Color.clear) // Make ScrollView background clear
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading) // ScrollView takes full available space
+        .frame(maxWidth: .infinity, maxHeight: .infinity) // ScrollView takes full available space
     }
 }
 
@@ -90,26 +90,26 @@ struct ChatHistoryView_Previews: PreviewProvider {
     ]
 
     static var previews: some View {
-        ChatHistoryView(
-            messages: sampleMessages,
-            isSending: false,
-            hasSelectedConversation: true,
-            chatHistoryBottomPadding: 120 // Provide a value for the preview
-        )
-        .previewLayout(.sizeThatFits)
+        VStack {
+            ChatHistoryView(
+                messages: sampleMessages,
+                isSending: false,
+                hasSelectedConversation: true
+            )
+        }
         .frame(height: 500)
         .background(Color.gray.opacity(0.5))
-        .previewDisplayName("Standard History with Dividers")
+        .previewDisplayName("Standard History (Top Aligned)")
 
-        ChatHistoryView(
-            messages: sampleMessagesAgentFirst,
-            isSending: true,
-            hasSelectedConversation: true,
-            chatHistoryBottomPadding: 120 // Provide a value for the preview
-        )
-        .previewLayout(.sizeThatFits)
+        VStack {
+            ChatHistoryView(
+                messages: sampleMessagesAgentFirst,
+                isSending: true,
+                hasSelectedConversation: true
+            )
+        }
         .frame(height: 300)
         .background(Color.gray.opacity(0.5))
-        .previewDisplayName("Agent Thinking with Dividers")
+        .previewDisplayName("Agent Thinking (Top Aligned)")
     }
 }

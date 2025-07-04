@@ -15,7 +15,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
-    @StateObject private var explorerViewModel = ExplorerViewModel() // This remains a @StateObject owned by MainApplicationView
+    @StateObject private var explorerViewModel = ExplorerViewModel()
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
@@ -27,8 +27,6 @@ struct MainApplicationView: View {
         activityBarWidth + (isSidebarVisible ? currentSidebarPaneWidth : 0)
     }
 
-    // --- Constants for UI adjustments ---
-    private let chatHistoryBottomPadding: CGFloat = 130
     private let inputAreaCornerRadius: CGFloat = 12
     
     // MARK: - Body
@@ -48,25 +46,26 @@ struct MainApplicationView: View {
                     isConversationSelected: viewModel.selectedConversationID != nil
                 )
 
-                ZStack(alignment: .bottom) {
+                VStack(spacing: 0) {
                     ScrollViewReader { scrollProxy in
                         ChatHistoryView(
                             messages: viewModel.currentChatMessages,
                             isSending: viewModel.isSending,
-                            hasSelectedConversation: viewModel.selectedConversationID != nil,
-                            chatHistoryBottomPadding: chatHistoryBottomPadding
+                            hasSelectedConversation: viewModel.selectedConversationID != nil
                         )
                         .frame(maxWidth: .infinity)
                         .onChange(of: viewModel.currentChatMessages) { newMessages in
                             if viewModel.selectedConversationID != nil {
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                    scrollToBottom(scrollProxy: scrollProxy, messages: newMessages, isSending: viewModel.isSending)
+                                    // MODIFIED: Call scrollToTop
+                                    scrollToTop(scrollProxy: scrollProxy, messages: newMessages, isSending: viewModel.isSending)
                                 }
                             }
                         }
                         .onChange(of: viewModel.isSending) { isNowSending in
                              if viewModel.selectedConversationID != nil {
-                                 scrollToBottom(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: isNowSending)
+                                 // MODIFIED: Call scrollToTop
+                                 scrollToTop(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: isNowSending)
                              }
                         }
                         .onChange(of: viewModel.selectedConversationID) { newID in
@@ -75,7 +74,8 @@ struct MainApplicationView: View {
                                     viewModel.isUserMessagesOnlyFilterActive = false
                                     logger.info("Reset user messages filter due to conversation change.")
                                 }
-                                scrollToBottom(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
+                                // MODIFIED: Call scrollToTop
+                                scrollToTop(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
                                 if !viewModel.showSettings && !viewModel.showPromptLibrary {
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                         isInputFocused = true
@@ -95,21 +95,20 @@ struct MainApplicationView: View {
                         }
                     }
 
-                    VStack(spacing: 0) {
-                        ChatInputAreaView(
-                            userInput: $viewModel.userInput,
-                            showContextArea: $viewModel.showContextArea,
-                            activeContextFilePath: $viewModel.activeContextFilePath,
-                            isSending: viewModel.isSending,
-                            showSettings: viewModel.showSettings,
-                            isInputFocused: $isInputFocused,
-                            onSendMessage: viewModel.sendMessage,
-                            onToggleContext: {
-                                withAnimation { viewModel.toggleContextArea() }
-                            }
-                        )
-                    }
+                    ChatInputAreaView(
+                        userInput: $viewModel.userInput,
+                        showContextArea: $viewModel.showContextArea,
+                        activeContextFilePath: $viewModel.activeContextFilePath,
+                        isSending: viewModel.isSending,
+                        showSettings: viewModel.showSettings,
+                        isInputFocused: $isInputFocused,
+                        onSendMessage: viewModel.sendMessage,
+                        onToggleContext: {
+                            withAnimation { viewModel.toggleContextArea() }
+                        }
+                    )
                     .padding(.horizontal)
+                    .padding(.top, 4)
                     .padding(.bottom, 8)
                     .frame(maxWidth: 1050)
                     .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
@@ -174,7 +173,8 @@ struct MainApplicationView: View {
         }
     }
 
-    private func scrollToBottom(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
+    // --- MODIFIED: Renamed function and changed scroll anchor to .top ---
+    private func scrollToTop(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
          let targetID: AnyHashable?
          if isSending && !viewModel.isUserMessagesOnlyFilterActive {
             targetID = "thinkingIndicator"
@@ -184,14 +184,14 @@ struct MainApplicationView: View {
              targetID = nil
          }
          guard let finalID = targetID else { return }
-         logger.trace("Scrolling to ID \(String(describing: finalID))")
+         logger.trace("Scrolling to ID \(String(describing: finalID)) with anchor: .top")
          if animated {
              withAnimation(.easeOut(duration: 0.2)) {
-                 scrollProxy.scrollTo(finalID, anchor: .bottom)
+                 scrollProxy.scrollTo(finalID, anchor: .top)
              }
          } else {
              DispatchQueue.main.async {
-                 scrollProxy.scrollTo(finalID, anchor: .bottom)
+                 scrollProxy.scrollTo(finalID, anchor: .top)
              }
          }
      }

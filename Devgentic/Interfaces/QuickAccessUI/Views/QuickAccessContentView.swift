@@ -164,8 +164,7 @@ extension QuickAccessContentView {
              ChatHistoryView( // Assuming ChatHistoryView is defined elsewhere
                  messages: viewModel.messages,
                  isSending: viewModel.isSending,
-                 hasSelectedConversation: true,
-                 chatHistoryBottomPadding: 0
+                 hasSelectedConversation: true
              )
              .frame(maxWidth: .infinity, maxHeight: .infinity)
              .padding(.horizontal)

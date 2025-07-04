@@ -1,5 +1,5 @@
 //
-//  MainApplicationViewModel
+//  MainApplicationViewModel.swift
 //  Devgentic
 //
 //  Created by Raj Singh on 15/04/25.
@@ -20,6 +20,7 @@ private let attachedFilesLogger = Logger(subsystem: Bundle.main.bundleIdentifier
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
+    // --- MODIFIED: Use the concrete class type to resolve build error ---
     private let persistenceService = CoreDataPersistenceService.shared
     
     private let fileProcessorService: FileProcessorService
@@ -41,7 +42,14 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Published State Properties (UI and Core Chat Logic)
     @Published var conversations: [Conversation] = []
-    @Published var selectedConversationID: UUID?
+    @Published var selectedConversationID: UUID? {
+        didSet {
+            // When the conversation changes, refresh the messages.
+            refreshChatMessages()
+        }
+    }
+    
+    @Published var currentChatMessages: [ChatMessage] = []
     @Published var isSending: Bool = false
     @Published var userInput: String = ""
     @Published var isSidebarCollapsed: Bool = true
@@ -49,7 +57,6 @@ class MainApplicationViewModel: ObservableObject {
     @Published var showPromptLibrary: Bool = false
     @Published var selectedSettingsSection: SettingsSection = .general {
         didSet {
-            // Use the shared instance to clear statuses
             OllamaService.shared.clearAllModelActionStatuses()
         }
     }
@@ -80,22 +87,6 @@ class MainApplicationViewModel: ObservableObject {
     }()
 
     // MARK: - Computed Properties
-    var currentChatMessages: [ChatMessage] {
-            guard let selectedID = selectedConversationID,
-                  let conversationEntity = persistenceService.getConversation(withId: selectedID) else {
-                return []
-            }
-            
-            let messagesToDisplay = (conversationEntity.messages as? Set<ChatMessageEntity> ?? [])
-                .map { $0.toChatMessageStruct() }
-                .sorted { $0.timestamp < $1.timestamp }
-
-            if isUserMessagesOnlyFilterActive {
-                return messagesToDisplay.filter { $0.sender == .user }
-            } else {
-                return messagesToDisplay
-            }
-    }
 
     var currentConversationTitle: String {
             guard let selectedID = selectedConversationID,
@@ -206,8 +197,29 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)
+    
+    private func refreshChatMessages() {
+        guard let selectedID = selectedConversationID,
+              let conversationEntity = persistenceService.getConversation(withId: selectedID) else {
+            currentChatMessages = []
+            return
+        }
+        
+        let messagesToDisplay = (conversationEntity.messages as? Set<ChatMessageEntity> ?? [])
+            .map { $0.toChatMessageStruct() }
+            .sorted { $0.timestamp < $1.timestamp }
+
+        if isUserMessagesOnlyFilterActive {
+            currentChatMessages = messagesToDisplay.filter { $0.sender == .user }
+        } else {
+            currentChatMessages = messagesToDisplay
+        }
+        logger.debug("Chat messages refreshed for conversation \(selectedID.uuidString). Count: \(self.currentChatMessages.count)")
+    }
+    
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
+        refreshChatMessages()
     }
     
     func startNewConversation() {
@@ -232,7 +244,9 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Message Sending Logic
+    // --- MODIFIED: Refactored to handle all async calls within a single Task ---
     func sendMessage(attributedString: NSAttributedString) {
+        // Synchronous pre-checks
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
         
@@ -245,72 +259,75 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
-        // --- MODIFIED VALIDATION LOGIC ---
-        // The validation now depends on the selected backend.
-        if selectedBackend == .ollama {
-            guard let currentIntegration = llmIntegrationStore.currentIntegration, currentIntegration.providerType == .ollama else {
-                let errorMsg = ChatMessage(conversationId: selectedConversationID ?? UUID(), sender: .agent, content: .error(title: "OllaIntegration Not Selected", details: "Please select an active Ollama integration to use this backend."))
-                if let convId = selectedConversationID, let entity = persistenceService.getConversation(withId: convId) {
-                    persistenceService.addMessage(errorMsg, to: entity)
-                }
-                return
-            }
-        } else if selectedBackend == .agent {
-            guard selectedAgentID != nil else {
-                let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
-                let errorMessage = ChatMessage(
-                    conversationId: conversationIDToUse,
-                    sender: .agent,
-                    content: .error(title: "Agent Not Selected", details: "Please select an agent from the input area to use the Agent backend.")
-                )
-                if let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
-                    persistenceService.addMessage(errorMessage, to: targetEntity)
-                }
-                return
-            }
-        }
-        // --- END MODIFIED VALIDATION LOGIC ---
-
-        if voiceInputState.isSessionActive {
-            self.stopVoiceCaptureAndFinalize(customError: nil)
-        }
-
-        var conversationIDToUse: UUID
-        if let currentID = selectedConversationID, persistenceService.getConversation(withId: currentID) != nil {
-            conversationIDToUse = currentID
-        } else {
-            conversationIDToUse = createAndSelectNewConversation()
-        }
-        
-        guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
-            logger.error("CRITICAL: Could not find conversation object for ID: \(conversationIDToUse.uuidString) before sending user message.")
-            isSending = false
-            return
-        }
-
-        if !plainUserQueryFromEditor.isEmpty {
-            let userMessage = ChatMessage(conversationId: conversationIDToUse, sender: .user, content: .plainText(plainUserQueryFromEditor))
-            persistenceService.addMessage(userMessage, to: targetConversationEntity)
-        }
-        
         self.isSending = true
 
         Task {
+            // --- ASYNCHRONOUS OPERATIONS START HERE ---
+            
+            // 1. Validate backend configuration
+            if selectedBackend == .agent {
+                guard selectedAgentID != nil else {
+                    let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
+                    let errorMessage = ChatMessage(
+                        conversationId: conversationIDToUse,
+                        sender: .agent,
+                        content: .error(title: "Agent Not Selected", details: "Please select an agent from the input area to use the Agent backend.")
+                    )
+                    if let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
+                        await persistenceService.addMessage(errorMessage, to: targetEntity)
+                        refreshChatMessages()
+                    }
+                    self.isSending = false
+                    return
+                }
+            }
+            
+            if voiceInputState.isSessionActive {
+                self.stopVoiceCaptureAndFinalize(customError: nil)
+            }
+
+            // 2. Determine the target conversation
+            var conversationIDToUse: UUID
+            if let currentID = selectedConversationID, persistenceService.getConversation(withId: currentID) != nil {
+                conversationIDToUse = currentID
+            } else {
+                conversationIDToUse = createAndSelectNewConversation()
+            }
+            
+            guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
+                logger.error("CRITICAL: Could not find conversation object for ID: \(conversationIDToUse.uuidString) before sending user message.")
+                isSending = false
+                return
+            }
+
+            // 3. Save the user's message and refresh UI
+            if !plainUserQueryFromEditor.isEmpty {
+                let userMessage = ChatMessage(conversationId: conversationIDToUse, sender: .user, content: .plainText(plainUserQueryFromEditor))
+                await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+                refreshChatMessages()
+            }
+            
+            // 4. Send to backend and get response
             let (agentMessagesForThisTurn, errorMessage) = await assembleAndSend(
                 conversationID: conversationIDToUse,
                 userQuery: plainUserQueryFromEditor,
                 files: filesToProcess
             )
 
+            // 5. Save the agent's response/error and refresh UI
             var allNewMessages = agentMessagesForThisTurn
             if let errorMsg = errorMessage {
                 allNewMessages.append(ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: .error(title: "Error", details: errorMsg)))
             }
             
-            if !allNewMessages.isEmpty, let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
-                persistenceService.addMessages(allNewMessages, to: targetEntity)
+            if !allNewMessages.isEmpty {
+                 if let targetEntity = persistenceService.getConversation(withId: conversationIDToUse) {
+                    await persistenceService.addMessages(allNewMessages, to: targetEntity)
+                    refreshChatMessages()
+                }
             }
             
+            // 6. Reset UI state
             self.userInput = ""
             self.clearAttachedFiles()
             self.isSending = false
@@ -325,7 +342,6 @@ class MainApplicationViewModel: ObservableObject {
                 return ([], "")
                 
             case .agent:
-                // MODIFIED: This function is now completely rewritten
                 let (messages, error) = try await sendToAgent(conversationID: conversationID, userQuery: userQuery, files: files)
                 return (messages, error?.localizedDescription)
             }
@@ -336,7 +352,6 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     // MARK: - Agent Payload Construction and Sending
-    // MODIFIED: This function is rewritten to use the new AgentOrchestrationRequest model
     private func sendToAgent(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
         guard let selectedAgent = agentStore.agents.first(where: { $0.id == selectedAgentID }) else {
             throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No agent is selected or the selected agent could not be found."])
@@ -352,36 +367,28 @@ class MainApplicationViewModel: ObservableObject {
             throw NSError(domain: "AgentConfigError", code: 400, userInfo: [NSLocalizedDescriptionKey: "The agent's linked LLM integration must be a configured Ollama provider."])
         }
 
-        // 1. Create LLMSettings
         let llmSettings = OllamaLLMSettings(
             baseUrl: baseUrl,
             modelName: modelName,
             contextWindowSize: linkedIntegration.contextWindowSize ?? 4096
         )
 
-        // 2. Create the root AgentConfig
-        // The user's query becomes the main objective for the root agent.
         let rootAgentConfig = AgentConfig(
             agentId: selectedAgent.id.uuidString,
-            parentId: nil, // This is the root agent
+            parentId: nil,
             roleObjective: userQuery,
             tools: selectedAgent.tools.map { $0.id },
-            llmSettings: .ollama(llmSettings) // Wrap in the enum case
+            llmSettings: .ollama(llmSettings)
         )
 
-        // 3. Create FileObjects
-        let fileObjects = files.map { fileItem -> FileObject in
-            return FileObject(uri: fileItem.url.absoluteString, name: fileItem.name)
-        }
+        let fileObjects = files.map { FileObject(uri: $0.url.absoluteString, name: $0.name) }
 
-        // 4. Assemble the final AgentOrchestrationRequest
         let payload = AgentOrchestrationRequest(
             conversationId: conversationID.uuidString,
             files: fileObjects,
-            agentConfigs: [rootAgentConfig] // Array containing just the root agent
+            agentConfigs: [rootAgentConfig]
         )
         
-        // 5. Send the request
         let agentBaseURL = selectedAgent.baseURL
         let backendConfig = BackendConfiguration(url: agentBaseURL, endpoint: "/agent/chat", payload: [:])
 
@@ -390,59 +397,6 @@ class MainApplicationViewModel: ObservableObject {
         
         return (messages, llmResponse.error)
     }
-
-    // MARK: - Ollama Payload Construction and Sending (Refactored for consistency)
-//    private func sendToOllama(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
-//        var generatedMessages: [ChatMessage] = []
-//
-//        guard let currentIntegration = llmIntegrationStore.currentIntegration, currentIntegration.providerType == .ollama else {
-//                    throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No active Ollama integration found."])
-//        }
-//        
-//        let (messageParts, processingWarnings) = await messageAssemblerService.assembleMessageParts(
-//            userQuery: userQuery,
-//            attachedFiles: files,
-//            for: .ollama,
-//            ollamaModelDetails: OllamaModelInfo(name: currentOllamaProfile?.llmModelName ?? "", displayName: "", sizeDescription: ""),
-//            maxInlineCharsOllama: currentOllamaProfile?.maxInlineChars ?? 5000,
-//            maxFilesForOllama: currentOllamaProfile?.maxAttachedFiles ?? 5,
-//            textFileStrategy: currentOllamaProfile?.textFileInclusionStrategy ?? .preferInlining,
-//            imageHandlingStrategy: currentOllamaProfile?.imageHandlingStrategy ?? .includePathWithWarning,
-//            binaryFileHandlingStrategy: currentOllamaProfile?.binaryFileHandlingStrategy ?? .includePathWithWarning
-//        )
-//
-//        if !processingWarnings.isEmpty {
-//            let warningContent = MessageContent.error(title: "File Processing Notice", details: "- " + processingWarnings.joined(separator: "\n- "))
-//            generatedMessages.append(ChatMessage(conversationId: conversationID, sender: .agent, content: warningContent))
-//        }
-//
-//        let processableParts = messageParts.filter { part in
-//            if let fileRep = part.fileRepresentation, case .unprocessable = fileRep { return false }
-//            return true
-//        }
-//
-////        if !processableParts.contains(where: { !$0.content.isEmpty || $0.type == .file }) {
-////            logger.info("No processable content to send to Ollama.")
-////            return (generatedMessages, nil)
-////        }
-//        
-//        if ollamaService.serverStatus != .connected {
-//            let errorMsg = "Cannot send message: Ollama server is not connected. Status: \(ollamaService.serverStatus.description) at \(ollamaService.ollamaBaseURL)"
-//            throw NSError(domain: "OllamaConnectionError", code: 503, userInfo: [NSLocalizedDescriptionKey: errorMsg])
-//        }
-//
-//        let baseBackendConfig = self.determineBackendConfiguration()
-//        var finalPartsToSend = processableParts
-////        if showContextArea, let filePath = activeContextFilePath, !filePath.isEmpty {
-////            finalPartsToSend.insert(MessagePart(type: .text, content: "Context File: \(filePath)\n\n", fileRepresentation: LLMFileRepresentation?), at: 0)
-////        }
-//        
-//        let llmResponse = try await self.llmCommunicator.sendMessage(parts: finalPartsToSend, to: .ollama, config: baseBackendConfig)
-//        let newMessages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
-//        generatedMessages.append(contentsOf: newMessages)
-//        
-//        return (generatedMessages, llmResponse.error)
-//    }
 
     private func determineBackendConfiguration() -> BackendConfiguration {
         if let currentIntegration = llmIntegrationStore.currentIntegration,
