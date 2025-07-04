@@ -10,7 +10,7 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "DefaultLLMCommunicator")
 
-class DefaultLLMCommunicator: LLMCommunicatorProtocol {
+class DefaultLLMCommunicator {
 
     private let aiConnect: OllamaConnect // For Ollama direct calls
     private let agentConnect: AgentConnect // For Python Agent calls

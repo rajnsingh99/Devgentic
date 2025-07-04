@@ -234,6 +234,14 @@ struct AgentDetailView: View {
 private struct LLMIntegrationCardView: View {
     let integration: LLMIntegrationModel
     
+    private var modelName: String {
+        if integration.providerType == .ollama {
+            return integration.ollamaConfig?.modelName ?? "Not Set"
+        } else {
+            return integration.remoteConfig?.modelName ?? "Not Set"
+        }
+    }
+    
     var body: some View {
         HStack(spacing: 15) {
             Image(systemName: integration.providerType == .ollama ? "shippingbox.fill" : "cloud.fill")
@@ -241,7 +249,6 @@ private struct LLMIntegrationCardView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(integration.displayName).font(.headline)
-                let modelName = integration.ollamaModelName ?? integration.remoteModelName ?? "Not Set"
                 Text("Model: \(modelName)").font(.caption).foregroundColor(.secondary)
             }
             Spacer()

@@ -95,22 +95,23 @@ private struct IntegrationRowView: View {
 struct LLMIntegrationsView_Previews: PreviewProvider {
     static var previews: some View {
         let integrationStore = LLMIntegrationStore()
-        let agentStore = AgentStore()
         
         integrationStore.integrations = [
             .defaultOllama(),
-            LLMIntegrationModel(id: UUID(), displayName: "OpenAI API", providerType: .remote, remoteProvider: .openAI, remoteModelName: "gpt-4o")
+            LLMIntegrationModel(
+                id: UUID(),
+                displayName: "OpenAI API",
+                providerType: .remote,
+                ollamaConfig: nil,
+                remoteConfig: RemoteConfigModel(
+                    provider: .openAI, apiKey: "sk-123", modelName: "gpt-4o", temperature: 0.7, contextWindowSize: 8192
+                )
+            )
         ]
         integrationStore.selectedIntegrationID = integrationStore.integrations.first?.id
         
-        let mockViewModel = MainApplicationViewModel(
-            llmIntegrationStore: integrationStore,
-            agentStore: agentStore
-        )
-        
         return LLMIntegrationsView()
             .environmentObject(integrationStore)
-            .environmentObject(mockViewModel)
             .frame(width: 800, height: 600)
     }
 }

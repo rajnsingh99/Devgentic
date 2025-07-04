@@ -58,9 +58,18 @@ struct SelectLLMIntegrationView: View {
 struct SelectLLMIntegrationView_Previews: PreviewProvider {
     static var previews: some View {
         let store = LLMIntegrationStore()
+        
         store.integrations = [
             .defaultOllama(),
-            LLMIntegrationModel(id: UUID(), displayName: "OpenAI API", providerType: .remote, remoteProvider: .openAI, remoteModelName: "gpt-4o")
+            LLMIntegrationModel(
+                id: UUID(),
+                displayName: "Anthropic API",
+                providerType: .remote,
+                ollamaConfig: nil,
+                remoteConfig: RemoteConfigModel(
+                    provider: .anthropic, apiKey: "sk-abc", modelName: "claude-3-opus", temperature: 0.8, contextWindowSize: 200000
+                )
+            )
         ]
         
         return SelectLLMIntegrationView(selectedIntegrationID: .constant(store.integrations.first?.id))

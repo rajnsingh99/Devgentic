@@ -525,9 +525,9 @@ private struct AgentSelectorPopup: View {
         
         switch integration.providerType {
         case .ollama:
-            return integration.ollamaModelName ?? "Default Ollama Model"
+            return integration.ollamaConfig?.modelName ?? "Default Ollama Model"
         case .remote:
-            return integration.remoteModelName ?? "Default Remote Model"
+            return integration.remoteConfig?.modelName ?? "Default Remote Model"
         }
     }
 }

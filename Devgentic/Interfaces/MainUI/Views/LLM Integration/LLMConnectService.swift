@@ -12,20 +12,23 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct LLMConnectService {
 
-    // MARK: - Ollama Validation
+    // MARK: - Ollama Validation (Refactored)
 
-    static func validateOllama(baseURL: String) async throws -> [String] {
-        logger.info("Validating Ollama server at \(baseURL)...")
+    // --- REFACTORED: Now accepts an OllamaConfigModel ---
+    static func validateOllama(config: OllamaConfigModel) async throws -> [String] {
+        logger.info("Validating Ollama server at \(config.baseURL)...")
         
-        guard let url = URL(string: baseURL) else {
+        guard let url = URL(string: config.baseURL) else {
             throw URLError(.badURL, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL provided."])
         }
         
+        // Check server reachability
         let (_, response) = try await URLSession.shared.data(from: url)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
-            throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Ollama server is not responding at \(baseURL)."])
+            throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Ollama server is not responding at \(config.baseURL)."])
         }
         
+        // Fetch models
         logger.info("Ollama server is reachable. Fetching models...")
         let tagsURL = url.appendingPathComponent("/api/tags")
         let (tagsData, tagsResponse) = try await URLSession.shared.data(from: tagsURL)
@@ -41,22 +44,23 @@ struct LLMConnectService {
         return modelNames
     }
 
-    // MARK: - Remote API Validation
+    // MARK: - Remote API Validation (Refactored)
 
-    static func validateRemoteAPI(provider: RemoteProvider, apiKey: String) async throws -> [String] {
-        logger.info("Validating API key for provider: \(provider.rawValue)")
+    // --- REFACTORED: Now accepts a RemoteConfigModel ---
+    static func validateRemoteAPI(config: RemoteConfigModel) async throws -> [String] {
+        logger.info("Validating API key for provider: \(config.provider.rawValue)")
         
-        switch provider {
+        switch config.provider {
         case .openAI:
-            return try await validateOpenAI(apiKey: apiKey)
+            return try await validateOpenAI(apiKey: config.apiKey)
         case .anthropic:
-            return try await validateAnthropic(apiKey: apiKey)
+            return try await validateAnthropic(apiKey: config.apiKey)
         case .google:
-            return try await validateGoogle(apiKey: apiKey)
+            return try await validateGoogle(apiKey: config.apiKey)
         }
     }
     
-    // MARK: - Private Provider-Specific Helpers
+    // MARK: - Private Provider-Specific Helpers (No change in logic, just callers)
     
     private static func validateOpenAI(apiKey: String) async throws -> [String] {
         guard let url = URL(string: "https://api.openai.com/v1/models") else { throw URLError(.badURL) }
@@ -85,7 +89,6 @@ struct LLMConnectService {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         
-        // We send a minimal, invalid payload. A 400 error means the key is valid. A 401 means it's invalid.
         let payload: [String: Any] = ["model": "claude-3-haiku-20240307", "max_tokens": 1, "messages": [["role": "user", "content": "test"]]]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
@@ -94,13 +97,11 @@ struct LLMConnectService {
 
         if httpResponse.statusCode == 401 { throw URLError(.userAuthenticationRequired, userInfo: [NSLocalizedDescriptionKey: "Invalid Anthropic API Key."]) }
         
-        // For Anthropic, a 400 Bad Request on this test payload is a success for validation.
         guard (200..<300).contains(httpResponse.statusCode) || httpResponse.statusCode == 400 else {
             throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Failed to connect to Anthropic. Status: \(httpResponse.statusCode)"])
         }
         
         logger.info("Anthropic API Key is valid.")
-        // Anthropic doesn't have a public models list endpoint, so we return a hardcoded list of common models.
         return ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
     }
 
@@ -119,7 +120,6 @@ struct LLMConnectService {
         guard (200..<300).contains(httpResponse.statusCode) else { throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Failed to connect to Google. Status: \(httpResponse.statusCode)"]) }
         
         let modelsResponse = try JSONDecoder().decode(GoogleModelsResponse.self, from: data)
-        // Filter for generative models that support text generation.
         let modelNames = modelsResponse.models
             .filter { $0.supportedGenerationMethods.contains("generateContent") }
             .map { $0.name.replacingOccurrences(of: "models/", with: "") }

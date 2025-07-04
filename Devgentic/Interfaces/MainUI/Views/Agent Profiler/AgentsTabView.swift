@@ -18,9 +18,7 @@ struct AgentsTabView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 if viewModel.agentStore.agents.isEmpty {
-                    Text("No agents configured yet. Add a new agent to get started.")
-                        .foregroundColor(.secondary)
-                        .padding()
+                    ContentUnavailableView("No Agents", systemImage: "person.3.sequence", description: Text("Add a new agent to get started."))
                 } else {
                     VStack(spacing: 10) {
                         ForEach(viewModel.agentStore.agents) { agent in
@@ -44,7 +42,7 @@ struct AgentsTabView: View {
     }
 }
 
-// MARK: - AgentRowView
+// MARK: - AgentRowView (Refactored)
 struct AgentRowView: View {
     let agent: AgentProfileModel
     @EnvironmentObject var viewModel: MainApplicationViewModel
@@ -53,13 +51,24 @@ struct AgentRowView: View {
         viewModel.agentStore.selectedAgentID == agent.id
     }
 
-    // --- MODIFIED: This now fetches from the new LLMIntegrationStore ---
     private var linkedIntegration: LLMIntegrationModel? {
-        if let integrationID = agent.linkedIntegrationID {
-            // Use the new llmIntegrationStore from the viewModel
-            return viewModel.llmIntegrationStore.integrations.first { $0.id == integrationID }
+        guard let integrationID = agent.linkedIntegrationID else { return nil }
+        return viewModel.llmIntegrationStore.integrations.first { $0.id == integrationID }
+    }
+
+    private var integrationDisplayInfo: (name: String, model: String) {
+        guard let integration = linkedIntegration else {
+            return ("Not Linked", "N/A")
         }
-        return nil
+        
+        let modelName: String
+        if integration.providerType == .ollama {
+            modelName = integration.ollamaConfig?.modelName ?? "Not Set"
+        } else {
+            modelName = integration.remoteConfig?.modelName ?? "Not Set"
+        }
+        
+        return (integration.displayName, modelName)
     }
 
     var body: some View {
@@ -69,82 +78,66 @@ struct AgentRowView: View {
                     .font(.headline)
                     .foregroundColor(.primary)
 
-                // --- MODIFIED: Updated logic to display info from the new model ---
-                if let integration = linkedIntegration {
-                    // Display the integration's display name and the specific model name
-                    let modelName = integration.ollamaModelName ?? integration.remoteModelName ?? "N/A"
-                    Text("\(integration.displayName) - \(modelName)")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("No LLM integration linked")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                }
+                Text("\(integrationDisplayInfo.name) - \(integrationDisplayInfo.model)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
             Spacer()
             
             if isAgentActive {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.blue)
+                    .foregroundColor(.accentColor)
                     .font(.title2)
             }
         }
         .padding(12)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(Color(NSColor.controlAlternatingRowBackgroundColors.first ?? .clear))
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(isAgentActive ? Color.blue : Color.gray.opacity(0.2), lineWidth: 1)
+                .stroke(isAgentActive ? Color.accentColor : Color.gray.opacity(0.2), lineWidth: 1.5)
         )
-        .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
+        .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
         .contentShape(Rectangle())
         .animation(.easeInOut(duration: 0.2), value: isAgentActive)
     }
 }
 
-// MARK: - Preview Provider (Updated for new data model)
+
+// MARK: - Preview Provider (Fixed)
 struct AgentsTabView_Previews: PreviewProvider {
     static var mockViewModel: MainApplicationViewModel = {
-        // --- MODIFIED: Create mock LLMIntegrationStore ---
         let llmIntegrationStore = LLMIntegrationStore()
         let agentStore = AgentStore()
         
-        // Create a mock LLM integration to link to an agent
+        // --- FIXED: Use the new nested model structure for initialization ---
         let mockIntegration = LLMIntegrationModel(
             id: UUID(),
             displayName: "Local Llama 3",
             providerType: .ollama,
-            ollamaBaseURL: "http://localhost:11434",
-            ollamaModelName: "llama3:8b"
+            ollamaConfig: OllamaConfigModel(
+                baseURL: "http://localhost:11434",
+                modelName: "llama3:8b",
+                temperature: 0.8,
+                contextWindowSize: 4096
+            ),
+            remoteConfig: nil
         )
         llmIntegrationStore.integrations = [mockIntegration]
 
-        // Create mock agents and link them to the new integration
         let agent1 = AgentProfileModel(
             id: UUID(),
             name: "Developer Agent",
             role: "Your personal development assistant.",
             baseURL: "http://localhost:8000",
-            // --- MODIFIED: Use new property name ---
             linkedIntegrationID: mockIntegration.id,
             tools: []
         )
-        let agent2 = AgentProfileModel(
-            id: UUID(),
-            name: "Research Assistant",
-            role: "Helps with research and data gathering.",
-            baseURL: "http://localhost:8001",
-            linkedIntegrationID: nil,
-            tools: []
-        )
-        
-        agentStore.agents = [agent1, agent2]
+        agentStore.agents = [agent1]
         agentStore.selectedAgentID = agent1.id
 
-        // Create the main view model with the new mock store
         let viewModel = MainApplicationViewModel(
-            // --- MODIFIED: Pass new store to initializer ---
             llmIntegrationStore: llmIntegrationStore,
             agentStore: agentStore
         )
@@ -155,7 +148,5 @@ struct AgentsTabView_Previews: PreviewProvider {
         AgentsTabView()
             .environmentObject(mockViewModel)
             .frame(width: 350, height: 500)
-            .previewLayout(.sizeThatFits)
-            .previewDisplayName("Agents Tab View")
     }
 }

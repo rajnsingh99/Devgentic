@@ -17,21 +17,12 @@ extension Binding {
     }
 }
 
-extension Binding where Value == String? {
-    var toNonOptionalString: Binding<String> {
-        // Now uses the generic helper for consistency.
-        self.toNonOptional(defaultValue: "")
-    }
-}
-
-
 struct AddLLMIntegrationView: View {
     @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
     @Environment(\.dismiss) var dismiss
 
     // MARK: - State Management
     @State private var newIntegration = LLMIntegrationModel.new()
-    @State private var selectedProviderType: ProviderType = .ollama
     
     enum ValidationState: Equatable {
         case idle
@@ -44,10 +35,10 @@ struct AddLLMIntegrationView: View {
     private var isChecking: Bool { validationState == .checking }
     
     private var canCheckConnection: Bool {
-        if selectedProviderType == .ollama {
-            return !(newIntegration.ollamaBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if newIntegration.providerType == .ollama {
+            return !(newIntegration.ollamaConfig?.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         } else {
-            return !(newIntegration.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            return !(newIntegration.remoteConfig?.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
     }
     
@@ -68,7 +59,7 @@ struct AddLLMIntegrationView: View {
             Form {
                 TextField("Display Name:", text: $newIntegration.displayName)
                 
-                Picker("Provider Type:", selection: $selectedProviderType) {
+                Picker("Provider Type:", selection: $newIntegration.providerType) {
                     ForEach(ProviderType.allCases) { type in
                         Text(type.rawValue).tag(type)
                     }
@@ -77,7 +68,7 @@ struct AddLLMIntegrationView: View {
                 
                 Divider()
 
-                if selectedProviderType == .ollama {
+                if newIntegration.providerType == .ollama {
                     ollamaFields
                 } else {
                     remoteFields
@@ -96,28 +87,41 @@ struct AddLLMIntegrationView: View {
         }
         .padding(20)
         .frame(minWidth: 400, idealWidth: 450)
-        .onChange(of: selectedProviderType) { _, newType in
-            newIntegration.providerType = newType
+        .onChange(of: newIntegration.providerType) { _, newType in
+            // When provider type changes, reset the config models and validation state
             validationState = .idle
+            if newType == .ollama {
+                newIntegration.remoteConfig = nil
+                if newIntegration.ollamaConfig == nil {
+                    newIntegration.ollamaConfig = OllamaConfigModel(baseURL: "http://localhost:11434", modelName: "")
+                }
+            } else {
+                newIntegration.ollamaConfig = nil
+                if newIntegration.remoteConfig == nil {
+                    newIntegration.remoteConfig = RemoteConfigModel(provider: .openAI, apiKey: "", modelName: "")
+                }
+            }
         }
     }
 
     // MARK: - Subviews
     private var ollamaFields: some View {
-        Group {
-            TextField("Base URL:", text: $newIntegration.ollamaBaseURL.toNonOptionalString, prompt: Text("e.g., http://localhost:11434"))
+        // Use a binding to the nested config model. Since the view logic ensures
+        // ollamaConfig is non-nil when this view is shown, we can safely unwrap.
+        BindingView(binding: $newIntegration.ollamaConfig) { $config in
+            TextField("Base URL:", text: $config.baseURL, prompt: Text("e.g., http://localhost:11434"))
                 .disabled(isChecking)
         }
     }
 
     private var remoteFields: some View {
-        Group {
-            Picker("Provider:", selection: $newIntegration.remoteProvider.toNonOptional(defaultValue: .openAI)) {
+        BindingView(binding: $newIntegration.remoteConfig) { $config in
+            Picker("Provider:", selection: $config.provider) {
                 ForEach(RemoteProvider.allCases) { Text($0.rawValue).tag($0) }
             }
             .disabled(isChecking)
             
-            SecureField("API Key:", text: $newIntegration.apiKey.toNonOptionalString, prompt: Text("Enter your API key"))
+            SecureField("API Key:", text: $config.apiKey, prompt: Text("Enter your API key"))
                 .disabled(isChecking)
         }
     }
@@ -180,21 +184,22 @@ struct AddLLMIntegrationView: View {
         Task {
             do {
                 let models: [String]
-                if selectedProviderType == .ollama {
-                    let url = newIntegration.ollamaBaseURL ?? ""
-                    models = try await LLMConnectService.validateOllama(baseURL: url)
+                if newIntegration.providerType == .ollama, let config = newIntegration.ollamaConfig {
+                    models = try await LLMConnectService.validateOllama(config: config)
+                } else if newIntegration.providerType == .remote, let config = newIntegration.remoteConfig {
+                    models = try await LLMConnectService.validateRemoteAPI(config: config)
                 } else {
-                    let provider = newIntegration.remoteProvider ?? .openAI
-                    let key = newIntegration.apiKey ?? ""
-                    models = try await LLMConnectService.validateRemoteAPI(provider: provider, apiKey: key)
+                    throw URLError(.badURL, userInfo: [NSLocalizedDescriptionKey: "Configuration is missing."])
                 }
+                
                 validationState = .success(models: models)
                 
+                // Set the first model as the default selection
                 if let firstModel = models.first {
-                    if selectedProviderType == .ollama {
-                        newIntegration.ollamaModelName = firstModel
+                    if newIntegration.providerType == .ollama {
+                        newIntegration.ollamaConfig?.modelName = firstModel
                     } else {
-                        newIntegration.remoteModelName = firstModel
+                        newIntegration.remoteConfig?.modelName = firstModel
                     }
                 }
             } catch {
@@ -204,15 +209,39 @@ struct AddLLMIntegrationView: View {
     }
     
     private func addIntegration() {
+        // Set default temperature and context size before adding
+        if newIntegration.providerType == .ollama {
+            newIntegration.ollamaConfig?.temperature = 0.8
+            newIntegration.ollamaConfig?.contextWindowSize = 4096
+        } else {
+            newIntegration.remoteConfig?.temperature = 0.8
+            newIntegration.remoteConfig?.contextWindowSize = 4096
+        }
         llmIntegrationStore.addIntegration(model: newIntegration)
         dismiss()
     }
     
     private func modelSelectionBinding() -> Binding<String> {
-        if selectedProviderType == .ollama {
-            return $newIntegration.ollamaModelName.toNonOptionalString
+        if newIntegration.providerType == .ollama {
+            return $newIntegration.ollamaConfig.toNonOptional(defaultValue: .init(baseURL: "", modelName: "")).modelName
         } else {
-            return $newIntegration.remoteModelName.toNonOptionalString
+            return $newIntegration.remoteConfig.toNonOptional(defaultValue: .init(provider: .openAI, apiKey: "", modelName: "")).modelName
+        }
+    }
+}
+
+/// A helper view to safely unwrap an optional binding for use in a subview.
+struct BindingView<T, Content: View>: View {
+    @Binding var binding: T?
+    @ViewBuilder let content: (Binding<T>) -> Content // Add @ViewBuilder here
+
+    var body: some View {
+        if let wrappedValue = binding {
+            let b = Binding(
+                get: { wrappedValue },
+                set: { binding = $0 }
+            )
+            content(b)
         }
     }
 }

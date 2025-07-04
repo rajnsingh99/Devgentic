@@ -26,17 +26,16 @@ struct LLMIntegrationsSidebarView: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    // This section now lists all integrations (Ollama and Remote)
                     LLMIntegrationsSection()
                         .environmentObject(viewModel.llmIntegrationStore)
 
                     Divider()
 
-                    // This section is now conditionally shown only if an Ollama profile is active
+                    // --- FIXED: Access baseURL from the nested ollamaConfig model ---
                     if let ollamaIntegration = activeOllamaIntegration {
                         LocalModelsSection(
                             ollamaService: viewModel.ollamaService,
-                            ollamaBaseURL: ollamaIntegration.ollamaBaseURL ?? "http://localhost:11434",
+                            ollamaBaseURL: ollamaIntegration.ollamaConfig?.baseURL ?? "",
                             sidebarWidth: $sidebarWidth
                         )
                     } else {
@@ -52,7 +51,6 @@ struct LLMIntegrationsSidebarView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onDisappear {
-            logger.debug("LLMIntegrationsSidebarView disappeared.")
             viewModel.ollamaService.clearAllModelActionStatuses()
         }
     }
@@ -62,7 +60,6 @@ struct LLMIntegrationsSidebarView: View {
 private struct LLMIntegrationsSection: View {
     @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
     @State private var showingAddIntegrationPopover = false
-    @State private var isHoveringAddButton = false
 
     var body: some View {
         VStack(alignment: .leading) {
@@ -74,16 +71,12 @@ private struct LLMIntegrationsSection: View {
                     showingAddIntegrationPopover = true
                 } label: {
                     Image(systemName: "plus.circle")
-                        .foregroundColor(isHoveringAddButton ? .blue : .primary)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .onHover { hovering in isHoveringAddButton = hovering }
                 .help("Add New LLM Integration")
                 .popover(isPresented: $showingAddIntegrationPopover, arrowEdge: .bottom) {
-                    // In Phase 3, this will be the AddLLMIntegrationView
-                    Text("Add Integration Popover (Phase 3)")
-                        .padding()
-                        .environmentObject(llmIntegrationStore)
+                    AddLLMIntegrationView()
+                         .environmentObject(llmIntegrationStore)
                 }
             }
             .padding(.bottom, 5)
@@ -109,7 +102,6 @@ private struct IntegrationRowView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Icon based on provider type
             Image(systemName: integration.providerType == .ollama ? "shippingbox.fill" : "cloud.fill")
                 .foregroundColor(isActive ? .blue : .secondary)
                 .font(.title2)
@@ -118,12 +110,9 @@ private struct IntegrationRowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(integration.displayName)
                     .fontWeight(.semibold)
-                    .foregroundColor(.primary)
-
                 Text(integration.providerType.rawValue)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                    .lineLimit(1)
             }
 
             Spacer()
@@ -168,7 +157,7 @@ private struct IntegrationRowView: View {
 }
 
 
-// MARK: - Local Models Section (Largely unchanged, but now conditionally visible)
+// MARK: - Local Models Section
 private struct LocalModelsSection: View {
     @ObservedObject var ollamaService: OllamaService
     let ollamaBaseURL: String
@@ -187,9 +176,9 @@ private struct LocalModelsSection: View {
     }
 }
 
-// MARK: - Local Model Card (Updated)
+// MARK: - Local Model Card
 private struct LocalModelCard: View {
-    let modelName: String // Simplified to just take the name
+    let modelName: String
     @ObservedObject var ollamaService: OllamaService
     let ollamaBaseURL: String
     
@@ -197,8 +186,9 @@ private struct LocalModelCard: View {
     
     @State private var showingRemovalConfirmation = false
 
+    // --- FIXED: Access modelName from the nested ollamaConfig model ---
     var isSelectedForChat: Bool {
-        viewModel.llmIntegrationStore.currentIntegration?.ollamaModelName == modelName
+        viewModel.llmIntegrationStore.currentIntegration?.ollamaConfig?.modelName == modelName
     }
 
     var body: some View {
@@ -206,7 +196,7 @@ private struct LocalModelCard: View {
     }
 }
 
-// MARK: - Ollama Status View (Unchanged)
+// MARK: - Ollama Status View
 private struct OllamaStatusView: View {
     @ObservedObject var ollamaService: OllamaService
     var body: some View { Text("Status") }

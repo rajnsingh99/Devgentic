@@ -30,17 +30,27 @@
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>
     </entity>
     <entity name="LLMIntegrationEntity" representedClassName="LLMIntegrationEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="apiKey" optional="YES" attributeType="String"/>
-        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="displayName" attributeType="String"/>
         <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="lastSelected" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="ollamaBaseURL" optional="YES" attributeType="String"/>
-        <attribute name="ollamaModelName" optional="YES" attributeType="String"/>
         <attribute name="providerType" optional="YES" attributeType="String"/>
-        <attribute name="remoteModelName" optional="YES" attributeType="String"/>
-        <attribute name="remoteProvider" optional="YES" attributeType="String"/>
+        <relationship name="ollamaConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="OllamaConfigEntity" inverseName="integration" inverseEntity="OllamaConfigEntity"/>
+        <relationship name="remoteConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="RemoteConfigEntity" inverseName="integration" inverseEntity="RemoteConfigEntity"/>
+    </entity>
+    <entity name="OllamaConfigEntity" representedClassName="OllamaConfigEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="baseURL" attributeType="String"/>
+        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="modelName" attributeType="String"/>
         <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
+        <relationship name="integration" maxCount="1" deletionRule="Nullify" destinationEntity="LLMIntegrationEntity" inverseName="ollamaConfig" inverseEntity="LLMIntegrationEntity"/>
+    </entity>
+    <entity name="RemoteConfigEntity" representedClassName="RemoteConfigEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="apiKey" attributeType="String"/>
+        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="modelName" attributeType="String"/>
+        <attribute name="provider" attributeType="String"/>
+        <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
+        <relationship name="integration" maxCount="1" deletionRule="Nullify" destinationEntity="LLMIntegrationEntity" inverseName="remoteConfig" inverseEntity="LLMIntegrationEntity"/>
     </entity>
     <entity name="SelectedToolEntity" representedClassName="SelectedToolEntity" syncable="YES" codeGenerationType="class">
         <attribute name="displayName" optional="YES" attributeType="String"/>

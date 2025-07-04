@@ -10,7 +10,6 @@ import SwiftUI
 struct LLMIntegrationDetailView: View {
     @Binding var integration: LLMIntegrationModel
     @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
-    @EnvironmentObject var viewModel: MainApplicationViewModel
 
     @State private var originalIntegration: LLMIntegrationModel
     @State private var hasUnsavedChanges = false
@@ -28,17 +27,16 @@ struct LLMIntegrationDetailView: View {
 
     var body: some View {
         Form {
-            Section() {
-                TextField("Name:", text: $integration.displayName)
+            Section {
+                TextField("Display Name:", text: $integration.displayName)
                 HStack {
-                    Text("Provider:")
+                    Text("Provider Type:")
                     Spacer()
-                    HStack {
-                        Image(systemName: integration.providerType == .ollama ? "shippingbox.fill" : "cloud.fill")
-                        Text(integration.providerType.rawValue)
-                    }
-                    .padding()
-                    .background(Color(nsColor: .controlBackgroundColor)).cornerRadius(6)
+                    Text(integration.providerType.rawValue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(6)
                 }
             }
 
@@ -48,136 +46,131 @@ struct LLMIntegrationDetailView: View {
 
             Spacer()
             
-            HStack {
-                Button("Delete", role: .destructive) {
-                    llmIntegrationStore.deleteIntegration(id: integration.id)
-                }
-                .disabled(llmIntegrationStore.integrations.count <= 1)
-                
-                Spacer()
-                
-                Button("Revert") { revertChanges() }.disabled(!hasUnsavedChanges)
-                
-                Button("Save") { saveChanges() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!hasUnsavedChanges)
-            }
+            actionButtons
         }
         .padding()
-        .onAppear(perform: fetchAvailableModels)
-        .onChange(of: integration.id) { _, _ in
-            isApiKeyVisible = false
+        .onAppear {
+            self.originalIntegration = integration
             fetchAvailableModels()
         }
-        .onChange(of: integration) { _, _ in checkForChanges() }
+        .onChange(of: integration.id) { _, newId in
+            isApiKeyVisible = false
+            if let newIntegration = llmIntegrationStore.integrations.first(where: { $0.id == newId }) {
+                self.integration = newIntegration
+                self.originalIntegration = newIntegration
+                fetchAvailableModels()
+            }
+        }
+        .onChange(of: integration) { _, newIntegration in
+            hasUnsavedChanges = (newIntegration != originalIntegration)
+        }
     }
     
-    // MARK: - Model Configuration Section
     @ViewBuilder
     private var modelConfigurationSection: some View {
-        Section(header: Text("Configurations: ")) {
+        Section(header: Text("Configuration")) {
             if integration.providerType == .ollama {
-                TextField("URL:", text: $integration.ollamaBaseURL.toNonOptionalString).padding()
-            } else {
-                HStack {
-                    Text("Provider:").foregroundColor(.secondary)
-                    Text(integration.remoteProvider?.rawValue ?? "Not Set")
+                BindingView(binding: $integration.ollamaConfig) { $config in
+                    TextField("Base URL:", text: $config.baseURL)
+                    modelPicker(selection: $config.modelName)
                 }
-                
-                HStack {
-                    if isApiKeyVisible {
-                        TextField("API Key:", text: $integration.apiKey.toNonOptionalString)
-                    } else {
-                        SecureField("API Key:", text: $integration.apiKey.toNonOptionalString)
+            } else {
+                // --- FIXED: Added else block to correctly handle the remote provider case ---
+                BindingView(binding: $integration.remoteConfig) { $config in
+                    Text("Provider: \(config.provider.rawValue)")
+                    
+                    HStack {
+                        if isApiKeyVisible {
+                            TextField("API Key:", text: $config.apiKey)
+                        } else {
+                            SecureField("API Key:", text: $config.apiKey)
+                        }
+                        Button(action: { isApiKeyVisible.toggle() }) {
+                            Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
+                        }.buttonStyle(.plain)
                     }
                     
-                    Button(action: { isApiKeyVisible.toggle() }) {
-                        Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
-                    }
-                    .buttonStyle(.plain)
-                    .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
+                    modelPicker(selection: $config.modelName)
                 }
-                .padding()
+            }
+        }
+    }
+    
+    private var actionButtons: some View {
+        HStack {
+            Button("Delete", role: .destructive) {
+                llmIntegrationStore.deleteIntegration(id: integration.id)
+            }
+            .disabled(llmIntegrationStore.integrations.count <= 1)
+            
+            Spacer()
+            
+            Button("Revert") { revertChanges() }.disabled(!hasUnsavedChanges)
+            
+            Button("Save") { saveChanges() }
+                .buttonStyle(.borderedProminent)
+                .disabled(!hasUnsavedChanges)
+        }
+    }
+    
+    @ViewBuilder
+    private func modelPicker(selection: Binding<String>) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            if isLoadingModels {
+                ProgressView().controlSize(.small)
+                Text("Fetching models...").foregroundColor(.secondary)
+            } else if let error = modelError {
+                Label(error, systemImage: "xmark.octagon.fill")
+                    .foregroundColor(.red).font(.caption)
+            } else {
+                Picker("Model:", selection: selection) {
+                    ForEach(availableModels, id: \.self) { Text($0).tag($0) }
+                }
+                .disabled(availableModels.isEmpty)
             }
             
-            // Model Picker
-            HStack(alignment: .firstTextBaseline) {
-                if isLoadingModels {
-                    ProgressView().controlSize(.small)
-                    Text("Fetching models...").foregroundColor(.secondary)
-                } else if let error = modelError {
-                    Text("Error: \(error)").foregroundColor(.red).font(.caption)
-                } else {
-                    Picker("Model:", selection: modelSelectionBinding()) {
-                        ForEach(availableModels, id: \.self) { modelName in
-                            Text(modelName).tag(modelName)
-                        }
-                    }
-                    .disabled(availableModels.isEmpty)
-                }
-                
-                Spacer()
-                
-                Button(action: fetchAvailableModels) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.plain)
-                .help("Refresh model list")
-                .disabled(isLoadingModels)
+            Spacer()
+            
+            Button(action: fetchAvailableModels) {
+                Image(systemName: "arrow.clockwise")
             }
-            .padding(.bottom)
+            .buttonStyle(.plain)
+            .help("Refresh model list")
+            .disabled(isLoadingModels)
         }
     }
 
-    // MARK: - Logic
     private func fetchAvailableModels() {
         isLoadingModels = true
         modelError = nil
+        availableModels = []
         
         Task {
             do {
                 let models: [String]
-                if integration.providerType == .ollama {
-                    guard let baseURL = integration.ollamaBaseURL, !baseURL.isEmpty else {
-                        throw URLError(.badURL, userInfo: [NSLocalizedDescriptionKey: "Ollama Base URL is not set."])
-                    }
-                    models = try await LLMConnectService.validateOllama(baseURL: baseURL)
+                if integration.providerType == .ollama, let config = integration.ollamaConfig {
+                    models = try await LLMConnectService.validateOllama(config: config)
+                } else if integration.providerType == .remote, let config = integration.remoteConfig {
+                    models = try await LLMConnectService.validateRemoteAPI(config: config)
                 } else {
-                    guard let provider = integration.remoteProvider, let apiKey = integration.apiKey, !apiKey.isEmpty else {
-                        throw URLError(.userAuthenticationRequired, userInfo: [NSLocalizedDescriptionKey: "API Provider or Key is not set."])
-                    }
-                    models = try await LLMConnectService.validateRemoteAPI(provider: provider, apiKey: apiKey)
+                    models = []
                 }
                 
                 self.availableModels = models
                 
-                let currentModel = (integration.providerType == .ollama) ? integration.ollamaModelName : integration.remoteModelName
+                let currentModel: String? = (integration.providerType == .ollama) ? integration.ollamaConfig?.modelName : integration.remoteConfig?.modelName
                 if !models.contains(currentModel ?? "") {
                     if integration.providerType == .ollama {
-                        integration.ollamaModelName = models.first
+                        integration.ollamaConfig?.modelName = models.first ?? ""
                     } else {
-                        integration.remoteModelName = models.first
+                        integration.remoteConfig?.modelName = models.first ?? ""
                     }
                 }
-                
             } catch {
                 self.modelError = error.localizedDescription
-                self.availableModels = []
             }
             isLoadingModels = false
         }
-    }
-    
-    private func modelSelectionBinding() -> Binding<String> {
-        if integration.providerType == .ollama {
-            return $integration.ollamaModelName.toNonOptionalString
-        } else {
-            return $integration.remoteModelName.toNonOptionalString
-        }
-    }
-
-    private func checkForChanges() {
-        hasUnsavedChanges = (integration != originalIntegration)
     }
 
     private func saveChanges() {
@@ -192,8 +185,7 @@ struct LLMIntegrationDetailView: View {
     }
 }
 
-
-// MARK: - Preview Provider
+// MARK: - Preview Provider (Fixed)
 struct LLMIntegrationDetailView_Previews: PreviewProvider {
     
     // Helper container to manage state for previews
@@ -202,27 +194,30 @@ struct LLMIntegrationDetailView_Previews: PreviewProvider {
         @State var remoteIntegration: LLMIntegrationModel
 
         let llmIntegrationStore: LLMIntegrationStore
-        let mainViewModel: MainApplicationViewModel
 
         init() {
             let store = LLMIntegrationStore()
+            
+            // --- FIXED: Correctly initialize models using the new nested structure ---
             let ollama = LLMIntegrationModel.defaultOllama()
             let remote = LLMIntegrationModel(
                 id: UUID(),
                 displayName: "OpenAI API Key",
                 providerType: .remote,
-                remoteProvider: .openAI,
-                apiKey: "sk-1234567890",
-                remoteModelName: "gpt-4o"
+                ollamaConfig: nil,
+                remoteConfig: RemoteConfigModel(
+                    provider: .openAI,
+                    apiKey: "sk-1234567890",
+                    modelName: "gpt-4o",
+                    temperature: 0.7,
+                    contextWindowSize: 8192
+                )
             )
             store.integrations = [ollama, remote]
             
             self._ollamaIntegration = State(initialValue: ollama)
             self._remoteIntegration = State(initialValue: remote)
             self.llmIntegrationStore = store
-            
-            // Create a mock view model
-            self.mainViewModel = MainApplicationViewModel(llmIntegrationStore: store, agentStore: AgentStore())
         }
 
         var body: some View {
@@ -230,24 +225,15 @@ struct LLMIntegrationDetailView_Previews: PreviewProvider {
                 VStack {
                     Text("Ollama Provider Preview").font(.title3)
                     LLMIntegrationDetailView(integration: $ollamaIntegration)
-                        .padding()
-                        .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(10)
                 }
-                
                 Divider()
-                
                 VStack {
                     Text("Remote Provider Preview").font(.title3)
                     LLMIntegrationDetailView(integration: $remoteIntegration)
-                        .padding()
-                        .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(10)
                 }
             }
             .padding()
             .environmentObject(llmIntegrationStore)
-            .environmentObject(mainViewModel)
             .frame(width: 600, height: 750)
         }
     }

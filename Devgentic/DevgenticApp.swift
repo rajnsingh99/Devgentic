@@ -1,5 +1,6 @@
 // DevgenticApp.swift
 import SwiftUI
+import CoreData
 
 @main
 struct DevgenticApp: App {
@@ -16,7 +17,7 @@ struct DevgenticApp: App {
     private let coreDataService = CoreDataPersistenceService.shared
     
     // Create the persistent stores as StateObjects first.
-    @StateObject private var llmIntegrationStore = LLMIntegrationStore()
+    @StateObject private var llmIntegrationStore: LLMIntegrationStore
     @StateObject private var agentStore = AgentStore()
     @StateObject private var agentManager = AgentManager()
     @StateObject private var toolStore = ToolStore()
@@ -25,6 +26,8 @@ struct DevgenticApp: App {
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
 
     init() {
+        
+        
         // Create the stores that will be passed to the view model
         let integrationStore = LLMIntegrationStore()
         let agStore = AgentStore()
@@ -38,6 +41,7 @@ struct DevgenticApp: App {
         self._llmIntegrationStore = StateObject(wrappedValue: integrationStore)
         self._agentStore = StateObject(wrappedValue: agStore)
         self._mainApplicationViewModel = StateObject(wrappedValue: viewModel)
+        performDataCleanupIfNeeded()
     }
 
     var body: some Scene {
@@ -98,38 +102,60 @@ struct DevgenticApp: App {
             }
         }
 
-        // MARK: - File Viewer Window
+        // MARK: - Window Groups (Unchanged)
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
-            if let url = fileURL {
-                FileViewerWindowView(fileURL: url)
-            } else {
-                Text("Error: No file URL provided.")
-            }
+            if let url = fileURL { FileViewerWindowView(fileURL: url) }
         }
-        
-        // MARK: - Command Centre (Settings) Window
         WindowGroup("Command Centre", id: "command-centre") {
             CommandCentreView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(agentManager)
                 .environmentObject(llmIntegrationStore)
-        }
-        .defaultSize(width: 850, height: 700)
-
-        // MARK: - LLM Integrations Window
+        }.defaultSize(width: 850, height: 700)
         WindowGroup("LLM Provider", id: "llm-integrations") {
-                    LLMIntegrationsView()
-                        .environmentObject(mainApplicationViewModel)
-                        .environmentObject(llmIntegrationStore)
-                }
-        .defaultSize(width: 850, height: 700)
-        
-        // MARK: - Agent Settings Window
+            LLMIntegrationsView()
+                .environmentObject(mainApplicationViewModel)
+                .environmentObject(llmIntegrationStore)
+        }.defaultSize(width: 850, height: 700)
         WindowGroup("Agent Configuration", id: "agent-config", for: UUID.self) { $agentID in
             AgentProfilerView()
                .environmentObject(mainApplicationViewModel)
                .environmentObject(toolStore)
-        }
-        .defaultSize(width: 850, height: 700)
+        }.defaultSize(width: 850, height: 700)
     }
-}
+    
+    // --- NEW: One-time data migration logic ---
+    private func performDataCleanupIfNeeded() {
+            let cleanupKey = "didTruncateDatabaseForLLMRefactor"
+            guard !UserDefaults.standard.bool(forKey: cleanupKey) else {
+                return // Cleanup already done
+            }
+            
+            print("Performing one-time database truncation for refactoring...")
+            
+            let context = coreDataService.viewContext
+            let entityNames = ["LLMIntegrationEntity", "OllamaConfigEntity", "RemoteConfigEntity", "AgentProfileEntity", "ConversationEntity", "ChatMessageEntity", "SelectedToolEntity"]
+            
+            for entityName in entityNames {
+                let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: entityName)
+                let deleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
+                
+                do {
+                    try context.execute(deleteRequest)
+                    print("Successfully truncated entity: \(entityName)")
+                } catch let error as NSError {
+                    print("Failed to truncate entity \(entityName): \(error), \(error.userInfo)")
+                }
+            }
+            
+            do {
+                try context.save()
+                print("Database truncation complete. Saved context.")
+                UserDefaults.standard.set(true, forKey: cleanupKey)
+                print("Cleanup flag set. This process will not run again.")
+            } catch {
+                print("Failed to save context after truncation: \(error)")
+            }
+        }
+    }
+

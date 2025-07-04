@@ -30,8 +30,10 @@ protocol CoreDataServiceProtocol {
     // LLM Integration Methods
     func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity?
     func fetchLLMIntegrations() -> [LLMIntegrationEntity]
+    // --- MODIFIED: Method signatures now use the refactored model ---
     func addLLMIntegration(from model: LLMIntegrationModel)
     func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel)
+    // --- END MODIFICATION ---
     func deleteLLMIntegration(with id: UUID)
     
     func saveContext()
@@ -48,7 +50,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CoreDataPersistenceService")
 
     lazy var persistentContainer: NSPersistentContainer = {
-    
+        // --- MODIFIED: The container name should match your .xcdatamodeld file ---
         let container = NSPersistentContainer(name: "DevgenticDB")
         
         container.loadPersistentStores { (storeDescription, error) in
@@ -87,9 +89,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 
-    // MARK: - Public CRUD Operations
-
-    /// Fetches a single conversation by its UUID.
+    // MARK: - Public CRUD Operations (Conversations, Messages, Agents)
+    // ... (Existing methods for Conversations, Messages, and AgentProfiles remain unchanged) ...
     func getConversation(withId id: UUID) -> ConversationEntity? {
         let fetchRequest: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
         fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
@@ -103,7 +104,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 
-    /// Creates and adds a new conversation and its messages from your Codable `Conversation` struct.
     func addConversation(from conversation: Conversation) {
         let newConversation = ConversationEntity(context: viewContext)
         newConversation.id = conversation.id
@@ -126,7 +126,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         saveContext()
     }
 
-    /// Deletes a conversation by its UUID.
     func deleteConversation(with id: UUID) {
         if let conversationToDelete = getConversation(withId: id) {
             viewContext.delete(conversationToDelete)
@@ -137,16 +136,10 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 
-    // MARK: - Message Handling
-    
-    // --- MODIFIED: Method is now async ---
-    /// Adds a single message to a conversation entity and saves the context.
     func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async {
         await addMessages([message], to: conversation)
     }
 
-    // --- MODIFIED: Method is now async and uses await on context.perform ---
-    /// Adds an array of messages to a conversation entity and saves the context.
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async {
         let context = conversation.managedObjectContext ?? self.viewContext
         
@@ -160,10 +153,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 self.mapMessageContent(from: message.content, to: newMessageEntity)
                 conversation.addToMessages(newMessageEntity)
             }
-            // Update the conversation's timestamp to reflect recent activity
             conversation.timestamp = Date()
-            
-            // Save the context within the perform block to ensure it's done on the correct queue.
             self.saveContext()
         }
         logger.debug("Finished async addMessages for \(messages.count) messages.")
@@ -180,128 +170,192 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             }
         }
 
-        func fetchAgentProfiles() -> [AgentProfileEntity] {
-            let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
-            request.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
-            do {
-                return try viewContext.fetch(request)
-            } catch {
-                logger.error("Failed to fetch all AgentProfiles: \(error.localizedDescription)")
-                return []
-            }
+    func fetchAgentProfiles() -> [AgentProfileEntity] {
+        let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        do {
+            return try viewContext.fetch(request)
+        } catch {
+            logger.error("Failed to fetch all AgentProfiles: \(error.localizedDescription)")
+            return []
         }
-        
-        func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext) {
-            let newAgent = AgentProfileEntity(context: context)
-            updateAgentProfile(entity: newAgent, with: model) // Use the update logic to populate
-            logger.info("Adding new Agent Profile '\(model.name)' to context.")
-            saveContext()
-        }
+    }
+    
+    func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext) {
+        let newAgent = AgentProfileEntity(context: context)
+        updateAgentProfile(entity: newAgent, with: model)
+        logger.info("Adding new Agent Profile '\(model.name)' to context.")
+        saveContext()
+    }
 
     func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel) {
         let context = entity.managedObjectContext ?? viewContext
-            
-            entity.id = model.id
-            entity.name = model.name
-            entity.role = model.role
-            entity.baseURL = model.baseURL
-            entity.linkedIntegrationID = model.linkedIntegrationID
-            
-            let currentSelectedTools = entity.mutableSetValue(forKey: "tools")
-            currentSelectedTools.removeAllObjects()
+        entity.id = model.id
+        entity.name = model.name
+        entity.role = model.role
+        entity.baseURL = model.baseURL
+        entity.linkedIntegrationID = model.linkedIntegrationID
+        
+        let currentSelectedTools = entity.mutableSetValue(forKey: "tools")
+        currentSelectedTools.removeAllObjects()
 
-            for selectedToolModel in model.tools {
-                let newSelectedToolEntity = SelectedToolEntity(context: context)
-                newSelectedToolEntity.id = UUID() // A unique ID for the Core Data entity itself
-                newSelectedToolEntity.toolName = selectedToolModel.toolName
-                newSelectedToolEntity.displayName = selectedToolModel.displayName
-                currentSelectedTools.add(newSelectedToolEntity)
-            }
+        for selectedToolModel in model.tools {
+            let newSelectedToolEntity = SelectedToolEntity(context: context)
+            newSelectedToolEntity.id = UUID()
+            newSelectedToolEntity.toolName = selectedToolModel.toolName
+            newSelectedToolEntity.displayName = selectedToolModel.displayName
+            currentSelectedTools.add(newSelectedToolEntity)
+        }
 
-            logger.trace("Updating attributes for Agent Profile: \(model.name)")
+        logger.trace("Updating attributes for Agent Profile: \(model.name)")
+        saveContext()
+    }
+
+    func deleteAgentProfile(with id: UUID) {
+        if let agentToDelete = getAgentProfile(withId: id) {
+            viewContext.delete(agentToDelete)
+            logger.info("Deleting Agent Profile with ID \(id.uuidString) from context.")
             saveContext()
         }
-
-        func deleteAgentProfile(with id: UUID) {
-            if let agentToDelete = getAgentProfile(withId: id) {
-                viewContext.delete(agentToDelete)
-                logger.info("Deleting Agent Profile with ID \(id.uuidString) from context.")
-                saveContext()
-            }
-        }
+    }
     
-    // MARK: - LLM Integration Methods
+    // MARK: - LLM Integration Methods (Refactored)
     
-    /// Fetches a single LLMIntegration by its UUID.
-        func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity? {
-            let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
-            request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-            do {
-                return try viewContext.fetch(request).first
-            } catch {
-                logger.error("Failed to fetch LLMIntegrationEntity with ID \(id.uuidString): \(error.localizedDescription)")
-                return nil
+    func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity? {
+        let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        do {
+            return try viewContext.fetch(request).first
+        } catch {
+            logger.error("Failed to fetch LLMIntegrationEntity with ID \(id.uuidString): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func fetchLLMIntegrations() -> [LLMIntegrationEntity] {
+        let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "displayName", ascending: true)]
+        do {
+            return try viewContext.fetch(request)
+        } catch {
+            logger.error("Failed to fetch all LLMIntegrationEntity objects: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    // --- REFACTORED ---
+    /// Creates a new `LLMIntegrationEntity` and its corresponding config entity from a model struct.
+    func addLLMIntegration(from model: LLMIntegrationModel) {
+        let newIntegration = LLMIntegrationEntity(context: viewContext)
+        newIntegration.id = model.id
+        newIntegration.displayName = model.displayName
+        newIntegration.providerType = model.providerType.rawValue
+        newIntegration.lastSelected = model.lastSelected
+        
+        // Create and link the appropriate config entity
+        switch model.providerType {
+        case .ollama:
+            if let configModel = model.ollamaConfig {
+                let ollamaConfigEntity = OllamaConfigEntity(context: viewContext)
+                ollamaConfigEntity.baseURL = configModel.baseURL
+                ollamaConfigEntity.modelName = configModel.modelName
+                ollamaConfigEntity.temperature = configModel.temperature ?? 0.8
+                ollamaConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                newIntegration.ollamaConfig = ollamaConfigEntity
+            }
+        case .remote:
+            if let configModel = model.remoteConfig {
+                let remoteConfigEntity = RemoteConfigEntity(context: viewContext)
+                remoteConfigEntity.provider = configModel.provider.rawValue
+                remoteConfigEntity.apiKey = configModel.apiKey
+                remoteConfigEntity.modelName = configModel.modelName
+                remoteConfigEntity.temperature = configModel.temperature ?? 0.8
+                remoteConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                newIntegration.remoteConfig = remoteConfigEntity
             }
         }
+        
+        logger.info("Adding new LLM Integration '\(model.displayName)' with \(model.providerType.rawValue) config.")
+        saveContext()
+    }
 
-        /// Fetches all LLMIntegrations, sorted by display name.
-        func fetchLLMIntegrations() -> [LLMIntegrationEntity] {
-            let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
-            request.sortDescriptors = [NSSortDescriptor(key: "displayName", ascending: true)]
-            do {
-                return try viewContext.fetch(request)
-            } catch {
-                logger.error("Failed to fetch all LLMIntegrationEntity objects: \(error.localizedDescription)")
-                return []
+    // --- REFACTORED ---
+    /// Updates an existing `LLMIntegrationEntity` with data from a model struct, handling config changes.
+    func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel) {
+        entity.displayName = model.displayName
+        entity.lastSelected = model.lastSelected
+        
+        // If provider type changed, delete old config and create new one
+        if entity.providerType != model.providerType.rawValue {
+            // Delete existing configs
+            if let ollamaConfig = entity.ollamaConfig {
+                viewContext.delete(ollamaConfig)
+                entity.ollamaConfig = nil
             }
-        }
-
-        /// Creates a new `LLMIntegrationEntity` from a model struct.
-        func addLLMIntegration(from model: LLMIntegrationModel) {
-            let newIntegration = LLMIntegrationEntity(context: viewContext)
-            updateLLMIntegration(entity: newIntegration, with: model) // Use the update logic to populate
-            logger.info("Adding new LLM Integration '\(model.displayName)' to context.")
-            saveContext()
-        }
-
-        /// Updates an existing `LLMIntegrationEntity` with data from a model struct.
-        func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel) {
-            entity.id = model.id
-            entity.displayName = model.displayName
+            if let remoteConfig = entity.remoteConfig {
+                viewContext.delete(remoteConfig)
+                entity.remoteConfig = nil
+            }
+            
+            // Create and link the new config
             entity.providerType = model.providerType.rawValue
-            entity.lastSelected = model.lastSelected
-            entity.ollamaBaseURL = model.ollamaBaseURL
-            entity.ollamaModelName = model.ollamaModelName
-            entity.remoteProvider = model.remoteProvider?.rawValue
-            entity.apiKey = model.apiKey
-            entity.remoteModelName = model.remoteModelName
-            
-            if let temp = model.temperature {
-                entity.temperature = temp
+            switch model.providerType {
+            case .ollama:
+                if let configModel = model.ollamaConfig {
+                    let newConfig = OllamaConfigEntity(context: viewContext)
+                    newConfig.baseURL = configModel.baseURL
+                    newConfig.modelName = configModel.modelName
+                    newConfig.temperature = configModel.temperature ?? 0.8
+                    newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                    entity.ollamaConfig = newConfig
+                }
+            case .remote:
+                 if let configModel = model.remoteConfig {
+                    let newConfig = RemoteConfigEntity(context: viewContext)
+                    newConfig.provider = configModel.provider.rawValue
+                    newConfig.apiKey = configModel.apiKey
+                    newConfig.modelName = configModel.modelName
+                    newConfig.temperature = configModel.temperature ?? 0.8
+                    newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                    entity.remoteConfig = newConfig
+                }
             }
-            if let ctxSize = model.contextWindowSize {
-                entity.contextWindowSize = Int64(ctxSize)
+        } else {
+            // Provider type is the same, just update the existing config
+            switch model.providerType {
+            case .ollama:
+                if let configModel = model.ollamaConfig, let configEntity = entity.ollamaConfig {
+                    configEntity.baseURL = configModel.baseURL
+                    configEntity.modelName = configModel.modelName
+                    configEntity.temperature = configModel.temperature ?? 0.8
+                    configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                }
+            case .remote:
+                if let configModel = model.remoteConfig, let configEntity = entity.remoteConfig {
+                    configEntity.provider = configModel.provider.rawValue
+                    configEntity.apiKey = configModel.apiKey
+                    configEntity.modelName = configModel.modelName
+                    configEntity.temperature = configModel.temperature ?? 0.8
+                    configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                }
             }
+        }
 
-            logger.trace("Updating attributes for LLM Integration: \(model.displayName)")
+        logger.trace("Updating attributes for LLM Integration: \(model.displayName)")
+        saveContext()
+    }
+
+    func deleteLLMIntegration(with id: UUID) {
+        if let integrationToDelete = getLLMIntegration(withId: id) {
+            viewContext.delete(integrationToDelete)
+            logger.info("Deleting LLM Integration with ID \(id.uuidString) from context.")
             saveContext()
         }
-
-        /// Deletes an LLMIntegration by its UUID.
-        func deleteLLMIntegration(with id: UUID) {
-            if let integrationToDelete = getLLMIntegration(withId: id) {
-                viewContext.delete(integrationToDelete)
-                logger.info("Deleting LLM Integration with ID \(id.uuidString) from context.")
-                saveContext()
-            }
-        }
-
-
+    }
 
     // MARK: - Private Helper Methods
-    
-    /// Maps the `MessageContent` enum to the attributes of a `ChatMessageEntity` managed object.
     func mapMessageContent(from content: MessageContent, to managedObject: ChatMessageEntity) {
+        // ... (This method remains unchanged) ...
         managedObject.text_content = nil
         managedObject.code_language = nil
         managedObject.code_content = nil
@@ -313,21 +367,17 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         case .plainText(let text):
             managedObject.messageType = "plainText"
             managedObject.text_content = text
-            
         case .markdownText(let text):
             managedObject.messageType = "markdownText"
             managedObject.text_content = text
-
         case .codeBlock(let language, let code):
             managedObject.messageType = "codeBlock"
             managedObject.code_language = language
             managedObject.code_content = code
-
         case .error(let title, let details):
             managedObject.messageType = "error"
             managedObject.error_title = title
             managedObject.error_details = details
-
         case .image(let url, _):
             managedObject.messageType = "image"
             managedObject.image_url = url?.absoluteString
@@ -335,11 +385,9 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     }
 }
 
+// MARK: - NSManagedObject Subclass Extensions (Refactored)
 
-
-
-// MARK: - NSManagedObject Subclass Extensions
-
+// ... (Extensions for ConversationEntity, ChatMessageEntity, AgentProfileEntity, SelectedToolEntity remain unchanged) ...
 extension ConversationEntity {
     func toConversationStruct() -> Conversation {
         let messagesArray = (self.messages as? Set<ChatMessageEntity> ?? []).map { $0.toChatMessageStruct() }
@@ -402,7 +450,6 @@ extension AgentProfileEntity {
 
 extension SelectedToolEntity {
     func toSelectedToolModel() -> SelectedTool {
-        // Directly map the stored attributes to the new simplified model.
         return SelectedTool(
             toolName: self.toolName ?? "unknown_tool",
             displayName: self.displayName ?? "Unknown Tool"
@@ -410,19 +457,51 @@ extension SelectedToolEntity {
     }
 }
 
+// --- REFACTORED ---
 extension LLMIntegrationEntity {
-    /// Converts a Core Data entity back to a plain Swift struct.
+    /// Converts a Core Data entity and its related config entity back to a plain Swift struct.
     func toLLMIntegrationModel() -> LLMIntegrationModel {
-        LLMIntegrationModel(
+        let providerType = ProviderType(rawValue: self.providerType ?? "ollama") ?? .ollama
+        var ollamaConfig: OllamaConfigModel? = nil
+        var remoteConfig: RemoteConfigModel? = nil
+        
+        if providerType == .ollama, let configEntity = self.ollamaConfig {
+            ollamaConfig = configEntity.toOllamaConfigModel()
+        } else if providerType == .remote, let configEntity = self.remoteConfig {
+            remoteConfig = configEntity.toRemoteConfigModel()
+        }
+        
+        return LLMIntegrationModel(
             id: self.id ?? UUID(),
             displayName: self.displayName ?? "Unnamed Integration",
-            providerType: ProviderType(rawValue: self.providerType ?? "ollama") ?? .ollama,
+            providerType: providerType,
             lastSelected: self.lastSelected,
-            ollamaBaseURL: self.ollamaBaseURL,
-            ollamaModelName: self.ollamaModelName,
-            remoteProvider: RemoteProvider(rawValue: self.remoteProvider ?? ""),
-            apiKey: self.apiKey,
-            remoteModelName: self.remoteModelName,
+            ollamaConfig: ollamaConfig,
+            remoteConfig: remoteConfig
+        )
+    }
+}
+
+// --- NEW: Extensions for new config entities ---
+extension OllamaConfigEntity {
+    /// Converts the Core Data entity to its corresponding Swift model.
+    func toOllamaConfigModel() -> OllamaConfigModel {
+        return OllamaConfigModel(
+            baseURL: self.baseURL ?? "",
+            modelName: self.modelName ?? "",
+            temperature: self.temperature,
+            contextWindowSize: Int(self.contextWindowSize)
+        )
+    }
+}
+
+extension RemoteConfigEntity {
+    /// Converts the Core Data entity to its corresponding Swift model.
+    func toRemoteConfigModel() -> RemoteConfigModel {
+        return RemoteConfigModel(
+            provider: RemoteProvider(rawValue: self.provider ?? "openAI") ?? .openAI,
+            apiKey: self.apiKey ?? "",
+            modelName: self.modelName ?? "",
             temperature: self.temperature,
             contextWindowSize: Int(self.contextWindowSize)
         )

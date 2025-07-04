@@ -25,7 +25,7 @@ class MainApplicationViewModel: ObservableObject {
     
     private let fileProcessorService: FileProcessorService
     private let messageAssemblerService: MessageAssemblerService
-    private let llmCommunicator: LLMCommunicatorProtocol
+    private let llmCommunicator: DefaultLLMCommunicator
 
     // MARK: - Use the OllamaService singleton
     @ObservedObject var ollamaService = OllamaService.shared
@@ -102,8 +102,7 @@ class MainApplicationViewModel: ObservableObject {
          audioEngineService: AudioEngineService = AudioEngineService(),
          speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
          fileProcessorService: FileProcessorService = FileProcessorService(),
-         messageAssemblerService: MessageAssemblerService? = nil,
-         llmCommunicator: LLMCommunicatorProtocol? = nil
+         messageAssemblerService: MessageAssemblerService? = nil
     ) {
         self.llmIntegrationStore = llmIntegrationStore
         self.agentStore = agentStore
@@ -113,7 +112,7 @@ class MainApplicationViewModel: ObservableObject {
         self.fileProcessorService = fileProcessorService
         self.messageAssemblerService = messageAssemblerService ?? MessageAssemblerService(fileProcessorService: self.fileProcessorService)
         
-        self.llmCommunicator = llmCommunicator ?? DefaultLLMCommunicator(fileProcessorService: self.fileProcessorService)
+        self.llmCommunicator = DefaultLLMCommunicator(fileProcessorService: self.fileProcessorService)
 
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
         
@@ -141,8 +140,8 @@ class MainApplicationViewModel: ObservableObject {
                 logger.info("MainApplicationViewModel: Active Ollama integration changed to '\(newIntegration.displayName)'. UpdatinOllamaService.")
                 
                 let service = OllamaService.shared
-                service.ollamaBaseURL = newIntegration.ollamaBaseURL ?? ""
-                service.llmModelName = newIntegration.ollamaModelName ?? ""
+                service.ollamaBaseURL = newIntegration.ollamaConfig?.baseURL ?? ""
+                service.llmModelName = newIntegration.ollamaConfig?.modelName ?? ""
                 
                 Task {
                     await service.checkServerStatusAndUpdateModels()
@@ -156,7 +155,6 @@ class MainApplicationViewModel: ObservableObject {
     convenience init() {
         let fpService = FileProcessorService()
         let maService = MessageAssemblerService(fileProcessorService: fpService)
-        let comm = DefaultLLMCommunicator(fileProcessorService: fpService)
         let llmIntegrationStore = LLMIntegrationStore()
         let agentStore = AgentStore()
 
@@ -164,8 +162,7 @@ class MainApplicationViewModel: ObservableObject {
             llmIntegrationStore: llmIntegrationStore,
             agentStore: agentStore,
             fileProcessorService: fpService,
-            messageAssemblerService: maService,
-            llmCommunicator: comm
+            messageAssemblerService: maService
         )
     }
 
@@ -184,16 +181,39 @@ class MainApplicationViewModel: ObservableObject {
     
     private func setupBindings() {
         agentStore.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
             
         llmIntegrationStore.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        
+        // --- REFACTORED: Observe changes to the selected integration ---
+        llmIntegrationStore.$selectedIntegrationID
+            .compactMap { [weak self] id in
+                self?.llmIntegrationStore.integrations.first { $0.id == id }
+            }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newIntegration in
+                self?.handleActiveIntegrationChange(newIntegration)
             }
             .store(in: &cancellables)
+    }
+    
+    private func handleActiveIntegrationChange(_ newIntegration: LLMIntegrationModel) {
+        logger.info("Active LLM integration changed to '\(newIntegration.displayName)'.")
+        
+        // Only update OllamaService if the new integration is an Ollama provider
+        if newIntegration.providerType == .ollama, let config = newIntegration.ollamaConfig {
+            let service = OllamaService.shared
+            service.ollamaBaseURL = config.baseURL
+            service.llmModelName = config.modelName
+            
+            Task {
+                await service.checkServerStatusAndUpdateModels()
+            }
+        }
     }
     
     // MARK: - Actions / Methods (UI Toggles, Chat Management)
@@ -354,23 +374,22 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Agent Payload Construction and Sending
     private func sendToAgent(conversationID: UUID, userQuery: String, files: [FileSystemItem]) async throws -> ([ChatMessage], Error?) {
         guard let selectedAgent = agentStore.agents.first(where: { $0.id == selectedAgentID }) else {
-            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No agent is selected or the selected agent could not be found."])
+            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No agent is selected."])
         }
         
         guard let linkedIntegration = llmIntegrationStore.integrations.first(where: { $0.id == selectedAgent.linkedIntegrationID }) else {
-            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent is not linked to a valid LLM integration."])
+            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent's LLM integration is not found."])
         }
 
-        guard linkedIntegration.providerType == .ollama,
-                let baseUrl = linkedIntegration.ollamaBaseURL,
-                let modelName = linkedIntegration.ollamaModelName else {
-            throw NSError(domain: "AgentConfigError", code: 400, userInfo: [NSLocalizedDescriptionKey: "The agent's linked LLM integration must be a configured Ollama provider."])
+        // The agent backend currently only supports Ollama. This check remains.
+        guard linkedIntegration.providerType == .ollama, let ollamaConfig = linkedIntegration.ollamaConfig else {
+            throw NSError(domain: "AgentConfigError", code: 400, userInfo: [NSLocalizedDescriptionKey: "The agent's linked LLM must be a configured Ollama provider."])
         }
 
         let llmSettings = OllamaLLMSettings(
-            baseUrl: baseUrl,
-            modelName: modelName,
-            contextWindowSize: linkedIntegration.contextWindowSize ?? 4096
+            baseUrl: ollamaConfig.baseURL,
+            modelName: ollamaConfig.modelName,
+            contextWindowSize: ollamaConfig.contextWindowSize ?? 4096
         )
 
         let rootAgentConfig = AgentConfig(
@@ -381,16 +400,13 @@ class MainApplicationViewModel: ObservableObject {
             llmSettings: .ollama(llmSettings)
         )
 
-        let fileObjects = files.map { FileObject(uri: $0.url.absoluteString, name: $0.name) }
-
         let payload = AgentOrchestrationRequest(
             conversationId: conversationID.uuidString,
-            files: fileObjects,
+            files: files.map { FileObject(uri: $0.url.absoluteString, name: $0.name) },
             agentConfigs: [rootAgentConfig]
         )
         
-        let agentBaseURL = selectedAgent.baseURL
-        let backendConfig = BackendConfiguration(url: agentBaseURL, endpoint: "/agent/chat", payload: [:])
+        let backendConfig = BackendConfiguration(url: selectedAgent.baseURL, endpoint: "/agent/chat", payload: [:])
 
         let llmResponse = try await self.llmCommunicator.sendMessage(payload: payload, to: .agent, config: backendConfig)
         let messages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
@@ -402,13 +418,13 @@ class MainApplicationViewModel: ObservableObject {
         if let currentIntegration = llmIntegrationStore.currentIntegration,
             currentIntegration.providerType == .ollama,
             self.selectedBackend == .ollama,
-            let baseUrl = currentIntegration.ollamaBaseURL {
+           let baseUrl = currentIntegration.ollamaConfig?.baseURL {
             
             let advancedOptions: [String: Any] = [
-                "temperature": currentIntegration.temperature ?? 0.8,
-                "num_ctx": currentIntegration.contextWindowSize ?? 4096
+                "temperature": currentIntegration.ollamaConfig?.temperature ?? 0.8,
+                "num_ctx": currentIntegration.ollamaConfig?.contextWindowSize ?? 4096
             ]
-            let modelName = currentIntegration.ollamaModelName ?? "default_model_name"
+            let modelName = currentIntegration.ollamaConfig?.modelName ?? "default_model_name"
             let initialPayload: [String: Any] = ["model": modelName, "stream": false, "options": advancedOptions]
             return BackendConfiguration(url: baseUrl, endpoint: "/api/generate", payload: initialPayload)
         
