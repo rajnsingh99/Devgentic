@@ -1,11 +1,16 @@
-// Models/BackendType.swift
+//
+//  GlobalConstants.swift
+//  Devgentic
+//
+//  Created by Raj Singh 
+//
+
 import Foundation
 
-// Define the possible AI backend types
 enum BackendType: String, CaseIterable, Identifiable {
+    
     case ollama = "Ollama"
     case agent = "Agent"
-   
 
     var id: String { self.rawValue }
 }

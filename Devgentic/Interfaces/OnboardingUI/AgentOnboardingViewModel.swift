@@ -454,11 +454,11 @@ class AgentOnboardingViewModel: ObservableObject, SetupFailedViewModelProtocol {
         Self.logger.info("Finalizing successful setup. Agent URL: \(result.url.absoluteString), PID: \(result.pid)")
         appendLog("All setup stages complete. Saving settings...")
 
-        UserDefaults.standard.set(result.url.absoluteString, forKey: SettingsKeys.agentBaseURL)
-        UserDefaults.standard.set(result.pid, forKey: SettingsKeys.agentPID)
-        UserDefaults.standard.set(venvPython, forKey: SettingsKeys.venvPythonPath)
-        UserDefaults.standard.set(selectedOllamaModel, forKey: SettingsKeys.defaultAgentModel)
-        UserDefaults.standard.set(BackendType.agent.rawValue, forKey: SettingsKeys.selectedBackend)
+        UserDefaults.standard.set(result.url.absoluteString, forKey: GlobalConstants.agentBaseURL)
+        UserDefaults.standard.set(result.pid, forKey: GlobalConstants.agentPID)
+        UserDefaults.standard.set(venvPython, forKey: GlobalConstants.venvPythonPath)
+        UserDefaults.standard.set(selectedOllamaModel, forKey: GlobalConstants.defaultAgentModel)
+        UserDefaults.standard.set(BackendType.agent.rawValue, forKey: GlobalConstants.selectedBackend)
         
         appendLog("Settings saved. Transitioning to setup complete screen.")
         onAgentReady?(result.url, result.pid)

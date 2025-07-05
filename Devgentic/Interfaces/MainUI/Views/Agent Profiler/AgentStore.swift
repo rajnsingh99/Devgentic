@@ -12,6 +12,7 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentStore")
 
 class AgentStore: ObservableObject {
+    
     @Published var agents: [AgentProfileModel] = []
     
     @Published var selectedAgentID: UUID? {

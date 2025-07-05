@@ -8,7 +8,7 @@ struct DevgenticApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     // Use @AppStorage to track onboarding completion status, defaulting to false
-    @AppStorage(SettingsKeys.isOnboardingComplete) private var isOnboardingComplete: Bool = false
+    @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = false
     
     // Environment variable to open new windows
     @Environment(\.openWindow) var openWindow
@@ -106,12 +106,6 @@ struct DevgenticApp: App {
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
             if let url = fileURL { FileViewerWindowView(fileURL: url) }
         }
-        WindowGroup("Command Centre", id: "command-centre") {
-            CommandCentreView()
-                .environmentObject(mainApplicationViewModel)
-                .environmentObject(agentManager)
-                .environmentObject(llmIntegrationStore)
-        }.defaultSize(width: 850, height: 700)
         WindowGroup("LLM Provider", id: "llm-integrations") {
             LLMIntegrationsView()
                 .environmentObject(mainApplicationViewModel)

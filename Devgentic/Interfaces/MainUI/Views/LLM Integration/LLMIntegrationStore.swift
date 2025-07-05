@@ -16,6 +16,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 class LLMIntegrationStore: ObservableObject {
     
     @Published var integrations: [LLMIntegrationModel] = []
+    
     @Published var selectedIntegrationID: UUID? {
         didSet {
             UserDefaults.standard.set(selectedIntegrationID?.uuidString, forKey: "selectedLLMIntegrationID")

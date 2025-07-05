@@ -20,7 +20,6 @@ struct ChatInputAreaView: View {
 
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
-    @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
 
     // MARK: - State for Suggestions & Popups
     @State private var showPromptSuggestions: Bool = false
@@ -33,7 +32,6 @@ struct ChatInputAreaView: View {
     @State private var filteredFiles: [FileSystemItem] = []
     @State private var activeFileMentionTriggerRange: NSRange? = nil
     
-    // MARK: New: State to control the agent selection pop-up
     @State private var showingAgentSelectorPopup: Bool = false
 
     @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
@@ -49,9 +47,6 @@ struct ChatInputAreaView: View {
     private let textEditorMinHeight: CGFloat = 24
     private let textEditorMaxHeight: CGFloat = 200
     
-    // MODIFIED: isInputEnabled no longer checks for an active profile.
-    // The input area will remain enabled, with behavior handled by the placeholder text
-    // and the sendMessage action in the ViewModel.
     private var isInputEnabled: Bool {
         !isSending && !showSettings
     }
@@ -61,6 +56,59 @@ struct ChatInputAreaView: View {
             .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
             .foregroundColor: NSColor.labelColor
         ]
+    }
+    
+    // MARK: - Dynamic UI Properties
+    
+    private enum ProfileType {
+        case agent, local, remote, none
+    }
+
+    private var currentProfileType: ProfileType {
+        switch mainViewModel.selectedBackend {
+        case .agent:
+            return .agent
+        case .ollama:
+            guard let integration = mainViewModel.llmIntegrationStore.currentIntegration else { return .none }
+            switch integration.providerType {
+            case .ollama:
+                return .local
+            case .remote:
+                return .remote
+            }
+        }
+    }
+
+    private var profileButtonIconName: String {
+        switch currentProfileType {
+        case .agent: return "person.2.fill"
+        case .local: return "cpu"
+        case .remote: return "cloud.fill"
+        case .none: return "questionmark.circle"
+        }
+    }
+
+    private var profileButtonBorderColor: Color {
+        switch currentProfileType {
+        case .agent: return .red
+        case .local: return .green
+        case .remote: return .blue
+        case .none: return .gray.opacity(0.5)
+        }
+    }
+    
+    private var profileButtonText: String {
+        switch mainViewModel.selectedBackend {
+        case .agent:
+            if let agent = mainViewModel.agentStore.currentAgent {
+                return agent.name
+            }
+        case .ollama:
+            if let integration = mainViewModel.llmIntegrationStore.currentIntegration {
+                return integration.displayName
+            }
+        }
+        return "Select Profile"
     }
     
     private var hasInputText: Bool {
@@ -95,17 +143,7 @@ struct ChatInputAreaView: View {
             fileSuggestionsArea
             
             if !mainViewModel.attachedFiles.isEmpty {
-                // AttachedFilesDisplayView is not defined in this file. Assuming it exists elsewhere.
-                // To make the preview work, we might need a placeholder.
-                // For now, leaving it as is.
-                // AttachedFilesDisplayView(
-                //     attachedFiles: mainViewModel.attachedFiles,
-                //     onRemoveFile: { fileItemToRemove in
-                //         mainViewModel.removeAttachedFile(fileItem: fileItemToRemove)
-                //     }
-                // )
-                // .padding(.horizontal, 5).padding(.bottom, 8)
-                // .transition(.opacity.combined(with: .move(edge: .top)))
+                // AttachedFilesDisplayView is not defined in this file.
             }
 
             mainInputArea
@@ -128,15 +166,13 @@ struct ChatInputAreaView: View {
 
     @ViewBuilder private var promptSuggestionsArea: some View {
         if showPromptSuggestions {
-            // PromptSuggestionView is not defined in this file. Assuming it exists elsewhere.
-            // Text("Prompt Suggestions Area")
+            // PromptSuggestionView is not defined in this file.
         }
     }
 
     @ViewBuilder private var fileSuggestionsArea: some View {
         if showFileSuggestions {
-             // FileSuggestionView is not defined in this file. Assuming it exists elsewhere.
-            // Text("File Suggestions Area")
+             // FileSuggestionView is not defined in this file.
         }
     }
 
@@ -186,7 +222,7 @@ struct ChatInputAreaView: View {
     }
     
     private var placeholderText: String {
-        if llmIntegrationStore.integrations.isEmpty { return "Please configure an LLM Integration to start..." }
+        if mainViewModel.llmIntegrationStore.integrations.isEmpty { return "Please configure an LLM Integration to start..." }
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
         if userInput.isEmpty {
             switch mainViewModel.voiceInputState {
@@ -213,7 +249,7 @@ struct ChatInputAreaView: View {
                 .buttonStyle(.plain)
                 .help("Web Search (Not Implemented)")
 
-                agentPickerButton()
+                profilePickerButton()
 
                 Spacer()
                 
@@ -224,35 +260,41 @@ struct ChatInputAreaView: View {
             .disabled(!isInputEnabled)
         }
 
-    // MARK: - Agent Picker Button (Updated to trigger pop-up)
     @ViewBuilder
-    private func agentPickerButton() -> some View {
+    private func profilePickerButton() -> some View {
         Button(action: { self.showingAgentSelectorPopup = true }) {
-            HStack(spacing: 4) {
-                Image(systemName: "person.2.fill").font(.system(size: 12))
-                if let selectedAgent = mainViewModel.agentStore.agents.first(where: { $0.id == mainViewModel.selectedAgentID }) {
-                    Text(selectedAgent.name)
-                } else {
-                    Text("Select Agent")
-                }
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+            HStack(spacing: 5) {
+                Image(systemName: profileButtonIconName)
+                    .font(.system(size: 12))
+                    .foregroundColor(profileButtonBorderColor)
+                
+                Text(profileButtonText)
+                    .lineLimit(1)
+                
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
             }
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.gray.opacity(0.2)).cornerRadius(6)
+            .background(Color.gray.opacity(0.15))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(profileButtonBorderColor, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingAgentSelectorPopup, arrowEdge: .bottom) {
-            AgentSelectorPopup(
+            BackendSelectorPopup(
                 selectedAgentID: $mainViewModel.selectedAgentID,
-                agents: mainViewModel.agentStore.agents,
-                llmIntegrationStore: self.llmIntegrationStore, // Pass the new store
-                isPresented: $showingAgentSelectorPopup
+                selectedIntegrationID: $mainViewModel.llmIntegrationStore.selectedIntegrationID,
+                isPresented: $showingAgentSelectorPopup,
+                agentStore: mainViewModel.agentStore,
+                llmIntegrationStore: mainViewModel.llmIntegrationStore
             )
         }
-        .help("Select an agent profile")
+        .help("Select an agent or model profile")
     }
 
-    // MARK: - Dynamic Action Button (Send/Mic/Stop)
     @ViewBuilder
     private var dynamicActionButton: some View {
         let mode = currentDynamicButtonMode
@@ -286,7 +328,7 @@ struct ChatInputAreaView: View {
                     Circle()
                         .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem))
                     
-                    Image(systemName: buttonIconName(for: mode))
+                    Image(systemName: dynamicActionButtonIconName(for: mode))
                         .resizable().scaledToFit()
                         .fontWeight(buttonIconWeight(for: mode))
                         .frame(width: dynamicButtonSize * buttonIconScale(for: mode), height: dynamicButtonSize * buttonIconScale(for: mode))
@@ -300,8 +342,7 @@ struct ChatInputAreaView: View {
         .help(buttonHelpText(for: mode))
     }
 
-    // MARK: - Helper Methods (Button states, actions, etc.)
-    private func buttonIconName(for mode: DynamicButtonMode) -> String {
+    private func dynamicActionButtonIconName(for mode: DynamicButtonMode) -> String {
         switch mode {
         case .send: return "arrow.up"
         case .stop: return "stop.circle.fill"
@@ -404,7 +445,6 @@ struct ChatInputAreaView: View {
                 let itemName = url.lastPathComponent
                 let isDirectoryBool = fileIsDirectoryObjC.boolValue
                 // Assuming FileSystemItem is defined elsewhere
-                // newItems.append(FileSystemItem(id: url, name: itemName, url: url, isDirectory: isDirectoryBool))
             }
         }
         if !newItems.isEmpty {
@@ -416,11 +456,8 @@ struct ChatInputAreaView: View {
         let allPrompts = promptStore.getAllPrompts()
         if query.isEmpty {
             // Assuming Prompt is defined elsewhere
-            // filteredPrompts = Array(allPrompts.sorted { $0.title.lowercased() < $1.title.lowercased() }.prefix(10))
         } else {
             let lowercasedQuery = query.lowercased()
-            // filteredPrompts = allPrompts.filter { $0.title.lowercased().contains(lowercasedQuery) }
-            //                           .sorted { $0.title.lowercased() < $1.title.lowercased() }.prefix(10).map{$0}
         }
     }
     
@@ -428,18 +465,9 @@ struct ChatInputAreaView: View {
         guard let rangeToReplace = activePromptTriggerRange else {
             logger.error("Cannot insert prompt text: activePromptTriggerRange is nil. Appending text as fallback.")
             let separator = userInput.isEmpty || userInput.last?.isWhitespace ?? true ? "" : " "
-            // userInput += "\(separator)\(selectedPrompt.text) "
             clearPromptSuggestionStates()
             return
         }
-
-        // let promptFullText = selectedPrompt.text
-        // let attributedString = NSAttributedString(string: "\(promptFullText) ", attributes: defaultTypingAttributes)
-        
-        // attributedTextInsertionRequest = .init(
-        //     range: rangeToReplace,
-        //     attributedString: attributedString
-        // )
         clearPromptSuggestionStates()
         DispatchQueue.main.async { self.isInputFocused.wrappedValue = true }
     }
@@ -452,11 +480,9 @@ struct ChatInputAreaView: View {
 
     private func performFileFiltering(query: String) {
         // let files = explorerViewModel.suggestableFiles(query: query)
-        // self.filteredFiles = Array(files.prefix(10))
     }
 
     private func handleFileSelection(_ selectedFile: FileSystemItem) {
-        // mainViewModel.addAttachedFile(fileItem: selectedFile)
         if let rangeToReplace = activeFileMentionTriggerRange {
             // attributedTextInsertionRequest = .init(range: rangeToReplace, attributedString: NSAttributedString(string: ""))
         }
@@ -468,66 +494,5 @@ struct ChatInputAreaView: View {
         showFileSuggestions = false
         activeFileMentionTriggerRange = nil
         fileSuggestionQuery = ""
-    }
-}
-
-// MARK: - Agent Selector Popup View (Enhanced)
-private struct AgentSelectorPopup: View {
-    @Binding var selectedAgentID: UUID?
-    let agents: [AgentProfileModel]
-    let llmIntegrationStore: LLMIntegrationStore
-    @Binding var isPresented: Bool
-
-    var body: some View {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(agents) { agent in
-                        Button(action: {
-                            self.selectedAgentID = agent.id
-                            self.isPresented = false // Dismiss the popover
-                        }) {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(agent.name)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.primary)
-                                    // Display LLM Model Name instead of description
-                                    Text(llmName(for: agent))
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                if agent.id == selectedAgentID {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.accentColor)
-                                }
-                            }
-                            .padding(.vertical, 8)
-                            .padding(.horizontal)
-                            .background(agent.id == selectedAgentID ? Color.accentColor.opacity(0.1) : Color.clear)
-                            .cornerRadius(6)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 4)
-                    }
-                }
-        }
-        // Removed outer vertical padding to eliminate extra space
-        .frame(minWidth: 250, idealWidth: 300, maxHeight: 400)
-    }
-    
-    // Helper function to find the LLM name from the linked profile
-    private func llmName(for agent: AgentProfileModel) -> String {
-        guard let integrationID = agent.linkedIntegrationID,
-                let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID }) else {
-            return "No LLM Linked"
-        }
-        
-        switch integration.providerType {
-        case .ollama:
-            return integration.ollamaConfig?.modelName ?? "Default Ollama Model"
-        case .remote:
-            return integration.remoteConfig?.modelName ?? "Default Remote Model"
-        }
     }
 }

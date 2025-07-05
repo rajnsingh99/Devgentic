@@ -30,7 +30,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         agentManager = AgentManager()
         Self.logger.info("AgentManager initialized in AppDelegate.")
         
-        if UserDefaults.standard.bool(forKey: SettingsKeys.isOnboardingComplete) {
+        if UserDefaults.standard.bool(forKey: GlobalConstants.isOnboardingComplete) {
             Self.logger.info("Onboarding is complete. Attempting to start agent if not already running via AgentManager.")
             agentManager?.startAgentIfNeeded()
         } else {
@@ -47,7 +47,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         NotificationCenter.default.removeObserver(
             self,
-            name: SettingsKeys.showQuickAccessPanelNotification,
+            name: GlobalConstants.showQuickAccessPanelNotification,
             object: nil
         )
         hotKey = nil
@@ -72,7 +72,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleShowQuickAccessPanelNotification(_:)),
-            name: SettingsKeys.showQuickAccessPanelNotification,
+            name: GlobalConstants.showQuickAccessPanelNotification,
             object: nil
         )
         Self.logger.info("Added observer for showQuickAccessPanelNotification.")
@@ -122,7 +122,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let defaults = UserDefaults.standard
-        let lastCloseTime = defaults.double(forKey: SettingsKeys.quickAccessLastCloseTime)
+        let lastCloseTime = defaults.double(forKey: GlobalConstants.quickAccessLastCloseTime)
         let currentTime = Date().timeIntervalSince1970
         let elapsedTime = currentTime - lastCloseTime
         var shouldResumeSession = false
@@ -132,8 +132,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
              if lastCloseTime > 0 && elapsedTime > sessionTimeoutDuration {
                  Self.logger.info("AppDelegate: Session timed out during transfer. Starting new conversation session.")
                  // Your logic for starting a new session would go here.
-                 defaults.removeObject(forKey: SettingsKeys.quickAccessLastCloseTime)
-                 defaults.removeObject(forKey: SettingsKeys.quickAccessWasExpandedOnClose)
+                 defaults.removeObject(forKey: GlobalConstants.quickAccessLastCloseTime)
+                 defaults.removeObject(forKey: GlobalConstants.quickAccessWasExpandedOnClose)
                  shouldResumeSession = false
              } else {
                  shouldResumeSession = true
@@ -144,8 +144,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else if lastCloseTime > 0 {
             Self.logger.info("AppDelegate: Quick Access session timed out. Starting new.")
             // Your logic for starting a new session would go here.
-            defaults.removeObject(forKey: SettingsKeys.quickAccessLastCloseTime)
-            defaults.removeObject(forKey: SettingsKeys.quickAccessWasExpandedOnClose)
+            defaults.removeObject(forKey: GlobalConstants.quickAccessLastCloseTime)
+            defaults.removeObject(forKey: GlobalConstants.quickAccessWasExpandedOnClose)
             shouldResumeSession = false
         } else {
             Self.logger.info("AppDelegate: No last close time found. Starting fresh.")

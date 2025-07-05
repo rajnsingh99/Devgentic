@@ -2,27 +2,24 @@
 //  MainApplicationViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/04/25.
+//  Created by Raj Singh
 //
 
 import SwiftUI
 import Combine
 import os
-import AppKit // For NSApplication, NSAttributedString
-import Speech // Import Speech framework for SFSpeechRecognizerAuthorizationStatus
-import AVFoundation // Required for AVCaptureDevice
+import AppKit
+import Speech
+import AVFoundation
 
-// Logger for the ViewModel
+
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MainApplicationViewModel")
-private let attachedFilesLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainAppViewModel_AttachedFiles")
 
-@MainActor // Ensure UI updates happen on the main thread
+@MainActor
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
-    // --- MODIFIED: Use the concrete class type to resolve build error ---
     private let persistenceService = CoreDataPersistenceService.shared
-    
     private let fileProcessorService: FileProcessorService
     private let messageAssemblerService: MessageAssemblerService
     private let llmCommunicator: DefaultLLMCommunicator
@@ -55,16 +52,13 @@ class MainApplicationViewModel: ObservableObject {
     @Published var isSidebarCollapsed: Bool = true
     @Published var showSettings: Bool = false
     @Published var showPromptLibrary: Bool = false
-    @Published var selectedSettingsSection: SettingsSection = .general {
-        didSet {
-            OllamaService.shared.clearAllModelActionStatuses()
-        }
-    }
     @Published var showContextArea: Bool = false
     @Published var activeContextFilePath: String? = nil
     @Published var isUserMessagesOnlyFilterActive: Bool = false
     @Published var attachedFiles: [FileSystemItem] = []
     @Published var voiceInputState: VoiceInputState = .idle
+    
+    @AppStorage(GlobalConstants.selectedBackend) var selectedBackend: BackendType = .agent
     
     var selectedAgentID: UUID? {
         get {
@@ -75,10 +69,6 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
 
-    @AppStorage(SettingsKeys.selectedBackend) var selectedBackend: BackendType = .agent
-    @AppStorage(SettingsKeys.windowOpacity) var windowOpacity: Double = 1.0
-    @AppStorage(SettingsKeys.agentBaseURL) var agentBaseURL: String = "http://127.0.0.1:8000"
-    @AppStorage(SettingsKeys.agentDelegationStrategy) var agentDelegationStrategy: String = "send_to_first_available"
     
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -112,7 +102,7 @@ class MainApplicationViewModel: ObservableObject {
         self.fileProcessorService = fileProcessorService
         self.messageAssemblerService = messageAssemblerService ?? MessageAssemblerService(fileProcessorService: self.fileProcessorService)
         
-        self.llmCommunicator = DefaultLLMCommunicator(fileProcessorService: self.fileProcessorService)
+        self.llmCommunicator = DefaultLLMCommunicator()
 
         logger.info("MainApplicationViewModel initialized. Loaded \(self.conversations.count) conversations.")
         
@@ -406,31 +396,10 @@ class MainApplicationViewModel: ObservableObject {
             agentConfigs: [rootAgentConfig]
         )
         
-        let backendConfig = BackendConfiguration(url: selectedAgent.baseURL, endpoint: "/agent/chat", payload: [:])
-
-        let llmResponse = try await self.llmCommunicator.sendMessage(payload: payload, to: .agent, config: backendConfig)
+        let llmResponse = try await self.llmCommunicator.sendMessage(payload: payload, to: .agent)
         let messages = llmResponse.content.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
         
         return (messages, llmResponse.error)
-    }
-
-    private func determineBackendConfiguration() -> BackendConfiguration {
-        if let currentIntegration = llmIntegrationStore.currentIntegration,
-            currentIntegration.providerType == .ollama,
-            self.selectedBackend == .ollama,
-           let baseUrl = currentIntegration.ollamaConfig?.baseURL {
-            
-            let advancedOptions: [String: Any] = [
-                "temperature": currentIntegration.ollamaConfig?.temperature ?? 0.8,
-                "num_ctx": currentIntegration.ollamaConfig?.contextWindowSize ?? 4096
-            ]
-            let modelName = currentIntegration.ollamaConfig?.modelName ?? "default_model_name"
-            let initialPayload: [String: Any] = ["model": modelName, "stream": false, "options": advancedOptions]
-            return BackendConfiguration(url: baseUrl, endpoint: "/api/generate", payload: initialPayload)
-        
-        } else {
-            return BackendConfiguration(url: self.agentBaseURL, endpoint: "/agent/chat", payload: [:])
-        }
     }
     
     // MARK: - Voice Input Methods
@@ -569,8 +538,8 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Conversation Management
     func transferSelectedConversationToOverlay() {
         guard let conversationID = selectedConversationID else { return }
-        UserDefaults.standard.set(conversationID.uuidString, forKey: SettingsKeys.quickAccessOverlayConversationId)
-        NotificationCenter.default.post(name: SettingsKeys.showQuickAccessPanelNotification, object: nil, userInfo: ["forceExpand": true])
+        UserDefaults.standard.set(conversationID.uuidString, forKey: GlobalConstants.quickAccessOverlayConversationId)
+        NotificationCenter.default.post(name: GlobalConstants.showQuickAccessPanelNotification, object: nil, userInfo: ["forceExpand": true])
         self.selectedConversationID = nil
     }
     

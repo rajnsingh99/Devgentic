@@ -12,13 +12,10 @@ import os
 // MARK: - Core Data Service Protocol
 protocol CoreDataServiceProtocol {
     // Conversation Methods
-    func getConversation(withId id: UUID) -> ConversationEntity?
-    func deleteConversation(with id: UUID)
-
-    // --- MODIFIED: Message methods are now async ---
     func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async
-    // --- END MODIFICATION ---
+    func getConversation(withId id: UUID) -> ConversationEntity?
+    func deleteConversation(with id: UUID)
 
     // Agent Profile Methods
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
@@ -30,10 +27,8 @@ protocol CoreDataServiceProtocol {
     // LLM Integration Methods
     func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity?
     func fetchLLMIntegrations() -> [LLMIntegrationEntity]
-    // --- MODIFIED: Method signatures now use the refactored model ---
     func addLLMIntegration(from model: LLMIntegrationModel)
     func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel)
-    // --- END MODIFICATION ---
     func deleteLLMIntegration(with id: UUID)
     
     func saveContext()

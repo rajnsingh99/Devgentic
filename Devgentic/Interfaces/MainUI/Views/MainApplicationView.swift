@@ -1,8 +1,8 @@
-// MainApplicationView.swift
 //
+//  MainApplicationView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 15/04/25.
+//  Created by Raj Singh
 //
 
 import SwiftUI
@@ -145,7 +145,6 @@ struct MainApplicationView: View {
                 .keyboardShortcut("n", modifiers: .command)
         }
         .environmentObject(explorerViewModel)
-        .opacity(viewModel.windowOpacity)
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {

@@ -3,11 +3,11 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 19/05/25.
-//  Updated for modular Python agent.
 //
 
+
 import Foundation
-import AppKit // For NSApplicationDelegate notifications like willTerminate
+import AppKit
 import Combine
 import os
 
@@ -24,16 +24,16 @@ class AgentManager: ObservableObject {
         case stopping = "Stopping..."
         case stopped = "Not Running"
         case failed = "Failed/Crashed"
-        case unknown = "Unknown" // e.g., PID exists but health check fails
+        case unknown = "Unknown"
     }
 
     private var agentProcess: Process?
     private var agentPID: Int32? {
         didSet {
-            UserDefaults.standard.set(agentPID, forKey: SettingsKeys.agentPID) // Save PID
+            UserDefaults.standard.set(agentPID, forKey: GlobalConstants.agentPID) // Save PID
         }
     }
-    private var agentURL: URL? // This is the base URL like http://127.0.0.1:8000
+    private var agentURL: URL? 
     private var venvPythonPath: String?
 
     private var healthCheckTimer: Timer?
@@ -50,8 +50,8 @@ class AgentManager: ObservableObject {
     }
 
     private func loadAgentDetails() {
-        self.agentPID = UserDefaults.standard.object(forKey: SettingsKeys.agentPID) as? Int32
-        if let urlString = UserDefaults.standard.string(forKey: SettingsKeys.agentBaseURL) {
+        self.agentPID = UserDefaults.standard.object(forKey: GlobalConstants.agentPID) as? Int32
+        if let urlString = UserDefaults.standard.string(forKey: GlobalConstants.agentBaseURL) {
             self.agentURL = URL(string: urlString)
         }
         
@@ -61,7 +61,7 @@ class AgentManager: ObservableObject {
             let venvDir = appSupportDir.appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.devgentic", isDirectory: true).appendingPathComponent("devgentic", isDirectory: true) // Assuming venv is named "devgentic"
             self.venvPythonPath = venvDir.appendingPathComponent("bin/python").path
             // Also save this to UserDefaults if it's reliably determined here or during onboarding
-            // UserDefaults.standard.set(self.venvPythonPath, forKey: SettingsKeys.venvPythonPath)
+            // UserDefaults.standard.set(self.venvPythonPath, forKey: GlobalConstants.venvPythonPath)
         }
 
 
@@ -80,7 +80,7 @@ class AgentManager: ObservableObject {
     }
 
     func startAgentIfNeeded() {
-        guard UserDefaults.standard.bool(forKey: SettingsKeys.isOnboardingComplete) else {
+        guard UserDefaults.standard.bool(forKey: GlobalConstants.isOnboardingComplete) else {
             Self.logger.info("Onboarding not complete, not starting agent.")
             agentStatus = .stopped
             return
@@ -323,9 +323,9 @@ class AgentManager: ObservableObject {
     private func appendLog(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         let logEntry = "[\(timestamp)] \(message)"
-        if agentLog.count > 200 { agentLog.removeFirst(100) } // Keep log size manageable
+        if agentLog.count > 200 { agentLog.removeFirst(100) }
         agentLog.append(logEntry)
-        Self.logger.info("\(message)") // Also log to system console
+        Self.logger.info("\(message)")
     }
 
     func onboardingDidComplete(agentURL: URL, agentPID: Int32, venvPythonPath: String) {
@@ -334,8 +334,8 @@ class AgentManager: ObservableObject {
         self.agentPID = agentPID
         self.venvPythonPath = venvPythonPath
         
-        UserDefaults.standard.set(agentURL.absoluteString, forKey: SettingsKeys.agentBaseURL)
-        UserDefaults.standard.set(venvPythonPath, forKey: SettingsKeys.venvPythonPath) // Save venv path
+        UserDefaults.standard.set(agentURL.absoluteString, forKey: GlobalConstants.agentBaseURL)
+        UserDefaults.standard.set(venvPythonPath, forKey: GlobalConstants.venvPythonPath)
         
         performHealthCheck(showInitialStatus: true)
         startHealthCheckTimer()

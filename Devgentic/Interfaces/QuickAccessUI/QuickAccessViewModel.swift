@@ -91,7 +91,7 @@ class QuickAccessViewModel: ObservableObject {
 
         Task {
             var resultingAgentMessages: [ChatMessage] = []
-            let modelName = UserDefaults.standard.string(forKey: SettingsKeys.llmModelName) ?? "gemma:2b"
+            let modelName = UserDefaults.standard.string(forKey: GlobalConstants.llmModelName) ?? "gemma:2b"
             let baseURLString = self.aiConnect.baseURL
 
             do {
@@ -135,7 +135,7 @@ class QuickAccessViewModel: ObservableObject {
             let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat")
             persistenceService.addConversation(from: newConversation)
             // Store the new ID as the dedicated QA chat ID.
-            UserDefaults.standard.set(newConversation.id.uuidString, forKey: SettingsKeys.quickAccessOverlayConversationId)
+            UserDefaults.standard.set(newConversation.id.uuidString, forKey: GlobalConstants.quickAccessOverlayConversationId)
             self.targetConversationId = newConversation.id
             self.messages = []
         } else {
@@ -153,7 +153,7 @@ class QuickAccessViewModel: ObservableObject {
     /// Gets the dedicated Quick Access conversation entity from Core Data, creating it if it doesn't exist.
     private func getOrCreateQuickAccessConversation() -> ConversationEntity {
         let defaults = UserDefaults.standard
-        let quickAccessKey = SettingsKeys.quickAccessOverlayConversationId
+        let quickAccessKey = GlobalConstants.quickAccessOverlayConversationId
 
         // Try to find an existing conversation by its stored ID.
         if let qaIdString = defaults.string(forKey: quickAccessKey),

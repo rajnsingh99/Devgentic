@@ -1,4 +1,10 @@
-// Models/SenderRole.swift
+//
+//  SenderRole.swift
+//  Devgentic
+//
+//  Created by Raj Singh
+//
+
 import Foundation
 
 // Make Codable using String raw values
