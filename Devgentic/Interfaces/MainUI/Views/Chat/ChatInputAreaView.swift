@@ -32,7 +32,7 @@ struct ChatInputAreaView: View {
     @State private var filteredFiles: [FileSystemItem] = []
     @State private var activeFileMentionTriggerRange: NSRange? = nil
     
-    @State private var showingAgentSelectorPopup: Bool = false
+    @State private var showingBackendSelectorPopup: Bool = false
 
     @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
     
@@ -69,13 +69,11 @@ struct ChatInputAreaView: View {
         case .agent:
             return .agent
         case .ollama:
-            guard let integration = mainViewModel.llmIntegrationStore.currentIntegration else { return .none }
-            switch integration.providerType {
-            case .ollama:
-                return .local
-            case .remote:
-                return .remote
-            }
+            return .local
+        case .remote:
+            return .remote
+        case .none:
+            return .none
         }
     }
 
@@ -103,12 +101,14 @@ struct ChatInputAreaView: View {
             if let agent = mainViewModel.agentStore.currentAgent {
                 return agent.name
             }
-        case .ollama:
+        case .ollama, .remote:
             if let integration = mainViewModel.llmIntegrationStore.currentIntegration {
                 return integration.displayName
             }
+        case .none:
+            break
         }
-        return "Select Profile"
+        return "Select Backend"
     }
     
     private var hasInputText: Bool {
@@ -139,11 +139,12 @@ struct ChatInputAreaView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            promptSuggestionsArea
-            fileSuggestionsArea
+            // Suggestion views are assumed to be implemented elsewhere
+            // if showPromptSuggestions { ... }
+            // if showFileSuggestions { ... }
             
             if !mainViewModel.attachedFiles.isEmpty {
-                // AttachedFilesDisplayView is not defined in this file.
+                // AttachedFilesDisplayView is assumed to be implemented elsewhere
             }
 
             mainInputArea
@@ -152,28 +153,6 @@ struct ChatInputAreaView: View {
         .animation(.easeInOut(duration: 0.15), value: currentDynamicButtonMode)
         .animation(.easeInOut(duration: 0.15), value: mainViewModel.voiceInputState)
         .fixedSize(horizontal: false, vertical: true)
-        .onChange(of: suggestionQuery) { newValue in performPromptFiltering(query: newValue) }
-        .onChange(of: showPromptSuggestions) { showState in
-            if showState { performPromptFiltering(query: suggestionQuery) }
-            else if !filteredPrompts.isEmpty { filteredPrompts = [] }
-        }
-        .onChange(of: fileSuggestionQuery) { newValue in performFileFiltering(query: newValue) }
-        .onChange(of: showFileSuggestions) { showState in
-            if showState { performFileFiltering(query: fileSuggestionQuery) }
-            else if !filteredFiles.isEmpty { filteredFiles = [] }
-        }
-    }
-
-    @ViewBuilder private var promptSuggestionsArea: some View {
-        if showPromptSuggestions {
-            // PromptSuggestionView is not defined in this file.
-        }
-    }
-
-    @ViewBuilder private var fileSuggestionsArea: some View {
-        if showFileSuggestions {
-             // FileSuggestionView is not defined in this file.
-        }
     }
 
     private var mainInputArea: some View {
@@ -188,14 +167,15 @@ struct ChatInputAreaView: View {
     }
 
     private var editorAndPlaceholderArea: some View {
-            ZStack(alignment: .topLeading) {
-                CustomTextEditor(
+        ZStack(alignment: .topLeading) {
+            CustomTextEditor(
                 text: $userInput,
                 onCommit: { attributedString in
                     if isInputEnabled { self.onSendMessage(attributedString) }
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
+                // Pass-through bindings for suggestion features
                 showPromptSuggestions: $showPromptSuggestions,
                 suggestionQuery: $suggestionQuery,
                 activePromptTriggerRange: $activePromptTriggerRange,
@@ -222,7 +202,7 @@ struct ChatInputAreaView: View {
     }
     
     private var placeholderText: String {
-        if mainViewModel.llmIntegrationStore.integrations.isEmpty { return "Please configure an LLM Integration to start..." }
+        if mainViewModel.selectedBackend == .none { return "Please select a backend to begin..." }
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
         if userInput.isEmpty {
             switch mainViewModel.voiceInputState {
@@ -236,33 +216,33 @@ struct ChatInputAreaView: View {
     }
 
     private var toolbarArea: some View {
-            HStack(spacing: 12) {
-                Button(action: openFilePicker) {
-                    Image(systemName: "plus").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Attach files")
-
-                Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
-                    Image(systemName: "globe").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Web Search (Not Implemented)")
-
-                profilePickerButton()
-
-                Spacer()
-                
-                dynamicActionButton
+        HStack(spacing: 12) {
+            Button(action: openFilePicker) {
+                Image(systemName: "plus").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
             }
-            .padding(.horizontal, 15)
-            .padding(.bottom, 10)
-            .disabled(!isInputEnabled)
+            .buttonStyle(.plain)
+            .help("Attach files")
+
+            Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
+                Image(systemName: "globe").resizable().scaledToFit().frame(width: iconSize, height: iconSize).foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Web Search (Not Implemented)")
+
+            backendPickerButton()
+
+            Spacer()
+            
+            dynamicActionButton
         }
+        .padding(.horizontal, 15)
+        .padding(.bottom, 10)
+        .disabled(!isInputEnabled)
+    }
 
     @ViewBuilder
-    private func profilePickerButton() -> some View {
-        Button(action: { self.showingAgentSelectorPopup = true }) {
+    private func backendPickerButton() -> some View {
+        Button(action: { self.showingBackendSelectorPopup = true }) {
             HStack(spacing: 5) {
                 Image(systemName: profileButtonIconName)
                     .font(.system(size: 12))
@@ -283,16 +263,17 @@ struct ChatInputAreaView: View {
             )
         }
         .buttonStyle(.plain)
-        .popover(isPresented: $showingAgentSelectorPopup, arrowEdge: .bottom) {
+        .popover(isPresented: $showingBackendSelectorPopup, arrowEdge: .bottom) {
             BackendSelectorPopup(
+                selectedBackend: $mainViewModel.selectedBackend,
                 selectedAgentID: $mainViewModel.selectedAgentID,
                 selectedIntegrationID: $mainViewModel.llmIntegrationStore.selectedIntegrationID,
-                isPresented: $showingAgentSelectorPopup,
+                isPresented: $showingBackendSelectorPopup,
                 agentStore: mainViewModel.agentStore,
                 llmIntegrationStore: mainViewModel.llmIntegrationStore
             )
         }
-        .help("Select an agent or model profile")
+        .help("Select a backend (Agent or direct Model)")
     }
 
     @ViewBuilder
@@ -342,6 +323,7 @@ struct ChatInputAreaView: View {
         .help(buttonHelpText(for: mode))
     }
 
+    // MARK: - Helper Methods for Dynamic Button
     private func dynamicActionButtonIconName(for mode: DynamicButtonMode) -> String {
         switch mode {
         case .send: return "arrow.up"
@@ -395,6 +377,7 @@ struct ChatInputAreaView: View {
     }
 
     private func isDynamicButtonDisabled(for mode: DynamicButtonMode) -> Bool {
+        if mainViewModel.selectedBackend == .none { return true }
         switch mode {
         case .send:
             let isEmptyTextAndNoFiles = userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mainViewModel.attachedFiles.isEmpty
@@ -424,6 +407,7 @@ struct ChatInputAreaView: View {
         }
     }
     
+    // MARK: - File & Prompt Handling (Stubs)
     private func openFilePicker() {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = true
@@ -432,67 +416,8 @@ struct ChatInputAreaView: View {
         openPanel.prompt = "Attach Files or Folders"
         openPanel.begin { response in
             if response == .OK {
-                processSelectedURLs(openPanel.urls)
+                // File processing logic would go here.
             }
         }
-    }
-
-    private func processSelectedURLs(_ urls: [URL]) {
-        var newItems: [FileSystemItem] = []
-        for url in urls {
-            var fileIsDirectoryObjC: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &fileIsDirectoryObjC) {
-                let itemName = url.lastPathComponent
-                let isDirectoryBool = fileIsDirectoryObjC.boolValue
-                // Assuming FileSystemItem is defined elsewhere
-            }
-        }
-        if !newItems.isEmpty {
-            mainViewModel.addAttachedFiles(fileItems: newItems)
-        }
-    }
-    
-    private func performPromptFiltering(query: String) {
-        let allPrompts = promptStore.getAllPrompts()
-        if query.isEmpty {
-            // Assuming Prompt is defined elsewhere
-        } else {
-            let lowercasedQuery = query.lowercased()
-        }
-    }
-    
-    private func handlePromptSelection(_ selectedPrompt: Prompt) {
-        guard let rangeToReplace = activePromptTriggerRange else {
-            logger.error("Cannot insert prompt text: activePromptTriggerRange is nil. Appending text as fallback.")
-            let separator = userInput.isEmpty || userInput.last?.isWhitespace ?? true ? "" : " "
-            clearPromptSuggestionStates()
-            return
-        }
-        clearPromptSuggestionStates()
-        DispatchQueue.main.async { self.isInputFocused.wrappedValue = true }
-    }
-    
-    private func clearPromptSuggestionStates() {
-        showPromptSuggestions = false
-        activePromptTriggerRange = nil
-        suggestionQuery = ""
-    }
-
-    private func performFileFiltering(query: String) {
-        // let files = explorerViewModel.suggestableFiles(query: query)
-    }
-
-    private func handleFileSelection(_ selectedFile: FileSystemItem) {
-        if let rangeToReplace = activeFileMentionTriggerRange {
-            // attributedTextInsertionRequest = .init(range: rangeToReplace, attributedString: NSAttributedString(string: ""))
-        }
-        clearFileSuggestionStates()
-        DispatchQueue.main.async { self.isInputFocused.wrappedValue = true }
-    }
-
-    private func clearFileSuggestionStates() {
-        showFileSuggestions = false
-        activeFileMentionTriggerRange = nil
-        fileSuggestionQuery = ""
     }
 }
