@@ -22,6 +22,7 @@ class BackendOrchestrationService: ObservableObject {
     private let remoteOrchestrationService: RemoteOrchestrationService
     private let agentStore: AgentStore
     private let llmIntegrationStore: LLMIntegrationStore
+    private let persistenceService: CoreDataServiceProtocol
     
     private var cancellables = Set<AnyCancellable>()
 
@@ -37,6 +38,7 @@ class BackendOrchestrationService: ObservableObject {
         self.agentService = AgentService()
         self.ollamaService = OllamaService.shared
         self.remoteOrchestrationService = RemoteOrchestrationService()
+        self.persistenceService = CoreDataPersistenceService.shared
         
         setupBindings()
         logger.info("BackendOrchestrationService initialized and bindings are set up.")
@@ -93,6 +95,11 @@ class BackendOrchestrationService: ObservableObject {
         
         logger.debug("Sending message with detected backend: \(self.activeBackend.rawValue)")
         
+        // Fetch conversation history from the persistence service.
+        let conversationEntity = persistenceService.getConversation(withId: conversationID)
+        let conversation = conversationEntity?.toConversationStruct()
+        let conversationHistory = conversation?.messages ?? []
+        
         do {
             switch activeBackend {
             case .agent:
@@ -113,7 +120,22 @@ class BackendOrchestrationService: ObservableObject {
                  guard let integrationID = llmIntegrationStore.selectedIntegrationID else {
                     return ([], "No remote integration selected.")
                 }
-                let (messages, error) = try await sendToRemote(conversationID: conversationID, userQuery: userQuery, files: files, integrationID: integrationID)
+                
+                let (messages, newThreadID, error) = try await sendToRemote(
+                    conversationID: conversationID,
+                    userQuery: userQuery,
+                    history: conversationHistory,
+                    openAIThreadID: conversation?.openAIThreadID,
+                    files: files,
+                    integrationID: integrationID
+                )
+                
+                // If a new thread was created by the OpenAI service, save its ID to our database.
+                if let newThreadID = newThreadID {
+                    persistenceService.updateOpenAIThreadID(for: conversationID, with: newThreadID)
+                    logger.info("Saved new OpenAI thread ID \(newThreadID) to conversation \(conversationID.uuidString).")
+                }
+                
                 return (messages, error?.localizedDescription)
 
             case .none:
@@ -182,11 +204,25 @@ class BackendOrchestrationService: ObservableObject {
         return ([chatMessage], nil)
     }
 
-    private func sendToRemote(conversationID: UUID, userQuery: String, files: [FileSystemItem], integrationID: UUID) async throws -> ([ChatMessage], Error?) {
-         guard let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID && $0.providerType == .remote }) else {
-             throw NSError(domain: "RemoteConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected remote integration not found."])
+    private func sendToRemote(
+            conversationID: UUID,
+            userQuery: String,
+            history: [ChatMessage],
+            openAIThreadID: String?,
+            files: [FileSystemItem],
+            integrationID: UUID
+        ) async throws -> (messages: [ChatMessage], newThreadID: String?, error: Error?) {
+             guard let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID && $0.providerType == .remote }) else {
+                 throw NSError(domain: "RemoteConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected remote integration not found."])
+            }
+            
+            return try await remoteOrchestrationService.sendMessage(
+                conversationID: conversationID,
+                userQuery: userQuery,
+                history: history,
+                openAIThreadID: openAIThreadID,
+                files: files,
+                integration: integration
+            )
         }
-        
-        return try await remoteOrchestrationService.sendMessage(conversationID: conversationID, userQuery: userQuery, files: files, integration: integration)
-    }
 }

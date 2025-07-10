@@ -14,6 +14,9 @@ struct Conversation: Identifiable, Codable, Equatable {
 
     /// Optional user-defined title for the conversation. (Part B)
     var userDefinedTitle: String?
+    
+    /// The thread ID from the OpenAI Assistants API, used for stateful conversations.
+    var openAIThreadID: String?
 
     /// Computed property to display a title for the conversation list.
     /// Uses userDefinedTitle if available, otherwise falls back to first message content. (Updated for Part B)
@@ -60,10 +63,11 @@ struct Conversation: Identifiable, Codable, Equatable {
     }
 
     // Initializer
-    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil) {
+    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, openAIThreadID: String? = nil) {
         self.id = id
         self.messages = messages
         self.timestamp = timestamp
         self.userDefinedTitle = userDefinedTitle
+        self.openAIThreadID = openAIThreadID
     }
 }

@@ -28,12 +28,14 @@ class GeminiConnect {
     /// - Parameters:
     ///   - conversationID: The ID of the current conversation.
     ///   - userQuery: The user's text input.
+    ///   - history: An array of previous ChatMessage objects representing the conversation history.
     ///   - files: A list of attached files (currently ignored).
     ///   - modelName: The specific model to use for the request (e.g., "gemini-1.5-pro-latest").
     /// - Returns: A tuple containing an array of `ChatMessage` and an optional `Error`.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
+        history: [ChatMessage],
         files: [FileSystemItem],
         modelName: String
     ) async throws -> ([ChatMessage], Error?) {
@@ -46,9 +48,18 @@ class GeminiConnect {
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
+        // Construct the contents list from history
+        var apiContents = history.compactMap { message -> Content? in
+            let role = message.sender == .user ? "user" : "model"
+            guard let contentText = message.content.textContent else { return nil }
+            return Content(role: role, parts: [Part(text: contentText)])
+        }
+
+        // Add the current user query
+        apiContents.append(Content(role: "user", parts: [Part(text: userQuery)]))
+        
         // Construct the request body
-        // TODO: Implement multi-part messages for file/image support.
-        let requestBody = GeminiRequest(contents: [Content(parts: [Part(text: userQuery)])])
+        let requestBody = GeminiRequest(contents: apiContents)
         
         do {
             request.httpBody = try JSONEncoder().encode(requestBody)
@@ -57,15 +68,21 @@ class GeminiConnect {
             throw error
         }
 
-        logger.debug("Sending request to Gemini API with model: \(modelName)")
+        logger.debug("Sending request to Gemini API with model: \(modelName) and \(apiContents.count) content parts.")
         
         let (data, response) = try await urlSession.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let errorResponse = String(data: data, encoding: .utf8) ?? "Unable to decode error response."
-            logger.error("Gemini API returned a non-200 status code: \(statusCode). Response: \(errorResponse)")
-            let errorContent = MessageContent.error(title: "Gemini API Error", details: "API Error (Code: \(statusCode)): \(errorResponse)")
+            var errorDetails = String(data: data, encoding: .utf8) ?? "Unable to decode error response."
+            
+            // Try to parse a more specific error message from Gemini's response
+            if let errorResponse = try? JSONDecoder().decode(GeminiErrorResponse.self, from: data) {
+                errorDetails = errorResponse.error.message
+            }
+            
+            logger.error("Gemini API returned a non-200 status code: \(statusCode). Response: \(errorDetails)")
+            let errorContent = MessageContent.error(title: "Gemini API Error", details: "API Error (Code: \(statusCode)): \(errorDetails)")
             return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
         }
 
@@ -103,6 +120,7 @@ private struct GeminiRequest: Codable {
 }
 
 private struct Content: Codable {
+    let role: String
     let parts: [Part]
 }
 
@@ -112,9 +130,20 @@ private struct Part: Codable {
 
 private struct GeminiResponse: Codable {
     let candidates: [Candidate]
+    
+    struct Candidate: Codable {
+        let content: Content
+        let finishReason: String?
+    }
 }
 
-private struct Candidate: Codable {
-    let content: Content
-    let finishReason: String?
+// For parsing more detailed errors
+private struct GeminiErrorResponse: Codable {
+    let error: GeminiError
+    
+    struct GeminiError: Codable {
+        let code: Int
+        let message: String
+        let status: String
+    }
 }

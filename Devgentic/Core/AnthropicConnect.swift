@@ -26,6 +26,7 @@ class AnthropicConnect {
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
+        history: [ChatMessage],
         files: [FileSystemItem],
         modelName: String
     ) async throws -> ([ChatMessage], Error?) {
@@ -40,12 +41,21 @@ class AnthropicConnect {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
 
+        // Construct the message list from history
+        var apiMessages = history.compactMap { message -> AnthropicRequest.Message? in
+            let role = message.sender == .user ? "user" : "assistant"
+            guard let contentText = message.content.textContent else { return nil }
+            return AnthropicRequest.Message(role: role, content: contentText)
+        }
+        
+        // Add the current user query as the last message
+        apiMessages.append(AnthropicRequest.Message(role: "user", content: userQuery))
+
         // Construct the request body
-        // TODO: Add support for files/images and conversation history
         let requestBody = AnthropicRequest(
             model: modelName,
             max_tokens: 4096, // A reasonable default, can be made configurable
-            messages: [AnthropicRequest.Message(role: "user", content: userQuery)]
+            messages: apiMessages
         )
 
         do {
@@ -55,7 +65,7 @@ class AnthropicConnect {
             throw error
         }
 
-        logger.debug("Sending request to Anthropic API with model: \(modelName)")
+        logger.debug("Sending request to Anthropic API with model: \(modelName) and \(apiMessages.count) messages.")
         
         let (data, response) = try await urlSession.data(for: request)
 

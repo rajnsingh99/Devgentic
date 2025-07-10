@@ -18,70 +18,69 @@ class RemoteOrchestrationService {
     }
 
     /// Sends a message to the configured remote LLM provider by routing to the appropriate connector service.
-    /// - Parameters:
-    ///   - conversationID: The ID of the current conversation.
-    ///   - userQuery: The user's text input.
-    ///   - files: A list of attached files.
-    ///   - integration: The `LLMIntegrationModel` containing the configuration for the remote provider.
-    /// - Returns: A tuple containing an array of `ChatMessage` and an optional `Error`.
+    /// - Returns: A tuple containing an array of `ChatMessage`, an optional new OpenAI thread ID, and an optional `Error`.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
+        history: [ChatMessage],
+        openAIThreadID: String?,
         files: [FileSystemItem],
         integration: LLMIntegrationModel
-    ) async throws -> ([ChatMessage], Error?) {
+    ) async throws -> (messages: [ChatMessage], newThreadID: String?, error: Error?) {
         
-        // Ensure we have a valid remote configuration
         guard let remoteConfig = integration.remoteConfig else {
             let errorMessage = "The selected integration '\(integration.displayName)' is missing a remote configuration."
             let errorContent = MessageContent.error(title: "Configuration Error", details: errorMessage)
-            return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
+            return (messages: [ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], newThreadID: nil, error: nil)
         }
 
         let provider = remoteConfig.provider
         logger.info("RemoteOrchestrationService routing message to provider: \(provider.rawValue)")
 
-        // Shared validation for API key and model name
         guard !remoteConfig.apiKey.isEmpty else {
             let errorMessage = "The \(provider.rawValue) integration is missing an API key."
             let errorContent = MessageContent.error(title: "Configuration Error", details: errorMessage)
-            return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
+            return (messages: [ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], newThreadID: nil, error: nil)
         }
         
         guard !remoteConfig.modelName.isEmpty else {
             let errorMessage = "The \(provider.rawValue) integration is missing a model name."
             let errorContent = MessageContent.error(title: "Configuration Error", details: errorMessage)
-            return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
+            return (messages: [ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], newThreadID: nil, error: nil)
         }
 
-        // Switch on the provider to delegate to the correct service
         switch provider {
         case .google:
             let geminiService = GeminiConnect(apiKey: remoteConfig.apiKey)
-            return try await geminiService.sendMessage(
+            let (messages, error) = try await geminiService.sendMessage(
                 conversationID: conversationID,
                 userQuery: userQuery,
+                history: history,
                 files: files,
                 modelName: remoteConfig.modelName
             )
+            return (messages: messages, newThreadID: nil, error: error)
 
         case .openAI:
             let openAIService = OpenAIConnect(apiKey: remoteConfig.apiKey)
-            return try await openAIService.sendMessage(
+            let (messages, newThreadID) = try await openAIService.sendMessage(
                 conversationID: conversationID,
                 userQuery: userQuery,
-                files: files,
+                openAIThreadID: openAIThreadID,
                 modelName: remoteConfig.modelName
             )
+            return (messages: messages, newThreadID: newThreadID, error: nil)
 
         case .anthropic:
             let anthropicService = AnthropicConnect(apiKey: remoteConfig.apiKey)
-            return try await anthropicService.sendMessage(
+            let (messages, error) = try await anthropicService.sendMessage(
                 conversationID: conversationID,
                 userQuery: userQuery,
+                history: history,
                 files: files,
                 modelName: remoteConfig.modelName
             )
+            return (messages: messages, newThreadID: nil, error: error)
         }
     }
 }

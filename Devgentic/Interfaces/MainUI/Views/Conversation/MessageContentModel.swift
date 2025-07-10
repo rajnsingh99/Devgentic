@@ -92,3 +92,21 @@ extension MessageContent: Codable {
         }
     }
 }
+
+extension MessageContent {
+    /// A computed property to easily extract the primary text from any content type.
+    var textContent: String? {
+        switch self {
+        case .plainText(let text):
+            return text
+        case .markdownText(let text):
+            return text
+        case .codeBlock(_, let code):
+            return code
+        case .error(let title, let details):
+            return "\(title): \(details)"
+        case .image:
+            return nil // Images do not have direct text content
+        }
+    }
+}

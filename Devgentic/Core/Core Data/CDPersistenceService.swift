@@ -15,6 +15,7 @@ protocol CoreDataServiceProtocol {
     func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async
     func getConversation(withId id: UUID) -> ConversationEntity?
+    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
     func deleteConversation(with id: UUID)
 
     // Agent Profile Methods
@@ -45,7 +46,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CoreDataPersistenceService")
 
     lazy var persistentContainer: NSPersistentContainer = {
-        // --- MODIFIED: The container name should match your .xcdatamodeld file ---
         let container = NSPersistentContainer(name: "DevgenticDB")
         
         container.loadPersistentStores { (storeDescription, error) in
@@ -84,8 +84,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 
-    // MARK: - Public CRUD Operations (Conversations, Messages, Agents)
-    // ... (Existing methods for Conversations, Messages, and AgentProfiles remain unchanged) ...
+    // MARK: - Conversation Methods
+    
     func getConversation(withId id: UUID) -> ConversationEntity? {
         let fetchRequest: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
         fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
@@ -99,11 +99,26 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 
+    func updateOpenAIThreadID(for conversationId: UUID, with threadId: String) {
+        guard let conversation = getConversation(withId: conversationId) else {
+            logger.warning("Attempted to update thread ID for a conversation that does not exist: \(conversationId.uuidString)")
+            return
+        }
+        
+        // IMPORTANT: Assumes 'openAIThreadID' is an attribute on your ConversationEntity
+        conversation.setValue(threadId, forKey: "openAIThreadID")
+        
+        logger.info("Updating conversation \(conversationId.uuidString) with new OpenAI thread ID.")
+        saveContext()
+    }
+
     func addConversation(from conversation: Conversation) {
         let newConversation = ConversationEntity(context: viewContext)
         newConversation.id = conversation.id
         newConversation.timestamp = conversation.timestamp
         newConversation.userDefinedTitle = conversation.userDefinedTitle
+        // IMPORTANT: Assumes 'openAIThreadID' is an attribute on your ConversationEntity
+        newConversation.setValue(conversation.openAIThreadID, forKey: "openAIThreadID")
 
         for message in conversation.messages {
             let newMessage = ChatMessageEntity(context: viewContext)
@@ -154,16 +169,18 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         logger.debug("Finished async addMessages for \(messages.count) messages.")
     }
     
+    // MARK: - Agent Profile Methods
+    
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity? {
-            let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
-            request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-            do {
-                return try viewContext.fetch(request).first
-            } catch {
-                logger.error("Failed to fetch AgentProfile with ID \(id.uuidString): \(error.localizedDescription)")
-                return nil
-            }
+        let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        do {
+            return try viewContext.fetch(request).first
+        } catch {
+            logger.error("Failed to fetch AgentProfile with ID \(id.uuidString): \(error.localizedDescription)")
+            return nil
         }
+    }
 
     func fetchAgentProfiles() -> [AgentProfileEntity] {
         let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
@@ -214,7 +231,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
     
-    // MARK: - LLM Integration Methods (Refactored)
+    // MARK: - LLM Integration Methods
     
     func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity? {
         let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
@@ -238,8 +255,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
 
-    // --- REFACTORED ---
-    /// Creates a new `LLMIntegrationEntity` and its corresponding config entity from a model struct.
     func addLLMIntegration(from model: LLMIntegrationModel) {
         let newIntegration = LLMIntegrationEntity(context: viewContext)
         newIntegration.id = model.id
@@ -247,7 +262,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         newIntegration.providerType = model.providerType.rawValue
         newIntegration.lastSelected = model.lastSelected
         
-        // Create and link the appropriate config entity
         switch model.providerType {
         case .ollama:
             if let configModel = model.ollamaConfig {
@@ -274,25 +288,14 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         saveContext()
     }
 
-    // --- REFACTORED ---
-    /// Updates an existing `LLMIntegrationEntity` with data from a model struct, handling config changes.
     func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel) {
         entity.displayName = model.displayName
         entity.lastSelected = model.lastSelected
         
-        // If provider type changed, delete old config and create new one
         if entity.providerType != model.providerType.rawValue {
-            // Delete existing configs
-            if let ollamaConfig = entity.ollamaConfig {
-                viewContext.delete(ollamaConfig)
-                entity.ollamaConfig = nil
-            }
-            if let remoteConfig = entity.remoteConfig {
-                viewContext.delete(remoteConfig)
-                entity.remoteConfig = nil
-            }
+            if let ollamaConfig = entity.ollamaConfig { viewContext.delete(ollamaConfig); entity.ollamaConfig = nil }
+            if let remoteConfig = entity.remoteConfig { viewContext.delete(remoteConfig); entity.remoteConfig = nil }
             
-            // Create and link the new config
             entity.providerType = model.providerType.rawValue
             switch model.providerType {
             case .ollama:
@@ -316,7 +319,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 }
             }
         } else {
-            // Provider type is the same, just update the existing config
             switch model.providerType {
             case .ollama:
                 if let configModel = model.ollamaConfig, let configEntity = entity.ollamaConfig {
@@ -350,7 +352,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
     // MARK: - Private Helper Methods
     func mapMessageContent(from content: MessageContent, to managedObject: ChatMessageEntity) {
-        // ... (This method remains unchanged) ...
         managedObject.text_content = nil
         managedObject.code_language = nil
         managedObject.code_content = nil
@@ -380,18 +381,21 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     }
 }
 
-// MARK: - NSManagedObject Subclass Extensions (Refactored)
+// MARK: - NSManagedObject Subclass Extensions
 
-// ... (Extensions for ConversationEntity, ChatMessageEntity, AgentProfileEntity, SelectedToolEntity remain unchanged) ...
 extension ConversationEntity {
     func toConversationStruct() -> Conversation {
         let messagesArray = (self.messages as? Set<ChatMessageEntity> ?? []).map { $0.toChatMessageStruct() }
+        
+        // IMPORTANT: Assumes 'openAIThreadID' is an attribute on your ConversationEntity
+        let threadID = self.value(forKey: "openAIThreadID") as? String
         
         return Conversation(
             id: self.id ?? UUID(),
             messages: messagesArray.sorted(by: { $0.timestamp < $1.timestamp }),
             timestamp: self.timestamp ?? Date(),
-            userDefinedTitle: self.userDefinedTitle
+            userDefinedTitle: self.userDefinedTitle,
+            openAIThreadID: threadID
         )
     }
 }
@@ -452,9 +456,7 @@ extension SelectedToolEntity {
     }
 }
 
-// --- REFACTORED ---
 extension LLMIntegrationEntity {
-    /// Converts a Core Data entity and its related config entity back to a plain Swift struct.
     func toLLMIntegrationModel() -> LLMIntegrationModel {
         let providerType = ProviderType(rawValue: self.providerType ?? "ollama") ?? .ollama
         var ollamaConfig: OllamaConfigModel? = nil
@@ -477,9 +479,7 @@ extension LLMIntegrationEntity {
     }
 }
 
-// --- NEW: Extensions for new config entities ---
 extension OllamaConfigEntity {
-    /// Converts the Core Data entity to its corresponding Swift model.
     func toOllamaConfigModel() -> OllamaConfigModel {
         return OllamaConfigModel(
             baseURL: self.baseURL ?? "",
@@ -491,7 +491,6 @@ extension OllamaConfigEntity {
 }
 
 extension RemoteConfigEntity {
-    /// Converts the Core Data entity to its corresponding Swift model.
     func toRemoteConfigModel() -> RemoteConfigModel {
         return RemoteConfigModel(
             provider: RemoteProvider(rawValue: self.provider ?? "openAI") ?? .openAI,
