@@ -27,7 +27,6 @@ class AnthropicConnect {
         conversationID: UUID,
         userQuery: String,
         history: [ChatMessage],
-        files: [FileSystemItem],
         modelName: String
     ) async throws -> ([ChatMessage], Error?) {
 

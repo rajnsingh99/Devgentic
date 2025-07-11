@@ -23,6 +23,7 @@ class BackendOrchestrationService: ObservableObject {
     private let agentStore: AgentStore
     private let llmIntegrationStore: LLMIntegrationStore
     private let persistenceService: CoreDataServiceProtocol
+    private let fileProcessorService: FileProcessorService
     
     private var cancellables = Set<AnyCancellable>()
 
@@ -31,9 +32,14 @@ class BackendOrchestrationService: ObservableObject {
     @Published private(set) var activeBackend: BackendType = .none
 
     // MARK: - Initialization
-    init(agentStore: AgentStore, llmIntegrationStore: LLMIntegrationStore) {
+    init(
+        agentStore: AgentStore,
+        llmIntegrationStore: LLMIntegrationStore,
+        fileProcessorService: FileProcessorService
+    ) {
         self.agentStore = agentStore
         self.llmIntegrationStore = llmIntegrationStore
+        self.fileProcessorService = fileProcessorService
         
         self.agentService = AgentService()
         self.ollamaService = OllamaService.shared
@@ -61,7 +67,6 @@ class BackendOrchestrationService: ObservableObject {
                 } else if let intID = integrationID {
                     // If an integration is selected, find it to determine the backend type.
                     if let integration = integrations.first(where: { $0.id == intID }) {
-                        // FIXED: Explicitly define the type of newBackend to help the compiler infer the enum cases.
                         let newBackend: BackendType = (integration.providerType == .ollama) ? .ollama : .remote
                         if self.activeBackend != newBackend {
                             self.activeBackend = newBackend
@@ -98,7 +103,24 @@ class BackendOrchestrationService: ObservableObject {
         // Fetch conversation history from the persistence service.
         let conversationEntity = persistenceService.getConversation(withId: conversationID)
         let conversation = conversationEntity?.toConversationStruct()
-        let conversationHistory = conversation?.messages ?? []
+        
+        // ** MODIFIED: Filter out error messages from the history. **
+        let conversationHistory = (conversation?.messages ?? []).filter { message in
+            if case .error = message.content {
+                return false 
+            }
+            return true
+        }
+        
+        var finalUserQuery = userQuery
+        
+        if activeBackend == .remote, !files.isEmpty {
+            let fileContext = assembleTextFileContent(for: files)
+            if !fileContext.isEmpty {
+                finalUserQuery = fileContext + "\n\n" + userQuery
+                logger.info("Assembled text file content and prepended to the user query for remote backend.")
+            }
+        }
         
         do {
             switch activeBackend {
@@ -123,14 +145,12 @@ class BackendOrchestrationService: ObservableObject {
                 
                 let (messages, newThreadID, error) = try await sendToRemote(
                     conversationID: conversationID,
-                    userQuery: userQuery,
+                    userQuery: finalUserQuery,
                     history: conversationHistory,
                     openAIThreadID: conversation?.openAIThreadID,
-                    files: files,
                     integrationID: integrationID
                 )
                 
-                // If a new thread was created by the OpenAI service, save its ID to our database.
                 if let newThreadID = newThreadID {
                     persistenceService.updateOpenAIThreadID(for: conversationID, with: newThreadID)
                     logger.info("Saved new OpenAI thread ID \(newThreadID) to conversation \(conversationID.uuidString).")
@@ -145,6 +165,29 @@ class BackendOrchestrationService: ObservableObject {
             let userFriendlyError = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.activeBackend)
             return ([], userFriendlyError)
         }
+    }
+    
+    // MARK: - File Content Assembly
+    
+    private func assembleTextFileContent(for files: [FileSystemItem]) -> String {
+        var assembledContent = ""
+        
+        for file in files {
+            let mimeType = fileProcessorService.getFileMimeType(for: file.url)
+            
+            if fileProcessorService.isTextFile(mimeType: mimeType, url: file.url) {
+                if let content = fileProcessorService.readFileContent(for: file.url) {
+                    logger.debug("Reading content for file: \(file.name)")
+                    assembledContent += "\n\n--- Start of file: \(file.name) ---\n"
+                    assembledContent += content
+                    assembledContent += "\n--- End of file: \(file.name) ---"
+                } else {
+                    logger.warning("Could not read content for text file: \(file.name)")
+                }
+            }
+        }
+        
+        return assembledContent
     }
 
     // MARK: - Backend-Specific Logic
@@ -209,7 +252,6 @@ class BackendOrchestrationService: ObservableObject {
             userQuery: String,
             history: [ChatMessage],
             openAIThreadID: String?,
-            files: [FileSystemItem],
             integrationID: UUID
         ) async throws -> (messages: [ChatMessage], newThreadID: String?, error: Error?) {
              guard let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID && $0.providerType == .remote }) else {
@@ -221,7 +263,6 @@ class BackendOrchestrationService: ObservableObject {
                 userQuery: userQuery,
                 history: history,
                 openAIThreadID: openAIThreadID,
-                files: files,
                 integration: integration
             )
         }

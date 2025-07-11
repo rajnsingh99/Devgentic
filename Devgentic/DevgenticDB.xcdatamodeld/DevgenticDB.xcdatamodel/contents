@@ -9,6 +9,22 @@
         <attribute name="role" optional="YES" attributeType="String"/>
         <relationship name="tools" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="SelectedToolEntity" inverseName="agentProfile" inverseEntity="SelectedToolEntity"/>
     </entity>
+    <entity name="AttachedImageFileEntity" representedClassName="AttachedImageFileEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="content" optional="YES" attributeType="Binary"/>
+        <attribute name="fileExtension" optional="YES" attributeType="String"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" optional="YES" attributeType="String"/>
+        <attribute name="size" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="url" optional="YES" attributeType="String"/>
+    </entity>
+    <entity name="AttachedTextFileEntity" representedClassName="AttachedTextFileEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="content" optional="YES" attributeType="String"/>
+        <attribute name="fileExtension" optional="YES" attributeType="String"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="name" optional="YES" attributeType="String"/>
+        <attribute name="size" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="url" optional="YES" attributeType="String"/>
+    </entity>
     <entity name="ChatMessageEntity" representedClassName="ChatMessageEntity" syncable="YES" codeGenerationType="class">
         <attribute name="code_content" optional="YES" attributeType="String"/>
         <attribute name="code_language" optional="YES" attributeType="String"/>
@@ -21,6 +37,8 @@
         <attribute name="senderType" optional="YES" attributeType="String"/>
         <attribute name="text_content" optional="YES" attributeType="String"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <relationship name="attachedImageFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedImageFileEntity"/>
+        <relationship name="attachedTextFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedTextFileEntity"/>
         <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ConversationEntity" inverseName="messages" inverseEntity="ConversationEntity"/>
     </entity>
     <entity name="ConversationEntity" representedClassName="ConversationEntity" syncable="YES" codeGenerationType="class">

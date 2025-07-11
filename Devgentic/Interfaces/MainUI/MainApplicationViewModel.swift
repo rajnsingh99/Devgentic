@@ -93,7 +93,8 @@ class MainApplicationViewModel: ObservableObject {
         
         self.backendOrchestrationService = BackendOrchestrationService(
             agentStore: agentStore,
-            llmIntegrationStore: llmIntegrationStore
+            llmIntegrationStore: llmIntegrationStore,
+            fileProcessorService: fileProcessorService
         )
 
         logger.info("MainApplicationViewModel initialized.")
@@ -202,14 +203,46 @@ class MainApplicationViewModel: ObservableObject {
                 return
             }
 
-            // 2. Save the user's message immediately for responsive UI.
-            if !plainUserQueryFromEditor.isEmpty {
-                let userMessage = ChatMessage(conversationId: conversationIDToUse, sender: .user, content: .plainText(plainUserQueryFromEditor))
-                await persistenceService.addMessage(userMessage, to: targetConversationEntity)
-                refreshChatMessages()
+            // 2. Process attachments and create the user's message.
+            var attachedTextFiles: [AttachedTextFile] = []
+            var attachedImageFiles: [AttachedImageFile] = []
+
+            for fileItem in filesToProcess {
+                let mimeType = fileProcessorService.getFileMimeType(for: fileItem.url)
+                let fileExtension = fileItem.url.pathExtension
+                let attributes = try? FileManager.default.attributesOfItem(atPath: fileItem.url.path)
+                let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+
+                if fileProcessorService.isTextFile(mimeType: mimeType, url: fileItem.url) {
+                    if let content = fileProcessorService.readFileContent(for: fileItem.url) {
+                        let textFile = AttachedTextFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, content: content, size: fileSize)
+                        attachedTextFiles.append(textFile)
+                    }
+                } else if fileProcessorService.isImageFile(mimeType: mimeType, url: fileItem.url) {
+                    do {
+                        let _ = fileItem.url.startAccessingSecurityScopedResource()
+                        let data = try Data(contentsOf: fileItem.url)
+                        fileItem.url.stopAccessingSecurityScopedResource()
+                        let imageFile = AttachedImageFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, binaryData: data, size: fileSize)
+                        attachedImageFiles.append(imageFile)
+                    } catch {
+                        logger.error("Could not read image data for file: \(fileItem.name)")
+                    }
+                }
             }
+
+            let userMessage = ChatMessage(
+                conversationId: conversationIDToUse,
+                sender: .user,
+                content: .plainText(plainUserQueryFromEditor),
+                attachedTextFiles: attachedTextFiles.isEmpty ? nil : attachedTextFiles,
+                attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles
+            )
             
-            // 3. Call backed to get llm response
+            await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+            refreshChatMessages()
+            
+            // 3. Call backend to get llm response
             let (responseMessages, errorMessage) = await backendOrchestrationService.sendMessage(
                 conversationID: conversationIDToUse,
                 userQuery: plainUserQueryFromEditor,

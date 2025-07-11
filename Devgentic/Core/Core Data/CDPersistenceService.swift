@@ -105,8 +105,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             return
         }
         
-        // IMPORTANT: Assumes 'openAIThreadID' is an attribute on your ConversationEntity
-        conversation.setValue(threadId, forKey: "openAIThreadID")
+        conversation.openAIThreadID = threadId
         
         logger.info("Updating conversation \(conversationId.uuidString) with new OpenAI thread ID.")
         saveContext()
@@ -117,8 +116,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         newConversation.id = conversation.id
         newConversation.timestamp = conversation.timestamp
         newConversation.userDefinedTitle = conversation.userDefinedTitle
-        // IMPORTANT: Assumes 'openAIThreadID' is an attribute on your ConversationEntity
-        newConversation.setValue(conversation.openAIThreadID, forKey: "openAIThreadID")
+        newConversation.openAIThreadID = conversation.openAIThreadID
 
         for message in conversation.messages {
             let newMessage = ChatMessageEntity(context: viewContext)
@@ -161,6 +159,37 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 newMessageEntity.senderType = message.sender.rawValue
                 newMessageEntity.conversationId = message.conversationId
                 self.mapMessageContent(from: message.content, to: newMessageEntity)
+                
+                // --- Save Attached Text Files ---
+                if let textFiles = message.attachedTextFiles {
+                    let textFileEntities = textFiles.map { textFile -> AttachedTextFileEntity in
+                        let entity = AttachedTextFileEntity(context: context)
+                        entity.id = textFile.id
+                        entity.name = textFile.name
+                        entity.url = textFile.url.absoluteString
+                        entity.fileExtension = textFile.fileExtension
+                        entity.content = textFile.content
+                        entity.size = textFile.size
+                        return entity
+                    }
+                    newMessageEntity.addToAttachedTextFiles(NSSet(array: textFileEntities))
+                }
+
+                // --- Save Attached Image Files ---
+                if let imageFiles = message.attachedImageFiles {
+                    let imageFileEntities = imageFiles.map { imageFile -> AttachedImageFileEntity in
+                        let entity = AttachedImageFileEntity(context: context)
+                        entity.id = imageFile.id
+                        entity.name = imageFile.name
+                        entity.url = imageFile.url.absoluteString
+                        entity.fileExtension = imageFile.fileExtension
+                        entity.content = imageFile.binaryData
+                        entity.size = imageFile.size
+                        return entity
+                    }
+                    newMessageEntity.addToAttachedImageFiles(NSSet(array: imageFileEntities))
+                }
+
                 conversation.addToMessages(newMessageEntity)
             }
             conversation.timestamp = Date()
@@ -387,15 +416,12 @@ extension ConversationEntity {
     func toConversationStruct() -> Conversation {
         let messagesArray = (self.messages as? Set<ChatMessageEntity> ?? []).map { $0.toChatMessageStruct() }
         
-        // IMPORTANT: Assumes 'openAIThreadID' is an attribute on your ConversationEntity
-        let threadID = self.value(forKey: "openAIThreadID") as? String
-        
         return Conversation(
             id: self.id ?? UUID(),
             messages: messagesArray.sorted(by: { $0.timestamp < $1.timestamp }),
             timestamp: self.timestamp ?? Date(),
             userDefinedTitle: self.userDefinedTitle,
-            openAIThreadID: threadID
+            openAIThreadID: self.openAIThreadID
         )
     }
 }
@@ -420,15 +446,66 @@ extension ChatMessageEntity {
             break
         }
         
+        // --- Load Attached Text Files ---
+        let textFileEntities = self.attachedTextFiles as? Set<AttachedTextFileEntity> ?? []
+        let attachedTextFiles = textFileEntities.compactMap { $0.toAttachedTextFileStruct() }
+
+        // --- Load Attached Image Files ---
+        let imageFileEntities = self.attachedImageFiles as? Set<AttachedImageFileEntity> ?? []
+        let attachedImageFiles = imageFileEntities.compactMap { $0.toAttachedImageFileStruct() }
+        
         return ChatMessage(
             id: self.id ?? UUID(),
             conversationId: self.conversationId ?? UUID(),
             timestamp: self.timestamp ?? Date(),
             sender: SenderRole(rawValue: self.senderType ?? "user") ?? .user,
-            content: content
+            content: content,
+            attachedTextFiles: attachedTextFiles.isEmpty ? nil : attachedTextFiles,
+            attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles
         )
     }
 }
+
+// MARK: - Attached File Entity Extensions
+
+extension AttachedTextFileEntity {
+    func toAttachedTextFileStruct() -> AttachedTextFile? {
+        guard let name = self.name,
+              let urlString = self.url, let url = URL(string: urlString),
+              let fileExtension = self.fileExtension,
+              let content = self.content else {
+            return nil
+        }
+        return AttachedTextFile(
+            id: self.id ?? UUID(),
+            name: name,
+            url: url,
+            fileExtension: fileExtension,
+            content: content,
+            size: self.size
+        )
+    }
+}
+
+extension AttachedImageFileEntity {
+    func toAttachedImageFileStruct() -> AttachedImageFile? {
+        guard let name = self.name,
+              let urlString = self.url, let url = URL(string: urlString),
+              let fileExtension = self.fileExtension,
+              let binaryData = self.content else {
+            return nil
+        }
+        return AttachedImageFile(
+            id: self.id ?? UUID(),
+            name: name,
+            url: url,
+            fileExtension: fileExtension,
+            binaryData: binaryData,
+            size: self.size
+        )
+    }
+}
+
 
 extension AgentProfileEntity {
     func toAgentProfileModel() -> AgentProfileModel {

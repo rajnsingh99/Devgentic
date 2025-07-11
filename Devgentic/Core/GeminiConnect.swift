@@ -27,16 +27,15 @@ class GeminiConnect {
     /// Sends a user's query to the Gemini API using a dynamically provided model name.
     /// - Parameters:
     ///   - conversationID: The ID of the current conversation.
-    ///   - userQuery: The user's text input.
+    ///   - userQuery: The user's text input, which may include formatted file content.
     ///   - history: An array of previous ChatMessage objects representing the conversation history.
-    ///   - files: A list of attached files (currently ignored).
     ///   - modelName: The specific model to use for the request (e.g., "gemini-1.5-pro-latest").
     /// - Returns: A tuple containing an array of `ChatMessage` and an optional `Error`.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
         history: [ChatMessage],
-        files: [FileSystemItem],
+        // files: [FileSystemItem], // ** REMOVED in Phase 2 **
         modelName: String
     ) async throws -> ([ChatMessage], Error?) {
 

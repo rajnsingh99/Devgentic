@@ -24,7 +24,7 @@ class RemoteOrchestrationService {
         userQuery: String,
         history: [ChatMessage],
         openAIThreadID: String?,
-        files: [FileSystemItem],
+        // files: [FileSystemItem], // ** REMOVED in Phase 2 **
         integration: LLMIntegrationModel
     ) async throws -> (messages: [ChatMessage], newThreadID: String?, error: Error?) {
         
@@ -56,7 +56,6 @@ class RemoteOrchestrationService {
                 conversationID: conversationID,
                 userQuery: userQuery,
                 history: history,
-                files: files,
                 modelName: remoteConfig.modelName
             )
             return (messages: messages, newThreadID: nil, error: error)
@@ -77,7 +76,6 @@ class RemoteOrchestrationService {
                 conversationID: conversationID,
                 userQuery: userQuery,
                 history: history,
-                files: files,
                 modelName: remoteConfig.modelName
             )
             return (messages: messages, newThreadID: nil, error: error)
