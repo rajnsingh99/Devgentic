@@ -1,0 +1,9 @@
+{
+  "MLModelDescriptionKey" : "Embedding model for text to vector",
+  "MLModelCreatorDefinedKey" : {
+    "com.github.apple.coremltools.source_dialect" : "TorchScript",
+    "com.github.apple.coremltools.source" : "torch==2.1.2",
+    "com.github.apple.coremltools.version" : "7.1"
+  },
+  "MLModelAuthorKey" : "Raj Singh"
+}

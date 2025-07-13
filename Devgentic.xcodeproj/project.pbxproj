@@ -9,7 +9,10 @@
 /* Begin PBXBuildFile section */
 		352C81DE2DC54CF70029EA59 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = 352C81DD2DC54CF70029EA59 /* Markdown */; };
 		35A144B52DC50543005D476C /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = 35A144B42DC50543005D476C /* MarkdownUI */; };
+		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
+		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
 		35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 35DB4C1F2DC53B9D002B3BF7 /* Splash */; };
+		35F483FA2E23C8680031D7CB /* EntityInfo-devgentic.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -30,6 +33,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EntityInfo-devgentic.generated.swift"; sourceTree = "<group>"; };
 		35FCBA882DB5526B00D39123 /* devgentic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = devgentic.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		35FCBA992DB5526B00D39123 /* devgenticTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -59,7 +63,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				352C81DE2DC54CF70029EA59 /* Markdown in Frameworks */,
+				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
 				35A144B52DC50543005D476C /* MarkdownUI in Frameworks */,
+				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
 				35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -88,6 +94,14 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		35F483F92E23C8680031D7CB /* generated */ = {
+			isa = PBXGroup;
+			children = (
+				35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */,
+			);
+			path = generated;
+			sourceTree = "<group>";
+		};
 		35FCBA7F2DB5526B00D39123 = {
 			isa = PBXGroup;
 			children = (
@@ -96,6 +110,7 @@
 				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
 				35DB4C1E2DC53B9D002B3BF7 /* Frameworks */,
 				35FCBA892DB5526B00D39123 /* Products */,
+				35F483F92E23C8680031D7CB /* generated */,
 			);
 			sourceTree = "<group>";
 		};
@@ -132,6 +147,8 @@
 				35A144B42DC50543005D476C /* MarkdownUI */,
 				35DB4C1F2DC53B9D002B3BF7 /* Splash */,
 				352C81DD2DC54CF70029EA59 /* Markdown */,
+				35CDCB0E2E2396B700A7B51B /* HotKey */,
+				35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -219,6 +236,8 @@
 				35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */,
 				35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */,
 				352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */,
+				35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -261,6 +280,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				35F483FA2E23C8680031D7CB /* EntityInfo-devgentic.generated.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -423,6 +443,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -449,6 +470,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"devgentic/Preview Content\"";
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -594,6 +616,22 @@
 				minimumVersion = 0.16.0;
 			};
 		};
+		35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/soffes/HotKey.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+		35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/objectbox/objectbox-swift-spm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.4.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -606,6 +644,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */;
 			productName = MarkdownUI;
+		};
+		35CDCB0E2E2396B700A7B51B /* HotKey */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */;
+			productName = HotKey;
+		};
+		35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */;
+			productName = ObjectBox.xcframework;
 		};
 		35DB4C1F2DC53B9D002B3BF7 /* Splash */ = {
 			isa = XCSwiftPackageProductDependency;

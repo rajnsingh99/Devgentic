@@ -1,0 +1,21 @@
+{
+  "Inputs" : {
+    "attention_mask" : {
+      "MLFeatureShortDescription" : ""
+    },
+    "input_ids" : {
+      "MLFeatureShortDescription" : ""
+    }
+  },
+  "Outputs" : {
+    "var_514" : {
+      "MLFeatureShortDescription" : ""
+    }
+  },
+  "TrainingInputs" : {
+
+  },
+  "States" : {
+
+  }
+}

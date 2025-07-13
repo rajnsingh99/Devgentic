@@ -1,6 +1,15 @@
 {
-  "originHash" : "7a86b26686c7a87be7cf2d8e1dd739fcb934da5f1356c31422e17ea1449d2b45",
+  "originHash" : "956f40238cd3d5b25358d34dcb1a8a52b9cad64a4b6c6c2f835e61a958cbc386",
   "pins" : [
+    {
+      "identity" : "hotkey",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/soffes/HotKey.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "a3cf605d7a96f6ff50e04fcb6dea6e2613cfcbe4"
+      }
+    },
     {
       "identity" : "markdownui",
       "kind" : "remoteSourceControl",
@@ -17,6 +26,15 @@
       "state" : {
         "revision" : "2849f5323265386e200484b0d0f896e73c3411b9",
         "version" : "6.0.1"
+      }
+    },
+    {
+      "identity" : "objectbox-swift-spm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/objectbox/objectbox-swift-spm.git",
+      "state" : {
+        "revision" : "58116eabfb2b70003fb355e7859e3e9c99cded13",
+        "version" : "4.4.0"
       }
     },
     {

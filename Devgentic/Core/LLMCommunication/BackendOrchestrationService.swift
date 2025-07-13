@@ -12,23 +12,28 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendOrchestrationService")
 
 /// This class is the central dispatcher for all LLM-related communications.
-/// It now reactively determines the active backend by observing the data stores.
+/// It now reactively determines the active backend by observing the data stores and augments
+/// queries with relevant context from the vector store.
 @MainActor
 class BackendOrchestrationService: ObservableObject {
 
     // MARK: - Dependencies
     private let agentService: AgentService
-    private let ollamaService: OllamaService // Using singleton
+    private let ollamaService: OllamaService
     private let remoteOrchestrationService: RemoteOrchestrationService
     private let agentStore: AgentStore
     private let llmIntegrationStore: LLMIntegrationStore
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     
+    // RAG Services
+    private let embeddingService = EmbeddingService.shared
+    private let vectorStoreService = VectorStoreService.shared
+    
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Derived State
-    /// The active backend, derived reactively from the stores. This is the single source of truth for this service.
+    /// The active backend, derived reactively from the stores.
     @Published private(set) var activeBackend: BackendType = .none
 
     // MARK: - Initialization
@@ -50,7 +55,6 @@ class BackendOrchestrationService: ObservableObject {
         logger.info("BackendOrchestrationService initialized and bindings are set up.")
     }
     
-    /// Sets up Combine pipelines to react to changes in the data stores and update the active backend.
     private func setupBindings() {
         agentStore.$selectedAgentID
             .combineLatest(llmIntegrationStore.$selectedIntegrationID, llmIntegrationStore.$integrations)
@@ -59,13 +63,11 @@ class BackendOrchestrationService: ObservableObject {
                 guard let self = self else { return }
 
                 if agentID != nil {
-                    // If an agent is selected, it's the active backend.
                     if self.activeBackend != .agent {
                         self.activeBackend = .agent
                         logger.info("BackendOrchestrationService: Detected backend switch to Agent.")
                     }
                 } else if let intID = integrationID {
-                    // If an integration is selected, find it to determine the backend type.
                     if let integration = integrations.first(where: { $0.id == intID }) {
                         let newBackend: BackendType = (integration.providerType == .ollama) ? .ollama : .remote
                         if self.activeBackend != newBackend {
@@ -73,14 +75,12 @@ class BackendOrchestrationService: ObservableObject {
                             logger.info("BackendOrchestrationService: Detected backend switch to \(self.activeBackend.rawValue).")
                         }
                     } else {
-                        // The selected ID doesn't exist in the store, so no backend is active.
                         if self.activeBackend != .none {
                             self.activeBackend = .none
                             logger.warning("BackendOrchestrationService: Selected integration ID \(intID.uuidString) not found in store. No backend active.")
                         }
                     }
                 } else {
-                    // If neither an agent nor an integration is selected, there's no active backend.
                     if self.activeBackend != .none {
                         self.activeBackend = .none
                         logger.info("BackendOrchestrationService: No backend selected.")
@@ -91,7 +91,8 @@ class BackendOrchestrationService: ObservableObject {
     }
 
     // MARK: - Main Sending Logic
-    /// The primary method for sending a user's query to the appropriate backend.
+    
+    /// The primary method for sending a user's query to the appropriate backend, augmented with RAG context.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
@@ -100,24 +101,24 @@ class BackendOrchestrationService: ObservableObject {
         
         logger.debug("Sending message with detected backend: \(self.activeBackend.rawValue)")
         
-        // Fetch conversation history from the persistence service.
+        // ** RAG Step 1: Retrieve relevant context **
+        let augmentedQuery = await augmentQueryWithContext(userQuery: userQuery)
+        
         let conversationEntity = persistenceService.getConversation(withId: conversationID)
         let conversation = conversationEntity?.toConversationStruct()
         
-        // ** MODIFIED: Filter out error messages from the history. **
         let conversationHistory = (conversation?.messages ?? []).filter { message in
-            if case .error = message.content {
-                return false 
-            }
+            if case .error = message.content { return false }
             return true
         }
         
-        var finalUserQuery = userQuery
+        var finalUserQuery = augmentedQuery
         
+        // This part might be redundant now that RAG handles context, but can be kept for non-RAG backends or specific cases.
         if activeBackend == .remote, !files.isEmpty {
             let fileContext = assembleTextFileContent(for: files)
             if !fileContext.isEmpty {
-                finalUserQuery = fileContext + "\n\n" + userQuery
+                finalUserQuery = fileContext + "\n\n" + finalUserQuery
                 logger.info("Assembled text file content and prepended to the user query for remote backend.")
             }
         }
@@ -128,14 +129,15 @@ class BackendOrchestrationService: ObservableObject {
                 guard let agentID = agentStore.selectedAgentID else {
                     return ([], "No agent selected for the Agent backend.")
                 }
-                let (messages, error) = try await sendToAgent(conversationID: conversationID, userQuery: userQuery, files: files, agentID: agentID)
+                // Note: The agent's objective is now the augmented query
+                let (messages, error) = try await sendToAgent(conversationID: conversationID, userQuery: finalUserQuery, files: files, agentID: agentID)
                 return (messages, error?.localizedDescription)
                 
             case .ollama:
                 guard let integrationID = llmIntegrationStore.selectedIntegrationID else {
                     return ([], "No Ollama integration selected.")
                 }
-                let (messages, error) = try await sendToOllama(conversationID: conversationID, userQuery: userQuery, files: files, integrationID: integrationID)
+                let (messages, error) = try await sendToOllama(conversationID: conversationID, userQuery: finalUserQuery, files: files, integrationID: integrationID)
                 return (messages, error?.localizedDescription)
 
             case .remote:
@@ -165,6 +167,37 @@ class BackendOrchestrationService: ObservableObject {
             let userFriendlyError = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: self.activeBackend)
             return ([], userFriendlyError)
         }
+    }
+    
+    // MARK: - RAG Context Retrieval
+    
+    /// Augments the user query with relevant context retrieved from the vector store.
+    private func augmentQueryWithContext(userQuery: String) async -> String {
+        // 1. Generate embedding for the user's query
+        guard let queryEmbedding = await embeddingService.generateEmbedding(for: userQuery) else {
+            logger.warning("Could not generate embedding for query. Proceeding without RAG context.")
+            return userQuery
+        }
+        
+        // 2. Find nearest neighbors in the vector store
+        let relevantChunks = vectorStoreService.findNearest(to: queryEmbedding, limit: 3)
+        
+        guard !relevantChunks.isEmpty else {
+            logger.info("No relevant context found in vector store for the query.")
+            return userQuery
+        }
+        
+        // 3. Assemble the context string
+        let contextHeader = "--- Relevant Context ---\n"
+        let contextString = relevantChunks.map { $0.content }.joined(separator: "\n\n")
+        let contextFooter = "\n--- End of Context ---"
+        
+        let assembledContext = contextHeader + contextString + contextFooter
+        
+        logger.info("Augmenting query with \(relevantChunks.count) chunks of context.")
+        
+        // 4. Return the augmented query
+        return "\(assembledContext)\n\nQuestion: \(userQuery)"
     }
     
     // MARK: - File Content Assembly
@@ -213,7 +246,7 @@ class BackendOrchestrationService: ObservableObject {
         let rootAgentConfig = AgentConfig(
             agentId: selectedAgent.id.uuidString,
             parentId: nil,
-            roleObjective: userQuery,
+            roleObjective: userQuery, // The augmented query is passed here
             tools: selectedAgent.tools.map { $0.id },
             llmSettings: .ollama(llmSettings)
         )
@@ -240,8 +273,8 @@ class BackendOrchestrationService: ObservableObject {
              throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected Ollama integration not found."])
         }
         
-        let errorMessage = "Sending messages directly to the Ollama backend is not yet implemented in this service."
-//        logger.warning(errorMessage)
+        // This implementation can now be completed to send the augmented query to Ollama
+        let errorMessage = "Sending messages directly to the Ollama backend is not yet fully implemented in this service."
         let errorContent = MessageContent.error(title: "Not Implemented", details: errorMessage)
         let chatMessage = ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)
         return ([chatMessage], nil)
@@ -260,7 +293,7 @@ class BackendOrchestrationService: ObservableObject {
             
             return try await remoteOrchestrationService.sendMessage(
                 conversationID: conversationID,
-                userQuery: userQuery,
+                userQuery: userQuery, // Pass the augmented query
                 history: history,
                 openAIThreadID: openAIThreadID,
                 integration: integration

@@ -44,6 +44,11 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
     // MARK: - Private Properties
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CoreDataPersistenceService")
+    
+    // RAG Services
+    private let embeddingService = EmbeddingService.shared
+    private let vectorStoreService = VectorStoreService.shared
+    private let textChunker = TextChunker()
 
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "DevgenticDB")
@@ -191,12 +196,65 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 }
 
                 conversation.addToMessages(newMessageEntity)
+                
+                // ** RAG INTEGRATION: Index message content **
+                Task {
+                    await self.indexMessageForRAG(message)
+                }
             }
             conversation.timestamp = Date()
             self.saveContext()
         }
         logger.debug("Finished async addMessages for \(messages.count) messages.")
     }
+    
+    // MARK: - RAG Indexing
+    
+    /// Chunks, embeds, and indexes the textual content of a message for RAG.
+    private func indexMessageForRAG(_ message: ChatMessage) async {
+        var textToProcess = ""
+        
+        // Aggregate all text content from the message
+        if let textContent = message.content.textContent {
+            textToProcess += textContent + "\n"
+        }
+        
+        if let attachedFiles = message.attachedTextFiles {
+            for file in attachedFiles {
+                textToProcess += "\n--- Start of file: \(file.name) ---\n"
+                textToProcess += file.content
+                textToProcess += "\n--- End of file: \(file.name) ---\n"
+            }
+        }
+        
+        guard !textToProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return // No text to index
+        }
+        
+        // 1. Chunk the text
+        let chunks = textChunker.chunk(text: textToProcess)
+        var chunkEntities: [ChunkEntity] = []
+        
+        // 2. Embed and create entities for each chunk
+        for chunkText in chunks {
+            if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
+                let chunkEntity = ChunkEntity(
+                    sourceMessageID: message.id,
+                    content: chunkText,
+                    embedding: embedding,
+                    timestamp: message.timestamp
+                )
+                chunkEntities.append(chunkEntity)
+            }
+        }
+        
+        // 3. Save to vector store
+        if !chunkEntities.isEmpty {
+            vectorStoreService.add(chunks: chunkEntities)
+            logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString).")
+        }
+    }
+
     
     // MARK: - Agent Profile Methods
     
