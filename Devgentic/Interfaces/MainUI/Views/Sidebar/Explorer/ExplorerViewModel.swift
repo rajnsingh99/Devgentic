@@ -2,7 +2,7 @@
 //  ExplorerViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 11/05/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -32,7 +32,14 @@ final class ExplorerViewModel: ObservableObject {
                 if newURL.startAccessingSecurityScopedResource() {
                     logger.info("Successfully started accessing security-scoped resource (didSet for selectedRootURL) for: \(newURL.path)")
                     saveBookmark(for: newURL)
-                    loadDirectoryContents(for: newURL) // This populates rootItems for the UI
+                    
+                    // **NEW**: Trigger the deep search and start monitoring.
+                    Task {
+                        await indexAllFiles(from: newURL)
+                    }
+                    startMonitoring(path: newURL.path)
+
+                    loadDirectoryContents(for: newURL) // This can remain for the visual explorer view
                 } else {
                     logger.error("Failed to start accessing security-scoped resource (didSet for selectedRootURL) for: \(newURL.path). Files might not be accessible.")
                     self.errorMessage = "Could not gain permission to access this folder. Please try selecting it again. If the issue persists, check app permissions in System Settings (Privacy & Security -> Files and Folders)."
@@ -42,6 +49,8 @@ final class ExplorerViewModel: ObservableObject {
                     clearLastOpenedFolderBookmark()
                 }
             } else {
+                // **NEW**: Stop monitoring when the folder is closed.
+                stopMonitoring()
                 self.rootItems = []
                 self.errorMessage = nil
                 self.isLoading = false
@@ -59,6 +68,17 @@ final class ExplorerViewModel: ObservableObject {
     @Published var renameErrorMessage: String? = nil
 
     @Published var expandedItemIDs: Set<URL> = []
+    @Published private var loadingIDs: Set<URL> = []
+
+    // The in-memory cache for all files in the directory.
+    @Published var allSuggestableFiles: [FileSystemItem] = []
+
+    // A flag to provide UI feedback during the initial scan.
+    @Published var isIndexing: Bool = false
+
+    // A property to hold our real-time file system monitor.
+    private var fileSystemMonitor: FileSystemMonitor?
+
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.explorer", category: "ExplorerViewModel")
     private static let lastOpenedFolderBookmarkKey = "explorerLastOpenedFolderBookmark"
@@ -70,6 +90,8 @@ final class ExplorerViewModel: ObservableObject {
 
     deinit {
         logger.info("ExplorerViewModel deinitialized. Resource cleanup for selectedRootURL is managed by its property observers.")
+        // The call to stopMonitoring() is removed. The FileSystemMonitor's own deinit will handle the cleanup automatically
+        // when the ExplorerViewModel is deallocated, which is the correct and safe pattern.
     }
 
     // MARK: - Persistence Logic
@@ -115,7 +137,7 @@ final class ExplorerViewModel: ObservableObject {
             set: { isExpanding in
                 if isExpanding {
                     self.expandedItemIDs.insert(item.id)
-                    if item.isDirectory && item.children?.isEmpty == true {
+                    if item.isDirectory && item.children == nil {
                         self.logger.info("DisclosureGroup expanding '\(item.name)', triggering lazy load.")
                         self.toggleFolderExpansion(for: item)
                     }
@@ -210,13 +232,22 @@ final class ExplorerViewModel: ObservableObject {
 
     func toggleFolderExpansion(for item: FileSystemItem) {
         guard item.isDirectory else { return }
+        
+        guard !loadingIDs.contains(item.id) else {
+            logger.info("Load for folder '\(item.name)' is already in progress. Ignoring duplicate request.")
+            return
+        }
+
         if let currentError = self.errorMessage, currentError.contains("Could not gain permission"),
            (selectedRootURL == item.url || item.url.path.hasPrefix(selectedRootURL?.path ?? "___INVALID_PATH___")) {
             logger.warning("Skipping folder expansion/load for \(item.name) due to existing permission error related to its hierarchy.")
             return
         }
-        if item.children?.isEmpty == true {
-            logger.info("Data load triggered for folder: \(item.url.path) (children are empty)")
+        
+        if item.children == nil {
+            logger.info("Data load triggered for folder: \(item.url.path) (children have not been loaded yet)")
+            loadingIDs.insert(item.id)
+            
             Task {
                 do {
                     let children = try await fetchItems(at: item.url)
@@ -225,18 +256,21 @@ final class ExplorerViewModel: ObservableObject {
                         if self.errorMessage?.contains("Failed to load contents of '\(item.name)'") == true {
                             self.errorMessage = nil
                         }
+                        self.loadingIDs.remove(item.id)
                     }
                 } catch {
                     await MainActor.run {
                         if !(self.errorMessage?.contains("Could not gain permission") == true) {
                              self.errorMessage = "Failed to load contents of '\(item.name)': \(error.localizedDescription)"
                         }
+                        self.updateChildren(for: item.id, with: [])
                         self.logger.error("Error lazy loading children for folder \(item.url.path): \(error.localizedDescription)")
+                        self.loadingIDs.remove(item.id)
                     }
                 }
             }
         } else {
-            logger.debug("Folder '\(item.name)' children not empty or item is not a directory. UI expansion handled by DisclosureGroup binding.")
+            logger.debug("Folder '\(item.name)' children already loaded. UI expansion handled by DisclosureGroup binding.")
         }
     }
         
@@ -263,7 +297,6 @@ final class ExplorerViewModel: ObservableObject {
     private func fetchItems(at url: URL) async throws -> [FileSystemItem] {
         var items: [FileSystemItem] = []
         let fileManager = FileManager.default
-        // CORRECTED: resourceKeys should be a Set
         let resourceKeys: Set<URLResourceKey> = [.nameKey, .isDirectoryKey, .isHiddenKey]
 
         guard url.startAccessingSecurityScopedResource() else {
@@ -272,14 +305,14 @@ final class ExplorerViewModel: ObservableObject {
         }
         defer { url.stopAccessingSecurityScopedResource() }
         
-        let contents = try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(resourceKeys), options: []) // Pass Array here if API needs it, but Set is fine for resourceValues(forKeys:)
+        let contents = try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(resourceKeys), options: [])
         
         for itemURL in contents {
-            let resourceValues = try itemURL.resourceValues(forKeys: resourceKeys) // Use Set here
+            let resourceValues = try itemURL.resourceValues(forKeys: resourceKeys)
             if resourceValues.isHidden == true { continue }
             let name = resourceValues.name ?? itemURL.lastPathComponent
             let isDirectory = resourceValues.isDirectory ?? false
-            items.append(FileSystemItem(id: itemURL, name: name, url: itemURL, isDirectory: isDirectory, children: isDirectory ? [] : nil))
+            items.append(FileSystemItem(id: itemURL, name: name, url: itemURL, isDirectory: isDirectory, children: nil))
         }
         return items.sorted {
             if $0.isDirectory && !$1.isDirectory { return true }
@@ -371,85 +404,89 @@ final class ExplorerViewModel: ObservableObject {
         return nil
     }
 
-    // MARK: - REFINED File Suggestion Logic
+    // MARK: - File Suggestion Logic
     public func suggestableFiles(query: String) -> [FileSystemItem] {
-        logger.debug("SuggestableFiles called with query: '\(query)'")
-        var collectedFiles: [FileSystemItem] = []
-
-        guard let rootURL = self.selectedRootURL else {
-            logger.warning("SuggestableFiles: No selectedRootURL. Returning empty list.")
-            return []
-        }
-
-        guard rootURL.startAccessingSecurityScopedResource() else {
-            logger.error("SuggestableFiles: Could not start security-scoped access for rootURL: \(rootURL.path). Returning empty list.")
-            return []
-        }
-        defer {
-            rootURL.stopAccessingSecurityScopedResource()
-            logger.trace("SuggestableFiles: Stopped security-scoped access for rootURL: \(rootURL.path)")
-        }
-
-        let fileManager = FileManager.default
-        // CORRECTED: resourceKeys is now a Set<URLResourceKey>
-        let resourceKeys: Set<URLResourceKey> = [.nameKey, .isDirectoryKey, .isHiddenKey]
-        
-        // 1. Get files directly under rootURL
-        do {
-            // The 'includingPropertiesForKeys' parameter expects [URLResourceKey]?, so we convert the Set to an Array here.
-            let rootContents = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: Array(resourceKeys), options: [.skipsSubdirectoryDescendants])
-            for itemURL in rootContents {
-                // 'resourceValues(forKeys:)' correctly takes a Set<URLResourceKey>
-                let resourceValues = try itemURL.resourceValues(forKeys: resourceKeys)
-                if resourceValues.isHidden == true { continue }
-                if resourceValues.isDirectory == false {
-                    let name = resourceValues.name ?? itemURL.lastPathComponent
-                    collectedFiles.append(FileSystemItem(id: itemURL, name: name, url: itemURL, isDirectory: false, children: nil))
-                }
-            }
-        } catch {
-            logger.error("SuggestableFiles: Error reading contents of root directory \(rootURL.path): \(error.localizedDescription)")
-        }
-
-        // 2. Get files from first-level subdirectories of rootURL
-        do {
-            let firstLevelItems = try fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: Array(resourceKeys), options: [.skipsSubdirectoryDescendants])
-            for dirURL in firstLevelItems {
-                let dirResourceValues = try dirURL.resourceValues(forKeys: resourceKeys)
-                if dirResourceValues.isHidden == true { continue }
-                
-                if dirResourceValues.isDirectory == true {
-                    do {
-                        let subDirContents = try fileManager.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: Array(resourceKeys), options: [.skipsSubdirectoryDescendants])
-                        for itemURL in subDirContents {
-                            let itemResourceValues = try itemURL.resourceValues(forKeys: resourceKeys)
-                            if itemResourceValues.isHidden == true { continue }
-                            if itemResourceValues.isDirectory == false {
-                                let name = itemResourceValues.name ?? itemURL.lastPathComponent
-                                if !collectedFiles.contains(where: { $0.id == itemURL }) {
-                                     collectedFiles.append(FileSystemItem(id: itemURL, name: name, url: itemURL, isDirectory: false, children: nil))
-                                }
-                            }
-                        }
-                    } catch {
-                        logger.error("SuggestableFiles: Error reading contents of first-level subdirectory \(dirURL.path): \(error.localizedDescription)")
-                    }
-                }
-            }
-        } catch {
-            logger.error("SuggestableFiles: Error listing first-level items in root directory \(rootURL.path): \(error.localizedDescription)")
-        }
-        
-        logger.debug("SuggestableFiles: Collected \(collectedFiles.count) files directly from file system (root + 1st level).")
-
+        logger.debug("Searching cache for query: '\(query)'")
         if query.isEmpty {
-            return collectedFiles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            // Return a sorted, limited list if the query is empty.
+            return Array(allSuggestableFiles.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.prefix(50))
         } else {
             let lowercasedQuery = query.lowercased()
-            let filtered = collectedFiles.filter { $0.name.lowercased().contains(lowercasedQuery) }
+            // Perform a fast, in-memory filter.
+            return allSuggestableFiles.filter { $0.name.lowercased().contains(lowercasedQuery) }
                                       .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-            logger.debug("SuggestableFiles: Query '\(query)' filtered to \(filtered.count) files.")
-            return filtered
+        }
+    }
+    
+    // MARK: - File System Monitoring
+    private func startMonitoring(path: String) {
+        stopMonitoring() // Ensure any existing monitor is stopped.
+        fileSystemMonitor = FileSystemMonitor { [weak self] url in
+            self?.logger.info("File system change detected at \(url.path). Re-indexing...")
+            // For simplicity and robustness, we will re-run the full deep search.
+            Task {
+                await self?.indexAllFiles(from: url)
+            }
+        }
+        fileSystemMonitor?.start(path: path)
+        logger.info("Started file system monitoring for path: \(path)")
+    }
+
+    // This method is now a standard private method isolated to the MainActor.
+    // It's no longer `nonisolated`.
+    private func stopMonitoring() {
+        fileSystemMonitor?.stop()
+        fileSystemMonitor = nil
+        logger.info("Stopped file system monitoring.")
+    }
+    
+    // MARK: - Deep Search (Indexing)
+    private func indexAllFiles(from url: URL) async {
+        await MainActor.run { self.isIndexing = true }
+        
+        let allFiles = await Task.detached(priority: .userInitiated) { () -> [FileSystemItem] in
+            var collectedFiles: [FileSystemItem] = []
+            let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .isHiddenKey]
+            let excludedDirectoryNames: Set<String> = [".git", ".build", "node_modules", "Pods", ".DS_Store"]
+
+            guard let enumerator = FileManager.default.enumerator(
+                at: url,
+                includingPropertiesForKeys: resourceKeys,
+                options: [.skipsPackageDescendants, .skipsHiddenFiles],
+                errorHandler: { url, error -> Bool in
+                    self.logger.error("Enumeration error at \(url.path): \(error.localizedDescription)")
+                    return true
+                }
+            ) else {
+                return []
+            }
+
+            // Reworked loop to correctly identify and skip excluded directories.
+            for case let fileURL as URL in enumerator {
+                guard let resourceValues = try? fileURL.resourceValues(forKeys: Set(resourceKeys)) else { continue }
+                
+                // If the item is a directory and its name is in the exclusion list, skip its descendants.
+                if resourceValues.isDirectory == true {
+                    if excludedDirectoryNames.contains(resourceValues.name ?? "") {
+                        enumerator.skipDescendants()
+                    }
+                    // Always continue for all directories, as we only want to index files.
+                    continue
+                }
+
+                // The .skipsHiddenFiles option handles this, but a check remains for safety.
+                if resourceValues.isHidden == true { continue }
+
+                let name = resourceValues.name ?? fileURL.lastPathComponent
+                collectedFiles.append(FileSystemItem(id: fileURL, name: name, url: fileURL, isDirectory: false))
+            }
+            return collectedFiles
+        }.value
+
+        await MainActor.run {
+            self.allSuggestableFiles = allFiles
+            self.isIndexing = false
+            self.logger.info("Indexing complete. Found \(allFiles.count) suggestable files.")
         }
     }
 }

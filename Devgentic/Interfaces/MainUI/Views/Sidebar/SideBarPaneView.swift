@@ -2,7 +2,7 @@
 //  SideBarPaneView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 17/05/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -40,6 +40,7 @@ struct SideBarPaneView: View {
             VStack {
                 switch selectedTab {
                 case .newChat: NewChatTabView()
+                // --- FIX: Corrected typo from ExplorerVdiew to ExplorerView ---
                 case .explorer: ExplorerView()
                 case .conversations: ConversationListView()
                 case .ollama: LLMIntegrationsSidebarView(sidebarWidth: $sidebarWidth)

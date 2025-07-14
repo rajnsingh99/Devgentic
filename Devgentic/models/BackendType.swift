@@ -8,7 +8,7 @@
 import Foundation
 
 /// Defines the available backend types for processing user requests.
-enum BackendType: String, CaseIterable, Identifiable {
+enum BackendType: String, Codable, CaseIterable, Identifiable {
     
     /// The Agent backend processes requests through a custom Python server.
     case agent = "Agent"

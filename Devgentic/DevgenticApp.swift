@@ -1,4 +1,10 @@
-// DevgenticApp.swift
+//
+//  MainApplicationView.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
+
 import SwiftUI
 import CoreData
 
@@ -26,8 +32,6 @@ struct DevgenticApp: App {
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
 
     init() {
-        
-        
         // Create the stores that will be passed to the view model
         let integrationStore = LLMIntegrationStore()
         let agStore = AgentStore()
@@ -49,7 +53,11 @@ struct DevgenticApp: App {
         WindowGroup {
             if isOnboardingComplete {
                 MainApplicationView()
+                    // --- FIX: Inject all the necessary environment objects ---
                     .environmentObject(mainApplicationViewModel)
+                    // This is the crucial line that makes the *same* explorerViewModel
+                    // available to all child views.
+                    .environmentObject(mainApplicationViewModel.explorerViewModel)
                     .environmentObject(agentManager)
                     .environmentObject(llmIntegrationStore)
                     .environmentObject(agentStore)
@@ -73,6 +81,7 @@ struct DevgenticApp: App {
                 .environmentObject(agentManager)
             }
         }
+        // ... The rest of your file remains the same ...
         .commands {
             CommandMenu("File") {
                 Button("Close File Viewer Window") {
@@ -152,4 +161,3 @@ struct DevgenticApp: App {
             }
         }
     }
-

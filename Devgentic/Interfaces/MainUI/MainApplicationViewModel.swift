@@ -2,7 +2,7 @@
 //  MainApplicationViewModel.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -19,7 +19,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
-    private let persistenceService = CoreDataPersistenceService.shared
+    private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     private let backendOrchestrationService: BackendOrchestrationService
 
@@ -27,6 +27,10 @@ class MainApplicationViewModel: ObservableObject {
     @ObservedObject var ollamaService = OllamaService.shared
     @ObservedObject var llmIntegrationStore: LLMIntegrationStore
     @ObservedObject var agentStore: AgentStore
+    
+    // --- FIX: Add the ExplorerViewModel as a stable property ---
+    // This makes the MainApplicationViewModel the single owner of the ExplorerViewModel.
+    let explorerViewModel = ExplorerViewModel()
 
     // MARK: - Voice Input Services
     private let audioEngineService: AudioEngineService
@@ -41,6 +45,9 @@ class MainApplicationViewModel: ObservableObject {
     @Published var selectedConversationID: UUID? {
         didSet {
             refreshChatMessages()
+            // --- NEW ---
+            loadBackendStateForSelectedConversation()
+            // -----------
         }
     }
     
@@ -79,12 +86,14 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Initialization
-    init(llmIntegrationStore: LLMIntegrationStore,
+    init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
+         llmIntegrationStore: LLMIntegrationStore,
          agentStore: AgentStore = AgentStore(),
          audioEngineService: AudioEngineService = AudioEngineService(),
          speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
          fileProcessorService: FileProcessorService = FileProcessorService()
     ) {
+        self.persistenceService = persistenceService
         self.llmIntegrationStore = llmIntegrationStore
         self.agentStore = agentStore
         self.audioEngineService = audioEngineService
@@ -166,6 +175,15 @@ class MainApplicationViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+            
+        // --- NEW: Reactive pipeline to save backend changes ---
+        Publishers.CombineLatest3($selectedBackend, agentStore.$selectedAgentID, llmIntegrationStore.$selectedIntegrationID)
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main) // Prevent rapid writes
+            .sink { [weak self] _ in
+                self?.updateBackendForCurrentConversation()
+            }
+            .store(in: &cancellables)
+        // --------------------------------------------------------
     }
     
     // MARK: - Message Sending Logic
@@ -270,7 +288,7 @@ class MainApplicationViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Conversation & UI Management (largely unchanged)
+    // MARK: - Conversation & UI Management
     
     private func refreshChatMessages() {
         guard let selectedID = selectedConversationID,
@@ -306,11 +324,65 @@ class MainApplicationViewModel: ObservableObject {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
         
-        let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date())
+        let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), backendType: .none, backendEntityId: nil)
         persistenceService.addConversation(from: newConversation)
         selectedConversationID = newConversation.id
         isUserMessagesOnlyFilterActive = false
         return newConversation.id
+    }
+    
+    // MARK: - Backend Persistence Logic (NEW)
+
+    /// Loads the backend configuration from the currently selected conversation and updates the UI state.
+    private func loadBackendStateForSelectedConversation() {
+        guard let conversationID = selectedConversationID,
+              let conversationEntity = persistenceService.getConversation(withId: conversationID) else {
+            // No conversation selected, reset to default state
+            self.selectedBackend = .none
+            self.agentStore.selectedAgentID = nil
+            self.llmIntegrationStore.selectedIntegrationID = nil
+            return
+        }
+
+        let conversation = conversationEntity.toConversationStruct()
+        let backendType = conversation.backendType ?? .none
+        let backendEntityId = conversation.backendEntityId
+
+        self.selectedBackend = backendType
+        
+        switch backendType {
+        case .agent:
+            self.agentStore.selectedAgentID = backendEntityId
+            self.llmIntegrationStore.selectedIntegrationID = nil
+        case .ollama, .remote:
+            self.llmIntegrationStore.selectedIntegrationID = backendEntityId
+            self.agentStore.selectedAgentID = nil
+        case .none:
+            self.agentStore.selectedAgentID = nil
+            self.llmIntegrationStore.selectedIntegrationID = nil
+        }
+        logger.info("Loaded backend state for conversation \(conversationID.uuidString): \(backendType.rawValue)")
+    }
+
+    /// Saves the current backend selection to the active conversation in Core Data.
+    private func updateBackendForCurrentConversation() {
+        guard let conversationID = selectedConversationID else { return }
+
+        var entityId: UUID?
+        switch selectedBackend {
+        case .agent:
+            entityId = agentStore.selectedAgentID
+        case .ollama, .remote:
+            entityId = llmIntegrationStore.selectedIntegrationID
+        case .none:
+            entityId = nil
+        }
+        
+        persistenceService.updateBackendForConversation(
+            id: conversationID,
+            backendType: selectedBackend,
+            backendEntityId: entityId
+        )
     }
     
     // MARK: - Voice Input Methods (unchanged)

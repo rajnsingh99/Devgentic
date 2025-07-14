@@ -2,7 +2,7 @@
 //  MainApplicationView.swift
 //  Devgentic
 //
-//  Created by Raj Singh
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -15,7 +15,11 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
-    @StateObject private var explorerViewModel = ExplorerViewModel()
+    
+    // --- FIX: REMOVED the local @StateObject ---
+    // The view will now get the shared instance from the environment,
+    // which is injected by DevgenticApp.
+    // @StateObject private var explorerViewModel = ExplorerViewModel()
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
@@ -57,14 +61,12 @@ struct MainApplicationView: View {
                         .onChange(of: viewModel.currentChatMessages) { newMessages in
                             if viewModel.selectedConversationID != nil {
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                    // MODIFIED: Call scrollToTop
                                     scrollToTop(scrollProxy: scrollProxy, messages: newMessages, isSending: viewModel.isSending)
                                 }
                             }
                         }
                         .onChange(of: viewModel.isSending) { isNowSending in
                              if viewModel.selectedConversationID != nil {
-                                 // MODIFIED: Call scrollToTop
                                  scrollToTop(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: isNowSending)
                              }
                         }
@@ -74,7 +76,6 @@ struct MainApplicationView: View {
                                     viewModel.isUserMessagesOnlyFilterActive = false
                                     logger.info("Reset user messages filter due to conversation change.")
                                 }
-                                // MODIFIED: Call scrollToTop
                                 scrollToTop(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
                                 if !viewModel.showSettings && !viewModel.showPromptLibrary {
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -144,7 +145,7 @@ struct MainApplicationView: View {
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
         }
-        .environmentObject(explorerViewModel)
+        // --- FIX: REMOVED the redundant .environmentObject() modifier ---
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {
@@ -172,7 +173,6 @@ struct MainApplicationView: View {
         }
     }
 
-    // --- MODIFIED: Renamed function and changed scroll anchor to .top ---
     private func scrollToTop(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
          let targetID: AnyHashable?
          if isSending && !viewModel.isUserMessagesOnlyFilterActive {
@@ -198,9 +198,12 @@ struct MainApplicationView: View {
 
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
+        // Create a mock main view model which now contains the explorer view model
+        let mockMainViewModel = MainApplicationViewModel()
+        
         MainApplicationView()
-            .environmentObject(MainApplicationViewModel())
-            .environmentObject(ExplorerViewModel())
+            .environmentObject(mockMainViewModel)
+            .environmentObject(mockMainViewModel.explorerViewModel) // Inject the nested one
             .frame(width: 1000, height: 700)
             .previewDisplayName("Main View with Resizable Sidebar")
     }

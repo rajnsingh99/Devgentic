@@ -42,6 +42,8 @@
         <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ConversationEntity" inverseName="messages" inverseEntity="ConversationEntity"/>
     </entity>
     <entity name="ConversationEntity" representedClassName="ConversationEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="backendEntityId" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="backendType" optional="YES" attributeType="String"/>
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="openAIThreadID" optional="YES" attributeType="String"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>

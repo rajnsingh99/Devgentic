@@ -12,11 +12,13 @@ import os
 // MARK: - Core Data Service Protocol
 protocol CoreDataServiceProtocol {
     // Conversation Methods
+    func addConversation(from conversation: Conversation)
     func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async
     func getConversation(withId id: UUID) -> ConversationEntity?
     func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
     func deleteConversation(with id: UUID)
+    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
 
     // Agent Profile Methods
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
@@ -122,6 +124,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         newConversation.timestamp = conversation.timestamp
         newConversation.userDefinedTitle = conversation.userDefinedTitle
         newConversation.openAIThreadID = conversation.openAIThreadID
+        newConversation.backendType = conversation.backendType?.rawValue
+        newConversation.backendEntityId = conversation.backendEntityId
 
         for message in conversation.messages {
             let newMessage = ChatMessageEntity(context: viewContext)
@@ -206,6 +210,19 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             self.saveContext()
         }
         logger.debug("Finished async addMessages for \(messages.count) messages.")
+    }
+    
+    func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {
+        guard let conversation = getConversation(withId: id) else {
+            logger.warning("Attempted to update backend for a conversation that does not exist: \(id.uuidString)")
+            return
+        }
+        
+        conversation.backendType = backendType?.rawValue
+        conversation.backendEntityId = backendEntityId
+        
+        logger.info("Updating conversation \(id.uuidString) with backend type: \(backendType?.rawValue ?? "none")")
+        saveContext()
     }
     
     // MARK: - RAG Indexing
@@ -473,13 +490,16 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 extension ConversationEntity {
     func toConversationStruct() -> Conversation {
         let messagesArray = (self.messages as? Set<ChatMessageEntity> ?? []).map { $0.toChatMessageStruct() }
+        let backendType = self.backendType.flatMap { BackendType(rawValue: $0) }
         
         return Conversation(
             id: self.id ?? UUID(),
             messages: messagesArray.sorted(by: { $0.timestamp < $1.timestamp }),
             timestamp: self.timestamp ?? Date(),
             userDefinedTitle: self.userDefinedTitle,
-            openAIThreadID: self.openAIThreadID
+            openAIThreadID: self.openAIThreadID,
+            backendType: backendType,
+            backendEntityId: self.backendEntityId
         )
     }
 }

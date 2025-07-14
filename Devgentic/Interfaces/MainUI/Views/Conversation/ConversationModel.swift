@@ -13,8 +13,10 @@ struct Conversation: Identifiable, Codable, Equatable {
     var timestamp: Date
     var userDefinedTitle: String?
     
-    /// The thread ID from the OpenAI Assistants API, used for stateful conversations.
     var openAIThreadID: String?
+
+    var backendType: BackendType?
+    var backendEntityId: UUID?
 
     var displayTitle: String {
         if let userTitle = userDefinedTitle, !userTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -52,11 +54,13 @@ struct Conversation: Identifiable, Codable, Equatable {
         lhs.id == rhs.id
     }
 
-    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, openAIThreadID: String? = nil) {
+    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, openAIThreadID: String? = nil, backendType: BackendType? = .none, backendEntityId: UUID? = nil) {
         self.id = id
         self.messages = messages
         self.timestamp = timestamp
         self.userDefinedTitle = userDefinedTitle
         self.openAIThreadID = openAIThreadID
+        self.backendType = backendType
+        self.backendEntityId = backendEntityId
     }
 }

@@ -1,5 +1,10 @@
-// ChatInputAreaView.swift
-// Views/ChatInputAreaView.swift
+//
+//  ChatInputAreaView.swift
+//  Devgentic
+//
+//  Created by Raj Singh.
+//
+
 import SwiftUI
 import os
 import Combine
@@ -139,16 +144,47 @@ struct ChatInputAreaView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Suggestion views are assumed to be implemented elsewhere
-            // if showPromptSuggestions { ... }
-            // if showFileSuggestions { ... }
-            
-            if !mainViewModel.attachedFiles.isEmpty {
-                // AttachedFilesDisplayView is assumed to be implemented elsewhere
+            // Suggestion Views
+            if showFileSuggestions {
+                FileSuggestionView(
+                    files: filteredFiles,
+                    suggestionQuery: fileSuggestionQuery,
+                    onSelectFile: handleFileSelection
+                )
+                .padding(.horizontal, 15)
+                .padding(.bottom, 4)
             }
+
+            // Attached Files Display
+            AttachedFilesDisplayView(
+                attachedFiles: mainViewModel.attachedFiles,
+                onRemoveFile: { fileItem in
+                    mainViewModel.removeAttachedFile(fileItem: fileItem)
+                }
+            )
 
             mainInputArea
         }
+        .onChange(of: showFileSuggestions) { isShowing in
+            if isShowing {
+                // Pre-populate the list when the suggestion view is about to appear.
+                // This avoids a race condition where the view appears with an empty file list initially.
+                self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
+            }
+        }
+        .onChange(of: fileSuggestionQuery) { newQuery in
+            self.filteredFiles = explorerViewModel.suggestableFiles(query: newQuery)
+        }
+        // --- FIX STARTS HERE ---
+        // We now use .onReceive to subscribe to the publisher of the fileCacheID.
+        // This is the correct and robust way to react to changes in an ObservableObject
+        // from a SwiftUI view, avoiding the previous compiler errors.
+        .onReceive(explorerViewModel.objectWillChange) { _ in
+            // Re-filter the list of files whenever the underlying view model data changes.
+            logger.info("RAJ Updated triggered")
+            self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
+        }
+        // --- FIX ENDS HERE ---
         .animation(.spring(), value: mainViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.15), value: currentDynamicButtonMode)
         .animation(.easeInOut(duration: 0.15), value: mainViewModel.voiceInputState)
@@ -407,16 +443,52 @@ struct ChatInputAreaView: View {
         }
     }
     
-    // MARK: - File & Prompt Handling (Stubs)
+    // MARK: - File & Prompt Handling
+    private func handleFileSelection(_ file: FileSystemItem) {
+        // 1. Add the file to the central list of attachments
+        mainViewModel.addAttachedFile(fileItem: file)
+
+        // 2. Create a request to replace the "@query" text in the editor
+        if let range = activeFileMentionTriggerRange {
+            let insertionText = NSAttributedString(string: file.name + " ", attributes: defaultTypingAttributes)
+            self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
+        }
+
+        // 3. Reset the suggestion UI state
+        self.showFileSuggestions = false
+        self.fileSuggestionQuery = ""
+        self.activeFileMentionTriggerRange = nil
+        self.filteredFiles = []
+    }
+    
     private func openFilePicker() {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = true
         openPanel.canChooseDirectories = true
         openPanel.allowsMultipleSelection = true
         openPanel.prompt = "Attach Files or Folders"
+        
         openPanel.begin { response in
             if response == .OK {
-                // File processing logic would go here.
+                let selectedURLs = openPanel.urls
+                var fileItems: [FileSystemItem] = []
+                
+                for url in selectedURLs {
+                    var isDirectory: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                        let newItem = FileSystemItem(
+                            id: url,
+                            name: url.lastPathComponent,
+                            url: url,
+                            isDirectory: isDirectory.boolValue
+                        )
+                        fileItems.append(newItem)
+                    }
+                }
+                
+                if !fileItems.isEmpty {
+                    mainViewModel.addAttachedFiles(fileItems: fileItems)
+                }
             }
         }
     }

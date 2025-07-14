@@ -2,7 +2,7 @@
 //  FileSuggestionView.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 12/05/25.
+//  Created by Raj Singh.
 //
 
 import SwiftUI
@@ -25,11 +25,7 @@ struct FileSuggestionView: View {
 
     // MARK: - Body
     var body: some View {
-        if files.isEmpty {
-            // Optionally, show a "No results" message or just an empty view
-            // For now, an empty view, so it doesn't take space if no files.
-            EmptyView()
-        } else {
+        if !files.isEmpty {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(files) { fileItem in
@@ -78,7 +74,23 @@ struct FileSuggestionView: View {
             .onAppear {
                 logger.debug("FileSuggestionView appeared with \(files.count) files for query '\(suggestionQuery)'.")
             }
+        } else if !suggestionQuery.isEmpty {
+            // Only show "No matching files" if the user has actually typed a query.
+            Text("No matching files found.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(VisualEffectBlur(material: .sidebar).opacity(0.8))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadiusValue)
+                        .stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
+                )
+                .shadow(color: Color.black.opacity(0.1), radius: 3, x: 0, y: 2)
+                .transition(.opacity)
         }
+        // If files are empty and the query is empty, show nothing (initial state).
     }
 }
 
@@ -120,7 +132,16 @@ struct FileSuggestionView_Previews: PreviewProvider {
             )
             .padding(.horizontal)
 
-            Text("File Suggestions (Empty)")
+            Text("File Suggestions (Empty Query)")
+                .font(.headline)
+            FileSuggestionView(
+                files: [],
+                suggestionQuery: "",
+                onSelectFile: handleSelection
+            )
+            .padding(.horizontal)
+            
+            Text("File Suggestions (No Results)")
                 .font(.headline)
             FileSuggestionView(
                 files: [],
