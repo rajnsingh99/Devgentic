@@ -45,7 +45,6 @@ struct DevgenticApp: App {
         self._llmIntegrationStore = StateObject(wrappedValue: integrationStore)
         self._agentStore = StateObject(wrappedValue: agStore)
         self._mainApplicationViewModel = StateObject(wrappedValue: viewModel)
-        performDataCleanupIfNeeded()
     }
 
     var body: some Scene {
@@ -113,7 +112,9 @@ struct DevgenticApp: App {
 
         // MARK: - Window Groups (Unchanged)
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
-            if let url = fileURL { FileViewerWindowView(fileURL: url) }
+            if let url = fileURL {
+                FileWindowViewer(fileURL: url)
+            }
         }
         WindowGroup("LLM Provider", id: "llm-integrations") {
             LLMIntegrationsView()
@@ -126,38 +127,4 @@ struct DevgenticApp: App {
                .environmentObject(toolStore)
         }.defaultSize(width: 850, height: 700)
     }
-    
-    // --- NEW: One-time data migration logic ---
-    private func performDataCleanupIfNeeded() {
-            let cleanupKey = "didTruncateDatabaseForLLMRefactor"
-            guard !UserDefaults.standard.bool(forKey: cleanupKey) else {
-                return // Cleanup already done
-            }
-            
-            print("Performing one-time database truncation for refactoring...")
-            
-            let context = coreDataService.viewContext
-            let entityNames = ["LLMIntegrationEntity", "OllamaConfigEntity", "RemoteConfigEntity", "AgentProfileEntity", "ConversationEntity", "ChatMessageEntity", "SelectedToolEntity"]
-            
-            for entityName in entityNames {
-                let fetchRequest: NSFetchRequest<NSFetchRequestResult> = NSFetchRequest(entityName: entityName)
-                let deleteRequest = NSBatchDeleteRequest(fetchRequest: fetchRequest)
-                
-                do {
-                    try context.execute(deleteRequest)
-                    print("Successfully truncated entity: \(entityName)")
-                } catch let error as NSError {
-                    print("Failed to truncate entity \(entityName): \(error), \(error.userInfo)")
-                }
-            }
-            
-            do {
-                try context.save()
-                print("Database truncation complete. Saved context.")
-                UserDefaults.standard.set(true, forKey: cleanupKey)
-                print("Cleanup flag set. This process will not run again.")
-            } catch {
-                print("Failed to save context after truncation: \(error)")
-            }
-        }
-    }
+}
