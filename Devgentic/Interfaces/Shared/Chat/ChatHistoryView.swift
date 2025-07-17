@@ -1,16 +1,43 @@
-// Views/ChatHistoryView.swift
+//
+//  ChatHistoryView.swift
+//  Devgentic
+//
+//  Created by Raj Singh
+//
+
 import SwiftUI
 import os
 
-// Logger (Optional)
-// private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatHistoryView")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatHistoryView")
+
+fileprivate struct ThinkingIndicatorView: View {
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkle")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.accentColor)
+                .opacity(isAnimating ? 1.0 : 0.5)
+                .animation(Animation.easeInOut(duration: 1).repeatForever(), value: isAnimating)
+            
+            Text("Thinking...")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .onAppear {
+            self.isAnimating = true
+        }
+    }
+}
+
 
 struct ChatHistoryView: View {
-    let messages: [ChatMessage]
-    let isSending: Bool
-    let hasSelectedConversation: Bool
+    
+    @EnvironmentObject private var viewModel: MainApplicationViewModel
+    @State private var streamingText: String = ""
+    @State private var streamingError: Error? = nil
 
-    // Define a subtle color for the divider, adaptable to light/dark mode
     private var dividerColor: Color {
         #if os(macOS)
         return Color(NSColor.separatorColor)
@@ -19,97 +46,152 @@ struct ChatHistoryView: View {
         #endif
     }
 
+    // Computed property to build the temporary in-progress message for display.
+    private var inProgressMessage: ChatMessage? {
+        guard let conversationID = viewModel.selectedConversationID, viewModel.isSending else {
+            return nil
+        }
+        
+        let content: MessageContent = if let error = streamingError {
+            .error(title: "Streaming Error", details: error.localizedDescription)
+        } else {
+            .markdownText(streamingText)
+        }
+        
+        return ChatMessage(
+            conversationId: conversationID,
+            sender: .agent,
+            content: content
+        )
+    }
+
     var body: some View {
-        ScrollView {
-            // The Spacer has been removed to align content to the top
-            VStack(alignment: .leading, spacing: 0) {
-                if hasSelectedConversation {
-                    ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
-                        if index > 0 {
-                            let previousMessage = messages[index - 1]
-                            if message.sender != previousMessage.sender {
-                                Divider()
-                                    .background(dividerColor)
-                                    .padding(.vertical, 15)
-                            }
-                        }
-
-                        if message.sender == .user {
-                            UserMessageContainerView(message: message)
-                                .padding(.vertical, 10)
-                        } else { // message.sender == .agent
-                            AgentMessageContainerView(message: message)
-                                .padding(.vertical, 10)
-                        }
+        // Use ScrollViewReader for all OS versions to get fine-grained anchor control.
+        ScrollViewReader { proxy in
+            chatScrollView
+                .task(id: viewModel.streamingTriggerID) {
+                    // When a new stream starts, scroll the user's query to the TOP.
+                    if let triggerID = viewModel.streamingTriggerID {
+                        scrollTo(proxy: proxy, anchor: triggerID, position: .top)
                     }
+                    await consumeStream()
                 }
+        }
+    }
+    
 
-                if isSending && hasSelectedConversation {
-                    if let lastMessage = messages.last, lastMessage.sender == .user {
-                        Divider()
-                            .background(dividerColor)
-                            .padding(.vertical, 15)
+    private var chatScrollView: some View {
+        ScrollView {
+            // Spacing is now handled conditionally inside the messageView builder.
+            VStack(alignment: .leading, spacing: 0) {
+                if viewModel.selectedConversationID != nil {
+                    // Display the full list of messages from the view model.
+                    ForEach(viewModel.currentChatMessages) { message in
+                        messageView(for: message)
+                            .id(message.id)
                     }
-                    HStack {
-                        Text("Agent is thinking...")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                            .padding(10)
-                            .background(Color.gray.opacity(0.15))
-                            .cornerRadius(10)
-                        Spacer()
+
+                    if viewModel.isSending {
+                        // Add more space before the thinking indicator/streaming response.
+                        Spacer().frame(height: 25)
+
+                        // If we are waiting for the first token, show the indicator.
+                        if streamingText.isEmpty && streamingError == nil {
+                            ThinkingIndicatorView()
+                                .id("inProgressMessage")
+                                .frame(minHeight: 700, alignment: .top)
+                        } else if let inProgress = inProgressMessage {
+                            // Once tokens arrive, show the streaming message container.
+                            AgentMessageContainerView(message: inProgress)
+                                .id("inProgressMessage")
+                                .frame(minHeight: 700, alignment: .top)
+                        }
                     }
-                    .padding(.leading)
-                    .padding(.vertical, 10)
-                    .id("thinkingIndicator")
                 }
             }
-            .padding(.top, 20) // Give some space at the top of the entire list
+            .padding(.top, 20)
             .padding(.horizontal, 50)
             .padding(.bottom, 10)
-            .frame(maxWidth: .infinity, alignment: .topLeading) // Align content to the top
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .background(Color.clear) // Make ScrollView background clear
-        .frame(maxWidth: .infinity, maxHeight: .infinity) // ScrollView takes full available space
+        .background(Color.clear)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
-
-// --- UPDATED Preview Provider ---
-struct ChatHistoryView_Previews: PreviewProvider {
-    static let sampleConversationId = UUID()
-    static let sampleMessages: [ChatMessage] = [
-        ChatMessage(conversationId: sampleConversationId, sender: .user, content: .plainText("Hello there!")),
-        ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .markdownText("Hi! How can I help? This is the first agent message.")),
-        ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .codeBlock(language: "swift", code: "let a = 10")),
-        ChatMessage(conversationId: sampleConversationId, sender: .user, content: .plainText("Tell me about SwiftUI.")),
-        ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .markdownText("It's a declarative UI framework from Apple, great for building interfaces across Apple platforms."))
-    ]
-    static let sampleMessagesAgentFirst: [ChatMessage] = [
-         ChatMessage(conversationId: sampleConversationId, sender: .agent, content: .markdownText("Welcome!")),
-         ChatMessage(conversationId: sampleConversationId, sender: .user, content: .plainText("Thanks!"))
-    ]
-
-    static var previews: some View {
-        VStack {
-            ChatHistoryView(
-                messages: sampleMessages,
-                isSending: false,
-                hasSelectedConversation: true
-            )
+    
+    /// Consumes the stream from the ViewModel and updates the local state.
+    /// This function is called by the .task modifier.
+    private func consumeStream() async {
+        guard let triggerID = viewModel.streamingTriggerID,
+              let conversationID = viewModel.selectedConversationID,
+              let lastUserMessage = viewModel.currentChatMessages.last(where: { $0.sender == .user && $0.id == triggerID }),
+              let userQuery = lastUserMessage.content.textContent
+        else {
+            return
         }
-        .frame(height: 500)
-        .background(Color.gray.opacity(0.5))
-        .previewDisplayName("Standard History (Top Aligned)")
-
-        VStack {
-            ChatHistoryView(
-                messages: sampleMessagesAgentFirst,
-                isSending: true,
-                hasSelectedConversation: true
+        
+        logger.debug("Task started for trigger ID: \(triggerID.uuidString)")
+        
+        self.streamingText = ""
+        self.streamingError = nil
+        var finalFullText = ""
+        var finalError: Error?
+        
+        do {
+            let stream = viewModel.streamResponse(
+                conversationID: conversationID,
+                userQuery: userQuery,
+                files: viewModel.attachedFiles
             )
+            
+            for try await token in stream {
+                self.streamingText += token
+                finalFullText = self.streamingText
+            }
+        } catch {
+            logger.error("Stream consumption failed: \(error.localizedDescription)")
+            self.streamingError = error
+            finalError = error
         }
-        .frame(height: 300)
-        .background(Color.gray.opacity(0.5))
-        .previewDisplayName("Agent Thinking (Top Aligned)")
+        
+        viewModel.finalizeStreaming(
+            conversationID: conversationID,
+            fullText: finalFullText,
+            error: finalError
+        )
     }
+    
+    /// A view builder for creating message rows.
+    @ViewBuilder
+    private func messageView(for message: ChatMessage) -> some View {
+        // This Group handles the conditional spacing and dividers between messages.
+        Group {
+            if let index = viewModel.currentChatMessages.firstIndex(where: { $0.id == message.id }), index > 0 {
+                let previousMessage = viewModel.currentChatMessages[index - 1]
+                
+                if message.sender == .user && previousMessage.sender == .agent {
+                    Divider()
+                        .background(dividerColor)
+                        .padding(.vertical, 60)
+                } else {
+                    Spacer().frame(height: 40)
+                }
+            }
+
+            // Render the actual message view.
+            if message.sender == .user {
+                UserMessageContainerView(message: message)
+            } else {
+                AgentMessageContainerView(message: message)
+            }
+        }
+    }
+
+    /// A flexible scroll helper function that scrolls to a given anchor with a specific alignment.
+    private func scrollTo(proxy: ScrollViewProxy, anchor: any Hashable, position: UnitPoint) {
+           DispatchQueue.main.async {
+               withAnimation {
+                   proxy.scrollTo(anchor, anchor: position)
+               }
+           }
+       }
 }

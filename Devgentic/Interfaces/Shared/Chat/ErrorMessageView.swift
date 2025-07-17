@@ -21,7 +21,7 @@ struct ErrorMessageView: View {
                         .foregroundColor(.primary.opacity(0.9))
                 }
                 Text(details)
-                    .font(.body)
+                    .font(.system(size: 15)) // Increased font size for readability
                     // Use .secondary for less emphasis, but ensure readability
                     .foregroundColor(.secondary)
                     .textSelection(.enabled) // Allow copying error details

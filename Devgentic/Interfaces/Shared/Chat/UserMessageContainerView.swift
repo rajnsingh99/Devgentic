@@ -1,7 +1,13 @@
-// Views/Messages/UserMessageContainerView.swift
+//
+//  UserMessageContainerView.swift
+//  Devgentic
+//
+//  Created by Raj Singh
+//
+
 import SwiftUI
-import MarkdownUI // For Markdown rendering
-import Splash     // For CodeBlockView syntax highlighting
+import MarkdownUI
+import Splash     
 
 struct UserMessageContainerView: View {
     let message: ChatMessage
@@ -16,69 +22,60 @@ struct UserMessageContainerView: View {
     private let userForegroundColor = SwiftUI.Color.white
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 0) { // Align to bottom for consistency
-            // Apply styling conditionally based on content type
+        HStack(alignment: .bottom, spacing: 0) {
+            Spacer()
             messageContentWithStyling
-            Spacer() // Push content to the left
         }
-        .frame(maxWidth: .infinity, alignment: .leading) // Ensure HStack fills width, aligns left
-        // Add padding on the right side of the entire HStack to prevent bubble touching edge
-        // .padding(.trailing, 50) // Adjust as needed
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
-    // Applies the correct frame, padding, and background based on content type
+
     @ViewBuilder
     private var messageContentWithStyling: some View {
         switch message.content {
         case .codeBlock(let language, let code):
             CodeBlockView(language: language, code: code)
-                // Code blocks manage their own background/padding via CodeBlockView itself
-                .frame(maxWidth: codeMaxWidth) // Allow code blocks to be wider
-        case .image: // <<< ADD IMAGE CASE
-                    // Style image without bubble, provide padding directly if needed
-                    messageContent
-                       // Add padding *around* the ImageView if ImageView doesn't include enough
-                       // .padding(.vertical, 4)
-                       .frame(maxWidth: maxImageWidth, alignment: .leading) // Use appropriate width
+                .frame(maxWidth: codeMaxWidth)
+        case .image:
+            messageContent
+                       .frame(maxWidth: maxImageWidth, alignment: .trailing)
         case .plainText, .markdownText:
-             // Apply standard user bubble styling for text content
-             messageContent // Get the Text or Markdown view
+             messageContent
                  .padding(bubblePadding)
                  .background(userBackgroundColor)
                  .foregroundColor(userForegroundColor)
                  .cornerRadius(bubbleCornerRadius)
-                 .frame(maxWidth: textMaxWidth, alignment: .leading) // Max width for text bubbles
+                 .frame(maxWidth: textMaxWidth, alignment: .trailing)
         default:
-             // Apply default styling for unsupported content (can match text bubble)
               messageContent
                  .padding(bubblePadding)
-                 .background(Color.orange.opacity(0.2)) // Indicate unsupported?
+                 .background(Color.orange.opacity(0.2))
                  .foregroundColor(userForegroundColor)
                  .cornerRadius(bubbleCornerRadius)
-                 .frame(maxWidth: textMaxWidth, alignment: .leading)
+                 .frame(maxWidth: textMaxWidth, alignment: .trailing)
         }
     }
 
-    // Returns the actual view for the content (without bubble styling)
     @ViewBuilder
     private var messageContent: some View {
         switch message.content {
         case .plainText(let text):
             Text(text)
+                .font(.system(size: 16))
                 .textSelection(.enabled)
         case .markdownText(let text):
-            Markdown(text) // Use MarkdownUI view
+            Markdown(text)
                 .textSelection(.enabled)
-                .markdownTheme(.basic) // Apply a basic theme or customize as needed
+                .markdownTheme(.basic.text {
+                    FontSize(16)
+                })
         case .codeBlock:
-             // Should not be reached here as CodeBlockView is created in messageContentWithStyling
              EmptyView()
-        case .error(let title, let details): // Handle error case here too
+        case .error(let title, let details):
                      ErrorMessageView(title: title, details: details)
-        case .image(let url, let alt): // <<< ADD IMAGE CASE
+        case .image(let url, let alt):
             ImageView(url: url, alt: alt)
         default:
-            // Fallback for unhandled or future content types
             Text("Unsupported content")
                 .foregroundColor(.gray)
                 .italic()

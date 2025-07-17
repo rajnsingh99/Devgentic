@@ -61,7 +61,7 @@ struct QuickAccessContentView: View {
         VStack(spacing: 0) {
             if isExpanded {
                 topBarView
-                chatHistoryAreaView
+//                chatHistoryAreaView
             }
             Spacer(minLength: 0)
             inputAreaViewContainer
@@ -158,22 +158,22 @@ extension QuickAccessContentView {
         .padding(.top, 5)
     }
 
-    @ViewBuilder
-    private var chatHistoryAreaView: some View {
-        ScrollViewReader { scrollProxy in
-             ChatHistoryView( // Assuming ChatHistoryView is defined elsewhere
-                 messages: viewModel.messages,
-                 isSending: viewModel.isSending,
-                 hasSelectedConversation: true
-             )
-             .frame(maxWidth: .infinity, maxHeight: .infinity)
-             .padding(.horizontal)
-             .padding(.top, 5)
-             .onChange(of: viewModel.messages) { _ in scrollToBottom(scrollProxy: scrollProxy) }
-             .onChange(of: viewModel.isSending) { _ in scrollToBottom(scrollProxy: scrollProxy) }
-        }
-        .frame(minHeight: 0, maxHeight: .infinity)
-    }
+//    @ViewBuilder
+//    private var chatHistoryAreaView: some View {
+//        ScrollViewReader { scrollProxy in
+//             ChatHistoryView( // Assuming ChatHistoryView is defined elsewhere
+//                 messages: viewModel.messages,
+//                 isSending: viewModel.isSending,
+//                 hasSelectedConversation: true
+//             )
+//             .frame(maxWidth: .infinity, maxHeight: .infinity)
+//             .padding(.horizontal)
+//             .padding(.top, 5)
+//             .onChange(of: viewModel.messages) { _ in scrollToBottom(scrollProxy: scrollProxy) }
+//             .onChange(of: viewModel.isSending) { _ in scrollToBottom(scrollProxy: scrollProxy) }
+//        }
+//        .frame(minHeight: 0, maxHeight: .infinity)
+//    }
 
     @ViewBuilder
     private var inputAreaViewContainer: some View {

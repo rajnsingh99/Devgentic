@@ -11,7 +11,7 @@ struct CodeBlockView: View {
 
     // --- Theme Configuration ---
     // Using Sundell's Colors theme with a slightly larger font.
-    private let theme: Splash.Theme = .sundellsColors(withFont: Splash.Font(size: 14))
+    private let theme: Splash.Theme = .sundellsColors(withFont: Splash.Font(size: 16)) // Increased font size
 
     // --- Custom Colors for Backgrounds ---
     // Define a slightly darker background for the header.
@@ -51,11 +51,11 @@ struct CodeBlockView: View {
         HStack {
             if let lang = language, !lang.isEmpty {
                 Text(lang.lowercased()) // Display language in lowercase
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 14, weight: .medium, design: .monospaced)) // Increased font size
                     .foregroundColor(headerForegroundColor)
             } else {
                 Text("code") // Fallback if no language is specified
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 14, weight: .medium, design: .monospaced)) // Increased font size
                     .foregroundColor(headerForegroundColor)
             }
             Spacer() // Pushes the copy button to the right
@@ -63,7 +63,7 @@ struct CodeBlockView: View {
                 copyToClipboard()
             } label: {
                 Image(systemName: "doc.on.doc")
-                    .font(.system(size: 12)) // Icon size consistent with text
+                    .font(.system(size: 14)) // Increased icon size
             }
             .buttonStyle(.plain) // Use plain button style for a cleaner look
             .foregroundColor(headerForegroundColor)

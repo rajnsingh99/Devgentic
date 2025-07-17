@@ -137,14 +137,6 @@ struct CustomTextEditor: NSViewRepresentable {
              }
         }
 
-        logger.trace("""
-            updateNSView: Check for binding sync.
-            textWasChangedByInsertionRequest: \(textWasChangedByInsertionRequest),
-            textView.string (first 20): \"\(String(textView.string.prefix(20)))\",
-            self.text (binding, first 20): \"\(String(self.text.prefix(20)))\",
-            isProgrammaticallyChangingText: \(context.coordinator.isProgrammaticallyChangingText)
-            """)
-
         if !textWasChangedByInsertionRequest && textView.string != self.text && !context.coordinator.isProgrammaticallyChangingText {
             logger.debug("NSTextView: Syncing binding IN. TextView had: \"\(textView.string.prefix(50))\", Binding (now target): \"\(self.text.prefix(50))\"")
             
@@ -347,7 +339,6 @@ struct CustomTextEditor: NSViewRepresentable {
             let currentPlainText = textView.string
             if parent.text != currentPlainText {
                 parent.text = currentPlainText
-                parent.logger.debug("Coordinator.textDidChange: User input synced binding OUT. New text: \"\(currentPlainText.prefix(50))\"")
             }
 
             let currentSelectedRange = textView.selectedRange()

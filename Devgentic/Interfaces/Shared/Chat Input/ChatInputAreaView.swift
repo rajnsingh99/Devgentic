@@ -180,8 +180,6 @@ struct ChatInputAreaView: View {
         // This is the correct and robust way to react to changes in an ObservableObject
         // from a SwiftUI view, avoiding the previous compiler errors.
         .onReceive(explorerViewModel.objectWillChange) { _ in
-            // Re-filter the list of files whenever the underlying view model data changes.
-            logger.info("RAJ Updated triggered")
             self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
         }
         // --- FIX ENDS HERE ---

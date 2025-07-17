@@ -1,4 +1,10 @@
-// Views/Messages/AgentMessageContainerView.swift
+//
+//  AgentMessageContainerView.swift
+//  Devgentic
+//
+//  Created by Raj Singh
+//
+
 import SwiftUI
 import MarkdownUI
 import Splash
@@ -7,13 +13,13 @@ struct AgentMessageContainerView: View {
     let message: ChatMessage
 
     private let maxImageWidth: CGFloat = 350
-    private let agentForegroundColor = Color.primary 
+    private let agentForegroundColor = Color.primary
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 0) { // Use .bottom or .top based on preference
-            messageContentWithStyling // Apply styling conditionally
+        HStack(alignment: .bottom, spacing: 0) {
+            messageContentWithStyling 
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -44,19 +50,20 @@ struct AgentMessageContainerView: View {
         switch message.content {
         case .plainText(let text):
             Text(text)
+                .font(.system(size: 16))
                 .textSelection(.enabled)
         case .markdownText(let text):
             Markdown(text)
                 .textSelection(.enabled)
-                .markdownTheme(.basic)
+                .markdownTheme(.basic.text {
+                    FontSize(16)
+                })
         case .codeBlock:
-             EmptyView() // Handled in messageContentWithStyling
-        // --- NEW CASE: Error ---
+             EmptyView()
         case .error(let title, let details):
              ErrorMessageView(title: title, details: details)
-        case .image(let url, let alt): // <<< ADD IMAGE CASE
+        case .image(let url, let alt):
                      ImageView(url: url, alt: alt)
-             // ErrorMessageView handles internal layout and colors
         // ------------------------
         default:
             Text("Unsupported content")
@@ -80,7 +87,7 @@ struct AgentMessageContainerView_Previews: PreviewProvider {
     )
 
     static var previews: some View {
-        VStack(alignment: .trailing, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) { // Changed to .leading for preview
             AgentMessageContainerView(message: plainTextMessage)
             AgentMessageContainerView(message: markdownMessage)
             AgentMessageContainerView(message: codeMessage)

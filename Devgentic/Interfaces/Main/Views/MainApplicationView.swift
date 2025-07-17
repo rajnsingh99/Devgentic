@@ -15,11 +15,6 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
-    
-    // --- FIX: REMOVED the local @StateObject ---
-    // The view will now get the shared instance from the environment,
-    // which is injected by DevgenticApp.
-    // @StateObject private var explorerViewModel = ExplorerViewModel()
 
     // --- View State ---
     @FocusState private var isInputFocused: Bool
@@ -49,73 +44,9 @@ struct MainApplicationView: View {
                     },
                     isConversationSelected: viewModel.selectedConversationID != nil
                 )
-
-                VStack(spacing: 0) {
-                    ScrollViewReader { scrollProxy in
-                        ChatHistoryView(
-                            messages: viewModel.currentChatMessages,
-                            isSending: viewModel.isSending,
-                            hasSelectedConversation: viewModel.selectedConversationID != nil
-                        )
-                        .frame(maxWidth: .infinity)
-                        .onChange(of: viewModel.currentChatMessages) { newMessages in
-                            if viewModel.selectedConversationID != nil {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                    scrollToTop(scrollProxy: scrollProxy, messages: newMessages, isSending: viewModel.isSending)
-                                }
-                            }
-                        }
-                        .onChange(of: viewModel.isSending) { isNowSending in
-                             if viewModel.selectedConversationID != nil {
-                                 scrollToTop(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: isNowSending)
-                             }
-                        }
-                        .onChange(of: viewModel.selectedConversationID) { newID in
-                            if newID != nil {
-                                if viewModel.isUserMessagesOnlyFilterActive {
-                                    viewModel.isUserMessagesOnlyFilterActive = false
-                                    logger.info("Reset user messages filter due to conversation change.")
-                                }
-                                scrollToTop(scrollProxy: scrollProxy, messages: viewModel.currentChatMessages, isSending: viewModel.isSending, animated: false)
-                                if !viewModel.showSettings && !viewModel.showPromptLibrary {
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                        isInputFocused = true
-                                    }
-                                }
-                            } else {
-                                isInputFocused = false
-                            }
-                        }
-                    }
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .overlay {
-                        if viewModel.selectedConversationID == nil {
-                            Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
-                                .font(.title3)
-                                .foregroundColor(.gray.opacity(0.7))
-                        }
-                    }
-
-                    ChatInputAreaView(
-                        userInput: $viewModel.userInput,
-                        showContextArea: $viewModel.showContextArea,
-                        activeContextFilePath: $viewModel.activeContextFilePath,
-                        isSending: viewModel.isSending,
-                        showSettings: viewModel.showSettings,
-                        isInputFocused: $isInputFocused,
-                        onSendMessage: viewModel.sendMessage,
-                        onToggleContext: {
-                            withAnimation { viewModel.toggleContextArea() }
-                        }
-                    )
-                    .padding(.horizontal)
-                    .padding(.top, 4)
-                    .padding(.bottom, 8)
-                    .frame(maxWidth: 1050)
-                    .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(VisualEffectBlur(material: .windowBackground))
+                
+                // The main chat area, now simplified.
+                chatArea
             }
             .padding(.leading, totalSidebarWidth)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
@@ -125,8 +56,8 @@ struct MainApplicationView: View {
                 isSidebarVisible: $isSidebarVisible,
                 sidebarWidth: $currentSidebarPaneWidth
             )
-                .frame(width: totalSidebarWidth)
-                .zIndex(1)
+            .frame(width: totalSidebarWidth)
+            .zIndex(1)
 
             if viewModel.showPromptLibrary {
                 PromptLibraryPanelView(showPromptLibrary: $viewModel.showPromptLibrary)
@@ -145,7 +76,6 @@ struct MainApplicationView: View {
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
         }
-        // --- FIX: REMOVED the redundant .environmentObject() modifier ---
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {
@@ -171,39 +101,71 @@ struct MainApplicationView: View {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
+        .onChange(of: viewModel.selectedConversationID) { newID in
+             if newID != nil {
+                 if viewModel.isUserMessagesOnlyFilterActive {
+                     viewModel.isUserMessagesOnlyFilterActive = false
+                     logger.info("Reset user messages filter due to conversation change.")
+                 }
+                 if !viewModel.showSettings && !viewModel.showPromptLibrary {
+                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                         isInputFocused = true
+                     }
+                 }
+             } else {
+                 isInputFocused = false
+             }
+         }
     }
+    
+    // MARK: - Subviews
 
-    private func scrollToTop(scrollProxy: ScrollViewProxy, messages: [ChatMessage], isSending: Bool, animated: Bool = true) {
-         let targetID: AnyHashable?
-         if isSending && !viewModel.isUserMessagesOnlyFilterActive {
-            targetID = "thinkingIndicator"
-         } else if let lastMessageId = messages.last?.id {
-             targetID = lastMessageId
-         } else {
-             targetID = nil
-         }
-         guard let finalID = targetID else { return }
-         logger.trace("Scrolling to ID \(String(describing: finalID)) with anchor: .top")
-         if animated {
-             withAnimation(.easeOut(duration: 0.2)) {
-                 scrollProxy.scrollTo(finalID, anchor: .top)
-             }
-         } else {
-             DispatchQueue.main.async {
-                 scrollProxy.scrollTo(finalID, anchor: .top)
-             }
-         }
-     }
+    @ViewBuilder
+    private var chatArea: some View {
+        VStack(spacing: 0) {
+            // FIX: ChatHistoryView is now self-contained and gets its data
+            // from the environment object. No parameters are needed.
+            // The scrolling logic is also handled inside ChatHistoryView.
+            ChatHistoryView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay {
+                    if viewModel.selectedConversationID == nil {
+                        Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
+                            .font(.title3)
+                            .foregroundColor(.gray.opacity(0.7))
+                    }
+                }
+
+            ChatInputAreaView(
+                userInput: $viewModel.userInput,
+                showContextArea: $viewModel.showContextArea,
+                activeContextFilePath: $viewModel.activeContextFilePath,
+                isSending: viewModel.isSending,
+                showSettings: viewModel.showSettings,
+                isInputFocused: $isInputFocused,
+                onSendMessage: viewModel.sendMessage,
+                onToggleContext: {
+                    withAnimation { viewModel.toggleContextArea() }
+                }
+            )
+            .padding(.horizontal)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
+            .frame(maxWidth: 1050)
+            .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(VisualEffectBlur(material: .windowBackground))
+    }
 }
 
 struct MainApplicationView_ZStack_Previews: PreviewProvider {
     static var previews: some View {
-        // Create a mock main view model which now contains the explorer view model
         let mockMainViewModel = MainApplicationViewModel()
         
         MainApplicationView()
             .environmentObject(mockMainViewModel)
-            .environmentObject(mockMainViewModel.explorerViewModel) // Inject the nested one
+            .environmentObject(mockMainViewModel.explorerViewModel)
             .frame(width: 1000, height: 700)
             .previewDisplayName("Main View with Resizable Sidebar")
     }
