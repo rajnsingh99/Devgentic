@@ -42,11 +42,16 @@ class MainApplicationViewModel: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID? {
         didSet {
-            // When conversation changes, cancel any ongoing stream.
             if oldValue != selectedConversationID {
                 cancelStreaming()
+                Task {
+                    await loadConversation()
+                }
+            } else if selectedConversationID != nil {
+                Task {
+                    await loadConversation()
+                }
             }
-            refreshChatMessages()
             loadBackendStateForSelectedConversation()
         }
     }
@@ -64,9 +69,22 @@ class MainApplicationViewModel: ObservableObject {
     @Published var voiceInputState: VoiceInputState = .idle
     @Published var selectedBackend: BackendType = .none
     
-    // This property will now act as a "trigger" for the View's .task modifier.
+    @Published var isInitiallyLoadingConversation = false
+    
+    // --- Pagination State ---
+    @Published var isLoadingPage = false
+    @Published var canLoadMorePages = true
+    private let initialPageSize = 20
+    private let subsequentPageSize = 10
+    
+    
     @Published var streamingTriggerID: UUID? = nil
     private var streamingTask: Task<Void, Never>?
+
+    // --- PHASE 1 CHANGE: State for Code Viewer Panel ---
+    @Published var isCodeViewerVisible: Bool = false
+    @Published var codeViewerContent: (language: String?, code: String)? = nil
+    @Published var codeViewerWidth: CGFloat = 600 // Default width
 
     var selectedAgentID: UUID? {
         get { agentStore.selectedAgentID }
@@ -141,10 +159,30 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     private func setupBindings() {
-        // ... (existing bindings are fine) ...
+        // ...
     }
     
-    // MARK: - Message Sending Logic (Refactored for Streaming)
+    // MARK: - Code Viewer Panel Control
+    
+    /// --- PHASE 1 CHANGE: Functions to control the code viewer ---
+    func showCodeInViewer(language: String?, code: String) {
+        codeViewerContent = (language, code)
+        withAnimation(.spring()) {
+            isCodeViewerVisible = true
+        }
+    }
+
+    func hideCodeViewer() {
+        withAnimation(.spring()) {
+            isCodeViewerVisible = false
+        }
+        // Delay clearing the content to allow for a smooth slide-out animation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            self.codeViewerContent = nil
+        }
+    }
+
+    // MARK: - Message Sending Logic
     
     func sendMessage(attributedString: NSAttributedString) {
         if showSettings { showSettings = false }
@@ -180,13 +218,11 @@ class MainApplicationViewModel: ObservableObject {
         Task {
             await persistenceService.addMessage(userMessage, to: targetConversationEntity)
         }
-        currentChatMessages.append(userMessage)
+        currentChatMessages.insert(userMessage, at: 0)
         
-        // This is the crucial change. We set a unique ID to trigger the .task in the View.
         self.streamingTriggerID = userMessage.id
     }
     
-    /// This function is now called by the View's task to get the data stream.
     func streamResponse(conversationID: UUID, userQuery: String, files: [FileSystemItem]) -> AsyncThrowingStream<String, Error> {
         let context = TraceContext()
         logger.info("🚀 [streamResponse] Providing stream to consumer. traceID: \(context.traceID)")
@@ -198,7 +234,6 @@ class MainApplicationViewModel: ObservableObject {
         )
     }
 
-    /// This function is called by the View's task when streaming is complete.
     func finalizeStreaming(conversationID: UUID, fullText: String, error: Error?) {
         let finalContent: MessageContent = if let error = error {
             .error(title: "Streaming Error", details: error.localizedDescription)
@@ -217,7 +252,7 @@ class MainApplicationViewModel: ObservableObject {
                 await persistenceService.addMessage(finalMessage, to: targetEntity)
             }
         }
-        currentChatMessages.append(finalMessage)
+        currentChatMessages.insert(finalMessage, at: 0)
         
         resetSendingState()
     }
@@ -226,7 +261,7 @@ class MainApplicationViewModel: ObservableObject {
         self.userInput = ""
         self.clearAttachedFiles()
         self.isSending = false
-        self.streamingTriggerID = nil // Reset the trigger
+        self.streamingTriggerID = nil
         logger.info("✅ [Request Finished] Sending state has been reset.")
     }
 
@@ -238,7 +273,6 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) -> ChatMessage {
-        // ... (this function remains the same) ...
         var attachedTextFiles: [AttachedTextFile] = []
         var attachedImageFiles: [AttachedImageFile] = []
 
@@ -275,26 +309,71 @@ class MainApplicationViewModel: ObservableObject {
         )
     }
     
-    // MARK: - Other methods (unchanged)
+    // MARK: - Paginated Message Loading
     
-    private func refreshChatMessages() {
-        guard let selectedID = selectedConversationID,
-              let conversationEntity = persistenceService.getConversation(withId: selectedID) else {
+    func loadConversation() async {
+        guard let selectedID = selectedConversationID else {
             currentChatMessages = []
             return
         }
         
-        let messagesToDisplay = (conversationEntity.messages as? Set<ChatMessageEntity> ?? [])
-            .map { $0.toChatMessageStruct() }
-            .sorted { $0.timestamp < $1.timestamp }
-
-        currentChatMessages = isUserMessagesOnlyFilterActive ? messagesToDisplay.filter { $0.sender == .user } : messagesToDisplay
-        logger.debug("Chat messages refreshed for conversation \(selectedID.uuidString). Count: \(self.currentChatMessages.count)")
+        logger.debug("Loading initial page for conversation \(selectedID.uuidString).")
+        
+        isInitiallyLoadingConversation = true
+        currentChatMessages = []
+        canLoadMorePages = true
+        
+        let messages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
+        
+        self.currentChatMessages = messages
+        if messages.count < initialPageSize {
+            self.canLoadMorePages = false
+        }
+        
+        if isUserMessagesOnlyFilterActive {
+            applyUserMessagesFilter()
+        }
+        
+        self.isInitiallyLoadingConversation = false
     }
+
+    func loadMoreMessages() async {
+        guard !isLoadingPage, canLoadMorePages, let selectedID = selectedConversationID else {
+            return
+        }
+        
+        isLoadingPage = true
+        
+        let offset = currentChatMessages.count
+        logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString).")
+        
+        let olderMessages = await persistenceService.fetchMessages(for: selectedID, offset: offset, limit: subsequentPageSize)
+        
+        if olderMessages.isEmpty {
+            canLoadMorePages = false
+        } else {
+            self.currentChatMessages.append(contentsOf: olderMessages)
+            
+            if isUserMessagesOnlyFilterActive {
+                applyUserMessagesFilter()
+            }
+        }
+        
+        isLoadingPage = false
+    }
+
     
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
-        refreshChatMessages()
+        Task {
+            await loadConversation()
+        }
+    }
+    
+    private func applyUserMessagesFilter() {
+        if isUserMessagesOnlyFilterActive {
+            currentChatMessages = currentChatMessages.filter { $0.sender == .user }
+        }
     }
     
     func startNewConversation() {

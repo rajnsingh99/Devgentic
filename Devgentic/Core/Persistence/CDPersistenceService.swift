@@ -16,6 +16,10 @@ protocol CoreDataServiceProtocol {
     func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async
     func getConversation(withId id: UUID) -> ConversationEntity?
+    
+    // --- PHASE 1 CHANGE: Made fetchMessages asynchronous ---
+    func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage]
+    
     func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
     func deleteConversation(with id: UUID)
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
@@ -103,6 +107,48 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         } catch {
             logger.error("Failed to fetch conversation with ID \(id.uuidString): \(error.localizedDescription)")
             return nil
+        }
+    }
+    
+    /// --- PHASE 1 CHANGE: Implemented asynchronous fetching ---
+    /// Fetches messages for a given conversation with pagination.
+    /// This function is now `async` and performs the Core Data fetch on the context's private queue.
+    func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {
+        // Use `perform` to ensure Core Data operations happen on the correct queue,
+        // preventing any potential blocking of the main thread.
+        return await viewContext.perform {
+            let request: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
+            
+            request.predicate = NSPredicate(format: "conversationId == %@", conversationId as CVarArg)
+            request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
+            request.fetchLimit = limit
+            request.fetchOffset = offset
+            
+            do {
+                let entities = try self.viewContext.fetch(request)
+                let chatMessages = entities.map { $0.toChatMessageStruct() }
+
+                self.logger.debug("Fetched \(chatMessages.count) messages for conversation \(conversationId.uuidString) (offset: \(offset), limit: \(limit)):")
+                for message in chatMessages {
+                    switch message.content {
+                    case .plainText(let text):
+                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: PlainText, Content: \"\(text)\"")
+                    case .markdownText(let text):
+                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: MarkdownText, Content: \"\(text)\"")
+                    case .codeBlock(let language, let code):
+                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: CodeBlock, Language: \(language ?? "N/A"), Code: \"\(code)\"")
+                    case .error(let title, let details):
+                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: Error, Title: \(title ?? "N/A"), Details: \"\(details)\"")
+                    case .image(let url, _):
+                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: Image, URL: \(url?.absoluteString ?? "N/A")")
+                    }
+                }
+                
+                return chatMessages
+            } catch {
+                self.logger.error("Failed to fetch messages for conversation \(conversationId.uuidString) with offset \(offset) and limit \(limit): \(error.localizedDescription)")
+                return []
+            }
         }
     }
 
@@ -227,11 +273,9 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     
     // MARK: - RAG Indexing
     
-    /// Chunks, embeds, and indexes the textual content of a message for RAG.
     private func indexMessageForRAG(_ message: ChatMessage) async {
         var textToProcess = ""
         
-        // Aggregate all text content from the message
         if let textContent = message.content.textContent {
             textToProcess += textContent + "\n"
         }
@@ -245,14 +289,12 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
         
         guard !textToProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return // No text to index
+            return
         }
         
-        // 1. Chunk the text
         let chunks = textChunker.chunk(text: textToProcess)
         var chunkEntities: [ChunkEntity] = []
         
-        // 2. Embed and create entities for each chunk
         for chunkText in chunks {
             if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
                 let chunkEntity = ChunkEntity(
@@ -265,7 +307,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             }
         }
         
-        // 3. Save to vector store
         if !chunkEntities.isEmpty {
             vectorStoreService.add(chunks: chunkEntities)
             logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString).")
@@ -524,11 +565,9 @@ extension ChatMessageEntity {
             break
         }
         
-        // --- Load Attached Text Files ---
         let textFileEntities = self.attachedTextFiles as? Set<AttachedTextFileEntity> ?? []
         let attachedTextFiles = textFileEntities.compactMap { $0.toAttachedTextFileStruct() }
 
-        // --- Load Attached Image Files ---
         let imageFileEntities = self.attachedImageFiles as? Set<AttachedImageFileEntity> ?? []
         let attachedImageFiles = imageFileEntities.compactMap { $0.toAttachedImageFileStruct() }
         

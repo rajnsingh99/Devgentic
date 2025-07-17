@@ -31,24 +31,26 @@ struct MainApplicationView: View {
     // MARK: - Body
     var body: some View {
         ZStack(alignment: .leading) {
-            VStack(spacing: 0) {
-                ChatHeaderView(
-                    chatTitle: viewModel.currentConversationTitle,
-                    isFilterActive: viewModel.isUserMessagesOnlyFilterActive,
-                    onEyeButtonTapped: {
-                        viewModel.toggleUserMessagesFilter()
-                        logger.info("Header eye button tapped. Filter active: \(viewModel.isUserMessagesOnlyFilterActive)")
-                    },
-                    onTransferButtonTapped: {
-                        viewModel.transferSelectedConversationToOverlay()
-                    },
-                    isConversationSelected: viewModel.selectedConversationID != nil
-                )
-                
-                // The main chat area, now simplified.
-                chatArea
+            ZStack {
+                VStack(spacing: 0) {
+                    ChatHeaderView(
+                        chatTitle: viewModel.currentConversationTitle,
+                        isFilterActive: viewModel.isUserMessagesOnlyFilterActive,
+                        onEyeButtonTapped: {
+                            viewModel.toggleUserMessagesFilter()
+                            logger.info("Header eye button tapped. Filter active: \(viewModel.isUserMessagesOnlyFilterActive)")
+                        },
+                        onTransferButtonTapped: {
+                            viewModel.transferSelectedConversationToOverlay()
+                        },
+                        isConversationSelected: viewModel.selectedConversationID != nil
+                    )
+                    
+                    chatArea
+                }
             }
             .padding(.leading, totalSidebarWidth)
+            .frame(maxWidth: .infinity)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
             
@@ -63,6 +65,12 @@ struct MainApplicationView: View {
                 PromptLibraryPanelView(showPromptLibrary: $viewModel.showPromptLibrary)
                     .transition(.scale.combined(with: .opacity))
                     .zIndex(3)
+            }
+
+            // --- PHASE 3 CHANGE: Add the Code Viewer Panel as an overlay ---
+            if viewModel.isCodeViewerVisible {
+                CodeViewerPanelView()
+                    .zIndex(2) // Ensure it draws above the main content but below the prompt library
             }
 
             Button(action: {
@@ -123,9 +131,6 @@ struct MainApplicationView: View {
     @ViewBuilder
     private var chatArea: some View {
         VStack(spacing: 0) {
-            // FIX: ChatHistoryView is now self-contained and gets its data
-            // from the environment object. No parameters are needed.
-            // The scrolling logic is also handled inside ChatHistoryView.
             ChatHistoryView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay {
@@ -151,22 +156,10 @@ struct MainApplicationView: View {
             .padding(.horizontal)
             .padding(.top, 4)
             .padding(.bottom, 8)
-            .frame(maxWidth: 1050)
             .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: 960)
+        .frame(maxHeight: .infinity)
         .background(VisualEffectBlur(material: .windowBackground))
-    }
-}
-
-struct MainApplicationView_ZStack_Previews: PreviewProvider {
-    static var previews: some View {
-        let mockMainViewModel = MainApplicationViewModel()
-        
-        MainApplicationView()
-            .environmentObject(mockMainViewModel)
-            .environmentObject(mockMainViewModel.explorerViewModel)
-            .frame(width: 1000, height: 700)
-            .previewDisplayName("Main View with Resizable Sidebar")
     }
 }
