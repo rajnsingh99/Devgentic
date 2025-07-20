@@ -160,6 +160,6 @@ struct MainApplicationView: View {
         }
         .frame(maxWidth: 960)
         .frame(maxHeight: .infinity)
-        .background(VisualEffectBlur(material: .windowBackground))
+//        .background(VisualEffectBlur(material: .windowBackground))
     }
 }

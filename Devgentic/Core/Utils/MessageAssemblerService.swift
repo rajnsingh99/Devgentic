@@ -138,7 +138,7 @@ struct MessageAssemblerService {
                     let fileType = fileProcessorService.isImageFile(mimeType: mimeType, url: fileURL) ? "Image" : "Binary"
                     reason = "\(fileType) file processing for the \(backend.rawValue) backend is not yet implemented. The file cannot be sent."
                     messageParts.append(.file(.unprocessable(fileName: fileName, reason: reason, mimeType: mimeType)))
-                    warnings.append("File Not Processed: '\(fileName)' (\(mimeType ?? "unknown")) could not be prepared for the \(backend.rawValue) backend. Reason: \(reason)")
+                    warnings.append("File Not Processed: '\(fileName)' (\(mimeType)) could not be prepared for the \(backend.rawValue) backend. Reason: \(reason)")
                     logger.warning("File '\(fileName)' (\(mimeType ?? "unknown")) marked unprocessable for \(backend.rawValue) backend: \(reason)")
                 }
                 

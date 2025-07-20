@@ -81,10 +81,9 @@ class MainApplicationViewModel: ObservableObject {
     @Published var streamingTriggerID: UUID? = nil
     private var streamingTask: Task<Void, Never>?
 
-    // --- PHASE 1 CHANGE: State for Code Viewer Panel ---
+    // --- State for Code Viewer Panel ---
     @Published var isCodeViewerVisible: Bool = false
     @Published var codeViewerContent: (language: String?, code: String)? = nil
-    @Published var codeViewerWidth: CGFloat = 600 // Default width
 
     var selectedAgentID: UUID? {
         get { agentStore.selectedAgentID }
@@ -164,21 +163,18 @@ class MainApplicationViewModel: ObservableObject {
     
     // MARK: - Code Viewer Panel Control
     
-    /// --- PHASE 1 CHANGE: Functions to control the code viewer ---
+    /// --- Functions to control the code viewer ---
     func showCodeInViewer(language: String?, code: String) {
         codeViewerContent = (language, code)
-        withAnimation(.spring()) {
+        withAnimation(.snappy()) {
             isCodeViewerVisible = true
         }
     }
 
     func hideCodeViewer() {
-        withAnimation(.spring()) {
+        withAnimation(.easeInOut(duration: 0.3)) {
             isCodeViewerVisible = false
-        }
-        // Delay clearing the content to allow for a smooth slide-out animation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            self.codeViewerContent = nil
+            codeViewerContent = nil
         }
     }
 
@@ -317,7 +313,7 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
         
-        logger.debug("Loading initial page for conversation \(selectedID.uuidString).")
+        logger.debug("Loading initial page for conversation \(selectedID.uuidString, privacy: .public).")
         
         isInitiallyLoadingConversation = true
         currentChatMessages = []
@@ -326,6 +322,7 @@ class MainApplicationViewModel: ObservableObject {
         let messages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
         
         self.currentChatMessages = messages
+
         if messages.count < initialPageSize {
             self.canLoadMorePages = false
         }
@@ -345,7 +342,7 @@ class MainApplicationViewModel: ObservableObject {
         isLoadingPage = true
         
         let offset = currentChatMessages.count
-        logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString).")
+        logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString, privacy: .public).")
         
         let olderMessages = await persistenceService.fetchMessages(for: selectedID, offset: offset, limit: subsequentPageSize)
         
@@ -423,7 +420,7 @@ class MainApplicationViewModel: ObservableObject {
             self.agentStore.selectedAgentID = nil
             self.llmIntegrationStore.selectedIntegrationID = nil
         }
-        logger.info("Loaded backend state for conversation \(conversationID.uuidString): \(backendType.rawValue)")
+        logger.info("Loaded backend state for conversation \(conversationID.uuidString, privacy: .public): \(backendType.rawValue)")
     }
 
     private func updateBackendForCurrentConversation() {

@@ -7,8 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		352C81DE2DC54CF70029EA59 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = 352C81DD2DC54CF70029EA59 /* Markdown */; };
-		35A144B52DC50543005D476C /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = 35A144B42DC50543005D476C /* MarkdownUI */; };
+		35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 35243D362E26F08800602933 /* CodeEditSourceEditor */; settings = {ATTRIBUTES = (Required, ); }; };
+		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
+		35CDA7552E2A619500564AB7 /* Down in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7542E2A619500564AB7 /* Down */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
 		35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 35DB4C1F2DC53B9D002B3BF7 /* Splash */; };
@@ -62,10 +63,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				352C81DE2DC54CF70029EA59 /* Markdown in Frameworks */,
+				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
-				35A144B52DC50543005D476C /* MarkdownUI in Frameworks */,
+				35CDA7552E2A619500564AB7 /* Down in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
+				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
 				35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -144,11 +146,12 @@
 			);
 			name = devgentic;
 			packageProductDependencies = (
-				35A144B42DC50543005D476C /* MarkdownUI */,
 				35DB4C1F2DC53B9D002B3BF7 /* Splash */,
-				352C81DD2DC54CF70029EA59 /* Markdown */,
 				35CDCB0E2E2396B700A7B51B /* HotKey */,
 				35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */,
+				35243D362E26F08800602933 /* CodeEditSourceEditor */,
+				35CDA7422E2A2A3400564AB7 /* Highlightr */,
+				35CDA7542E2A619500564AB7 /* Down */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -233,11 +236,12 @@
 			mainGroup = 35FCBA7F2DB5526B00D39123;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */,
 				35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */,
-				352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */,
 				35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */,
 				35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */,
+				35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
+				35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */,
+				35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -438,6 +442,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = devgentic/devgentic.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -465,6 +470,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = devgentic/devgentic.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -592,20 +598,12 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
+		35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/apple/swift-markdown.git";
+			repositoryURL = "https://github.com/CodeEditApp/CodeEditSourceEditor";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.6.0;
-			};
-		};
-		35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/gonzalezreal/MarkdownUI.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.4.1;
+				minimumVersion = 0.14.1;
 			};
 		};
 		35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */ = {
@@ -614,6 +612,22 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 0.16.0;
+			};
+		};
+		35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/raspu/Highlightr.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.3.0;
+			};
+		};
+		35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/johnxnguyen/Down";
+			requirement = {
+				branch = master;
+				kind = branch;
 			};
 		};
 		35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */ = {
@@ -635,15 +649,20 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		352C81DD2DC54CF70029EA59 /* Markdown */ = {
+		35243D362E26F08800602933 /* CodeEditSourceEditor */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 352C81DC2DC54CF70029EA59 /* XCRemoteSwiftPackageReference "swift-markdown" */;
-			productName = Markdown;
+			package = 35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */;
+			productName = CodeEditSourceEditor;
 		};
-		35A144B42DC50543005D476C /* MarkdownUI */ = {
+		35CDA7422E2A2A3400564AB7 /* Highlightr */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 35A144B32DC50543005D476C /* XCRemoteSwiftPackageReference "MarkdownUI" */;
-			productName = MarkdownUI;
+			package = 35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */;
+			productName = Highlightr;
+		};
+		35CDA7542E2A619500564AB7 /* Down */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */;
+			productName = Down;
 		};
 		35CDCB0E2E2396B700A7B51B /* HotKey */ = {
 			isa = XCSwiftPackageProductDependency;

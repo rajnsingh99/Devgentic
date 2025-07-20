@@ -7,7 +7,36 @@
 
 import Foundation
 import os
-import Markdown
+// import Markdown // REMOVED: This was causing the conflict.
+
+// ---
+// MARK: - Reason for Disabling Markdown Parsing (2025-07-18)
+//
+// The 'apple/swift-markdown' library was removed from this file and the project
+// because it was causing a critical build failure.
+//
+// **Problem:**
+// The project uses another Markdown library, 'Down', which is required by other
+// dependencies. Both 'Down' and 'apple/swift-markdown' include their own compiled
+// version of the C library 'cmark'. This resulted in over 100 "duplicate symbol"
+// linker errors during the build process, as the linker found two definitions for
+// every cmark function.
+//
+// **Temporary Solution:**
+// To resolve the build failure, all code related to 'apple/swift-markdown' has been
+// removed from this parser. The `parseTextToMessageContent` function has been modified
+// to bypass all Markdown processing and treat the agent's entire response as a
+// single block of plain text.
+//
+// **Removed Code:**
+// - `import Markdown`
+// - The entire implementation of `parseTextToMessageContent` which used `Document(parsing:)`.
+// - All private helper functions: `processMarkdownBlock`, `processImageNode`, and `appendAsMarkdown`.
+//
+// **Next Steps:**
+// The long-term solution is to re-implement the parsing logic in `parseTextToMessageContent`
+// using the 'Down' library to restore rich Markdown rendering.
+// ---
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentResponseParser")
 
@@ -49,93 +78,23 @@ struct AgentResponseParser {
         }
     }
 
-    // --- MODIFIED: This logic is now copied from the more advanced AgentResponseHandler ---
-    /// Parses an agent's response string (potentially Markdown) into an array of `MessageContent` blocks.
+    /// Parses an agent's response string into an array of `MessageContent` blocks.
     /// - Parameter responseText: The text response from the agent.
     /// - Returns: An array of `MessageContent` objects.
     func parseTextToMessageContent(_ responseText: String) -> [MessageContent] {
-        logger.debug("Parsing agent response string (length: \(responseText.count)) into MessageContent blocks...")
-        var contentBlocks: [MessageContent] = []
-        let document = Document(parsing: responseText)
-
-        for block in document.children {
-            processMarkdownBlock(block, into: &contentBlocks)
-        }
-
-        // If Markdown parsing results in no blocks, but the text isn't empty,
-        // treat the whole response as a single plain text block.
-        if contentBlocks.isEmpty && !responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-             logger.warning("Markdown parsing resulted in no content blocks for non-empty response. Returning original text as plain.")
-             return [.plainText(responseText)]
-         }
-
-        logger.info("Parsed response into \(contentBlocks.count) MessageContent blocks.")
-        return contentBlocks
-    }
-
-    private func processMarkdownBlock(_ block: Markup, into contentBlocks: inout [MessageContent]) {
-        switch block {
-        case let codeBlock as CodeBlock:
-             let codeContent = codeBlock.code.trimmingCharacters(in: .whitespacesAndNewlines)
-             if !codeContent.isEmpty {
-                 logger.trace("Found Code Block, language: \(codeBlock.language ?? "nil")")
-                 contentBlocks.append(.codeBlock(language: codeBlock.language, code: codeContent))
-             } else { logger.trace("Skipping empty Code Block.") }
-
-        case let paragraph as Paragraph:
-            // Check if the paragraph solely contains an image
-            let childrenArray = Array(paragraph.children)
-            if childrenArray.count == 1, let imageNode = childrenArray.first as? Markdown.Image {
-                logger.trace("Found Paragraph containing only an Image.")
-                processImageNode(imageNode, into: &contentBlocks)
-            } else {
-                // Otherwise, treat as general markdown content
-                appendAsMarkdown(paragraph, into: &contentBlocks)
-            }
-
-        case let imageNode as Markdown.Image: // Direct image node (less common at top level)
-             logger.trace("Found direct Image Node.")
-             processImageNode(imageNode, into: &contentBlocks)
-
-        case let blockquote as BlockQuote:
-             let quoteContent = blockquote.format().trimmingCharacters(in: .whitespacesAndNewlines)
-             if !quoteContent.isEmpty {
-                 logger.trace("Found Block Quote.")
-                 contentBlocks.append(.markdownText(quoteContent))
-             } else { logger.trace("Skipping empty Block Quote.") }
+        logger.debug("Temporarily disabling Markdown parsing. Returning content as plain text.")
         
-        // For other types like ThematicBreak, Heading, List, etc., format them as markdown.
-        default:
-            appendAsMarkdown(block, into: &contentBlocks)
+        // --- MODIFIED: Bypassing all Markdown logic ---
+        // If the text is not empty, return it as a single plainText block.
+        if !responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return [.plainText(responseText)]
         }
+        
+        // Otherwise, return an empty array.
+        return []
     }
-
-    private func processImageNode(_ imageNode: Markdown.Image, into contentBlocks: inout [MessageContent]) {
-        let urlString = imageNode.source
-        let altText = imageNode.plainText // plainText usually extracts alt text
-
-        if let sUrl = urlString, !sUrl.isEmpty {
-            let url = URL(string: sUrl) // URL(string:) can return nil if sUrl is invalid
-            logger.trace("Found Image Node, url: \(sUrl), alt: \(altText)")
-            contentBlocks.append(.image(url: url, alt: altText))
-        } else {
-            logger.warning("Skipping Image Node with missing or empty source URL.")
-        }
-    }
-
-    private func appendAsMarkdown(_ block: Markup, into contentBlocks: inout [MessageContent]) {
-         // Format the entire block as a Markdown string
-         let markdownContent = block.format().trimmingCharacters(in: .whitespacesAndNewlines)
-         if !markdownContent.isEmpty {
-             logger.trace("Found block of type '\(type(of: block))', treating as Markdown content.")
-             // Check if the last block was also markdown, if so, append. Otherwise, new block.
-             if let lastContent = contentBlocks.last, case .markdownText(let existingText) = lastContent {
-                 contentBlocks[contentBlocks.count - 1] = .markdownText(existingText + "\n\n" + markdownContent)
-             } else {
-                 contentBlocks.append(.markdownText(markdownContent))
-             }
-         } else {
-             logger.trace("Skipping empty formatted block of type '\(type(of: block))'.")
-         }
-     }
+    
+    // --- REMOVED ---
+    // All private helper functions that used the Markdown library have been removed
+    // to eliminate the dependency (`processMarkdownBlock`, `processImageNode`, etc.)
 }

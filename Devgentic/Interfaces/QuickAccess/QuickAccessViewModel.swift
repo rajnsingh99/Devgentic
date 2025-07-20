@@ -3,7 +3,7 @@ import SwiftUI
 import Combine
 import CoreData
 import os
-import Markdown
+// import Markdown // REMOVED: This was removed to fix a build conflict. See AgentResponseParser.swift for details.
 
 @MainActor
 class QuickAccessViewModel: ObservableObject {
@@ -19,6 +19,7 @@ class QuickAccessViewModel: ObservableObject {
     // MARK: - Properties
     private var targetConversationId: UUID? // The ID of the current Quick Access conversation.
     private var cancellables = Set<AnyCancellable>()
+    private let agentParser = AgentResponseParser()
 
     // MARK: - Initialization
     init() {
@@ -80,12 +81,10 @@ class QuickAccessViewModel: ObservableObject {
 
         let userMessage = ChatMessage(conversationId: originalConversationId, sender: .user, content: .plainText(query.trimmingCharacters(in: .whitespacesAndNewlines)))
         
-        // Add the message directly to Core Data. The notification observer will handle the UI update.
         guard let conversationEntity = persistenceService.getConversation(withId: originalConversationId) else {
             logger.error("Cannot send message, conversation entity \(originalConversationId.uuidString) not found.")
             return
         }
-//        persistenceService.addMessage(userMessage, to: conversationEntity)
 
         isSending = true
 
@@ -102,8 +101,8 @@ class QuickAccessViewModel: ObservableObject {
 
                 let payload: [String: Any] = [ "model": modelName, "prompt": query, "stream": false ]
                 let responseData = try await self.aiConnect.postToLocalServer(endpoint: "/api/generate", payload: payload)
-                let responseText = self.parseOllamaResponseData(data: responseData)
-                let parsedContents = self.parseAgentResponseString(responseText)
+                let responseText = try self.agentParser.parse(data: responseData)
+                let parsedContents = self.agentParser.parseTextToMessageContent(responseText)
 
                 for content in parsedContents {
                     resultingAgentMessages.append(ChatMessage(conversationId: originalConversationId, sender: .agent, content: content))
@@ -114,11 +113,6 @@ class QuickAccessViewModel: ObservableObject {
                 resultingAgentMessages.append(ChatMessage(conversationId: originalConversationId, sender: .agent, content: errorMessageContent))
             }
             
-            // Handle the response.
-//            if let targetEntity = persistenceService.getConversation(withId: originalConversationId) {
-//                persistenceService.addMessages(resultingAgentMessages, to: targetEntity)
-//            }
-            
             self.isSending = false
         }
     }
@@ -127,19 +121,15 @@ class QuickAccessViewModel: ObservableObject {
     func startNewChatSession() {
         logger.info("Starting new Quick Access chat session request.")
         
-        // Get the current QA conversation
         let currentQAConversation = getOrCreateQuickAccessConversation()
         
-        // If it's not empty, create a new one.
         if !(currentQAConversation.messages?.allObjects.isEmpty ?? true) {
             let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat")
             persistenceService.addConversation(from: newConversation)
-            // Store the new ID as the dedicated QA chat ID.
             UserDefaults.standard.set(newConversation.id.uuidString, forKey: GlobalConstants.quickAccessOverlayConversationId)
             self.targetConversationId = newConversation.id
             self.messages = []
         } else {
-            // If it is empty, just reuse it.
             self.targetConversationId = currentQAConversation.id
             self.messages = []
         }
@@ -155,7 +145,6 @@ class QuickAccessViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         let quickAccessKey = GlobalConstants.quickAccessOverlayConversationId
 
-        // Try to find an existing conversation by its stored ID.
         if let qaIdString = defaults.string(forKey: quickAccessKey),
            let qaId = UUID(uuidString: qaIdString),
            let foundConversation = persistenceService.getConversation(withId: qaId) {
@@ -163,27 +152,23 @@ class QuickAccessViewModel: ObservableObject {
             return foundConversation
         }
 
-        // If not found, create a new one.
         logger.info("No valid Quick Access conversation found. Creating a new one.")
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat")
         
-        // Add it to Core Data.
         persistenceService.addConversation(from: newConversation)
         
-        // Save its ID to UserDefaults for future launches.
         defaults.set(newConversation.id.uuidString, forKey: quickAccessKey)
         
-        // Fetch the newly created entity to return it.
         return persistenceService.getConversation(withId: newConversation.id)!
     }
     
-    // MARK: - Parsing Helpers (Unchanged)
-    private func parseOllamaResponseData(data: Data) -> String { /* ... implementation unchanged ... */ return "" }
-    private func parseAgentResponseString(_ responseText: String) -> [MessageContent] { /* ... implementation unchanged ... */ return [] }
-    private func processMarkdownBlock(_ block: Markup, into contentBlocks: inout [MessageContent]) { /* ... implementation unchanged ... */ }
-    private func processImageNode(_ imageNode: Markdown.Image, into contentBlocks: inout [MessageContent]) { /* ... implementation unchanged ... */ }
-    private func appendAsMarkdown(_ block: Markup, into contentBlocks: inout [MessageContent]) { /* ... implementation unchanged ... */ }
-    private func generateSimplifiedErrorMessage(error: Error) -> String { /* ... implementation unchanged ... */ return "" }
+    // MARK: - Parsing Helpers (REMOVED)
+    // The local parsing helpers were removed from this ViewModel.
+    // This logic is now fully encapsulated within the `AgentResponseParser` struct.
+    private func generateSimplifiedErrorMessage(error: Error) -> String {
+        // This helper can remain if it's generic enough.
+        return ""
+    }
     
     deinit {
         logger.info("QuickAccessViewModel deinitialized.")
@@ -191,4 +176,3 @@ class QuickAccessViewModel: ObservableObject {
         NotificationCenter.default.removeObserver(self)
     }
 }
-
