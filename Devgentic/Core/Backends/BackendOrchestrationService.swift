@@ -31,7 +31,6 @@ class BackendOrchestrationService: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Derived State
-    /// The active backend, derived reactively from the stores.
     @Published private(set) var activeBackend: BackendType = .none
 
     // MARK: - Initialization
@@ -88,20 +87,20 @@ class BackendOrchestrationService: ObservableObject {
             .store(in: &cancellables)
     }
 
-    // MARK: - Streaming Message Logic (NEW)
+    // MARK: - Streaming Message Logic
     
-    /// The primary method for streaming a response from the appropriate backend.
+    // --- FIX: Added 'history' parameter to accept the up-to-date message list ---
     func streamMessage(
         conversationID: UUID,
         userQuery: String,
+        history: [ChatMessage],
         files: [FileSystemItem],
-        context: TraceContext // <-- Add context parameter
+        context: TraceContext
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 logger.debug("Backend Orchestration: Routing to \(self.activeBackend.rawValue). traceID: \(context.traceID)")
                 
-                // --- RAG Instrumentation (Re-enabled) ---
                 let ragContext = context.newSpan()
                 logger.info("RAG: Augmentation Started. traceID: \(ragContext.traceID), spanID: \(ragContext.spanID)")
                 let ragStartTime = Date()
@@ -111,16 +110,15 @@ class BackendOrchestrationService: ObservableObject {
                 let ragDuration = Date().timeIntervalSince(ragStartTime)
                 await MetricsManager.shared.record(duration: ragDuration, for: "rag_duration", context: ragContext)
                 logger.info("RAG: Augmentation Finished. traceID: \(ragContext.traceID), spanID: \(ragContext.spanID)")
-                // --- End RAG Instrumentation ---
-
-                let conversationEntity = self.persistenceService.getConversation(withId: conversationID)
-                let conversation = conversationEntity?.toConversationStruct()
                 
-                let conversationHistory = (conversation?.messages ?? []).filter { message in
+                // --- FIX: Use the passed-in history directly instead of fetching from persistence ---
+                // This ensures the history includes the latest user message and the agent's placeholder.
+                let conversationHistory = history.filter { message in
                     if case .error = message.content { return false }
                     return true
                 }
-                
+                logger.info("Using provided history with \(conversationHistory.count) messages for the API call.")
+
                 var finalUserQuery = augmentedQuery
                 if self.activeBackend == .remote, !files.isEmpty {
                     let fileContext = self.assembleTextFileContent(for: files)
@@ -137,13 +135,14 @@ class BackendOrchestrationService: ObservableObject {
                             throw NSError(domain: "RemoteConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected remote integration not found."])
                         }
                         
+                        // --- FIX: Pass the correct, up-to-date history down to the next service ---
                         let stream = self.remoteOrchestrationService.streamMessage(
                             conversationID: conversationID,
                             userQuery: finalUserQuery,
                             history: conversationHistory,
-                            openAIThreadID: conversation?.openAIThreadID,
+                            openAIThreadID: nil, // OpenAI Thread ID logic might need review for streaming context
                             integration: integration,
-                            context: context // <-- Pass context down
+                            context: context
                         )
                         
                         for try await token in stream {
@@ -166,7 +165,6 @@ class BackendOrchestrationService: ObservableObject {
 
     // MARK: - Main Sending Logic (Non-Streaming)
     
-    /// The primary method for sending a user's query to the appropriate backend, augmented with RAG context.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,

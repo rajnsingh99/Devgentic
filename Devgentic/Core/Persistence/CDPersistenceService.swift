@@ -11,13 +11,13 @@ import os
 
 // MARK: - Core Data Service Protocol
 protocol CoreDataServiceProtocol {
+    
     // Conversation Methods
     func addConversation(from conversation: Conversation)
     func addMessage(_ message: ChatMessage, to conversation: ConversationEntity) async
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async
     func getConversation(withId id: UUID) -> ConversationEntity?
     
-    // --- PHASE 1 CHANGE: Made fetchMessages asynchronous ---
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage]
     
     func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
@@ -110,12 +110,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
     
-    /// --- PHASE 1 CHANGE: Implemented asynchronous fetching ---
-    /// Fetches messages for a given conversation with pagination.
-    /// This function is now `async` and performs the Core Data fetch on the context's private queue.
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {
-        // Use `perform` to ensure Core Data operations happen on the correct queue,
-        // preventing any potential blocking of the main thread.
         return await viewContext.perform {
             let request: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
             

@@ -1,20 +1,19 @@
 // Models/ChatMessage.swift
 import Foundation
 
-// Add Codable conformance (should be synthesized automatically)
 struct ChatMessage: Identifiable, Equatable, Codable {
     let id: UUID
     let conversationId: UUID
     let timestamp: Date
     let sender: SenderRole
-    let content: MessageContent
+    var content: MessageContent // Changed to var
     
-    // New properties for detailed file attachments
     var attachedTextFiles: [AttachedTextFile]?
     var attachedImageFiles: [AttachedImageFile]?
+    
+    var isStreaming: Bool = false
 
-    // Initializer
-    init(id: UUID = UUID(), conversationId: UUID, timestamp: Date = Date(), sender: SenderRole, content: MessageContent, attachedTextFiles: [AttachedTextFile]? = nil, attachedImageFiles: [AttachedImageFile]? = nil) {
+    init(id: UUID = UUID(), conversationId: UUID, timestamp: Date = Date(), sender: SenderRole, content: MessageContent, attachedTextFiles: [AttachedTextFile]? = nil, attachedImageFiles: [AttachedImageFile]? = nil, isStreaming: Bool = false) {
         self.id = id
         self.conversationId = conversationId
         self.timestamp = timestamp
@@ -22,10 +21,15 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         self.content = content
         self.attachedTextFiles = attachedTextFiles
         self.attachedImageFiles = attachedImageFiles
+        self.isStreaming = isStreaming
     }
 
-    // Equatable (keep as is)
+    // --- FIX: Updated Equatable conformance ---
+    // This now checks the content and streaming status, not just the ID.
+    // This is crucial for SwiftUI to detect changes and re-render the view.
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id &&
+        lhs.content == rhs.content && // Check if content has changed
+        lhs.isStreaming == rhs.isStreaming // Check if streaming status has changed
     }
 }

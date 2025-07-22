@@ -34,7 +34,7 @@ struct CustomTextEditor: NSViewRepresentable {
     
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
         [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize),
+            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize + 2),
             .foregroundColor: NSColor.labelColor
         ]
     }
@@ -50,8 +50,8 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.backgroundColor = NSColor.clear
         textView.textColor = NSColor.textColor
         textView.insertionPointColor = NSColor.labelColor
-        textView.textContainerInset = NSSize(width: 0, height: 3)
-        textView.textContainer?.lineFragmentPadding = 5
+        textView.textContainerInset = NSSize(width: 0, height: 10)
+        textView.textContainer?.lineFragmentPadding = 10
         textView.typingAttributes = defaultTypingAttributes
         textView.delegate = context.coordinator
         

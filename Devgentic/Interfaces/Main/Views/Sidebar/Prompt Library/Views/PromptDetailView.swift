@@ -122,20 +122,16 @@ struct PromptDetailView: View {
         }
     }
 
+    // --- FIXED: This function no longer causes a build error ---
     private func usePrompt() {
-        mainViewModel.userInput = prompt.text
+        // Send the prompt's text via the new publisher
+        mainViewModel.insertPromptText.send(prompt.text)
+        
         libraryViewModel.updatePromptUsage(prompt: prompt) // Mark as used
+        logger.info("Used prompt: '\(prompt.title)'. Text sent to main input.")
         
         // Close the prompt library panel
-        // This assumes the panel's visibility is controlled by a @Binding in its parent,
-        // which we'll handle during integration with MainApplicationView.
-        // For now, we can log this action.
-        logger.info("Used prompt: '\(prompt.title)'. Text copied to main input.")
-        
-        // To actually close the panel, the `showPromptLibrary` binding in PromptLibraryPanelView
-        // needs to be set to false. This action should ideally be done by PromptLibraryPanelView itself
-        // or by MainApplicationViewModel. Let's assume PromptLibraryPanelView handles its closure.
-        // We can notify it or have a shared state. For now, the parent will close.
+        mainViewModel.showPromptLibrary = false
     }
 }
 

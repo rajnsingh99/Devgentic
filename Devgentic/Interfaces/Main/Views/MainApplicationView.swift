@@ -141,25 +141,24 @@ struct MainApplicationView: View {
                     }
                 }
 
+            // --- REFACTORED: Removed the `userInput` binding ---
             ChatInputAreaView(
-                userInput: $viewModel.userInput,
                 showContextArea: $viewModel.showContextArea,
                 activeContextFilePath: $viewModel.activeContextFilePath,
                 isSending: viewModel.isSending,
                 showSettings: viewModel.showSettings,
                 isInputFocused: $isInputFocused,
-                onSendMessage: viewModel.sendMessage,
+                onSendMessage: viewModel.sendMessage, // This now correctly passes the final text
                 onToggleContext: {
                     withAnimation { viewModel.toggleContextArea() }
                 }
             )
             .padding(.horizontal)
             .padding(.top, 4)
-            .padding(.bottom, 8)
+            .padding(.bottom, 15)
             .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
         }
-        .frame(maxWidth: 960)
+        .frame(maxWidth: 1000)
         .frame(maxHeight: .infinity)
-//        .background(VisualEffectBlur(material: .windowBackground))
     }
 }

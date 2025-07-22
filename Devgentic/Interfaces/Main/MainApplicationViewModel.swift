@@ -26,22 +26,20 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Service & Store Observables
     @ObservedObject var ollamaService = OllamaService.shared
     @ObservedObject var llmIntegrationStore: LLMIntegrationStore
-    @ObservedObject var agentStore: AgentStore
-    
+    @ObservedObject var agentStore = AgentStore() // Initialize here
+
     let explorerViewModel = ExplorerViewModel()
 
-    // MARK: - Voice Input Services
-    private let audioEngineService: AudioEngineService
-    private let speechRecognitionService: NativeSpeechRecognitionService
+    // --- ADDED: Publisher to send text from prompts to the input area ---
+    let insertPromptText = PassthroughSubject<String, Never>()
     
     private var cancellables = Set<AnyCancellable>()
     
-    private var prefixForCurrentUtterance: String = ""
-
     // MARK: - Published State Properties
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID? {
         didSet {
+            logger.debug("selectedConversationID didSet: Old ID \(oldValue?.uuidString ?? "nil"), New ID \(self.selectedConversationID?.uuidString ?? "nil")")
             if oldValue != selectedConversationID {
                 cancelStreaming()
                 Task {
@@ -52,13 +50,13 @@ class MainApplicationViewModel: ObservableObject {
                     await loadConversation()
                 }
             }
+            // Always load backend state when conversation changes
             loadBackendStateForSelectedConversation()
         }
     }
     
     @Published var currentChatMessages: [ChatMessage] = []
     @Published var isSending: Bool = false
-    @Published var userInput: String = ""
     @Published var isSidebarCollapsed: Bool = true
     @Published var showSettings: Bool = false
     @Published var showPromptLibrary: Bool = false
@@ -66,8 +64,7 @@ class MainApplicationViewModel: ObservableObject {
     @Published var activeContextFilePath: String? = nil
     @Published var isUserMessagesOnlyFilterActive: Bool = false
     @Published var attachedFiles: [FileSystemItem] = []
-    @Published var voiceInputState: VoiceInputState = .idle
-    @Published var selectedBackend: BackendType = .none
+    @Published var selectedBackend: BackendType = .none // This property drives the UI backend selection
     
     @Published var isInitiallyLoadingConversation = false
     
@@ -77,8 +74,9 @@ class MainApplicationViewModel: ObservableObject {
     private let initialPageSize = 20
     private let subsequentPageSize = 10
     
-    
+    @Published var streamingMessage: ChatMessage? = nil
     @Published var streamingTriggerID: UUID? = nil
+    
     private var streamingTask: Task<Void, Never>?
 
     // --- State for Code Viewer Panel ---
@@ -109,15 +107,11 @@ class MainApplicationViewModel: ObservableObject {
     init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
          llmIntegrationStore: LLMIntegrationStore,
          agentStore: AgentStore = AgentStore(),
-         audioEngineService: AudioEngineService = AudioEngineService(),
-         speechRecognitionService: NativeSpeechRecognitionService = NativeSpeechRecognitionService(),
          fileProcessorService: FileProcessorService = FileProcessorService()
     ) {
         self.persistenceService = persistenceService
         self.llmIntegrationStore = llmIntegrationStore
         self.agentStore = agentStore
-        self.audioEngineService = audioEngineService
-        self.speechRecognitionService = speechRecognitionService
         self.fileProcessorService = fileProcessorService
         
         self.backendOrchestrationService = BackendOrchestrationService(
@@ -128,7 +122,6 @@ class MainApplicationViewModel: ObservableObject {
 
         logger.info("MainApplicationViewModel initialized.")
         
-        checkVoiceInputPermissionsAndAvailability()
         setupBindings()
     }
  
@@ -148,22 +141,90 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("MainApplicationViewModel deinitialized.")
         cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
-        
-        if audioEngineService.isRecording || speechRecognitionService.isRecognitionActive {
-            Task {
-                await self.stopVoiceCaptureAndFinalize(customError: "ViewModel deinitializing")
-            }
-        }
         streamingTask?.cancel()
     }
     
+    // MARK: - Bindings Setup
     private func setupBindings() {
-        // ...
+        // Observe changes to selectedBackend and related IDs to persist the choice
+        // This ensures that when a user selects a backend via the UI (e.g., BackendSelectorPopup),
+        // that selection is saved to the currently active conversation in Core Data.
+        $selectedBackend
+            .combineLatest(agentStore.$selectedAgentID, llmIntegrationStore.$selectedIntegrationID)
+            .sink { [weak self] newBackendType, newAgentID, newIntegrationID in
+                guard let self = self else { return }
+                // Only update persistence if a conversation is actually selected
+                // and if the values have genuinely changed from the last persisted state
+                // to avoid unnecessary saves.
+                if let conversationID = self.selectedConversationID {
+                    let currentConversation = self.persistenceService.getConversation(withId: conversationID)?.toConversationStruct()
+                    let currentPersistedBackendType = currentConversation?.backendType
+                    let currentPersistedBackendEntityId = currentConversation?.backendEntityId
+
+                    var effectiveBackendEntityId: UUID?
+                    switch newBackendType {
+                    case .agent:
+                        effectiveBackendEntityId = newAgentID
+                    case .ollama, .remote:
+                        effectiveBackendEntityId = newIntegrationID
+                    case .none:
+                        effectiveBackendEntityId = nil
+                    }
+
+                    // Only save if there's an actual change in backend type or entity ID
+                    if newBackendType != currentPersistedBackendType || effectiveBackendEntityId != currentPersistedBackendEntityId {
+                        self.updateBackendForCurrentConversation()
+                        logger.info("Backend selection changed to \(newBackendType.rawValue) with entity ID \(effectiveBackendEntityId?.uuidString ?? "nil"). Persisting to conversation \(conversationID.uuidString).")
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // Observe changes to currentAgent and currentIntegration in their respective stores.
+        // This is important because these stores might update their 'current' selections
+        // independently (e.g., when loading all agents/integrations), and we need to
+        // reflect that in the main view model's selectedBackend.
+        agentStore.$selectedAgentID
+            .combineLatest(llmIntegrationStore.$selectedIntegrationID)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] agentID, integrationID in
+                guard let self = self else { return }
+                
+                let agent = self.agentStore.currentAgent
+                let integration = self.llmIntegrationStore.currentIntegration
+
+                // If an agent is selected, ensure selectedBackend reflects it
+                if let agent = agent {
+                    if self.selectedBackend != .agent || self.agentStore.selectedAgentID != agent.id {
+                        self.selectedBackend = .agent
+                        self.agentStore.selectedAgentID = agent.id
+                        self.llmIntegrationStore.selectedIntegrationID = nil
+                    }
+                }
+                // If an LLM integration is selected, ensure selectedBackend reflects it
+                else if let integration = integration {
+                    let newBackendType: BackendType = (integration.providerType == .ollama) ? .ollama : .remote
+                    if self.selectedBackend != newBackendType || self.llmIntegrationStore.selectedIntegrationID != integration.id {
+                        self.selectedBackend = newBackendType
+                        self.llmIntegrationStore.selectedIntegrationID = integration.id
+                        self.agentStore.selectedAgentID = nil
+                    }
+                }
+                // If neither is selected, ensure selectedBackend is .none
+                else {
+                    if self.selectedBackend != .none {
+                        self.selectedBackend = .none
+                        self.agentStore.selectedAgentID = nil
+                        self.llmIntegrationStore.selectedIntegrationID = nil
+                    }
+                }
+                // The combineLatest above will trigger updateBackendForCurrentConversation if selectedBackend changes.
+            }
+            .store(in: &cancellables)
     }
     
     // MARK: - Code Viewer Panel Control
     
-    /// --- Functions to control the code viewer ---
     func showCodeInViewer(language: String?, code: String) {
         codeViewerContent = (language, code)
         withAnimation(.snappy()) {
@@ -191,12 +252,13 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
         guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
-            if !self.userInput.isEmpty { self.userInput = "" }
             return
         }
 
         self.isSending = true
+        logger.info("Beginning message send process.")
         
+        // Ensure a conversation is selected or create a new one
         let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
         
         guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
@@ -213,58 +275,143 @@ class MainApplicationViewModel: ObservableObject {
         
         Task {
             await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+            logger.debug("User message persisted successfully.")
         }
         currentChatMessages.insert(userMessage, at: 0)
+        logger.debug("User message inserted into UI.")
         
-        self.streamingTriggerID = userMessage.id
+        // ANTICIPATORY SCROLL: This is the placeholder for the incoming AI response.
+        let agentMessage = ChatMessage(
+            conversationId: conversationIDToUse,
+            sender: .agent,
+            content: .markdownText(""),
+            isStreaming: true
+        )
+        logger.info("Created initial empty agent message with ID \(agentMessage.id.uuidString) to begin streaming.")
+
+        self.streamingMessage = agentMessage
+        logger.debug("Set active streaming message.")
+
+        self.currentChatMessages.insert(agentMessage, at: 0)
+        logger.debug("Inserted streaming agent message into UI.")
+
+        self.clearAttachedFiles()
+        logger.debug("Cleared user input and attachments.")
+
+        // ANTICIPATORY SCROLL: The trigger is now the ID of the placeholder message.
+        // This tells the view to scroll to the top of this placeholder, creating space.
+        self.streamingTriggerID = agentMessage.id
+        logger.info("Set streaming trigger ID to placeholder message ID \(agentMessage.id.uuidString).")
+
+        // Start streaming response
+        streamingTask = Task {
+            do {
+                // FIX: Filter out messages with content of type .error from history
+                // Convert ReversedCollection to Array by adding .map { $0 }
+                let historyForBackend = currentChatMessages.filter { message in
+                    // Assuming ChatMessage.Content has an .error case, and SenderRole does not.
+                    if case .error = message.content { return false }
+                    return true
+                }.reversed().map { $0 } // Convert to Array<ChatMessage>
+
+                let stream = streamResponse(
+                    conversationID: conversationIDToUse,
+                    userQuery: plainUserQueryFromEditor, // Use original query for stream response
+                    history: historyForBackend,
+                    files: attachedFiles // Pass attached files for RAG
+                )
+                for try await token in stream {
+                    await appendTokenToStreamingMessage(token)
+                }
+                await finalizeStreaming(conversationID: conversationIDToUse, error: nil)
+            } catch {
+                logger.error("Streaming failed: \(error.localizedDescription)")
+                await finalizeStreaming(conversationID: conversationIDToUse, error: error)
+            }
+        }
     }
     
-    func streamResponse(conversationID: UUID, userQuery: String, files: [FileSystemItem]) -> AsyncThrowingStream<String, Error> {
+    func streamResponse(conversationID: UUID, userQuery: String, history: [ChatMessage], files: [FileSystemItem]) -> AsyncThrowingStream<String, Error> {
         let context = TraceContext()
-        logger.info("🚀 [streamResponse] Providing stream to consumer. traceID: \(context.traceID)")
+        logger.info("🚀 [streamResponse] Providing stream to consumer. History count: \(history.count). traceID: \(context.traceID)")
         return backendOrchestrationService.streamMessage(
             conversationID: conversationID,
             userQuery: userQuery,
+            history: history,
             files: files,
             context: context
         )
     }
 
-    func finalizeStreaming(conversationID: UUID, fullText: String, error: Error?) {
-        let finalContent: MessageContent = if let error = error {
-            .error(title: "Streaming Error", details: error.localizedDescription)
-        } else {
-            .markdownText(fullText)
+    func appendTokenToStreamingMessage(_ token: String) async {
+        guard var message = self.streamingMessage else {
+            logger.warning("appendTokenToStreamingMessage called but streamingMessage is nil.")
+            return
         }
-        
-        let finalMessage = ChatMessage(
-            conversationId: conversationID,
-            sender: .agent,
-            content: finalContent
-        )
 
-        if let targetEntity = persistenceService.getConversation(withId: conversationID) {
-            Task {
-                await persistenceService.addMessage(finalMessage, to: targetEntity)
-            }
+        if var currentText = message.content.textContent {
+            currentText += token
+            message.content = .markdownText(currentText)
         }
-        currentChatMessages.insert(finalMessage, at: 0)
+
+        self.streamingMessage = message
         
-        resetSendingState()
+        if let index = self.currentChatMessages.firstIndex(where: { $0.id == message.id }) {
+            self.currentChatMessages[index] = message
+            logger.trace("Appended token and updated message in UI array.")
+        } else {
+            logger.warning("Could not find streaming message in currentChatMessages to update UI.")
+        }
     }
     
-    private func resetSendingState() {
-        self.userInput = ""
+    func finalizeStreaming(conversationID: UUID, error: Error?) async {
+        logger.info("Finalizing stream for conversation \(conversationID.uuidString).")
+        guard var finalMessage = self.streamingMessage else {
+            logger.warning("finalizeStreaming called but no streaming message was found. Resetting state.")
+            await resetSendingState()
+            return
+        }
+
+        finalMessage.isStreaming = false
+        logger.debug("Marked message \(finalMessage.id.uuidString) as no longer streaming.")
+
+        if let error = error {
+            logger.error("Finalizing stream with error: \(error.localizedDescription)")
+            finalMessage.content = .error(title: "Streaming Error", details: error.localizedDescription)
+        } else {
+            logger.info("Stream finalized successfully with full text.")
+        }
+
+        if let index = self.currentChatMessages.firstIndex(where: { $0.id == finalMessage.id }) {
+            self.currentChatMessages[index] = finalMessage
+            logger.debug("Updated final message in currentChatMessages array.")
+        }
+
+        if let targetEntity = persistenceService.getConversation(withId: conversationID) {
+            await persistenceService.addMessage(finalMessage, to: targetEntity)
+            logger.info("Persisted final message \(finalMessage.id.uuidString).")
+        } else {
+            logger.error("Could not find conversation entity \(conversationID.uuidString) to persist final message.")
+        }
+
+        await resetSendingState()
+    }
+    
+    func resetSendingState() async {
         self.clearAttachedFiles()
         self.isSending = false
         self.streamingTriggerID = nil
+        self.streamingMessage = nil
         logger.info("✅ [Request Finished] Sending state has been reset.")
     }
 
     func cancelStreaming() {
         if streamingTriggerID != nil {
             logger.info("Streaming cancelled by user.")
-            resetSendingState()
+            streamingTask?.cancel() // Cancel the ongoing streaming task
+            Task {
+                await resetSendingState()
+            }
         }
     }
     
@@ -376,10 +523,15 @@ class MainApplicationViewModel: ObservableObject {
     func startNewConversation() {
         if showSettings { showSettings = false }
         if showPromptLibrary { showPromptLibrary = false }
-        userInput = ""
         clearAttachedFiles()
-        createAndSelectNewConversation()
+        let newConversationID = createAndSelectNewConversation()
+        // Ensure that selectedBackend reflects the initial .none state immediately for the new conversation.
+        // This reinforces the initial state before any user interaction for backend selection.
+        self.selectedBackend = .none
+        self.agentStore.selectedAgentID = nil
+        self.llmIntegrationStore.selectedIntegrationID = nil
         isUserMessagesOnlyFilterActive = false
+        logger.info("Started new conversation with ID \(newConversationID.uuidString). Backend state initialized to .none.")
     }
 
     @discardableResult
@@ -400,6 +552,7 @@ class MainApplicationViewModel: ObservableObject {
             self.selectedBackend = .none
             self.agentStore.selectedAgentID = nil
             self.llmIntegrationStore.selectedIntegrationID = nil
+            logger.info("No conversation selected or found. Resetting backend state to .none.")
             return
         }
 
@@ -407,6 +560,7 @@ class MainApplicationViewModel: ObservableObject {
         let backendType = conversation.backendType ?? .none
         let backendEntityId = conversation.backendEntityId
 
+        // Update the @Published properties based on the loaded conversation's backend
         self.selectedBackend = backendType
         
         switch backendType {
@@ -424,10 +578,13 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func updateBackendForCurrentConversation() {
-        guard let conversationID = selectedConversationID else { return }
+        guard let conversationID = selectedConversationID else {
+            logger.warning("Attempted to update backend for current conversation, but no conversation is selected.")
+            return
+        }
 
         var entityId: UUID?
-        switch selectedBackend {
+        switch self.selectedBackend {
         case .agent:
             entityId = agentStore.selectedAgentID
         case .ollama, .remote:
@@ -441,139 +598,9 @@ class MainApplicationViewModel: ObservableObject {
             backendType: selectedBackend,
             backendEntityId: entityId
         )
+        logger.debug("Persisted backend type \(self.selectedBackend.rawValue) and entity ID \(entityId?.uuidString ?? "nil") for conversation \(conversationID.uuidString).")
     }
     
-    private func handleSpeechRecognizerAvailabilityChange(isAvailable: Bool) {
-        logger.info("Speech Recognizer availability changed to: \(isAvailable)")
-        if !isAvailable {
-            if voiceInputState.isSessionActive {
-                self.stopVoiceCaptureAndFinalize(customError: "Speech recognizer became unavailable.")
-            }
-            if voiceInputState.canTransitionToError {
-                self.voiceInputState = .speechRecognitionUnavailable
-            }
-        } else {
-            if voiceInputState == .speechRecognitionUnavailable || voiceInputState == .idle {
-                 self.checkVoiceInputPermissionsAndAvailability()
-            }
-        }
-    }
-    
-    func checkVoiceInputPermissionsAndAvailability() {
-        self.voiceInputState = .requestingPermissions
-        
-        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        if micStatus == .notDetermined {
-            audioEngineService.requestMicrophonePermission { [weak self] granted in
-                DispatchQueue.main.async {
-                    if granted { self?.checkSpeechRecognitionPermission() }
-                    else { self?.voiceInputState = .permissionsDeniedMic }
-                }
-            }
-        } else if micStatus == .authorized {
-            checkSpeechRecognitionPermission()
-        } else {
-            self.voiceInputState = .permissionsDeniedMic
-        }
-    }
-
-    private func checkSpeechRecognitionPermission() {
-        let speechStatus = SFSpeechRecognizer.authorizationStatus()
-        if speechStatus == .notDetermined {
-            speechRecognitionService.requestSpeechRecognitionPermission { [weak self] status in
-                DispatchQueue.main.async { self?.updateStateAfterPermissionRequest(status: status) }
-            }
-        } else {
-            updateStateAfterPermissionRequest(status: speechStatus)
-        }
-    }
-    
-    private func updateStateAfterPermissionRequest(status: SFSpeechRecognizerAuthorizationStatus) {
-        switch status {
-        case .authorized:
-            self.voiceInputState = speechRecognitionService.speechRecognizerAvailable ? .available : .speechRecognitionUnavailable
-        case .denied:
-            self.voiceInputState = .permissionsDeniedSpeech
-        case .restricted:
-            self.voiceInputState = .error("Speech recognition restricted.")
-        default:
-            self.voiceInputState = .error("Could not determine speech permission.")
-        }
-    }
-
-    func toggleVoiceInput() {
-        switch self.voiceInputState {
-        case .idle, .available:
-            if userInput.isEmpty { startVoiceCapture() }
-        case .recording:
-            stopVoiceCaptureAndFinalize(customError: nil)
-        case .processing:
-             stopVoiceCaptureAndFinalize(customError: nil)
-        case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error:
-            checkVoiceInputPermissionsAndAvailability()
-        case .requestingPermissions:
-            break
-        }
-    }
-
-    private func startVoiceCapture() {
-        guard userInput.isEmpty, voiceInputState == .available else {
-            checkVoiceInputPermissionsAndAvailability()
-            return
-        }
-        
-        self.prefixForCurrentUtterance = self.userInput
-        do {
-            try audioEngineService.startStreamingAudio { [weak self] (buffer, _) in
-                self?.speechRecognitionService.processAudioBuffer(buffer)
-            }
-            try speechRecognitionService.startRecognition(recognitionHandler: { [weak self] (transcript, isFinal, error) in
-                self?.handleRecognitionUpdate(transcript: transcript, isFinal: isFinal, error: error)
-            })
-            voiceInputState = .recording
-        } catch {
-            voiceInputState = .error("Start capture error: \(error.localizedDescription.prefix(50))")
-            audioEngineService.stopStreamingAudio()
-        }
-    }
-    
-    private func handleRecognitionUpdate(transcript: String, isFinal: Bool, error: Error?) {
-        DispatchQueue.main.async {
-            if let error = error {
-                let nsError = error as NSError
-                let isCancellationError = nsError.domain == SFSpeechErrorDomain || (nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1107)
-                let noSpeechError = nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 1110
-                
-                let finalActionErrorString = isCancellationError ? nil : (noSpeechError ? "No speech detected." : "Recognition error: \(error.localizedDescription.prefix(50))")
-                self.stopVoiceCaptureAndFinalize(customError: finalActionErrorString)
-                return
-            }
-
-            let separator = self.prefixForCurrentUtterance.isEmpty || self.prefixForCurrentUtterance.last?.isWhitespace == true ? "" : " "
-            self.userInput = self.prefixForCurrentUtterance + separator + transcript
-            
-            if isFinal {
-                self.stopVoiceCaptureAndFinalize(customError: nil)
-            }
-        }
-    }
-
-    private func stopVoiceCaptureAndFinalize(customError: String?) {
-        let previousState = self.voiceInputState
-        if previousState.isSessionActive {
-            audioEngineService.stopStreamingAudio()
-            speechRecognitionService.stopRecognition()
-        }
-
-        if let explicitError = customError, !explicitError.isEmpty {
-            self.voiceInputState = .error(explicitError)
-        } else {
-            updateStateAfterPermissionRequest(status: SFSpeechRecognizer.authorizationStatus())
-        }
-        
-        logger.info("stopVoiceCaptureAndFinalize: State transitioned from \(previousState.description) to \(self.voiceInputState.description).")
-    }
-
     func transferSelectedConversationToOverlay() {
         guard let conversationID = selectedConversationID else { return }
         UserDefaults.standard.set(conversationID.uuidString, forKey: "quickAccessOverlayConversationId")
