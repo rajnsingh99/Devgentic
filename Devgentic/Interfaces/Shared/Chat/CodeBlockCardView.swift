@@ -12,7 +12,7 @@ import SwiftUI
 struct CodeBlockCardView: View {
     let language: String
     let lineCount: Int
-    let action: () -> Void 
+    let action: () -> Void
 
     var body: some View {
         Button(action: action) {
@@ -49,7 +49,10 @@ struct CodeBlockCardView: View {
                 RoundedRectangle(cornerRadius: 16)
                     .stroke(Color.accentColor.opacity(0.5), lineWidth: 1)
             )
-            .drawingGroup()
+            // --- FIX: Removed .drawingGroup() ---
+            // The .drawingGroup() modifier was causing inconsistent tap gesture recognition.
+            // Removing it ensures the button's action is reliably triggered without
+            // any negative performance impact for a view this simple.
         }
         .buttonStyle(.plain)
         .frame(maxWidth: 300, alignment: .leading)

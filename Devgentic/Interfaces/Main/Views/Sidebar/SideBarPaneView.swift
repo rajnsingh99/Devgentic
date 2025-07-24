@@ -21,7 +21,9 @@ struct SideBarPaneView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let tab = selectedTab, tab != .promptLibrary, tab != .settings {
+            // --- Updated Header ---
+            // The header is now only displayed for tabs that are NOT .conversations.
+            if let tab = selectedTab, tab != .conversations, tab != .promptLibrary, tab != .settings {
                 HStack {
                     Text(tab.title).font(.title3).fontWeight(.semibold)
                     Spacer()
@@ -37,12 +39,12 @@ struct SideBarPaneView: View {
                 Divider()
             }
 
+            // --- Main Content ---
             VStack {
                 switch selectedTab {
                 case .newChat: NewChatTabView()
-                // --- FIX: Corrected typo from ExplorerVdiew to ExplorerView ---
                 case .explorer: ExplorerView()
-                case .conversations: ConversationListView()
+                case .conversations: ConversationListView() // This view now contains its own search bar
                 case .ollama: LLMIntegrationsSidebarView(sidebarWidth: $sidebarWidth)
                 case .agents: AgentsTabView()
                 case .promptLibrary, .settings, .user, .none:
@@ -64,9 +66,7 @@ struct SideBarPaneView_Previews: PreviewProvider {
     static func createMockViewModel() -> MainApplicationViewModel {
         let agentStore = AgentStore()
         
-        // Ensures the mock data uses the correct initializer for AgentProfileModel
         if agentStore.agents.isEmpty {
-            // defaultAgent() correctly initializes with tools: []
             agentStore.agents.append(AgentProfileModel.defaultAgent())
         }
         
@@ -78,21 +78,19 @@ struct SideBarPaneView_Previews: PreviewProvider {
 
     static var previews: some View {
         let mockViewModel = createMockViewModel()
-        let mockToolStore = ToolStore() // Create a mock tool store for the preview
+        let mockToolStore = ToolStore()
 
         Group {
+            // Preview for a tab with a header (e.g., Agents)
             SideBarPaneView(selectedTab: .constant(.agents), sidebarWidth: .constant(350))
                 .environmentObject(mockViewModel)
-                .environmentObject(mockToolStore) // Inject the tool store for the preview
-                .previewDisplayName("Agents Pane")
-            
-            SideBarPaneView(selectedTab: .constant(.ollama), sidebarWidth: .constant(350))
+                .environmentObject(mockToolStore)
+                .previewDisplayName("Agents Pane (With Header)")
+
+            // Preview for the Conversations tab (no header)
+            SideBarPaneView(selectedTab: .constant(.conversations), sidebarWidth: .constant(350))
                 .environmentObject(mockViewModel)
-                .onAppear {
-                    let service = OllamaService.shared
-                    service.serverStatus = .connected
-                }
-                .previewDisplayName("Ollama Pane (Connected)")
+                .previewDisplayName("Conversations Pane (No Header)")
         }
         .frame(height: 600)
     }

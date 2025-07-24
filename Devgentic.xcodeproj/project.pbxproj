@@ -13,6 +13,7 @@
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
 		35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 35DB4C1F2DC53B9D002B3BF7 /* Splash */; };
+		35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 35E68C412E313B0B00993F95 /* WhisperKit */; };
 		35F483FA2E23C8680031D7CB /* EntityInfo-devgentic.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */; };
 /* End PBXBuildFile section */
 
@@ -69,6 +70,7 @@
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
 				35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */,
+				35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -152,6 +154,7 @@
 				35243D362E26F08800602933 /* CodeEditSourceEditor */,
 				35CDA7422E2A2A3400564AB7 /* Highlightr */,
 				35CDA7542E2A619500564AB7 /* Down */,
+				35E68C412E313B0B00993F95 /* WhisperKit */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -242,6 +245,7 @@
 				35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
 				35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */,
 				35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */,
+				35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -646,6 +650,14 @@
 				minimumVersion = 4.4.0;
 			};
 		};
+		35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -678,6 +690,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */;
 			productName = Splash;
+		};
+		35E68C412E313B0B00993F95 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */;
+			productName = WhisperKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -21,6 +21,9 @@ struct MainApplicationView: View {
     @State private var isSidebarVisible: Bool = true
     @State private var currentSidebarPaneWidth: CGFloat = 300
     
+    // --- State for dynamic layout ---
+    @State private var chatInputAreaHeight: CGFloat = 100
+
     private let activityBarWidth: CGFloat = 50
     private var totalSidebarWidth: CGFloat {
         activityBarWidth + (isSidebarVisible ? currentSidebarPaneWidth : 0)
@@ -67,10 +70,9 @@ struct MainApplicationView: View {
                     .zIndex(3)
             }
 
-            // --- PHASE 3 CHANGE: Add the Code Viewer Panel as an overlay ---
-            if viewModel.isCodeViewerVisible {
+            if viewModel.codeViewerContent != nil {
                 CodeViewerPanelView()
-                    .zIndex(2) // Ensure it draws above the main content but below the prompt library
+                    .zIndex(2)
             }
 
             Button(action: {
@@ -130,9 +132,13 @@ struct MainApplicationView: View {
 
     @ViewBuilder
     private var chatArea: some View {
-        VStack(spacing: 0) {
+        ZStack(alignment: .bottom) {
+            // Layer 1: The Chat History
+            // It fills the available space and has its bottom padding adjusted
+            // to ensure its content is not obscured by the input area.
             ChatHistoryView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.bottom, chatInputAreaHeight)
                 .overlay {
                     if viewModel.selectedConversationID == nil {
                         Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
@@ -141,24 +147,37 @@ struct MainApplicationView: View {
                     }
                 }
 
-            // --- REFACTORED: Removed the `userInput` binding ---
-            ChatInputAreaView(
-                showContextArea: $viewModel.showContextArea,
-                activeContextFilePath: $viewModel.activeContextFilePath,
-                isSending: viewModel.isSending,
-                showSettings: viewModel.showSettings,
-                isInputFocused: $isInputFocused,
-                onSendMessage: viewModel.sendMessage, // This now correctly passes the final text
-                onToggleContext: {
-                    withAnimation { viewModel.toggleContextArea() }
-                }
-            )
-            .padding(.horizontal)
-            .padding(.top, 4)
-            .padding(.bottom, 15)
-            .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+            // Layer 2: The Chat Input Area
+            // This view floats on top of the history view. Its size is measured
+            // but it does not push the history view itself.
+            VStack(spacing: 0) {
+                ChatInputAreaView(
+                    showContextArea: $viewModel.showContextArea,
+                    activeContextFilePath: $viewModel.activeContextFilePath,
+                    isSending: viewModel.isSending,
+                    showSettings: viewModel.showSettings,
+                    isInputFocused: $isInputFocused,
+                    onSendMessage: viewModel.sendMessage,
+                    onToggleContext: {
+                        withAnimation { viewModel.toggleContextArea() }
+                    }
+                )
+                .padding(.horizontal)
+                .padding(.top, 4)
+                .padding(.bottom, 15)
+                .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+            }
+            .background(GeometryReader { geometry in
+                Color.clear
+                    .onAppear {
+                        chatInputAreaHeight = geometry.size.height
+                    }
+                    .onChange(of: geometry.size.height) { newHeight in
+                        chatInputAreaHeight = newHeight
+                    }
+            })
         }
         .frame(maxWidth: 1000)
-        .frame(maxHeight: .infinity)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: chatInputAreaHeight)
     }
 }

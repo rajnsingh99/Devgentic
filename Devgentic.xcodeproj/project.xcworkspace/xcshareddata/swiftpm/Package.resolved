@@ -1,5 +1,5 @@
 {
-  "originHash" : "58122dc5284dc526806f7a336864ff78f3547d1ed138e0b260b109c611eedff1",
+  "originHash" : "77d63e39e3119e0262a1e83bb62d7d8fd4fd6a35f4be26b13fd7c4fbf3857c86",
   "pins" : [
     {
       "identity" : "codeeditlanguages",
@@ -65,6 +65,15 @@
       }
     },
     {
+      "identity" : "jinja",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/johnmai-dev/Jinja",
+      "state" : {
+        "revision" : "fc1233dea1142897d474bda2f1f9a6c3fe7acab6",
+        "version" : "1.2.1"
+      }
+    },
+    {
       "identity" : "objectbox-swift-spm",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/objectbox/objectbox-swift-spm.git",
@@ -92,12 +101,30 @@
       }
     },
     {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser.git",
+      "state" : {
+        "revision" : "309a47b2b1d9b5e991f36961c983ecec72275be3",
+        "version" : "1.6.1"
+      }
+    },
+    {
       "identity" : "swift-collections",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-collections.git",
       "state" : {
         "revision" : "c1805596154bb3a265fd91b8ac0c4433b4348fb0",
         "version" : "1.2.0"
+      }
+    },
+    {
+      "identity" : "swift-transformers",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/huggingface/swift-transformers.git",
+      "state" : {
+        "revision" : "8a83416cc00ab07a5de9991e6ad817a9b8588d20",
+        "version" : "0.1.15"
       }
     },
     {
@@ -143,6 +170,15 @@
       "state" : {
         "revision" : "f2f197b6b27ce75c280c20f131d4f71e906b86f7",
         "version" : "0.25.8"
+      }
+    },
+    {
+      "identity" : "whisperkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/argmaxinc/WhisperKit",
+      "state" : {
+        "branch" : "main",
+        "revision" : "3f13167641cf49a6023f509cda674e22f93b5220"
       }
     }
   ],

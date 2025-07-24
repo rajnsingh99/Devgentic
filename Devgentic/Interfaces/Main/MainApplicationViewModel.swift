@@ -9,7 +9,6 @@ import SwiftUI
 import Combine
 import os
 import AppKit
-import Speech
 import AVFoundation
 
 
@@ -37,24 +36,13 @@ class MainApplicationViewModel: ObservableObject {
     
     // MARK: - Published State Properties
     @Published var conversations: [Conversation] = []
-    @Published var selectedConversationID: UUID? {
-        didSet {
-            logger.debug("selectedConversationID didSet: Old ID \(oldValue?.uuidString ?? "nil"), New ID \(self.selectedConversationID?.uuidString ?? "nil")")
-            if oldValue != selectedConversationID {
-                cancelStreaming()
-                Task {
-                    await loadConversation()
-                }
-            } else if selectedConversationID != nil {
-                Task {
-                    await loadConversation()
-                }
-            }
-            // Always load backend state when conversation changes
-            loadBackendStateForSelectedConversation()
-        }
-    }
     
+    // ENHANCEMENT: Use a publisher for debouncing
+    @Published var selectedConversationID: UUID?
+    private var conversationLoader: AnyCancellable?
+    private var conversationLoadTask: Task<Void, Never>?
+
+
     @Published var currentChatMessages: [ChatMessage] = []
     @Published var isSending: Bool = false
     @Published var isSidebarCollapsed: Bool = true
@@ -79,8 +67,7 @@ class MainApplicationViewModel: ObservableObject {
     
     private var streamingTask: Task<Void, Never>?
 
-    // --- State for Code Viewer Panel ---
-    @Published var isCodeViewerVisible: Bool = false
+    // --- FIX: State for Code Viewer Panel Refactored ---
     @Published var codeViewerContent: (language: String?, code: String)? = nil
 
     var selectedAgentID: UUID? {
@@ -123,6 +110,7 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("MainApplicationViewModel initialized.")
         
         setupBindings()
+        setupConversationLoader()
     }
  
     convenience init() {
@@ -142,20 +130,16 @@ class MainApplicationViewModel: ObservableObject {
         cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
         streamingTask?.cancel()
+        conversationLoadTask?.cancel()
     }
     
     // MARK: - Bindings Setup
     private func setupBindings() {
         // Observe changes to selectedBackend and related IDs to persist the choice
-        // This ensures that when a user selects a backend via the UI (e.g., BackendSelectorPopup),
-        // that selection is saved to the currently active conversation in Core Data.
         $selectedBackend
             .combineLatest(agentStore.$selectedAgentID, llmIntegrationStore.$selectedIntegrationID)
             .sink { [weak self] newBackendType, newAgentID, newIntegrationID in
                 guard let self = self else { return }
-                // Only update persistence if a conversation is actually selected
-                // and if the values have genuinely changed from the last persisted state
-                // to avoid unnecessary saves.
                 if let conversationID = self.selectedConversationID {
                     let currentConversation = self.persistenceService.getConversation(withId: conversationID)?.toConversationStruct()
                     let currentPersistedBackendType = currentConversation?.backendType
@@ -171,7 +155,6 @@ class MainApplicationViewModel: ObservableObject {
                         effectiveBackendEntityId = nil
                     }
 
-                    // Only save if there's an actual change in backend type or entity ID
                     if newBackendType != currentPersistedBackendType || effectiveBackendEntityId != currentPersistedBackendEntityId {
                         self.updateBackendForCurrentConversation()
                         logger.info("Backend selection changed to \(newBackendType.rawValue) with entity ID \(effectiveBackendEntityId?.uuidString ?? "nil"). Persisting to conversation \(conversationID.uuidString).")
@@ -180,10 +163,6 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Observe changes to currentAgent and currentIntegration in their respective stores.
-        // This is important because these stores might update their 'current' selections
-        // independently (e.g., when loading all agents/integrations), and we need to
-        // reflect that in the main view model's selectedBackend.
         agentStore.$selectedAgentID
             .combineLatest(llmIntegrationStore.$selectedIntegrationID)
             .receive(on: DispatchQueue.main)
@@ -193,7 +172,6 @@ class MainApplicationViewModel: ObservableObject {
                 let agent = self.agentStore.currentAgent
                 let integration = self.llmIntegrationStore.currentIntegration
 
-                // If an agent is selected, ensure selectedBackend reflects it
                 if let agent = agent {
                     if self.selectedBackend != .agent || self.agentStore.selectedAgentID != agent.id {
                         self.selectedBackend = .agent
@@ -201,7 +179,6 @@ class MainApplicationViewModel: ObservableObject {
                         self.llmIntegrationStore.selectedIntegrationID = nil
                     }
                 }
-                // If an LLM integration is selected, ensure selectedBackend reflects it
                 else if let integration = integration {
                     let newBackendType: BackendType = (integration.providerType == .ollama) ? .ollama : .remote
                     if self.selectedBackend != newBackendType || self.llmIntegrationStore.selectedIntegrationID != integration.id {
@@ -210,7 +187,6 @@ class MainApplicationViewModel: ObservableObject {
                         self.agentStore.selectedAgentID = nil
                     }
                 }
-                // If neither is selected, ensure selectedBackend is .none
                 else {
                     if self.selectedBackend != .none {
                         self.selectedBackend = .none
@@ -218,23 +194,37 @@ class MainApplicationViewModel: ObservableObject {
                         self.llmIntegrationStore.selectedIntegrationID = nil
                     }
                 }
-                // The combineLatest above will trigger updateBackendForCurrentConversation if selectedBackend changes.
             }
             .store(in: &cancellables)
     }
     
+    // ENHANCEMENT: Debounced conversation loader
+    private func setupConversationLoader() {
+        conversationLoader = $selectedConversationID
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main) // Debounce for 250ms
+            .removeDuplicates()
+            .sink { [weak self] conversationID in
+                guard let self = self else { return }
+                
+                // Cancel any previously running load task
+                self.conversationLoadTask?.cancel()
+                
+                self.conversationLoadTask = Task {
+                    await self.loadConversation(id: conversationID)
+                }
+            }
+    }
+
     // MARK: - Code Viewer Panel Control
     
     func showCodeInViewer(language: String?, code: String) {
-        codeViewerContent = (language, code)
         withAnimation(.snappy()) {
-            isCodeViewerVisible = true
+            codeViewerContent = (language, code)
         }
     }
 
     func hideCodeViewer() {
         withAnimation(.easeInOut(duration: 0.3)) {
-            isCodeViewerVisible = false
             codeViewerContent = nil
         }
     }
@@ -258,7 +248,6 @@ class MainApplicationViewModel: ObservableObject {
         self.isSending = true
         logger.info("Beginning message send process.")
         
-        // Ensure a conversation is selected or create a new one
         let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
         
         guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
@@ -280,7 +269,6 @@ class MainApplicationViewModel: ObservableObject {
         currentChatMessages.insert(userMessage, at: 0)
         logger.debug("User message inserted into UI.")
         
-        // ANTICIPATORY SCROLL: This is the placeholder for the incoming AI response.
         let agentMessage = ChatMessage(
             conversationId: conversationIDToUse,
             sender: .agent,
@@ -298,27 +286,21 @@ class MainApplicationViewModel: ObservableObject {
         self.clearAttachedFiles()
         logger.debug("Cleared user input and attachments.")
 
-        // ANTICIPATORY SCROLL: The trigger is now the ID of the placeholder message.
-        // This tells the view to scroll to the top of this placeholder, creating space.
         self.streamingTriggerID = agentMessage.id
         logger.info("Set streaming trigger ID to placeholder message ID \(agentMessage.id.uuidString).")
 
-        // Start streaming response
         streamingTask = Task {
             do {
-                // FIX: Filter out messages with content of type .error from history
-                // Convert ReversedCollection to Array by adding .map { $0 }
                 let historyForBackend = currentChatMessages.filter { message in
-                    // Assuming ChatMessage.Content has an .error case, and SenderRole does not.
                     if case .error = message.content { return false }
                     return true
-                }.reversed().map { $0 } // Convert to Array<ChatMessage>
+                }.reversed().map { $0 }
 
                 let stream = streamResponse(
                     conversationID: conversationIDToUse,
-                    userQuery: plainUserQueryFromEditor, // Use original query for stream response
+                    userQuery: plainUserQueryFromEditor,
                     history: historyForBackend,
-                    files: attachedFiles // Pass attached files for RAG
+                    files: attachedFiles
                 )
                 for try await token in stream {
                     await appendTokenToStreamingMessage(token)
@@ -408,7 +390,7 @@ class MainApplicationViewModel: ObservableObject {
     func cancelStreaming() {
         if streamingTriggerID != nil {
             logger.info("Streaming cancelled by user.")
-            streamingTask?.cancel() // Cancel the ongoing streaming task
+            streamingTask?.cancel()
             Task {
                 await resetSendingState()
             }
@@ -454,8 +436,9 @@ class MainApplicationViewModel: ObservableObject {
     
     // MARK: - Paginated Message Loading
     
-    func loadConversation() async {
-        guard let selectedID = selectedConversationID else {
+    // ENHANCEMENT: loadConversation now takes an ID and is cancellable
+    func loadConversation(id: UUID?) async {
+        guard let selectedID = id else {
             currentChatMessages = []
             return
         }
@@ -463,22 +446,28 @@ class MainApplicationViewModel: ObservableObject {
         logger.debug("Loading initial page for conversation \(selectedID.uuidString, privacy: .public).")
         
         isInitiallyLoadingConversation = true
-        currentChatMessages = []
-        canLoadMorePages = true
         
-        let messages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
-        
-        self.currentChatMessages = messages
-
-        if messages.count < initialPageSize {
-            self.canLoadMorePages = false
-        }
-        
-        if isUserMessagesOnlyFilterActive {
-            applyUserMessagesFilter()
+        do {
+            // Check for cancellation before fetching
+            try Task.checkCancellation()
+            
+            let messages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
+            
+            // Check for cancellation before updating state
+            try Task.checkCancellation()
+            
+            self.currentChatMessages = messages
+            self.canLoadMorePages = messages.count >= initialPageSize
+            
+            if isUserMessagesOnlyFilterActive {
+                applyUserMessagesFilter()
+            }
+        } catch {
+            logger.info("Conversation load for \(selectedID.uuidString) was cancelled.")
         }
         
         self.isInitiallyLoadingConversation = false
+        loadBackendStateForSelectedConversation()
     }
 
     func loadMoreMessages() async {
@@ -509,9 +498,8 @@ class MainApplicationViewModel: ObservableObject {
     
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
-        Task {
-            await loadConversation()
-        }
+        // The debounced loader will pick this up
+        self.selectedConversationID = self.selectedConversationID
     }
     
     private func applyUserMessagesFilter() {
@@ -525,8 +513,6 @@ class MainApplicationViewModel: ObservableObject {
         if showPromptLibrary { showPromptLibrary = false }
         clearAttachedFiles()
         let newConversationID = createAndSelectNewConversation()
-        // Ensure that selectedBackend reflects the initial .none state immediately for the new conversation.
-        // This reinforces the initial state before any user interaction for backend selection.
         self.selectedBackend = .none
         self.agentStore.selectedAgentID = nil
         self.llmIntegrationStore.selectedIntegrationID = nil
@@ -560,7 +546,6 @@ class MainApplicationViewModel: ObservableObject {
         let backendType = conversation.backendType ?? .none
         let backendEntityId = conversation.backendEntityId
 
-        // Update the @Published properties based on the loaded conversation's backend
         self.selectedBackend = backendType
         
         switch backendType {
@@ -606,6 +591,11 @@ class MainApplicationViewModel: ObservableObject {
         UserDefaults.standard.set(conversationID.uuidString, forKey: "quickAccessOverlayConversationId")
         NotificationCenter.default.post(name: NSNotification.Name("showQuickAccessPanel"), object: nil, userInfo: ["forceExpand": true])
         self.selectedConversationID = nil
+    }
+    
+    func togglePinStatus(for conversationId: UUID) {
+        logger.debug("Toggling pin status for conversation: \(conversationId.uuidString)")
+        persistenceService.togglePinStatus(for: conversationId)
     }
     
     func deleteConversation(conversationID: UUID) {

@@ -20,7 +20,7 @@ struct ChatInputAreaView: View {
     @Binding var activeContextFilePath: String?
     let isSending: Bool // This binding comes from MainApplicationViewModel
     let showSettings: Bool
-    var isInputFocused: FocusState<Bool>.Binding // Corrected: Changed from .Bool to .Binding
+    var isInputFocused: FocusState<Bool>.Binding
 
     let onSendMessage: (NSAttributedString) -> Void
     let onToggleContext: () -> Void
@@ -167,8 +167,23 @@ struct ChatInputAreaView: View {
                     mainViewModel.removeAttachedFile(fileItem: fileItem)
                 }
             )
-
-            mainInputArea
+            
+            ZStack {
+                if inputViewModel.voiceInputState == .recording {
+                    RecordingOverlayView(
+                        recordingTime: $inputViewModel.recordingTime,
+                        powerLevels: $inputViewModel.audioPowerLevels,
+                        onCancel: {
+                            inputViewModel.cancelRecording()
+                        },
+                        onConfirm: {
+                            inputViewModel.toggleVoiceInput()
+                        }
+                    )
+                } else {
+                    mainInputArea
+                }
+            }
         }
         .onChange(of: showFileSuggestions) { isShowing in
             if isShowing {
@@ -182,8 +197,7 @@ struct ChatInputAreaView: View {
             self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
         }
         .animation(.spring(), value: mainViewModel.attachedFiles.count)
-        .animation(.easeInOut(duration: 0.15), value: currentDynamicButtonMode)
-        .animation(.easeInOut(duration: 0.15), value: inputViewModel.voiceInputState)
+        .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
         .fixedSize(horizontal: false, vertical: true)
         .onChange(of: isSending) { newValue in
             if !newValue {
@@ -204,12 +218,12 @@ struct ChatInputAreaView: View {
                 .stroke(Color.white.opacity(0.2), lineWidth: 1)
         )
         .opacity(isInputEnabled ? 1.0 : 0.6)
+        .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
 
     private var editorAndPlaceholderArea: some View {
         ZStack(alignment: .topLeading) {
             CustomTextEditor(
-                // --- UPDATED: Binds to the new inputViewModel ---
                 text: $inputViewModel.userInput,
                 onCommit: { attributedString in
                     if isInputEnabled { self.onSendMessage(attributedString) }
@@ -228,6 +242,9 @@ struct ChatInputAreaView: View {
                 }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
+            // --- ADDED: Animate height changes based on the text content ---
+            .animation(.easeInOut(duration: 0.2), value: inputViewModel.userInput)
+            
             if inputViewModel.userInput.isEmpty {
                 Text(placeholderText)
                     .font(Font(defaultTypingAttributes[.font] as! NSFont))
@@ -261,12 +278,12 @@ struct ChatInputAreaView: View {
             Button(action: openFilePicker) {
                 Image(systemName: "plus")
                     .resizable().scaledToFit().frame(width: iconSize, height: iconSize)
-                    .foregroundColor(isPlusButtonHovering ? .accentColor : .secondary) // Hover effect
-                    .scaleEffect(isPlusButtonHovering ? 1.1 : 1.0) // Hover effect
-                    .animation(.easeOut(duration: 0.1), value: isPlusButtonHovering) // Animation
+                    .foregroundColor(isPlusButtonHovering ? .accentColor : .secondary)
+                    .scaleEffect(isPlusButtonHovering ? 1.1 : 1.0)
+                    .animation(.easeOut(duration: 0.1), value: isPlusButtonHovering)
             }
             .buttonStyle(.plain)
-            .onHover { hover in // On hover modifier
+            .onHover { hover in
                 isPlusButtonHovering = hover
             }
             .help("Attach files")
@@ -274,12 +291,12 @@ struct ChatInputAreaView: View {
             Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
                 Image(systemName: "globe")
                     .resizable().scaledToFit().frame(width: iconSize, height: iconSize)
-                    .foregroundColor(isGlobeButtonHovering ? .accentColor : .secondary) // Hover effect
-                    .scaleEffect(isGlobeButtonHovering ? 1.1 : 1.0) // Hover effect
-                    .animation(.easeOut(duration: 0.1), value: isGlobeButtonHovering) // Animation
+                    .foregroundColor(isGlobeButtonHovering ? .accentColor : .secondary)
+                    .scaleEffect(isGlobeButtonHovering ? 1.1 : 1.0)
+                    .animation(.easeOut(duration: 0.1), value: isGlobeButtonHovering)
             }
             .buttonStyle(.plain)
-            .onHover { hover in // On hover modifier
+            .onHover { hover in
                 isGlobeButtonHovering = hover
             }
             .help("Web Search (Not Implemented)")
@@ -310,13 +327,13 @@ struct ChatInputAreaView: View {
                     .font(.system(size: 8, weight: .bold))
             }
             .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.gray.opacity(isBackendPickerHovering ? 0.25 : 0.15)) // Hover effect
+            .background(Color.gray.opacity(isBackendPickerHovering ? 0.25 : 0.15))
             .cornerRadius(6)
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(profileButtonBorderColor.opacity(isBackendPickerHovering ? 1.0 : 0.7), lineWidth: 1) // Hover effect
+                    .stroke(profileButtonBorderColor.opacity(isBackendPickerHovering ? 1.0 : 0.7), lineWidth: 1)
             )
-            .animation(.easeOut(duration: 0.1), value: isBackendPickerHovering) // Animation
+            .animation(.easeOut(duration: 0.1), value: isBackendPickerHovering)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingBackendSelectorPopup, arrowEdge: .bottom) {
@@ -329,7 +346,7 @@ struct ChatInputAreaView: View {
                 llmIntegrationStore: mainViewModel.llmIntegrationStore
             )
         }
-        .onHover { hover in // On hover modifier
+        .onHover { hover in
             isBackendPickerHovering = hover
         }
         .help("Select a backend (Agent or direct Model)")
@@ -362,30 +379,26 @@ struct ChatInputAreaView: View {
                     .frame(width: dynamicButtonSize, height: dynamicButtonSize)
             } else {
                 ZStack {
-                    // --- UPDATED: Reads from local input view model ---
                     let canSend = mode == .send && (!inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty)
                     let isDisabledBySystem = showSettings || (mode == .send && (inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording))
 
                     Circle()
-                        // Adjust background color based on hover state
                         .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem)
-                              .opacity(isDynamicButtonHovering ? 0.8 : 1.0)) // Slightly reduce opacity on hover
-                        .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering) // Smooth transition
+                              .opacity(isDynamicButtonHovering ? 0.8 : 1.0))
+                        .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering)
 
                     Image(systemName: dynamicActionButtonIconName(for: mode))
                         .resizable().scaledToFit()
                         .fontWeight(buttonIconWeight(for: mode))
                         .frame(width: dynamicButtonSize * buttonIconScale(for: mode), height: dynamicButtonSize * buttonIconScale(for: mode))
-                        // Adjust foreground color based on hover state
                         .foregroundColor(buttonIconForegroundColor(for: mode))
-                        .scaleEffect(isDynamicButtonHovering ? 1.1 : 1.0) // Subtle scale effect on hover
-                        .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering) // Smooth transition
+                        .scaleEffect(isDynamicButtonHovering ? 1.1 : 1.0)
+                        .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering)
                 }
                 .frame(width: dynamicButtonSize, height: dynamicButtonSize)
             }
         }
         .buttonStyle(PlainButtonStyle())
-        // Add the .onHover modifier here
         .onHover { hover in
             isDynamicButtonHovering = hover
         }
@@ -401,7 +414,7 @@ struct ChatInputAreaView: View {
         case .mic:
             switch inputViewModel.voiceInputState {
             case .processing: return "hourglass.circle"
-            case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error: return "mic.slash.fill"
+            case .permissionsDeniedMic, .error: return "mic.slash.fill"
             case .requestingPermissions: return "mic.badge.plus"
             default: return "mic.fill"
             }
@@ -427,7 +440,7 @@ struct ChatInputAreaView: View {
         case .stop:
             return Color.red.opacity(0.8)
         case .mic:
-            return (isDisabledBySystem || inputViewModel.voiceInputState != .idle) ? Color.gray.opacity(0.3) : Color(NSColor.controlAccentColor)
+            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color.gray.opacity(0.3) : Color(NSColor.controlAccentColor)
         }
     }
 
@@ -439,10 +452,9 @@ struct ChatInputAreaView: View {
             switch inputViewModel.voiceInputState {
             case .recording: return .white
             case .processing: return .orange
-            case .permissionsDeniedMic, .permissionsDeniedSpeech, .speechRecognitionUnavailable, .error: return .red.opacity(0.7)
+            case .permissionsDeniedMic, .error: return .red.opacity(0.7)
             case .requestingPermissions: return .orange
             default:
-                // Changed to white for better contrast with the new background
                 return .white
             }
         }
@@ -452,13 +464,11 @@ struct ChatInputAreaView: View {
         if mainViewModel.selectedBackend == .none { return true }
         switch mode {
         case .send:
-            // --- UPDATED: Reads from local input view model ---
             let isEmptyTextAndNoFiles = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mainViewModel.attachedFiles.isEmpty
             return isEmptyTextAndNoFiles || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing
         case .stop:
             return isSending || showSettings
         case .mic:
-            // --- UPDATED: Reads from local input view model ---
             return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording
         }
     }
@@ -473,8 +483,6 @@ struct ChatInputAreaView: View {
             case .processing: return "Processing Voice Input..."
             case .requestingPermissions: return "Requesting Voice Permissions..."
             case .permissionsDeniedMic: return "Microphone permission denied. Click to re-check."
-            case .permissionsDeniedSpeech: return "Speech recognition permission denied. Click to re-check."
-            case .speechRecognitionUnavailable: return "Speech recognition is currently unavailable. Click to re-check."
             case .error(let specificError): return "Voice input error: \(specificError.prefix(30))... Click to re-check."
             default: return "Voice Input"
             }
@@ -486,7 +494,7 @@ struct ChatInputAreaView: View {
         mainViewModel.addAttachedFile(fileItem: file)
 
         if let range = activeFileMentionTriggerRange {
-            let insertionText = NSAttributedString(string: file.name + " ", attributes: defaultTypingAttributes)
+            let insertionText = NSAttributedString(string: "", attributes: defaultTypingAttributes)
             self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
         }
 

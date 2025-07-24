@@ -143,7 +143,11 @@ struct CustomTextEditor: NSViewRepresentable {
             let currentSelectedRange = textView.selectedRange()
             context.coordinator.isProgrammaticallyChangingText = true
             
-            textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: textView.string.count), with: self.text)
+            // --- FIX: Apply default attributes when updating text programmatically ---
+            // Create an attributed string from the plain text binding, applying the desired font and color.
+            let attributedString = NSAttributedString(string: self.text, attributes: defaultTypingAttributes)
+            // Replace the entire contents of the text storage with our new styled string.
+            textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: textView.textStorage?.length ?? 0), with: attributedString)
             
             let newLocation = self.text.isEmpty ? 0 : min(currentSelectedRange.location, self.text.count)
             textView.setSelectedRange(NSRange(location: newLocation, length: 0))

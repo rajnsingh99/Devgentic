@@ -23,6 +23,7 @@ protocol CoreDataServiceProtocol {
     func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
     func deleteConversation(with id: UUID)
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
+    func togglePinStatus(for conversationId: UUID) // New method for pinning
 
     // Agent Profile Methods
     func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
@@ -164,6 +165,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         newConversation.id = conversation.id
         newConversation.timestamp = conversation.timestamp
         newConversation.userDefinedTitle = conversation.userDefinedTitle
+        newConversation.isPinned = conversation.isPinned // Set isPinned
         newConversation.openAIThreadID = conversation.openAIThreadID
         newConversation.backendType = conversation.backendType?.rawValue
         newConversation.backendEntityId = conversation.backendEntityId
@@ -174,9 +176,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             newMessage.timestamp = message.timestamp
             newMessage.senderType = message.sender.rawValue
             newMessage.conversationId = message.conversationId
-            
             mapMessageContent(from: message.content, to: newMessage)
-
             newConversation.addToMessages(newMessage)
         }
         
@@ -263,6 +263,16 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         conversation.backendEntityId = backendEntityId
         
         logger.info("Updating conversation \(id.uuidString) with backend type: \(backendType?.rawValue ?? "none")")
+        saveContext()
+    }
+    
+    func togglePinStatus(for conversationId: UUID) {
+        guard let conversation = getConversation(withId: conversationId) else {
+            logger.warning("Attempted to toggle pin for a conversation that does not exist: \(conversationId.uuidString)")
+            return
+        }
+        conversation.isPinned.toggle()
+        logger.info("Toggled pin status for conversation \(conversationId.uuidString) to \(conversation.isPinned).")
         saveContext()
     }
     
@@ -533,6 +543,7 @@ extension ConversationEntity {
             messages: messagesArray.sorted(by: { $0.timestamp < $1.timestamp }),
             timestamp: self.timestamp ?? Date(),
             userDefinedTitle: self.userDefinedTitle,
+            isPinned: self.isPinned, // Read isPinned
             openAIThreadID: self.openAIThreadID,
             backendType: backendType,
             backendEntityId: self.backendEntityId
