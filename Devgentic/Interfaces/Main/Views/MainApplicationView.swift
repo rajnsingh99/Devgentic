@@ -15,13 +15,12 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
+    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
 
-    // --- View State ---
     @FocusState private var isInputFocused: Bool
+    
     @State private var isSidebarVisible: Bool = true
     @State private var currentSidebarPaneWidth: CGFloat = 300
-    
-    // --- State for dynamic layout ---
     @State private var chatInputAreaHeight: CGFloat = 100
 
     private let activityBarWidth: CGFloat = 50
@@ -38,10 +37,10 @@ struct MainApplicationView: View {
                 VStack(spacing: 0) {
                     ChatHeaderView(
                         chatTitle: viewModel.currentConversationTitle,
-                        isFilterActive: viewModel.isUserMessagesOnlyFilterActive,
+                        isFilterActive: chatHistoryViewModel.isUserMessagesOnlyFilterActive,
                         onEyeButtonTapped: {
-                            viewModel.toggleUserMessagesFilter()
-                            logger.info("Header eye button tapped. Filter active: \(viewModel.isUserMessagesOnlyFilterActive)")
+                            chatHistoryViewModel.toggleUserMessagesFilter()
+                            logger.info("Header eye button tapped. Filter active: \(chatHistoryViewModel.isUserMessagesOnlyFilterActive)")
                         },
                         onTransferButtonTapped: {
                             viewModel.transferSelectedConversationToOverlay()
@@ -64,14 +63,9 @@ struct MainApplicationView: View {
             .frame(width: totalSidebarWidth)
             .zIndex(1)
 
-            if viewModel.showPromptLibrary {
-                PromptLibraryPanelView(showPromptLibrary: $viewModel.showPromptLibrary)
-                    .transition(.scale.combined(with: .opacity))
-                    .zIndex(3)
-            }
-
-            if viewModel.codeViewerContent != nil {
+            if chatHistoryViewModel.codeViewerContent != nil {
                 CodeViewerPanelView()
+                    .environmentObject(chatHistoryViewModel)
                     .zIndex(2)
             }
 
@@ -88,36 +82,29 @@ struct MainApplicationView: View {
         }
         .frame(minWidth: 800, minHeight: 500)
         .onAppear {
-             if viewModel.selectedConversationID != nil && !viewModel.showSettings && !viewModel.showPromptLibrary {
+             if viewModel.selectedConversationID != nil && !viewModel.showSettings {
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
         .onChange(of: viewModel.showSettings) { showingSettings in
-            if !showingSettings && viewModel.selectedConversationID != nil && !viewModel.showPromptLibrary {
+            if !showingSettings && viewModel.selectedConversationID != nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             } else if showingSettings {
                 isInputFocused = false
             }
         }
-        .onChange(of: viewModel.showPromptLibrary) { showingPromptLibrary in
-            if !showingPromptLibrary && viewModel.selectedConversationID != nil && !viewModel.showSettings {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
-            } else if showingPromptLibrary {
-                isInputFocused = false
-            }
-        }
-        .onChange(of: viewModel.isSending) { isNowSending in
-            if !isNowSending && !viewModel.showSettings && !viewModel.showPromptLibrary && viewModel.selectedConversationID != nil {
+        .onChange(of: chatHistoryViewModel.isSending) { isNowSending in
+            if !isNowSending && !viewModel.showSettings && viewModel.selectedConversationID != nil {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
         .onChange(of: viewModel.selectedConversationID) { newID in
              if newID != nil {
-                 if viewModel.isUserMessagesOnlyFilterActive {
-                     viewModel.isUserMessagesOnlyFilterActive = false
+                 if chatHistoryViewModel.isUserMessagesOnlyFilterActive {
+                     chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
                      logger.info("Reset user messages filter due to conversation change.")
                  }
-                 if !viewModel.showSettings && !viewModel.showPromptLibrary {
+                 if !viewModel.showSettings {
                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                          isInputFocused = true
                      }
@@ -133,10 +120,8 @@ struct MainApplicationView: View {
     @ViewBuilder
     private var chatArea: some View {
         ZStack(alignment: .bottom) {
-            // Layer 1: The Chat History
-            // It fills the available space and has its bottom padding adjusted
-            // to ensure its content is not obscured by the input area.
             ChatHistoryView()
+                .environmentObject(chatHistoryViewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.bottom, chatInputAreaHeight)
                 .overlay {
@@ -147,16 +132,14 @@ struct MainApplicationView: View {
                     }
                 }
 
-            // Layer 2: The Chat Input Area
-            // This view floats on top of the history view. Its size is measured
-            // but it does not push the history view itself.
             VStack(spacing: 0) {
                 ChatInputAreaView(
                     showContextArea: $viewModel.showContextArea,
                     activeContextFilePath: $viewModel.activeContextFilePath,
-                    isSending: viewModel.isSending,
+                    isSending: chatHistoryViewModel.isSending,
                     showSettings: viewModel.showSettings,
                     isInputFocused: $isInputFocused,
+                    backendConfiguration: viewModel.backendConfiguration,
                     onSendMessage: viewModel.sendMessage,
                     onToggleContext: {
                         withAnimation { viewModel.toggleContextArea() }
@@ -177,7 +160,6 @@ struct MainApplicationView: View {
                     }
             })
         }
-        .frame(maxWidth: 1000)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: chatInputAreaHeight)
     }
 }

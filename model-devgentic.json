@@ -5,7 +5,7 @@
   "entities": [
     {
       "id": "1:8850547422367127552",
-      "lastPropertyId": "5:27700735494270208",
+      "lastPropertyId": "6:5331159051447997184",
       "name": "ChunkEntity",
       "properties": [
         {
@@ -33,6 +33,11 @@
           "id": "5:27700735494270208",
           "name": "timestamp",
           "type": 10
+        },
+        {
+          "id": "6:5331159051447997184",
+          "name": "conversationID",
+          "type": 9
         }
       ],
       "relations": []

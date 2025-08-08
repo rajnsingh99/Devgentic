@@ -13,11 +13,13 @@ final class UUIDConverter {
     typealias PropertyType = UUID
     typealias DatabaseType = String
 
-    static func convert(entityProperty: UUID) -> String {
+    // UPDATED: Removed the external 'entityProperty' argument label.
+    static func convert(_ entityProperty: UUID) -> String {
         return entityProperty.uuidString
     }
 
-    static func convert(databaseValue: String?) -> UUID {
+    // UPDATED: Removed the external 'databaseValue' argument label.
+    static func convert(_ databaseValue: String?) -> UUID {
         guard let value = databaseValue, let uuid = UUID(uuidString: value) else {
             // Return a default or new UUID if the database value is nil or invalid.
             // This is important for data integrity, especially with non-optional properties.
@@ -34,12 +36,14 @@ final class FloatArrayConverter {
     typealias PropertyType = [Float]
     typealias DatabaseType = Data
 
-    static func convert(entityProperty: [Float]) -> Data {
+    // UPDATED: Removed the external 'entityProperty' argument label.
+    static func convert(_ entityProperty: [Float]) -> Data {
         // Convert the [Float] array into raw Data.
         return entityProperty.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    static func convert(databaseValue: Data?) -> [Float] {
+    // UPDATED: Removed the external 'databaseValue' argument label.
+    static func convert(_ databaseValue: Data?) -> [Float] {
         guard let data = databaseValue else { return [] }
         
         // Create a [Float] array from the raw Data.
@@ -63,6 +67,11 @@ final class ChunkEntity {
     // objectbox: convert = { "dbType": "String", "converter": "UUIDConverter" }
     var sourceMessageID: UUID = UUID()
     
+    /// A reference to the Conversation this chunk belongs to.
+    /// This is crucial for scoping vector searches to the correct conversation.
+    // objectbox: convert = { "dbType": "String", "converter": "UUIDConverter" }
+    var conversationID: UUID = UUID()
+    
     /// The actual text content of this chunk.
     var content: String = ""
     
@@ -78,8 +87,9 @@ final class ChunkEntity {
     init() {}
     
     /// A convenience initializer for creating new ChunkEntity instances.
-    init(sourceMessageID: UUID, content: String, embedding: [Float], timestamp: Date = Date()) {
+    init(sourceMessageID: UUID, conversationID: UUID, content: String, embedding: [Float], timestamp: Date = Date()) {
         self.sourceMessageID = sourceMessageID
+        self.conversationID = conversationID
         self.content = content
         self.embedding = embedding
         self.timestamp = timestamp

@@ -21,16 +21,15 @@ struct VSCodifiedSidebarContainerView: View {
     @State private var isHoveringOnDivider = false
     
     private let minSidebarWidth: CGFloat = 300
-    private let maxSidebarWidth: CGFloat = 1000
+    private let maxSidebarWidth: CGFloat = 400
     private let activityBarWidth: CGFloat = 50
 
     @State private var preferredWidths: [SidebarTab: CGFloat] = [
         .newChat: 300,
         .conversations: 300,
         .explorer: 300,
-        .ollama: 500,
-        .agents: 300,
-        .promptLibrary: 300,
+        .integration: 400,
+        .promptLibrary: 400, // Fixed width for the prompt library
         .settings: 300,
         .user: 300
     ]
@@ -99,9 +98,12 @@ struct VSCodifiedSidebarContainerView_Previews: PreviewProvider {
         @State var sidebarVisible = true
         @State var currentSidebarWidth: CGFloat = 350
 
-        // MARK: - Corrected: Initializer for the view model no longer takes OllamaService
+        // MODIFIED: Initializer for the view model now explicitly creates ChatHistoryViewModel
         @StateObject var vm = MainApplicationViewModel(
-            llmIntegrationStore: LLMIntegrationStore()
+            llmIntegrationStore: LLMIntegrationStore(),
+            agentStore: AgentStore(), // Ensure agentStore is initialized
+            fileProcessorService: FileProcessorService(), // Ensure fileProcessorService is initialized
+            chatHistoryViewModel: ChatHistoryViewModel() // Explicitly create ChatHistoryViewModel
         )
 
         var body: some View {

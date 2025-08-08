@@ -22,6 +22,10 @@ struct DevgenticApp: App {
     // Get the Core Data service singleton.
     private let coreDataService = CoreDataPersistenceService.shared
     
+    // --- THEME MANAGER ---
+    // Create the ThemeManager as a StateObject to keep it alive for the app's lifecycle.
+    @StateObject private var themeManager = ThemeManager()
+    
     // Create the persistent stores as StateObjects first.
     @StateObject private var llmIntegrationStore: LLMIntegrationStore
     @StateObject private var agentStore = AgentStore()
@@ -30,20 +34,24 @@ struct DevgenticApp: App {
 
     // MARK: - The single, shared MainApplicationViewModel instance
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
+    @StateObject private var chatHistoryViewModel: ChatHistoryViewModel // NEW: Add ChatHistoryViewModel as StateObject
 
     init() {
         // Create the stores that will be passed to the view model
         let integrationStore = LLMIntegrationStore()
         let agStore = AgentStore()
-        
+        let chatHistoryVM = ChatHistoryViewModel() // Initialize ChatHistoryViewModel here
+
         let viewModel = MainApplicationViewModel(
             llmIntegrationStore: integrationStore,
-            agentStore: agStore
+            agentStore: agStore,
+            chatHistoryViewModel: chatHistoryVM // Pass chatHistoryVM to MainApplicationViewModel
         )
         
         // Initialize the StateObjects
         self._llmIntegrationStore = StateObject(wrappedValue: integrationStore)
         self._agentStore = StateObject(wrappedValue: agStore)
+        self._chatHistoryViewModel = StateObject(wrappedValue: chatHistoryVM) // Initialize _chatHistoryViewModel
         self._mainApplicationViewModel = StateObject(wrappedValue: viewModel)
     }
 
@@ -52,15 +60,15 @@ struct DevgenticApp: App {
         WindowGroup {
             if isOnboardingComplete {
                 MainApplicationView()
-                    // --- FIX: Inject all the necessary environment objects ---
+                    // --- Inject all the necessary environment objects ---
+                    .environmentObject(themeManager) // Inject the theme manager
                     .environmentObject(mainApplicationViewModel)
-                    // This is the crucial line that makes the *same* explorerViewModel
-                    // available to all child views.
                     .environmentObject(mainApplicationViewModel.explorerViewModel)
                     .environmentObject(agentManager)
                     .environmentObject(llmIntegrationStore)
                     .environmentObject(agentStore)
                     .environmentObject(toolStore)
+                    .environmentObject(chatHistoryViewModel) // NEW: Inject chatHistoryViewModel
                     .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
                     .onAppear {
                         agentManager.startAgentIfNeeded()
@@ -77,10 +85,10 @@ struct DevgenticApp: App {
                         )
                     }
                 )
+                .environmentObject(themeManager) // Also inject into onboarding
                 .environmentObject(agentManager)
             }
         }
-        // ... The rest of your file remains the same ...
         .commands {
             CommandMenu("File") {
                 Button("Close File Viewer Window") {
@@ -114,17 +122,21 @@ struct DevgenticApp: App {
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
             if let url = fileURL {
                 FileWindowViewer(fileURL: url)
+                    .environmentObject(themeManager) // Inject theme manager into separate windows
             }
         }
         WindowGroup("LLM Provider", id: "llm-integrations") {
             LLMIntegrationsView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(llmIntegrationStore)
+                .environmentObject(themeManager) // Inject theme manager
         }.defaultSize(width: 850, height: 700)
+        
         WindowGroup("Agent Configuration", id: "agent-config", for: UUID.self) { $agentID in
             AgentProfilerView()
                .environmentObject(mainApplicationViewModel)
                .environmentObject(toolStore)
+               .environmentObject(themeManager) // Inject theme manager
         }.defaultSize(width: 850, height: 700)
     }
 }

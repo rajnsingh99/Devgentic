@@ -334,10 +334,14 @@ struct AgentDetailView_Previews: PreviewProvider {
             
             agentStore.agents = [mockAgent]
             
+            // NEW: Create an instance of ChatHistoryViewModel for the preview
+            let mockChatHistoryViewModel = ChatHistoryViewModel()
+
             // 5. Initialize the main view model with mock data
             self.viewModel = MainApplicationViewModel(
                 llmIntegrationStore: llmIntegrationStore,
-                agentStore: agentStore
+                agentStore: agentStore,
+                chatHistoryViewModel: mockChatHistoryViewModel // Pass the new instance here
             )
             
             // 6. Initialize the state for the container

@@ -9,8 +9,9 @@ import SwiftUI
 import CodeEditSourceEditor
 import CodeEditLanguages
 import Combine
+import UniformTypeIdentifiers
 
-// MARK: - Theme & Color Extensions (No Change)
+// MARK: - Theme & Color Extensions
 extension CodeEditSourceEditor.EditorTheme {
     public static let defaultDark: Self = .init(
         text: .init(color: .white),
@@ -135,12 +136,16 @@ class CodeDocument: ObservableObject, Equatable {
 
 // MARK: - CodeViewerPanelView (Main SwiftUI View)
 struct CodeViewerPanelView: View {
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
     @State private var isHoveringOnDivider = false
     @AppStorage("codeEditFontSize") var fontSize: Double = 14
     @AppStorage("codeViewerPanelWidth") private var panelWidth: Double = 600
 
     @State private var document: CodeDocument?
+    @State private var didCopy: Bool = false
+    
+    // NEW: State to hold the current snippet being viewed
+    @State private var currentSnippet: CodeSnippet?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -150,12 +155,16 @@ struct CodeViewerPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .transition(.move(edge: .trailing))
         .shadow(radius: 10)
-        .onReceive(viewModel.$codeViewerContent) { newContent in
+        .onReceive(chatHistoryViewModel.$codeViewerContent) { newContent in
+            // MODIFIED: Update the current snippet when the view model changes
             if let content = newContent {
-                if document?.content.string != content.code {
-                     document = CodeDocument(content: content.code, language: content.language)
+                let snippet = content.snippets[content.currentIndex]
+                if currentSnippet != snippet {
+                    currentSnippet = snippet
+                    document = CodeDocument(content: snippet.code, language: snippet.language)
                 }
             } else {
+                currentSnippet = nil
                 document = nil
             }
         }
@@ -183,16 +192,18 @@ struct CodeViewerPanelView: View {
     private var panelContent: some View {
         VStack(spacing: 0) {
             panelHeader
-            Divider()
-            
-            if let document = document {
-                HighPerformanceCodeViewRepresentable(
-                    document: document,
-                    fontSize: fontSize
-                )
-                .id(document.id)
-            } else {
-                placeholderContent
+            ZStack(alignment: .top) {
+                if let document = document {
+                    HighPerformanceCodeViewRepresentable(
+                        document: document,
+                        fontSize: fontSize
+                    )
+                    .id(document.id)
+                    .clipped()
+                } else {
+                    placeholderContent
+                }
+                Divider()
             }
         }
         .frame(width: panelWidth)
@@ -200,21 +211,70 @@ struct CodeViewerPanelView: View {
     }
     
     private var panelHeader: some View {
-        HStack {
-            Text(document?.language.id.rawValue.capitalized ?? "Code Viewer")
-                .font(.headline)
-                .padding(.leading)
-            
-            Spacer()
-            
-            Button(action: viewModel.hideCodeViewer) {
-                Image(systemName: "xmark")
+        ZStack {
+            // Left and Right aligned content
+            HStack {
+                // Left side
+                HStack(spacing: 8) {
+                    Image(systemName: languageIcon(for: currentSnippet?.language))
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                        .frame(width: 24, alignment: .center)
+
+                    Text(currentSnippet?.language?.capitalized ?? "Code Viewer")
+                        .font(.headline)
+                        .fontWeight(.medium)
+                }
+
+                Spacer()
+
+                // Right side
+                HStack(spacing: 4) {
+                    HeaderButton(
+                        action: {
+                            copyCodeToClipboard()
+                            didCopy = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                didCopy = false
+                            }
+                        },
+                        icon: didCopy ? "checkmark" : "doc.on.doc",
+                        helpText: "Copy code to clipboard",
+                        color: didCopy ? .green : .secondary
+                    )
+                    .animation(.easeInOut, value: didCopy)
+                    .disabled(document == nil)
+
+                    HeaderButton(
+                        action: saveCodeToFile,
+                        icon: "square.and.arrow.down",
+                        helpText: "Save code to a file",
+                        color: .secondary
+                    )
+                    .disabled(document == nil)
+
+                    HeaderButton(
+                        action: chatHistoryViewModel.hideCodeViewer,
+                        icon: "xmark",
+                        helpText: "Close viewer",
+                        color: .secondary
+                    )
+                }
             }
-            .buttonStyle(.plain)
-            .padding(.trailing)
+
+            // Centered content
+            if let content = chatHistoryViewModel.codeViewerContent, content.snippets.count > 1 {
+                SnippetNavigatorView(
+                    currentIndex: content.currentIndex,
+                    totalCount: content.snippets.count,
+                    onPrevious: chatHistoryViewModel.navigateToPreviousSnippet,
+                    onNext: chatHistoryViewModel.navigateToNextSnippet
+                )
+            }
         }
-        .frame(height: 44)
-        .background(Color.clear)
+        .padding(.horizontal)
+        .frame(height: 48)
+        .background(.ultraThinMaterial)
     }
     
     private var placeholderContent: some View {
@@ -231,7 +291,162 @@ struct CodeViewerPanelView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    private func copyCodeToClipboard() {
+        guard let snippet = currentSnippet else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(snippet.code, forType: .string)
+    }
+
+    private func saveCodeToFile() {
+        guard let snippet = currentSnippet else { return }
+
+        let savePanel = NSSavePanel()
+        savePanel.canCreateDirectories = true
+        savePanel.showsTagField = false
+        
+        let language = CodeLanguage.allLanguages.first {
+            $0.id.rawValue.lowercased() == snippet.language?.lowercased()
+        } ?? .default
+        
+        savePanel.nameFieldStringValue = "snippet.\(language.extensions.first ?? "txt")"
+        savePanel.title = "Save Code Snippet"
+        
+        if let utType = UTType(tag: language.extensions.first ?? "", tagClass: .filenameExtension, conformingTo: .text) {
+            savePanel.allowedContentTypes = [utType]
+        } else {
+            savePanel.allowedContentTypes = [.text]
+        }
+
+        savePanel.begin { (result) in
+            if result == .OK, let url = savePanel.url {
+                do {
+                    try snippet.code.write(to: url, atomically: true, encoding: .utf8)
+                } catch {
+                    print("Error saving file: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
+    private func languageIcon(for languageID: String?) -> String {
+        switch languageID?.lowercased() {
+        case "swift":
+            return "swift"
+        case "python":
+            return "chevron.left.forwardslash.chevron.right"
+        case "javascript", "typescript", "tsx":
+            return "curlybraces"
+        case "java":
+            return "cup.and.saucer.fill"
+        case "html":
+            return "chevron.left.slash.chevron.right"
+        case "css":
+            return "number"
+        case "ruby":
+            return "diamond.fill"
+        case "shell":
+            return "terminal.fill"
+        default:
+            return "doc.text"
+        }
+    }
 }
+
+// MARK: - NEW: Modern Snippet Navigator View
+fileprivate struct SnippetNavigatorView: View {
+    let currentIndex: Int
+    let totalCount: Int
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            // Previous Button
+            NavButton(
+                action: onPrevious,
+                icon: "chevron.left",
+                enabled: currentIndex > 0
+            )
+
+            // Page Indicator
+            Text("\(currentIndex + 1) of \(totalCount)")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
+
+            // Next Button
+            NavButton(
+                action: onNext,
+                icon: "chevron.right",
+                enabled: currentIndex < totalCount - 1
+            )
+        }
+        .padding(4)
+        .background(Color.black.opacity(0.2))
+        .cornerRadius(8)
+    }
+}
+
+// MARK: - NEW: Reusable Navigation Button
+fileprivate struct NavButton: View {
+    let action: () -> Void
+    let icon: String
+    let enabled: Bool
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(enabled ? .primary : .secondary.opacity(0.5))
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(isHovering && enabled ? Color.gray.opacity(0.3) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.1)) {
+                self.isHovering = hovering
+            }
+        }
+    }
+}
+
+// MARK: - NEW: Modern Header Action Button
+fileprivate struct HeaderButton: View {
+    let action: () -> Void
+    let icon: String
+    let helpText: String
+    let color: Color
+    @State private var isHovering = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .regular))
+                .foregroundColor(isEnabled ? color : .secondary.opacity(0.5))
+                .frame(width: 32, height: 32)
+                .background(
+                    Circle()
+                        .fill(isHovering && isEnabled ? Color.gray.opacity(0.25) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.1)) {
+                self.isHovering = hovering
+            }
+        }
+    }
+}
+
 
 extension CodeDocument: Identifiable {}
 
@@ -268,24 +483,13 @@ class HighPerformanceCodeViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // --- START: SIMPLIFICATION FIX ---
-        // The entire view setup is now handled by a single method that
-        // creates the SourceEditor with a direct binding to the data model.
         setupEditorView()
-        // --- END: SIMPLIFICATION FIX ---
     }
 
-    // --- START: SIMPLIFICATION FIX ---
-    // This new method creates the SourceEditor and its hosting controller.
-    // It's called once from viewDidLoad.
     private func setupEditorView() {
-        // Create a two-way binding to the document's content.
-        // This allows the SourceEditor to directly read and write to our model.
         let contentBinding = Binding<String>(
             get: { self.document.content.string },
             set: { newString in
-                // When the user types in the editor, this setter is called.
-                // We update our GapBuffer-based model with the new content.
                 if self.document.content.string != newString {
                     self.document.content = GapBuffer(string: newString)
                 }
@@ -293,7 +497,7 @@ class HighPerformanceCodeViewController: NSViewController {
         )
 
         let editorView = SourceEditor(
-            contentBinding, // Use the two-way binding here.
+            contentBinding,
             language: document.language,
             configuration: .init(
                 appearance: .init(
@@ -310,8 +514,6 @@ class HighPerformanceCodeViewController: NSViewController {
         let hosting = NSHostingController(rootView: editorView)
         self.hostingController = hosting
         
-        // Add the hosting controller as a child and its view to our view hierarchy.
-        // This is now the ONLY subview, eliminating all overlay and event conflicts.
         addChild(hosting)
         view.addSubview(hosting.view)
         
@@ -324,12 +526,9 @@ class HighPerformanceCodeViewController: NSViewController {
         ])
     }
     
-    // This method now only updates the existing SourceEditor's properties
-    // by replacing the rootView of the hosting controller.
     private func updatePresentationView() {
         let font = NSFont.monospacedSystemFont(ofSize: self.currentFontSize, weight: .regular)
         
-        // Recreate the binding to ensure it captures the current document state.
         let contentBinding = Binding<String>(
             get: { self.document.content.string },
             set: { newString in
@@ -353,12 +552,9 @@ class HighPerformanceCodeViewController: NSViewController {
             ),
             state: .constant(.init())
         )
-        // Update the root view of the existing hosting controller.
-        // This is more efficient than recreating the controller itself.
         hostingController?.rootView = newEditorView
     }
 
-    /// Entry point for updates from the SwiftUI Representable.
     func update(document: CodeDocument, fontSize: Double) {
         var needsViewUpdate = false
         
@@ -376,5 +572,4 @@ class HighPerformanceCodeViewController: NSViewController {
             updatePresentationView()
         }
     }
-    // --- END: SIMPLIFICATION FIX ---
 }

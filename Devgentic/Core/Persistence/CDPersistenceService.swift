@@ -39,6 +39,12 @@ protocol CoreDataServiceProtocol {
     func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel)
     func deleteLLMIntegration(with id: UUID)
     
+    // Prompt Methods
+    func fetchPrompts() -> [Prompt]
+    func addPrompt(from model: Prompt)
+    func updatePrompt(from model: Prompt)
+    func deletePrompt(withId id: UUID)
+    
     func saveContext()
 }
 
@@ -59,6 +65,9 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "DevgenticDB")
+        
+        // ** NEW: Register the transformer for the 'tags' attribute in PromptEntity **
+        ValueTransformer.setValueTransformer(StringArrayTransformer(), forName: NSValueTransformerName("StringArrayTransformer"))
         
         container.loadPersistentStores { (storeDescription, error) in
             if let error = error as NSError? {
@@ -302,8 +311,10 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         for chunkText in chunks {
             if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
+                // --- UPDATED: Pass the conversationID when creating the chunk ---
                 let chunkEntity = ChunkEntity(
                     sourceMessageID: message.id,
+                    conversationID: message.conversationId, // This now links the chunk to the conversation
                     content: chunkText,
                     embedding: embedding,
                     timestamp: message.timestamp
@@ -314,7 +325,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         if !chunkEntities.isEmpty {
             vectorStoreService.add(chunks: chunkEntities)
-            logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString).")
+            logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString) in conversation \(message.conversationId.uuidString).")
         }
     }
 
@@ -498,6 +509,75 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             logger.info("Deleting LLM Integration with ID \(id.uuidString) from context.")
             saveContext()
         }
+    }
+    
+    // MARK: - Prompt Methods
+    
+    func fetchPrompts() -> [Prompt] {
+        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+        
+        do {
+            let entities = try viewContext.fetch(request)
+            let prompts = entities.map { $0.toPromptStruct() }
+            logger.info("Successfully fetched \(prompts.count) prompts from Core Data.")
+            return prompts
+        } catch {
+            logger.error("Failed to fetch prompts from Core Data: \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    func addPrompt(from model: Prompt) {
+        let newPromptEntity = PromptEntity(context: viewContext)
+        configure(entity: newPromptEntity, with: model)
+        logger.info("Adding new prompt '\(model.title)' to Core Data.")
+        saveContext()
+    }
+    
+    func updatePrompt(from model: Prompt) {
+        guard let promptToUpdate = getPromptEntity(withId: model.id) else {
+            logger.warning("Attempted to update a prompt that does not exist in Core Data (ID: \(model.id.uuidString)). Adding it instead.")
+            addPrompt(from: model)
+            return
+        }
+        configure(entity: promptToUpdate, with: model)
+        logger.info("Updating prompt '\(model.title)' in Core Data.")
+        saveContext()
+    }
+    
+    func deletePrompt(withId id: UUID) {
+        guard let promptToDelete = getPromptEntity(withId: id) else {
+            logger.warning("Attempted to delete a prompt that does not exist in Core Data (ID: \(id.uuidString)).")
+            return
+        }
+        viewContext.delete(promptToDelete)
+        logger.info("Deleting prompt with ID \(id.uuidString) from Core Data.")
+        saveContext()
+    }
+    
+    private func getPromptEntity(withId id: UUID) -> PromptEntity? {
+        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        request.fetchLimit = 1
+        
+        do {
+            return try viewContext.fetch(request).first
+        } catch {
+            logger.error("Failed to fetch PromptEntity with ID \(id.uuidString): \(error.localizedDescription)")
+            return nil
+        }
+    }
+    
+    private func configure(entity: PromptEntity, with model: Prompt) {
+        entity.id = model.id
+        entity.title = model.title
+        entity.text = model.text
+        entity.category = model.category
+        entity.createdAt = model.createdAt
+        entity.lastUsedAt = model.lastUsedAt
+        entity.isUserDefined = model.isUserDefined
+        entity.tags = model.tags as NSArray?
     }
 
     // MARK: - Private Helper Methods
@@ -699,5 +779,34 @@ extension RemoteConfigEntity {
             temperature: self.temperature,
             contextWindowSize: Int(self.contextWindowSize)
         )
+    }
+}
+
+// MARK: - Prompt Entity Extension
+extension PromptEntity {
+    func toPromptStruct() -> Prompt {
+        return Prompt(
+            id: self.id ?? UUID(),
+            title: self.title ?? "Untitled Prompt",
+            text: self.text ?? "",
+            category: self.category ?? "General",
+            createdAt: self.createdAt ?? Date(),
+            lastUsedAt: self.lastUsedAt,
+            isUserDefined: self.isUserDefined,
+            tags: self.tags as? [String]
+        )
+    }
+}
+
+// MARK: - Value Transformer for [String]
+@objc(StringArrayTransformer)
+final class StringArrayTransformer: NSSecureUnarchiveFromDataTransformer {
+    override static var allowedTopLevelClasses: [AnyClass] {
+        [NSArray.self, NSString.self]
+    }
+
+    static func register() {
+        let transformer = StringArrayTransformer()
+        ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "StringArrayTransformer"))
     }
 }

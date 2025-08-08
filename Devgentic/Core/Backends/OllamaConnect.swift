@@ -6,10 +6,43 @@
 //
 
 import Foundation
-import os 
+import os
 
 // Logger for OllamaConnect
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.Devgentic", category: "AIConnect")
+
+// MARK: - Ollama Data Structures
+
+/// Represents a single message in the Ollama chat history.
+struct OllamaChatMessage: Codable {
+    let role: String // "system", "user", or "assistant"
+    let content: String
+    // For multi-modal requests, not used in this implementation yet
+    // let images: [String]?
+}
+
+/// Represents the payload for the `/api/chat` endpoint.
+struct OllamaChatRequest: Codable {
+    let model: String
+    let messages: [OllamaChatMessage]
+    let stream: Bool = false // Explicitly set to false for one-shot
+}
+
+/// Represents the response from a non-streaming `/api/chat` request.
+struct OllamaChatResponse: Codable {
+    let model: String
+    let createdAt: String
+    let message: OllamaChatMessage
+    let done: Bool
+    
+    enum CodingKeys: String, CodingKey {
+        case model
+        case createdAt = "created_at"
+        case message
+        case done
+    }
+}
+
 
 // Define a struct to hold the progress information we'll pass back
 struct ModelPullProgress {
@@ -31,50 +64,6 @@ struct OllamaConnect {
     init(baseURL: String = "http://localhost:11434") { // Default base URL (might not be used often now)
         self.baseURL = baseURL
     }
-
-    // MARK: - Fetch Data (GET Request) - Used for basic connection test
-
-    /// Fetches data from a specified endpoint using GET.
-    /// Assumes the endpoint is relative to the provided baseURL.
-    /// NOTE: This currently uses the instance's baseURL property.
-//    func fetchFromLocalServer(endpoint: String) async throws -> Data {
-//        // Use the baseURL passed during initialization for constructing the URL
-//        guard let url = URL(string: "\(baseURL)\(endpoint)") else {
-//            logger.error("Invalid URL constructed: \(self.baseURL)\(endpoint)")
-//            throw URLError(.badURL)
-//        }
-//
-//        logger.debug("Fetching data from URL: \(url.absoluteString)")
-//
-//        do {
-//            let (data, response) = try await URLSession.shared.data(from: url)
-//
-//            guard let httpResponse = response as? HTTPURLResponse else {
-//                logger.error("Invalid response received from \(url.absoluteString)")
-//                throw URLError(.cannotParseResponse)
-//            }
-//
-//            logger.debug("Received status code \(httpResponse.statusCode) from \(url.absoluteString)")
-//
-//            guard (200..<300).contains(httpResponse.statusCode) else {
-//                logger.error("Bad server response (\(httpResponse.statusCode)) from \(url.absoluteString)")
-//                if let responseBody = String(data: data, encoding: .utf8) {
-//                    logger.error("Error response body: \(responseBody)")
-//                }
-//                // Throw specific error based on status code if needed, otherwise generic bad response
-//                throw URLError(.badServerResponse, userInfo: ["HTTPStatusCode": httpResponse.statusCode, NSLocalizedDescriptionKey: "Server returned status \(httpResponse.statusCode)."])
-//            }
-//
-//            return data
-//        } catch {
-//            logger.error("Network error fetching from \(url.absoluteString): \(error.localizedDescription)")
-//            // Log underlying error if available
-//            if let nsError = error as NSError? {
-//                logger.error("Underlying error: \(nsError)")
-//            }
-//            throw error // Re-throw the caught error
-//        }
-//    }
 
     // MARK: - Post Data (POST Request) - Base function
 
@@ -123,65 +112,69 @@ struct OllamaConnect {
 
 
     // MARK: - Ollama Specific Checks and Actions
-
-    /// Checks if a specific Ollama model exists on the server using the /api/show endpoint.
+    
+    /// Sends a one-shot (non-streaming) chat request to the Ollama server.
     /// - Parameters:
-    ///   - baseURL: The base URL of the Ollama server (e.g., "http://localhost:11434").
-    ///   - modelName: The name of the model to check.
-    /// - Returns: `true` if the model exists (responds with 200), `false` if the model does not exist (responds with 404).
-    /// - Throws: An error for network issues or other non-200/404 HTTP status codes.
-//    static func checkOllamaModelExists(baseURL: String, modelName: String) async throws -> Bool {
-//        let endpoint = "/api/show"
-//        guard let url = URL(string: baseURL + endpoint) else {
-//            logger.error("Invalid URL constructed for model check: \(baseURL)\(endpoint)")
-//            throw URLError(.badURL)
-//        }
-//        logger.debug("Checking for model '\(modelName)' at URL: \(url.absoluteString)")
-//
-//        var request = URLRequest(url: url)
-//        request.httpMethod = "POST" // /api/show uses POST
-//        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-//        let payload = ["name": modelName]
-//
-//        do {
-//            request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
-//        } catch {
-//            logger.error("Failed to serialize JSON payload for model check: \(error)")
-//            throw error
-//        }
-//
-//        // Perform the request
-//        do {
-//            let (_, response) = try await URLSession.shared.data(for: request)
-//
-//            guard let httpResponse = response as? HTTPURLResponse else {
-//                 logger.error("Invalid response received from model check: \(url.absoluteString)")
-//                 throw URLError(.cannotParseResponse)
-//            }
-//
-//            logger.debug("Model check for '\(modelName)' received status code \(httpResponse.statusCode)")
-//
-//            if httpResponse.statusCode == 200 {
-//                logger.info("Model '\(modelName)' exists.")
-//                return true // Model exists
-//            } else if httpResponse.statusCode == 404 {
-//                logger.warning("Model '\(modelName)' not found (404).")
-//                return false // Model does not exist
-//            } else {
-//                // Other unexpected status code
-//                logger.error("Unexpected status code \(httpResponse.statusCode) during model check for '\(modelName)'.")
-//                throw URLError(.badServerResponse, userInfo: ["HTTPStatusCode": httpResponse.statusCode, NSLocalizedDescriptionKey: "Unexpected status code \(httpResponse.statusCode)"])
-//            }
-//        } catch let error as URLError where error.code == .cannotFindHost || error.code == .cannotConnectToHost || error.code == .networkConnectionLost {
-//             // Handle specific network connection errors clearly
-//             logger.error("Network error checking model '\(modelName)': \(error.localizedDescription)")
-//             throw error // Re-throw network error
-//         } catch {
-//            // Handle other potential errors during URLSession.shared.data(for:)
-//            logger.error("Error during model check request for '\(modelName)': \(error.localizedDescription)")
-//            throw error // Re-throw other errors
-//        }
-//    }
+    ///   - baseURL: The base URL of the Ollama server.
+    ///   - model: The name of the model to use for the chat.
+    ///   - history: The message history to send to the model.
+    /// - Returns: A `OllamaChatResponse` containing the model's reply.
+    /// - Throws: An error for network issues, bad responses, or decoding failures.
+    static func sendChatRequest(
+        baseURL: String,
+        model: String,
+        history: [OllamaChatMessage]
+    ) async throws -> OllamaChatResponse {
+        let endpoint = "/api/chat"
+        guard let url = URL(string: baseURL + endpoint) else {
+            logger.error("Invalid URL for chat request: \(baseURL)\(endpoint)")
+            throw URLError(.badURL)
+        }
+        logger.debug("Sending one-shot chat request to \(url.absoluteString) with model \(model)")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload = OllamaChatRequest(model: model, messages: history)
+
+        do {
+            request.httpBody = try JSONEncoder().encode(payload)
+        } catch {
+            logger.error("Failed to encode OllamaChatRequest payload: \(error)")
+            throw error
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Did not receive a valid HTTP response."])
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let responseBody = String(data: data, encoding: .utf8) ?? "Non-UTF8 response body"
+            logger.error("HTTP Error \(httpResponse.statusCode) from chat request. Body: \(responseBody)")
+            throw URLError(.badServerResponse, userInfo: [
+                NSLocalizedDescriptionKey: "Server returned status \(httpResponse.statusCode).",
+                "HTTPStatusCode": httpResponse.statusCode,
+                "ResponseData": data
+            ])
+        }
+
+        do {
+            let decoder = JSONDecoder()
+            let chatResponse = try decoder.decode(OllamaChatResponse.self, from: data)
+            logger.info("Successfully received and decoded one-shot chat response.")
+            return chatResponse
+        } catch {
+            logger.error("Failed to decode OllamaChatResponse: \(error)")
+            if let responseBody = String(data: data, encoding: .utf8) {
+                logger.error("Raw response body on decode failure: \(responseBody)")
+            }
+            throw error
+        }
+    }
+
 
     /// Fetches the list of local Ollama models from the server.
     /// - Parameter baseURL: The base URL of the Ollama server (e.g., "http://localhost:11434").

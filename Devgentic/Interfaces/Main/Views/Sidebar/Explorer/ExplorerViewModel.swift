@@ -78,6 +78,8 @@ final class ExplorerViewModel: ObservableObject {
 
     // A property to hold our real-time file system monitor.
     private var fileSystemMonitor: FileSystemMonitor?
+    private var fileSystemEventSubject = PassthroughSubject<URL, Never>()
+    private var cancellables = Set<AnyCancellable>()
 
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.explorer", category: "ExplorerViewModel")
@@ -92,6 +94,69 @@ final class ExplorerViewModel: ObservableObject {
         logger.info("ExplorerViewModel deinitialized. Resource cleanup for selectedRootURL is managed by its property observers.")
         // The call to stopMonitoring() is removed. The FileSystemMonitor's own deinit will handle the cleanup automatically
         // when the ExplorerViewModel is deallocated, which is the correct and safe pattern.
+    }
+    
+    private func setupDebouncer() {
+        fileSystemEventSubject
+            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
+            .sink { [weak self] url in
+                guard let self = self else { return }
+                self.logger.info("Debounced file system event triggered for \(url.path). Refreshing contents.")
+                // Re-run the indexing and reload the visual tree
+                Task {
+                    await self.indexAllFiles(from: url)
+                }
+                self.loadDirectoryContents(for: url)
+            }
+            .store(in: &cancellables)
+    }
+        
+    // MARK: - File Operations (New & Existing)
+    
+    // --- STEP 2.5: New Context Menu Actions ---
+    func copyRelativePath(_ item: FileSystemItem) {
+        guard let rootPath = selectedRootURL?.path else { return }
+        var itemPath = item.url.path
+        
+        if itemPath.hasPrefix(rootPath) {
+            // Remove the root path prefix to get the relative path
+            itemPath.removeFirst(rootPath.count)
+            // Remove leading slash if it exists
+            if itemPath.hasPrefix("/") {
+                itemPath.removeFirst()
+            }
+        }
+        
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(itemPath, forType: .string)
+        logger.info("Copied relative path to clipboard: \(itemPath)")
+    }
+        
+    func openInTerminal(_ item: FileSystemItem) {
+        let path: String
+        if item.isDirectory {
+            path = item.url.path
+        } else {
+            path = item.url.deletingLastPathComponent().path
+        }
+        
+        let scriptSource = """
+        tell application "Terminal"
+            activate
+            do script "cd \\"\(path)\\""
+        end tell
+        """
+        
+        if let script = NSAppleScript(source: scriptSource) {
+            var error: NSDictionary?
+            script.executeAndReturnError(&error)
+            if let err = error {
+                logger.error("AppleScript error opening terminal: \(err)")
+            } else {
+                logger.info("Opened terminal at path: \(path)")
+            }
+        }
     }
 
     // MARK: - Persistence Logic

@@ -12,9 +12,8 @@ import os
 struct BackendSelectorPopup: View {
 
     // MARK: - State Bindings
-    @Binding var selectedBackend: BackendType
-    @Binding var selectedAgentID: UUID?
-    @Binding var selectedIntegrationID: UUID?
+    // --- UPDATED: Receive the whole configuration object ---
+    @ObservedObject var configuration: BackendConfiguration
     @Binding var isPresented: Bool
     
     // MARK: - Environment
@@ -44,11 +43,9 @@ struct BackendSelectorPopup: View {
             // Column 1: Agents
             if showAgentColumn {
                 AgentColumnView(
-                    agentStore: agentStore,
-                    selectedAgentID: $selectedAgentID,
-                    selectedBackend: $selectedBackend,
+                    configuration: configuration,
+                    agents: agents,
                     onSelect: {
-                        self.selectedIntegrationID = nil
                         self.isPresented = false
                     },
                     onEdit: { agentID in
@@ -69,10 +66,8 @@ struct BackendSelectorPopup: View {
                     title: "Local Models",
                     backendTypeForColumn: .ollama,
                     integrations: localIntegrations,
-                    selectedIntegrationID: $selectedIntegrationID,
-                    selectedBackend: $selectedBackend,
+                    configuration: configuration,
                     onSelect: {
-                        self.selectedAgentID = nil
                         self.isPresented = false
                     },
                     onEdit: { integrationID in
@@ -94,10 +89,8 @@ struct BackendSelectorPopup: View {
                     title: "Remote Models",
                     backendTypeForColumn: .remote,
                     integrations: remoteIntegrations,
-                    selectedIntegrationID: $selectedIntegrationID,
-                    selectedBackend: $selectedBackend,
+                    configuration: configuration,
                     onSelect: {
-                        self.selectedAgentID = nil
                         self.isPresented = false
                     },
                     onEdit: { integrationID in
@@ -118,9 +111,8 @@ struct BackendSelectorPopup: View {
 
 // MARK: - Agent Column View
 private struct AgentColumnView: View {
-    @ObservedObject var agentStore: AgentStore
-    @Binding var selectedAgentID: UUID?
-    @Binding var selectedBackend: BackendType
+    @ObservedObject var configuration: BackendConfiguration
+    let agents: [AgentProfileModel]
     let onSelect: () -> Void
     let onEdit: (UUID) -> Void
 
@@ -132,8 +124,8 @@ private struct AgentColumnView: View {
             
             ScrollView {
                 VStack(alignment: .center, spacing: 0) {
-                    ForEach(agentStore.agents) { agent in
-                        let isSelected = selectedBackend == .agent && selectedAgentID == agent.id
+                    ForEach(agents) { agent in
+                        let isSelected = configuration.selectedBackend == .agent && configuration.selectedAgentID == agent.id
                         
                         ItemCell(
                             name: agent.name,
@@ -142,8 +134,8 @@ private struct AgentColumnView: View {
                         )
                         .onTapGesture(count: 2) { onEdit(agent.id) }
                         .onTapGesture(count: 1) {
-                            self.selectedBackend = .agent
-                            self.selectedAgentID = agent.id
+                            configuration.selectedBackend = .agent
+                            configuration.selectedAgentID = agent.id
                             self.onSelect()
                         }
                     }
@@ -160,8 +152,7 @@ private struct LLMColumnView: View {
     let title: String
     let backendTypeForColumn: BackendType
     let integrations: [LLMIntegrationModel]
-    @Binding var selectedIntegrationID: UUID?
-    @Binding var selectedBackend: BackendType
+    @ObservedObject var configuration: BackendConfiguration
     let onSelect: () -> Void
     let onEdit: (UUID) -> Void
 
@@ -174,7 +165,7 @@ private struct LLMColumnView: View {
             ScrollView {
                 VStack(alignment: .center, spacing: 0) {
                     ForEach(integrations) { integration in
-                        let isSelected = selectedBackend == backendTypeForColumn && selectedIntegrationID == integration.id
+                        let isSelected = configuration.selectedBackend == backendTypeForColumn && configuration.selectedIntegrationID == integration.id
                         
                         ItemCell(
                             name: integration.displayName,
@@ -183,8 +174,8 @@ private struct LLMColumnView: View {
                         )
                         .onTapGesture(count: 2) { onEdit(integration.id) }
                         .onTapGesture(count: 1) {
-                            self.selectedBackend = backendTypeForColumn
-                            self.selectedIntegrationID = integration.id
+                            configuration.selectedBackend = backendTypeForColumn
+                            configuration.selectedIntegrationID = integration.id
                             self.onSelect()
                         }
                     }

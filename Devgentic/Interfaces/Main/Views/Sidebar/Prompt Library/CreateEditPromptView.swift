@@ -13,42 +13,79 @@ struct CreateEditPromptView: View {
 
     // Available categories - can be dynamic later
     private let categories = ["General", "Development", "Productivity", "Creativity", "Writing", "Education", "Research", "Marketing", "Custom"]
+    
+    // To give focus to the title field when the view appears
+    @FocusState private var isTitleFocused: Bool
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 0) {
+            // MARK: - Header
             Text(viewModel.promptToEdit == nil ? "Create New Prompt" : "Edit Prompt")
                 .font(.title2)
                 .fontWeight(.semibold)
-                .padding(.bottom)
+                .padding()
+            
+            Divider()
 
-            // Form fields
-            Form {
-                TextField("Title", text: $viewModel.editablePromptTitle)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
+            // MARK: - Form Fields
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 20) {
+                // --- Title Row ---
+                GridRow(alignment: .center) {
+                    Text("Title")
+                        .gridColumnAlignment(.trailing)
+                    
+                    TextField("Enter a clear and concise title", text: $viewModel.editablePromptTitle)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isTitleFocused)
+                }
                 
-                Picker("Category", selection: $viewModel.editablePromptCategory) {
-                    ForEach(categories, id: \.self) { category in
-                        Text(category).tag(category)
+                // --- Category Row ---
+                GridRow(alignment: .center) {
+                    Text("Category")
+                        .gridColumnAlignment(.trailing)
+                    
+                    Picker("Category", selection: $viewModel.editablePromptCategory) {
+                        ForEach(categories, id: \.self) { category in
+                            Text(category).tag(category)
+                        }
                     }
+                    .pickerStyle(.menu)
+                    .labelsHidden() // Hide the default picker label
                 }
-                // Allow custom category input if "Custom" is selected (optional enhancement)
 
-                VStack(alignment: .leading) {
-                    Text("Prompt Text:")
+                // --- Prompt Text Row ---
+                GridRow(alignment: .top) {
+                    Text("Prompt Text")
+                        .gridColumnAlignment(.trailing)
+                        .padding(.top, 8)
+                    
                     TextEditor(text: $viewModel.editablePromptText)
+                        .font(.body)
                         .frame(minHeight: 150, maxHeight: 400)
-                        .border(Color.gray.opacity(0.3), width: 1)
-                        .cornerRadius(5)
+                        .padding(5)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        )
                 }
                 
-                TextField("Tags (comma-separated)", text: $viewModel.editablePromptTagsString)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .help("Enter tags separated by commas, e.g., coding, python, algorithm")
+                // --- Tags Row ---
+                GridRow(alignment: .center) {
+                    Text("Tags")
+                        .gridColumnAlignment(.trailing)
+                    
+                    TextField("Comma-separated, e.g., coding, python", text: $viewModel.editablePromptTagsString)
+                        .textFieldStyle(.roundedBorder)
+                        .help("Use commas to separate multiple tags.")
+                }
             }
-            .padding(.bottom)
+            .padding(20)
 
+            Spacer()
+            
+            Divider()
 
-            // Action Buttons
+            // MARK: - Action Buttons
             HStack {
                 Button("Cancel") {
                     dismiss()
@@ -66,13 +103,16 @@ struct CreateEditPromptView: View {
                           viewModel.editablePromptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .keyboardShortcut(.defaultAction)
             }
+            .padding()
         }
-        .padding(25)
-        .frame(minWidth: 500, idealWidth: 600, minHeight: 450, idealHeight: 550) // Good size for a sheet
         .onAppear {
             // If no prompt is being edited (i.e., creating new), and category is empty, set default
             if viewModel.promptToEdit == nil && viewModel.editablePromptCategory.isEmpty {
                 viewModel.editablePromptCategory = "General"
+            }
+            // Focus the title field automatically
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isTitleFocused = true
             }
         }
     }
@@ -84,13 +124,12 @@ struct CreateEditPromptView_Previews: PreviewProvider {
         let vm = PromptLibraryViewModel()
         if isEditing {
             let examplePrompt = Prompt.examplePrompts.first ?? Prompt(title: "Test Edit", text: "Editing this prompt.", category: "Testing", isUserDefined: true, tags: ["edit", "test"])
-            // If store is empty, add it so it can be "edited"
             if PromptStore.shared.getPrompt(withId: examplePrompt.id) == nil {
                  PromptStore.shared.addPrompt(examplePrompt)
             }
             vm.prepareToEditPrompt(examplePrompt)
         } else {
-            vm.prepareForCreateNewPrompt() // ensure fields are clear for create mode
+            vm.prepareForCreateNewPrompt()
         }
         return vm
     }
@@ -100,13 +139,14 @@ struct CreateEditPromptView_Previews: PreviewProvider {
             CreateEditPromptView()
                 .environmentObject(configuredViewModel(isEditing: false))
                 .previewDisplayName("Create New Prompt")
+                .frame(width: 550, height: 500)
 
             CreateEditPromptView()
                 .environmentObject(configuredViewModel(isEditing: true))
                 .previewDisplayName("Edit Prompt")
+                .frame(width: 550, height: 500)
         }
         .onAppear {
-            // Ensure the mock store has data for the preview
              if PromptStore.shared.prompts.isEmpty {
                  Prompt.examplePrompts.forEach { PromptStore.shared.addPrompt($0) }
              }

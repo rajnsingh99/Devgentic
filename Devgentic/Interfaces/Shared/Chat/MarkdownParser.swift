@@ -40,8 +40,13 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
 
     func finalizeCodeBlock() {
         if inCodeBlock {
-            let content = codeBlockContentLines.joined(separator: "\n")
-            blocks.append(.code(language: codeBlockLanguage, content: content))
+            // FIX: Trim the final joined content to remove leading/trailing whitespace and newlines.
+            // This ensures consistency with other parsing methods (like regex) and makes
+            // CodeSnippet equality checks reliable.
+            let content = codeBlockContentLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !content.isEmpty {
+                blocks.append(.code(language: codeBlockLanguage, content: content))
+            }
             inCodeBlock = false
             codeBlockLanguage = ""
             codeBlockContentLines.removeAll()

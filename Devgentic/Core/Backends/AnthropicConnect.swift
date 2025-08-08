@@ -51,7 +51,11 @@ class AnthropicConnect {
                     
                     let apiMessages = history.map { AnthropicMessage(from: $0) } + [AnthropicMessage(role: "user", content: userQuery)]
                     let requestBody = AnthropicStreamRequest(model: modelName, messages: apiMessages, stream: true, max_tokens: 4096)
+                    
                     request.httpBody = try JSONEncoder().encode(requestBody)
+                    // --- ADDED: Robust payload logging ---
+                    logRequestPayload(requestBody, for: "streamMessage")
+
 
                     let (bytes, response) = try await self.urlSession.bytes(for: request)
                     
@@ -139,6 +143,8 @@ class AnthropicConnect {
         )
 
         request.httpBody = try JSONEncoder().encode(requestBody)
+        // --- ADDED: Robust payload logging ---
+        logRequestPayload(requestBody, for: "sendMessage")
         
         let (data, response) = try await urlSession.data(for: request)
 
@@ -158,6 +164,29 @@ class AnthropicConnect {
             let errorText = "Could not find valid text in the Anthropic API response."
             let errorContent = MessageContent.error(title: "Invalid Response Structure", details: errorText)
             return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
+        }
+    }
+    
+    // --- ADDED: Private helper for logging request payloads ---
+    /// Encodes a `Codable` request body to a pretty-printed JSON string and logs it.
+    /// - Parameters:
+    ///   - payload: The `Codable` object to be logged.
+    ///   - functionName: The name of the calling function, for context in logs.
+    private func logRequestPayload<T: Codable>(_ payload: T, for functionName: String) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        do {
+            let data = try encoder.encode(payload)
+            if let jsonString = String(data: data, encoding: .utf8) {
+                logger.debug("""
+                [AnthropicConnect] Request Payload for \(functionName):
+                ---
+                \(jsonString)
+                ---
+                """)
+            }
+        } catch {
+            logger.error("[AnthropicConnect] Failed to encode request payload for logging: \(error.localizedDescription)")
         }
     }
 }

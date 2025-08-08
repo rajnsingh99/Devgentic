@@ -139,7 +139,8 @@ struct AgentsTabView_Previews: PreviewProvider {
 
         let viewModel = MainApplicationViewModel(
             llmIntegrationStore: llmIntegrationStore,
-            agentStore: agentStore
+            agentStore: agentStore,
+            chatHistoryViewModel: ChatHistoryViewModel()
         )
         return viewModel
     }()

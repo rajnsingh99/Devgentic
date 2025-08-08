@@ -5,7 +5,7 @@
 //  Created by Raj Singh on 10/05/25.
 //
 
-import AppKit 
+import AppKit
 
 /// Represents a reusable prompt in the Prompt Library.
 struct Prompt: Identifiable, Codable, Hashable {
@@ -64,6 +64,26 @@ extension Prompt {
                text: "Help me brainstorm ideas for [topic/project]. I'm looking for innovative and practical suggestions.",
                category: "Creativity",
                isUserDefined: false,
-               tags: ["ideation", "brainstorming"])
+               tags: ["ideation", "brainstorming"]),
+        Prompt(title: "Write a short story",
+               text: "Write a short story about a detective who solves a case using only a single, obscure detail.",
+               category: "Writing",
+               isUserDefined: false,
+               tags: ["fiction", "storytelling", "creative"]),
+        Prompt(title: "Explain REST APIs",
+               text: "Explain the concept of RESTful APIs, including key principles like statelessness and standard HTTP methods, in a way that is easy for a beginner to understand.",
+               category: "Development",
+               isUserDefined: false,
+               tags: ["development", "api", "web"]),
+        Prompt(title: "Generate a marketing slogan",
+               text: "Generate five catchy and effective marketing slogans for a new brand of sustainable coffee. The brand emphasizes fair trade and eco-friendly practices.",
+               category: "Marketing",
+               isUserDefined: false,
+               tags: ["marketing", "slogan", "branding"]),
+        Prompt(title: "Draft a professional email",
+               text: "Draft a professional email to a client requesting a meeting to discuss the next steps on a project. Be concise and provide a clear call to action.",
+               category: "Productivity",
+               isUserDefined: false,
+               tags: ["email", "professional", "writing"])
     ]
 }

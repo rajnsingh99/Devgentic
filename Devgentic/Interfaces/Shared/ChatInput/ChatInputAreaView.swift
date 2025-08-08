@@ -18,11 +18,14 @@ struct ChatInputAreaView: View {
 
     @Binding var showContextArea: Bool
     @Binding var activeContextFilePath: String?
-    let isSending: Bool // This binding comes from MainApplicationViewModel
+    
+    let isSending: Bool
     let showSettings: Bool
     var isInputFocused: FocusState<Bool>.Binding
-
-    let onSendMessage: (NSAttributedString) -> Void
+    
+    @ObservedObject var backendConfiguration: BackendConfiguration
+    
+    let onSendMessage: (NSAttributedString, BackendRequestConfig) -> Void
     let onToggleContext: () -> Void
 
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
@@ -75,7 +78,7 @@ struct ChatInputAreaView: View {
     }
 
     private var currentProfileType: ProfileType {
-        switch mainViewModel.selectedBackend {
+        switch backendConfiguration.selectedBackend {
         case .agent:
             return .agent
         case .ollama:
@@ -106,13 +109,15 @@ struct ChatInputAreaView: View {
     }
 
     private var profileButtonText: String {
-        switch mainViewModel.selectedBackend {
+        switch backendConfiguration.selectedBackend {
         case .agent:
-            if let agent = mainViewModel.agentStore.currentAgent {
+            if let agentID = backendConfiguration.selectedAgentID,
+               let agent = mainViewModel.agentStore.agents.first(where: { $0.id == agentID }) {
                 return agent.name
             }
         case .ollama, .remote:
-            if let integration = mainViewModel.llmIntegrationStore.currentIntegration {
+            if let integrationID = backendConfiguration.selectedIntegrationID,
+               let integration = mainViewModel.llmIntegrationStore.integrations.first(where: { $0.id == integrationID }) {
                 return integration.displayName
             }
         case .none:
@@ -138,18 +143,23 @@ struct ChatInputAreaView: View {
     }
 
     private var currentDynamicButtonMode: DynamicButtonMode {
-        if inputViewModel.voiceInputState == .recording {
-            return .stop
-        } else if hasInputText {
-            return .send
-        } else {
-            return .mic
-        }
+        if isSending { return .stop }
+        if hasInputText || !mainViewModel.attachedFiles.isEmpty { return .send }
+        return .mic
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Suggestion Views
+            if showPromptSuggestions {
+                PromptSuggestionView(
+                    prompts: filteredPrompts,
+                    suggestionQuery: suggestionQuery,
+                    onSelectPrompt: handlePromptSelection
+                )
+                .padding(.horizontal, 15)
+                .padding(.bottom, 4)
+            }
+            
             if showFileSuggestions {
                 FileSuggestionView(
                     files: filteredFiles,
@@ -160,7 +170,6 @@ struct ChatInputAreaView: View {
                 .padding(.bottom, 4)
             }
 
-            // Attached Files Display
             AttachedFilesDisplayView(
                 attachedFiles: mainViewModel.attachedFiles,
                 onRemoveFile: { fileItem in
@@ -185,6 +194,29 @@ struct ChatInputAreaView: View {
                 }
             }
         }
+        .frame(maxWidth: 1000)
+        .frame(maxWidth: .infinity, alignment: .center)
+        // --- FIX: Replicated the working logic from file suggestions for prompt suggestions ---
+        .onChange(of: showPromptSuggestions) { isShowing in
+            if isShowing {
+                // When the view appears, perform an initial filter
+                self.filteredPrompts = promptStore.getAllPrompts().filter {
+                    suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
+                }
+            }
+        }
+        .onChange(of: suggestionQuery) { newQuery in
+            // As the query changes, update the filtered list
+            self.filteredPrompts = promptStore.getAllPrompts().filter {
+                newQuery.isEmpty || $0.title.lowercased().contains(newQuery.lowercased())
+            }
+        }
+        .onReceive(promptStore.$prompts) { _ in
+             // If the underlying prompts change (e.g., added/deleted), re-filter
+            self.filteredPrompts = promptStore.getAllPrompts().filter {
+                suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
+            }
+        }
         .onChange(of: showFileSuggestions) { isShowing in
             if isShowing {
                 self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
@@ -195,6 +227,13 @@ struct ChatInputAreaView: View {
         }
         .onReceive(explorerViewModel.objectWillChange) { _ in
             self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
+        }
+        .sheet(isPresented: $inputViewModel.showAPIKeyInputPopup, onDismiss: {
+            inputViewModel.resetAPIKeyPopupState()
+        }) {
+            APIKeyInputPopup()
+                .environmentObject(mainViewModel)
+                .environmentObject(inputViewModel)
         }
         .animation(.spring(), value: mainViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
@@ -226,7 +265,10 @@ struct ChatInputAreaView: View {
             CustomTextEditor(
                 text: $inputViewModel.userInput,
                 onCommit: { attributedString in
-                    if isInputEnabled { self.onSendMessage(attributedString) }
+                    if isInputEnabled {
+                        let config = backendConfiguration.getRequestConfig()
+                        self.onSendMessage(attributedString, config)
+                    }
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
@@ -242,7 +284,6 @@ struct ChatInputAreaView: View {
                 }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
-            // --- ADDED: Animate height changes based on the text content ---
             .animation(.easeInOut(duration: 0.2), value: inputViewModel.userInput)
             
             if inputViewModel.userInput.isEmpty {
@@ -260,7 +301,7 @@ struct ChatInputAreaView: View {
     }
 
     private var placeholderText: String {
-        if mainViewModel.selectedBackend == .none { return "Please select a backend to begin..." }
+        if backendConfiguration.selectedBackend == .none { return "Please select a backend to begin..." }
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
         if inputViewModel.userInput.isEmpty {
             switch inputViewModel.voiceInputState {
@@ -288,10 +329,10 @@ struct ChatInputAreaView: View {
             }
             .help("Attach files")
 
-            Button { logger.info("Internet Search (globe) icon tapped - No functionality") } label: {
+            Button(action: handleGlobeButtonTap) {
                 Image(systemName: "globe")
                     .resizable().scaledToFit().frame(width: iconSize, height: iconSize)
-                    .foregroundColor(isGlobeButtonHovering ? .accentColor : .secondary)
+                    .foregroundColor(globeButtonColor)
                     .scaleEffect(isGlobeButtonHovering ? 1.1 : 1.0)
                     .animation(.easeOut(duration: 0.1), value: isGlobeButtonHovering)
             }
@@ -299,7 +340,7 @@ struct ChatInputAreaView: View {
             .onHover { hover in
                 isGlobeButtonHovering = hover
             }
-            .help("Web Search (Not Implemented)")
+            .help(globeButtonHelpText)
 
             backendPickerButton()
 
@@ -338,9 +379,7 @@ struct ChatInputAreaView: View {
         .buttonStyle(.plain)
         .popover(isPresented: $showingBackendSelectorPopup, arrowEdge: .bottom) {
             BackendSelectorPopup(
-                selectedBackend: $mainViewModel.selectedBackend,
-                selectedAgentID: $mainViewModel.selectedAgentID,
-                selectedIntegrationID: $mainViewModel.llmIntegrationStore.selectedIntegrationID,
+                configuration: backendConfiguration,
                 isPresented: $showingBackendSelectorPopup,
                 agentStore: mainViewModel.agentStore,
                 llmIntegrationStore: mainViewModel.llmIntegrationStore
@@ -362,13 +401,15 @@ struct ChatInputAreaView: View {
                 guard let textView = editorTextView else {
                     logger.error("Send button: editorTextView is nil.");
                     if !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty {
-                        onSendMessage(NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes))
+                        let config = backendConfiguration.getRequestConfig()
+                        onSendMessage(NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes), config)
                     }
                     return
                 }
                 let textToSend = textView.attributedString()
                 if !textToSend.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty {
-                    onSendMessage(textToSend)
+                    let config = backendConfiguration.getRequestConfig()
+                    onSendMessage(textToSend, config)
                 }
             case .mic, .stop:
                 inputViewModel.toggleVoiceInput()
@@ -440,7 +481,7 @@ struct ChatInputAreaView: View {
         case .stop:
             return Color.red.opacity(0.8)
         case .mic:
-            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color.gray.opacity(0.3) : Color(NSColor.controlAccentColor)
+            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
         }
     }
 
@@ -461,7 +502,7 @@ struct ChatInputAreaView: View {
     }
 
     private func isDynamicButtonDisabled(for mode: DynamicButtonMode) -> Bool {
-        if mainViewModel.selectedBackend == .none { return true }
+        if backendConfiguration.selectedBackend == .none { return true }
         switch mode {
         case .send:
             let isEmptyTextAndNoFiles = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mainViewModel.attachedFiles.isEmpty
@@ -488,8 +529,48 @@ struct ChatInputAreaView: View {
             }
         }
     }
+    
+    private var globeButtonColor: Color {
+        if mainViewModel.isWebSearchActive {
+            return .accentColor
+        }
+        return isGlobeButtonHovering ? .accentColor : .secondary
+    }
+
+    private var globeButtonHelpText: String {
+        if mainViewModel.isWebSearchEnabled {
+            return mainViewModel.isWebSearchActive ? "Web Search is Active" : "Web Search is Inactive"
+        }
+        return "Enable Web Search"
+    }
+
+    private func handleGlobeButtonTap() {
+        if mainViewModel.isWebSearchEnabled {
+            mainViewModel.toggleWebSearch()
+        } else {
+            inputViewModel.showAPIKeyInputPopup = true
+        }
+    }
 
     // MARK: - File & Prompt Handling
+    
+    private func handlePromptSelection(_ prompt: Prompt) {
+        guard let range = activePromptTriggerRange else {
+            logger.warning("Attempted to select a prompt, but activePromptTriggerRange was nil.")
+            return
+        }
+
+        logger.log("Prompt selected: '\(prompt.title)'. Replacing text in range \(NSStringFromRange(range)).")
+
+        let insertionText = NSAttributedString(string: prompt.text + " ", attributes: defaultTypingAttributes)
+        self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
+
+        self.showPromptSuggestions = false
+        self.suggestionQuery = ""
+        self.activePromptTriggerRange = nil
+        self.filteredPrompts = []
+    }
+    
     private func handleFileSelection(_ file: FileSystemItem) {
         mainViewModel.addAttachedFile(fileItem: file)
 

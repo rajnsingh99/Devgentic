@@ -11,26 +11,35 @@ import AVFoundation
 import os
 import WhisperKit
 
+/// Represents the state of the API key validation process.
+enum ValidationState {
+    case idle
+    case validating
+    case valid
+    case invalid(String)
+}
+
 @MainActor
 class ChatInputViewModel: ObservableObject {
+    
     // MARK: - Published Properties
     @Published var userInput: String = ""
     @Published var voiceInputState: VoiceInputState = .idle
-    
-    // --- ADDED: Properties for new recording UI ---
     @Published var recordingTime: TimeInterval = 0.0
     @Published var audioPowerLevels: [Float] = []
+    @Published var showAPIKeyInputPopup: Bool = false
+    @Published var apiKeyInput: String = ""
+    @Published var validationState: ValidationState = .idle
     
     // MARK - Services
     private var whisperRecognitionService: WhisperRecognitionService?
+    private let webSearchService = WebSearchService()
     
     // MARK: - Private State
     private let audioEngine = AVAudioEngine()
     private var audioBuffer: [Float] = []
     private var cancellables = Set<AnyCancellable>()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatInputViewModel")
-
-    // --- ADDED: Timer for recording duration ---
     private var recordingTimer: Timer?
     private let maxPowerLevelsToShow = 100 // Controls how many bars are shown in the waveform
 
@@ -71,7 +80,6 @@ class ChatInputViewModel: ObservableObject {
         }
     }
     
-    // --- ADDED: Function to cancel recording ---
     /// Stops recording and discards the audio without transcribing.
     func cancelRecording() {
         logger.log("Cancelling recording.")
@@ -83,12 +91,11 @@ class ChatInputViewModel: ObservableObject {
         recordingTimer?.invalidate()
         recordingTimer = nil
 
-        // Reset all recording-related state
         audioBuffer = []
         recordingTime = 0.0
         audioPowerLevels = []
         userInput = ""
-        voiceInputState = .available // Return to available state
+        voiceInputState = .available
     }
 
     // MARK: - State Management
@@ -119,7 +126,6 @@ class ChatInputViewModel: ObservableObject {
         if micStatus == .notDetermined {
             _ = await AVAudioApplication.requestRecordPermission()
         }
-        // The state will be updated by the sink observing the model loading state.
     }
 
     // MARK: - Transcription Lifecycle
@@ -133,7 +139,6 @@ class ChatInputViewModel: ObservableObject {
             return
         }
         
-        // --- UPDATED: Reset state for new recording ---
         self.voiceInputState = .recording
         self.userInput = ""
         self.audioBuffer = []
@@ -147,14 +152,11 @@ class ChatInputViewModel: ObservableObject {
         
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, time in
             guard let self = self else { return }
-            
-            // --- UPDATED: Process buffer for power levels and transcription data ---
             self.processAudioBuffer(buffer)
         }
         
         do {
             try audioEngine.start()
-            // --- ADDED: Start the recording timer ---
             self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
                 self?.recordingTime += 0.1
             }
@@ -175,8 +177,6 @@ class ChatInputViewModel: ObservableObject {
         
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        
-        // --- ADDED: Invalidate the timer ---
         recordingTimer?.invalidate()
         recordingTimer = nil
         
@@ -252,6 +252,34 @@ class ChatInputViewModel: ObservableObject {
         // Scale the decibel level to a 0-1 range.
         // We use a denominator of `abs(minDb)` because the loudest sound is 0 dB.
         return min(1.0, level / abs(minDb) + 1.0)
+    }
+    
+    // MARK: - Web Search API Key Management (UI State)
+    
+    /// Initiates the validation process for the API key entered by the user.
+    func validateEnteredAPIKey() async {
+        guard !apiKeyInput.isEmpty else { return }
+        
+        logger.info("Starting validation for the entered API key.")
+        self.validationState = .validating
+        
+        let (isValid, message) = await webSearchService.validate(apiKey: self.apiKeyInput)
+        
+        if isValid {
+            self.validationState = .valid
+            logger.info("API Key validation successful.")
+        } else {
+            self.validationState = .invalid(message)
+            logger.warning("API Key validation failed: \(message)")
+        }
+    }
+    
+    /// Resets the state of the API key input popup, typically called on dismiss.
+    func resetAPIKeyPopupState() {
+        logger.debug("Resetting API key popup state.")
+        apiKeyInput = ""
+        validationState = .idle
+        showAPIKeyInputPopup = false
     }
 }
 

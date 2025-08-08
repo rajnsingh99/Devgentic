@@ -49,7 +49,10 @@ class OpenAIConnect {
                     
                     let apiMessages = history.map { OpenAIMessage(from: $0) } + [OpenAIMessage(role: "user", content: userQuery)]
                     let requestBody = OpenAIStreamRequest(model: modelName, messages: apiMessages, stream: true)
+                    
                     request.httpBody = try JSONEncoder().encode(requestBody)
+                    // --- ADDED: Robust payload logging ---
+                    logRequestPayload(requestBody, for: "streamMessage")
 
                     let (bytes, response) = try await self.urlSession.bytes(for: request)
                     
@@ -127,13 +130,17 @@ class OpenAIConnect {
 
     private func getOrCreateThread(existingThreadID: String?) async throws -> (threadID: String, isNew: Bool) {
         if let existingThreadID = existingThreadID, !existingThreadID.isEmpty {
+            logger.debug("[OpenAIConnect] Using existing thread ID: \(existingThreadID)")
             return (existingThreadID, false)
         } else {
+            logger.debug("[OpenAIConnect] Creating new thread.")
             let url = URL(string: "https://api.openai.com/v1/threads")!
-            var request = makeAssistantsRequest(url: url, method: "POST")
+            let request = makeAssistantsRequest(url: url, method: "POST")
+            // No body for thread creation, so no payload to log.
             let (data, response) = try await urlSession.data(for: request)
             try handleAPIError(response: response, data: data)
             let thread = try JSONDecoder().decode(OpenAIThread.self, from: data)
+            logger.info("[OpenAIConnect] Created new thread with ID: \(thread.id)")
             return (thread.id, true)
         }
     }
@@ -141,7 +148,11 @@ class OpenAIConnect {
     private func addMessage(to threadID: String, text: String) async throws {
         let url = URL(string: "https://api.openai.com/v1/threads/\(threadID)/messages")!
         var request = makeAssistantsRequest(url: url, method: "POST")
-        request.httpBody = try JSONEncoder().encode(OpenAIMessageRequest(role: "user", content: text))
+        let requestBody = OpenAIMessageRequest(role: "user", content: text)
+        request.httpBody = try JSONEncoder().encode(requestBody)
+        // --- ADDED: Robust payload logging ---
+        logRequestPayload(requestBody, for: "addMessage")
+        
         let (_, response) = try await urlSession.data(for: request)
         try handleAPIError(response: response, data: nil)
     }
@@ -149,7 +160,11 @@ class OpenAIConnect {
     private func createRun(for threadID: String, modelName: String) async throws -> OpenAIRun {
         let url = URL(string: "https://api.openai.com/v1/threads/\(threadID)/runs")!
         var request = makeAssistantsRequest(url: url, method: "POST")
-        request.httpBody = try JSONEncoder().encode(OpenAIRunRequest(assistant_id: assistantID, model: modelName))
+        let requestBody = OpenAIRunRequest(assistant_id: assistantID, model: modelName)
+        request.httpBody = try JSONEncoder().encode(requestBody)
+        // --- ADDED: Robust payload logging ---
+        logRequestPayload(requestBody, for: "createRun")
+
         let (data, response) = try await urlSession.data(for: request)
         try handleAPIError(response: response, data: data)
         return try JSONDecoder().decode(OpenAIRun.self, from: data)
@@ -203,6 +218,29 @@ class OpenAIConnect {
                 errorMessage = errorResponse.error.message
             }
             throw OpenAIError.apiError("API Error (Code: \(statusCode)): \(errorMessage)")
+        }
+    }
+    
+    // --- ADDED: Private helper for logging request payloads ---
+    /// Encodes a `Codable` request body to a pretty-printed JSON string and logs it.
+    /// - Parameters:
+    ///   - payload: The `Codable` object to be logged.
+    ///   - functionName: The name of the calling function, for context in logs.
+    private func logRequestPayload<T: Codable>(_ payload: T, for functionName: String) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        do {
+            let data = try encoder.encode(payload)
+            if let jsonString = String(data: data, encoding: .utf8) {
+                logger.debug("""
+                [OpenAIConnect] Request Payload for \(functionName):
+                ---
+                \(jsonString)
+                ---
+                """)
+            }
+        } catch {
+            logger.error("[OpenAIConnect] Failed to encode request payload for logging: \(error.localizedDescription)")
         }
     }
 }

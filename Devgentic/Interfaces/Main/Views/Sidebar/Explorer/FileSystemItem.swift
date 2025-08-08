@@ -1,98 +1,64 @@
 // FileSystemItem.swift
-// (Located in your "Models" or "Explorer" group)
 import SwiftUI
-import UniformTypeIdentifiers // Make sure this is imported
+import UniformTypeIdentifiers
 
 struct FileSystemItem: Identifiable, Hashable {
-    let id: URL // Use URL as the unique ID for file system items
+    let id: URL
     var name: String
     var url: URL
     var isDirectory: Bool
-    var children: [FileSystemItem]? = nil // Loaded lazily for directories
+    var children: [FileSystemItem]? = nil
 
     // MARK: - Enhanced Icon Name
     var iconName: String {
         if isDirectory {
-            return "folder.fill" // Standard folder icon
+            return "folder.fill"
         } else {
-            // Try to get a type-specific icon using UTType
+            // Use UTType for more accurate file type detection
             if let type = UTType(filenameExtension: url.pathExtension) {
-                if type.conforms(to: .sourceCode) || type.conforms(to: .text) {
-                    // For source code and text files, use the "< >" icon from the screenshot
-                    // We'll use "chevron.left.forwardslash.chevron.right" as a proxy for "< / >"
-                    // or "curlybraces" for a more code-like feel.
-                    // Let's use "doc.text" for now and customize in AttachedFilePillView if a custom SVG/image is needed.
-                    // For a symbol that looks somewhat like "< >": "chevron.left.slash.chevron.right" is available.
-                    // Or, if you want to exactly match the screenshot, you might need a custom asset or SF Symbol that looks like "</>".
-                    // For now, let's use a generic code/text icon.
-                    return "doc.text" // Placeholder, will be refined in PillView if needed for the exact < >
-                }
-                if type.conforms(to: .image) {
-                    return "photo.fill"
-                }
-                if type.conforms(to: .pdf) {
-                    return "doc.richtext.fill" // PDFs often look like rich text docs
-                }
-                // Add more specific UTType checks here if needed
+                if type.conforms(to: .swiftSource) { return "swift" }
+                if type.conforms(to: .sourceCode) { return "chevron.left.forwardslash.chevron.right" }
+                if type.conforms(to: .image) { return "photo.on.rectangle.angled" }
+                if type.conforms(to: .pdf) { return "doc.richtext.fill" }
+                if type.conforms(to: .archive) { return "archivebox.fill" }
+                if type.conforms(to: .json) { return "doc.text.below.ecg" }
+                if type.conforms(to: .text) { return "doc.text" }
             }
-            return "doc" // Generic document icon as a fallback
+            // Fallback for any other file type
+            return "doc"
         }
     }
     
-    // MARK: - Enhanced File Type Description
-    var fileTypeDescription: String {
+    // MARK: - Icon Color
+    /// Provides a specific color for the icon based on the file type and the current theme.
+    func iconColor(for theme: any Theme) -> Color {
         if isDirectory {
-            return "Folder"
+            return theme.accentColor // Use the theme's accent color for all folders
         }
         
-        guard let type = UTType(filenameExtension: url.pathExtension) else {
-            // Fallback for unknown extensions or if extension is missing
-            if url.pathExtension.isEmpty {
-                return "File"
-            }
-            return "\(url.pathExtension.uppercased()) File"
-        }
-
-        // Provide more specific descriptions based on UTType
-        if type.conforms(to: .sourceCode) {
-            // Specific known source code types
-            if type.identifier == "com.apple.swift-source" { return "Swift Source Code" }
-            if type.identifier == "public.python-script" { return "Python Source Code" }
-            if type.identifier == "com.netscape.javascript-source" { return "JavaScript Source Code" }
-            if type.identifier == "public.c-source" { return "C Source Code" }
-            if type.identifier == "public.c-plus-plus-source" { return "C++ Source Code" }
-            if type.identifier == "com.sun.java-source" { return "Java Source Code" }
-            // Generic fallback for other source code
-            return type.localizedDescription ?? "Source Code"
+        if let type = UTType(filenameExtension: url.pathExtension) {
+            if type.conforms(to: .swiftSource) { return Color(hex: "#F05138") } // Orange for Swift
+            if type.conforms(to: .image) { return Color(hex: "#8E44AD") } // Purple for images
+            if type.conforms(to: .archive) { return Color(hex: "#F39C12") } // Yellow for archives
         }
         
-        if type.conforms(to: .text) { return type.localizedDescription ?? "Text Document" }
-        if type.conforms(to: .image) { return type.localizedDescription ?? "Image" }
-        if type.conforms(to: .pdf) { return "PDF Document" }
-        if type.conforms(to: .archive) { return type.localizedDescription ?? "Archive" }
-        if type.conforms(to: .spreadsheet) { return type.localizedDescription ?? "Spreadsheet" }
-        if type.conforms(to: .presentation) { return type.localizedDescription ?? "Presentation" }
-        if type.conforms(to: .database) { return type.localizedDescription ?? "Database" }
-        
-        // General fallback using localized description from UTType
-        if let localizedDesc = type.localizedDescription, !localizedDesc.isEmpty {
-            return localizedDesc
-        }
-        
-        // If localizedDescription is too generic (like "Document"), use the extension
-        if !url.pathExtension.isEmpty {
-            return "\(url.pathExtension.uppercased()) File"
-        }
-        
-        return "File" // Absolute fallback
+        // For all other files, use the theme's secondary text color for a subtle look.
+        return theme.secondaryText
     }
 
-    // Helper to check if children have been loaded (for lazy loading)
+    // FileTypeDescription and other properties remain the same...
+    var fileTypeDescription: String {
+        if isDirectory { return "Folder" }
+        guard let type = UTType(filenameExtension: url.pathExtension) else {
+            return url.pathExtension.isEmpty ? "File" : "\(url.pathExtension.uppercased()) File"
+        }
+        return type.localizedDescription ?? "File"
+    }
+
     var childrenLoaded: Bool {
         return children != nil
     }
 
-    // Conformance to Hashable (id is unique)
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }

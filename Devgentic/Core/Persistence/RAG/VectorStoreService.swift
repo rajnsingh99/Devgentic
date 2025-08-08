@@ -65,25 +65,40 @@ class VectorStoreService {
         }
     }
     
-    /// Finds the `limit` most relevant chunks in the database related to a query embedding.
-    ///
-    /// This function performs a brute-force nearest neighbor search by calculating the cosine
-    /// similarity between the query vector and every chunk in the database.
+    /// Finds the `limit` most relevant chunks in the database related to a query embedding,
+    /// optionally scoped to a specific conversation.
     ///
     /// - Parameters:
     ///   - queryEmbedding: The vector embedding of the user's query.
     ///   - limit: The maximum number of relevant chunks to return.
+    ///   - conversationID: If provided, the search will be limited to chunks within this conversation.
     /// - Returns: An array of the most relevant `ChunkEntity` objects, sorted by relevance.
-    func findNearest(to queryEmbedding: [Float], limit: Int) -> [ChunkEntity] {
+    func findNearest(to queryEmbedding: [Float], limit: Int, conversationID: UUID?) -> [ChunkEntity] {
         do {
-            let allChunks = try box.all()
-            if allChunks.isEmpty {
-                logger.debug("No chunks in vector store to search.")
+            let chunksToSearch: [ChunkEntity]
+            
+            // --- UPDATED: Conditionally build a query to filter by conversationID ---
+            if let convID = conversationID {
+                logger.info("Scoping vector search to conversation ID: \(convID.uuidString)")
+                // Build a query to fetch only chunks matching the conversation ID.
+                let query: Query<ChunkEntity> = try box.query {
+                    // Note: We query against the `uuidString` because the UUID is stored as a String in the DB.
+                    ChunkEntity.conversationID.isEqual(to: convID.uuidString, caseSensitive: false)
+                }.build()
+                chunksToSearch = try query.find()
+            } else {
+                // If no conversation ID is provided, fall back to searching all chunks.
+                logger.warning("No conversation ID provided for vector search. Searching globally.")
+                chunksToSearch = try box.all()
+            }
+
+            if chunksToSearch.isEmpty {
+                logger.debug("No chunks in vector store to search for the given criteria.")
                 return []
             }
             
             // Create a temporary structure to hold chunks and their similarity scores.
-            let scoredChunks = allChunks.map { chunk in
+            let scoredChunks = chunksToSearch.map { chunk in
                 (chunk: chunk, score: cosineSimilarity(between: queryEmbedding, and: chunk.embedding))
             }
             

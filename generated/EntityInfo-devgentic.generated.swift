@@ -29,11 +29,12 @@ extension ChunkEntity: ObjectBox.EntityInspectable {
         let entityBuilder = try modelBuilder.entityBuilder(for: ChunkEntity.self, id: 1, uid: 8850547422367127552)
         try entityBuilder.addProperty(name: "id", type: PropertyType.long, flags: [.id], id: 1, uid: 7368259189620248064)
         try entityBuilder.addProperty(name: "sourceMessageID", type: PropertyType.string, id: 2, uid: 165968057040098560)
+        try entityBuilder.addProperty(name: "conversationID", type: PropertyType.string, id: 6, uid: 5331159051447997184)
         try entityBuilder.addProperty(name: "content", type: PropertyType.string, id: 3, uid: 2038332945049212160)
         try entityBuilder.addProperty(name: "embedding", type: PropertyType.byteVector, id: 4, uid: 7150978206688453888)
         try entityBuilder.addProperty(name: "timestamp", type: PropertyType.date, id: 5, uid: 27700735494270208)
 
-        try entityBuilder.lastProperty(id: 5, uid: 27700735494270208)
+        try entityBuilder.lastProperty(id: 6, uid: 5331159051447997184)
     }
 }
 
@@ -50,6 +51,12 @@ extension ChunkEntity {
     ///
     ///     box.query { ChunkEntity.sourceMessageID.startsWith("X") }
     internal static var sourceMessageID: Property<ChunkEntity, String, Void> { return Property<ChunkEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChunkEntity.conversationID.startsWith("X") }
+    internal static var conversationID: Property<ChunkEntity, String, Void> { return Property<ChunkEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
@@ -90,6 +97,14 @@ extension ObjectBox.Property where E == ChunkEntity {
     ///     box.query { .sourceMessageID.startsWith("X") }
 
     internal static var sourceMessageID: Property<ChunkEntity, String, Void> { return Property<ChunkEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .conversationID.startsWith("X") }
+
+    internal static var conversationID: Property<ChunkEntity, String, Void> { return Property<ChunkEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
 
     /// Generated entity property information.
     ///
@@ -137,13 +152,15 @@ internal final class ChunkEntityBinding: ObjectBox.EntityBinding, Sendable {
 
     internal func collect(fromEntity entity: EntityType, id: ObjectBox.Id,
                                   propertyCollector: ObjectBox.FlatBufferBuilder, store: ObjectBox.Store) throws {
-        let propertyOffset_sourceMessageID = propertyCollector.prepare(string: UUIDConverter.convert(entityProperty: entity.sourceMessageID))
+        let propertyOffset_sourceMessageID = propertyCollector.prepare(string: UUIDConverter.convert(entity.sourceMessageID))
+        let propertyOffset_conversationID = propertyCollector.prepare(string: UUIDConverter.convert(entity.conversationID))
         let propertyOffset_content = propertyCollector.prepare(string: entity.content)
-        let propertyOffset_embedding = propertyCollector.prepare(bytes: FloatArrayConverter.convert(entityProperty: entity.embedding))
+        let propertyOffset_embedding = propertyCollector.prepare(bytes: FloatArrayConverter.convert(entity.embedding))
 
         propertyCollector.collect(id, at: 2 + 2 * 1)
         propertyCollector.collect(entity.timestamp, at: 2 + 2 * 5)
         propertyCollector.collect(dataOffset: propertyOffset_sourceMessageID, at: 2 + 2 * 2)
+        propertyCollector.collect(dataOffset: propertyOffset_conversationID, at: 2 + 2 * 6)
         propertyCollector.collect(dataOffset: propertyOffset_content, at: 2 + 2 * 3)
         propertyCollector.collect(dataOffset: propertyOffset_embedding, at: 2 + 2 * 4)
     }
@@ -152,9 +169,10 @@ internal final class ChunkEntityBinding: ObjectBox.EntityBinding, Sendable {
         let entity = ChunkEntity()
 
         entity.id = entityReader.read(at: 2 + 2 * 1)
-        entity.sourceMessageID = UUIDConverter.convert(databaseValue: entityReader.read(at: 2 + 2 * 2))
+        entity.sourceMessageID = UUIDConverter.convert(entityReader.read(at: 2 + 2 * 2))
+        entity.conversationID = UUIDConverter.convert(entityReader.read(at: 2 + 2 * 6))
         entity.content = entityReader.read(at: 2 + 2 * 3)
-        entity.embedding = FloatArrayConverter.convert(databaseValue: entityReader.read(at: 2 + 2 * 4))
+        entity.embedding = FloatArrayConverter.convert(entityReader.read(at: 2 + 2 * 4))
         entity.timestamp = entityReader.read(at: 2 + 2 * 5)
 
         return entity

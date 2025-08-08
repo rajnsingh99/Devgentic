@@ -12,10 +12,9 @@ import os
 enum SidebarTab: CaseIterable, Identifiable {
     case newChat
     case conversations
-    case ollama
+    case integration
     case explorer
     case promptLibrary
-    case agents
     case settings
     case user
 
@@ -28,13 +27,11 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "plus.bubble"
         case .conversations:
             return "message"
-        case .ollama:
+        case .integration:
             return "cpu"
         // MARK: - Icon for Prompt Library
         case .promptLibrary:
             return "books.vertical"
-        case .agents:
-            return "figure.walk.motion"
         case .settings:
             return "gearshape"
         case .user:
@@ -51,12 +48,10 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "New Conversation"
         case .conversations:
             return "Conversations"
-        case .ollama:
-            return "Ollama"
+        case .integration:
+            return "integration"
         case .promptLibrary:
             return "Prompt Library"
-        case .agents:
-            return "Agents"
         case .settings:
             return "Settings"
         case .user:

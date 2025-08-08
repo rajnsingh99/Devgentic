@@ -202,9 +202,13 @@ struct AgentProfilerView_V3_Previews: PreviewProvider {
 
         let mockToolStore = ToolStore()
         
+        // NEW: Create an instance of ChatHistoryViewModel for the preview
+        let mockChatHistoryViewModel = ChatHistoryViewModel()
+
         let mockMainViewModel = MainApplicationViewModel(
             llmIntegrationStore: mockLlmIntegrationStore,
-            agentStore: mockAgentStore
+            agentStore: mockAgentStore,
+            chatHistoryViewModel: mockChatHistoryViewModel // Pass the new instance here
         )
 
         AgentProfilerView()

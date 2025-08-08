@@ -7,6 +7,7 @@
 
 import Foundation
 import UniformTypeIdentifiers // For UTType
+import PDFKit // ADDED: Import PDFKit to handle PDF files
 import os // For Logger
 
 // Logger for the FileProcessorService
@@ -14,7 +15,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct FileProcessorService {
 
-    /// Reads the content of a text file at the given URL.
+    /// Reads the content of a file at the given URL.
+    /// This function now supports text extraction from PDF files.
     /// - Parameters:
     ///   - url: The URL of the file to read.
     ///   - maxSize: The maximum number of characters to read. If the file is larger, `nil` is returned.
@@ -39,8 +41,42 @@ struct FileProcessorService {
         }
 
         do {
+            // --- NEW: PDF Handling Logic ---
+            // Check if the file is a PDF using its UTType.
+            if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .pdf) {
+                guard let pdfDocument = PDFDocument(url: url) else {
+                    logger.warning("Could not initialize PDFDocument for: \(url.lastPathComponent, privacy: .public)")
+                    return nil
+                }
+
+                var fullText = ""
+                // Iterate through each page of the PDF.
+                for i in 0..<pdfDocument.pageCount {
+                    guard let page = pdfDocument.page(at: i), let pageText = page.string else {
+                        continue
+                    }
+                    
+                    // Ensure we don't exceed the maximum size.
+                    if fullText.count + pageText.count > maxSize {
+                        logger.warning("PDF content for \(url.lastPathComponent, privacy: .public) exceeds maxSize of \(maxSize). Truncating.")
+                        let remainingSpace = maxSize - fullText.count
+                        if remainingSpace > 0 {
+                            fullText.append(String(pageText.prefix(remainingSpace)))
+                        }
+                        break // Stop processing further pages.
+                    }
+                    fullText.append(pageText + "\n") // Add a newline to separate content from different pages.
+                }
+                logger.info("Successfully extracted text from PDF: \(url.lastPathComponent, privacy: .public) (length: \(fullText.count) chars)")
+                return fullText
+            }
+            // --- END of PDF Handling Logic ---
+
+            // --- Existing logic for other text files ---
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             if let fileSize = attributes[.size] as? NSNumber {
+                // Estimate max bytes to avoid reading huge files into memory unnecessarily.
+                // A character can be up to 4 bytes.
                 if fileSize.intValue > maxSize * 4 {
                     logger.warning("File \(url.lastPathComponent, privacy: .public) is potentially too large (size: \(fileSize.intValue) bytes) to inline, exceeding estimated limit for \(maxSize) chars.")
                 }
@@ -107,7 +143,7 @@ struct FileProcessorService {
     }
 
     /// Checks if a given MIME type or file URL represents a text-based format,
-    /// giving strong consideration to source code.
+    /// giving strong consideration to source code and now PDFs.
     /// - Parameters:
     ///   - mimeType: The MIME type string.
     ///   - url: The URL of the file, used for extension checking as a fallback.
@@ -117,8 +153,10 @@ struct FileProcessorService {
         
         // Check based on UTType conformance from the URL first
         if let type = UTType(filenameExtension: url.pathExtension) {
-            if type.conforms(to: .text) || type.conforms(to: .sourceCode) {
-                logger.trace("File '\(url.lastPathComponent, privacy: .public)' (UTType) is text/source code.")
+            // UPDATED: Added UTType.pdf to the list of types we consider "text files"
+            // because we can now extract their text content.
+            if type.conforms(to: .text) || type.conforms(to: .sourceCode) || type.conforms(to: .pdf) {
+                logger.trace("File '\(url.lastPathComponent, privacy: .public)' (UTType) is text/source code/pdf.")
                 return true
             }
         }
@@ -128,13 +166,12 @@ struct FileProcessorService {
         let commonTextMimeTypes = [
             "application/json", "application/xml", "application/javascript", "application/ecmascript",
             "application/xhtml+xml", "application/sql", "application/rtf",
-            "image/svg+xml" // SVG is XML-based text
+            "image/svg+xml", // SVG is XML-based text
+            "application/pdf" // Explicitly add PDF MIME type here as well for robustness
         ]
 
         for prefix in textMimeTypePrefixes {
             if lowercasedMimeType.starts(with: prefix) {
-                // Make sure it's not something like text/vcard or other less "LLM-promptable" text types,
-                // unless explicitly desired. For now, any "text/*" is fine.
                 logger.trace("MIME type '\(mimeType)' starts with 'text/', evaluated as text.")
                 return true
             }
@@ -172,9 +209,6 @@ struct FileProcessorService {
         
         // Fallback to MIME string check
         if lowercasedMimeType.starts(with: "image/") {
-             // image/svg+xml is an image, but also text-based.
-             // The isTextFile method also handles svg+xml as text.
-             // The MessageAssembler will decide how to treat it based on context (e.g., prefer inlining for text LLMs).
             logger.trace("MIME type '\(mimeType)' starts with 'image/', evaluated as image.")
             return true
         }

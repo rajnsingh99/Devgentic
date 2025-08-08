@@ -85,6 +85,8 @@ class GeminiConnect {
                 
                 do {
                     request.httpBody = try JSONEncoder().encode(requestBody)
+                    // --- ADDED: Robust payload logging ---
+                    logRequestPayload(requestBody, for: "streamMessage")
                 } catch {
                     logger.error("Failed to encode Gemini request body: \(error.localizedDescription)")
                     continuation.finish(throwing: error)
@@ -214,6 +216,8 @@ class GeminiConnect {
         
         do {
             request.httpBody = try JSONEncoder().encode(requestBody)
+            // --- ADDED: Robust payload logging ---
+            logRequestPayload(requestBody, for: "sendMessage")
         } catch {
             logger.error("Failed to encode Gemini request body: \(error.localizedDescription)")
             throw error
@@ -249,6 +253,29 @@ class GeminiConnect {
         } catch {
             logger.error("Failed to decode Gemini JSON response: \(error.localizedDescription)")
             throw error
+        }
+    }
+    
+    // --- ADDED: Private helper for logging request payloads ---
+    /// Encodes a `Codable` request body to a pretty-printed JSON string and logs it.
+    /// - Parameters:
+    ///   - payload: The `Codable` object to be logged.
+    ///   - functionName: The name of the calling function, for context in logs.
+    private func logRequestPayload<T: Codable>(_ payload: T, for functionName: String) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        do {
+            let data = try encoder.encode(payload)
+            if let jsonString = String(data: data, encoding: .utf8) {
+                logger.debug("""
+                [GeminiConnect] Request Payload for \(functionName):
+                ---
+                \(jsonString)
+                ---
+                """)
+            }
+        } catch {
+            logger.error("[GeminiConnect] Failed to encode request payload for logging: \(error.localizedDescription)")
         }
     }
 }

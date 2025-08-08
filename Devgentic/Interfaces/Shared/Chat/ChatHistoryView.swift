@@ -12,66 +12,82 @@ import Down
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatHistoryView")
 
-private let CODE_BLOCK_LINE_LIMIT = 50
-
 // MARK: - ChatHistoryView
 struct ChatHistoryView: View {
 
-    @EnvironmentObject private var viewModel: MainApplicationViewModel
+    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel // Dedicated view model
     
     @State private var showScrollToBottomButton = false
     @State private var scrollTargetID: UUID?
+    @State private var chatInputAreaHeight: CGFloat = 0 // To store the height of the chat input area
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottom) {
-                chatScrollView(proxy: proxy)
-                    .task(id: viewModel.streamingTriggerID) {
-                        guard viewModel.streamingTriggerID != nil else { return }
-                        await consumeStream()
-                    }
-                    .onChange(of: viewModel.streamingTriggerID) { newTriggerID in
-                        if let id = newTriggerID {
-                            logger.info("Streaming trigger ID changed. Setting scroll target to \(id.uuidString)")
-                            self.scrollTargetID = id
-                        }
-                    }
-                    .onChange(of: scrollTargetID) { targetID in
-                        if let id = targetID {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                logger.debug("Attempting to scroll to placeholder ID \(id.uuidString) with position: .top")
-                                scrollTo(proxy: proxy, anchor: id, position: .top, animated: false)
-                                self.scrollTargetID = nil
+        GeometryReader { geometry in // Use GeometryReader to get available height
+            ScrollViewReader { proxy in
+                ZStack(alignment: .bottom) {
+                    chatScrollView(proxy: proxy, geometry: geometry)
+                        // Observe streamingTriggerID from chatHistoryViewModel
+                        .onChange(of: chatHistoryViewModel.streamingTriggerID) { newTriggerID in
+                            if let id = newTriggerID {
+                                logger.info("Streaming trigger ID changed. Setting scroll target to \(id.uuidString)")
+                                self.scrollTargetID = id
                             }
                         }
-                    }
-                    .onChange(of: viewModel.currentChatMessages.first?.id) {
-                        if !viewModel.isSending, let firstMessageId = viewModel.currentChatMessages.first?.id {
-                           scrollTo(proxy: proxy, anchor: firstMessageId, position: .bottom, animated: true)
+                        .onChange(of: scrollTargetID) { targetID in
+                            if let id = targetID {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                    logger.debug("Attempting to scroll to placeholder ID \(id.uuidString) with position: .top")
+                                    scrollTo(proxy: proxy, anchor: id, position: .top, animated: false)
+                                    self.scrollTargetID = nil
+                                }
+                            }
                         }
+                        // Observe currentChatMessages from chatHistoryViewModel
+                        .onChange(of: chatHistoryViewModel.currentChatMessages.first?.id) {
+                            if !chatHistoryViewModel.isSending, let firstMessageId = chatHistoryViewModel.currentChatMessages.first?.id {
+                               scrollTo(proxy: proxy, anchor: firstMessageId, position: .top, animated: true)
+                            }
+                        }
+                    
+                    if showScrollToBottomButton {
+                        scrollToBottomButton(proxy: proxy)
                     }
-                
-                if showScrollToBottomButton {
-                    scrollToBottomButton(proxy: proxy)
                 }
             }
         }
+        // This is a placeholder to simulate the chat input area height.
+        // In a real app, you'd measure the actual height of your chat input view.
+        .onAppear {
+            // Estimate chat input area height. Adjust this value based on your actual UI.
+            self.chatInputAreaHeight = 100 // Example: 100 points for input field + padding
+        }
     }
 
-    private func chatScrollView(proxy: ScrollViewProxy) -> some View {
+    private func chatScrollView(proxy: ScrollViewProxy, geometry: GeometryProxy) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                if viewModel.selectedConversationID != nil {
-                    ForEach(Array(viewModel.currentChatMessages.enumerated()), id: \.element.id) { index, message in
+                // NEW: Shimmering loading view
+                if chatHistoryViewModel.isSending { // Use chatHistoryViewModel here
+                    ShimmeringLoadingView(
+                        availableHeight: geometry.size.height,
+                        chatInputAreaHeight: chatInputAreaHeight
+                    )
+                    .id("shimmering_loader") // Give it an ID for potential scrolling
+                    .transition(.opacity) // Add a fade transition
+                }
+
+                if mainAppViewModel.selectedConversationID != nil { // Still depends on MainAppViewModel for selected conversation
+                    ForEach(Array(chatHistoryViewModel.currentChatMessages.enumerated()), id: \.element.id) { index, message in // Use chatHistoryViewModel here
                         ChatBubbleView(message: message)
                             .id(message.id)
                             .rotationEffect(.degrees(180))
                             .scaleEffect(x: -1, y: 1, anchor: .center)
                             .onAppear {
-                                if viewModel.currentChatMessages.last?.id == message.id && viewModel.canLoadMorePages {
+                                if chatHistoryViewModel.currentChatMessages.last?.id == message.id && chatHistoryViewModel.canLoadMorePages { // Use chatHistoryViewModel here
                                     logger.debug("Reached top of chat, loading more messages.")
                                     Task {
-                                        await viewModel.loadMoreMessages()
+                                        await chatHistoryViewModel.loadMoreMessages() // Use chatHistoryViewModel here
                                     }
                                 }
                                 
@@ -87,8 +103,8 @@ struct ChatHistoryView: View {
                                 }
                             }
 
-                        if index < viewModel.currentChatMessages.count - 1 {
-                            Spacer().frame(height: UITheme.Spacing.xlarge) 
+                        if index < chatHistoryViewModel.currentChatMessages.count - 1 { // Use chatHistoryViewModel here
+                            Spacer().frame(height: UITheme.Spacing.xlarge)
                                 .rotationEffect(.degrees(180))
                                 .scaleEffect(x: -1, y: 1, anchor: .center)
                         }
@@ -97,20 +113,22 @@ struct ChatHistoryView: View {
                 
                 Spacer(minLength: 0)
             }
+            // MODIFIED: Added maxWidth and center alignment to LazyVStack
+            .frame(maxWidth: 1100) // Constrain the content width
+            .frame(maxWidth: .infinity, alignment: .top) // Center the constrained content
             .padding(.top, UITheme.Spacing.large)
-            .padding(.horizontal, 50)
             .padding(.bottom, UITheme.Spacing.medium)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            // Removed .frame(maxWidth: .infinity, alignment: .topLeading) as it's now handled by the two frame modifiers above
         }
         .background(Color.clear)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity) // ScrollView itself takes full available width
         .rotationEffect(.degrees(180))
         .scaleEffect(x: -1, y: 1, anchor: .center)
     }
     
     private func scrollToBottomButton(proxy: ScrollViewProxy) -> some View {
         Button(action: {
-            if let lastMessageId = viewModel.currentChatMessages.first?.id {
+            if let lastMessageId = chatHistoryViewModel.currentChatMessages.first?.id { // Use chatHistoryViewModel here
                 scrollTo(proxy: proxy, anchor: lastMessageId, position: .bottom, animated: true)
             }
         }) {
@@ -127,47 +145,8 @@ struct ChatHistoryView: View {
         .transition(.scale.combined(with: .opacity))
     }
 
-    private func consumeStream() async {
-        guard viewModel.streamingTriggerID != nil,
-              let conversationID = viewModel.selectedConversationID,
-              let lastUserMessage = viewModel.currentChatMessages.first(where: { $0.sender == .user }),
-              let userQuery = lastUserMessage.content.textContent
-        else {
-            if viewModel.isSending {
-                logger.warning("consumeStream: Pre-conditions not met, but isSending was true. Resetting state.")
-                await viewModel.resetSendingState()
-            }
-            return
-        }
-
-        logger.debug("Starting stream consumption for user message ID: \(lastUserMessage.id.uuidString)")
-        var finalError: Error?
-
-        do {
-            let history = Array(viewModel.currentChatMessages.dropFirst(2))
-            
-            let stream = viewModel.streamResponse(
-                conversationID: conversationID,
-                userQuery: userQuery,
-                history: history,
-                files: viewModel.attachedFiles
-            )
-
-            for try await token in stream {
-                await viewModel.appendTokenToStreamingMessage(token)
-            }
-            logger.info("Stream consumption finished successfully.")
-            
-        } catch {
-            logger.error("Stream consumption failed: \(error.localizedDescription)")
-            finalError = error
-        }
-
-        await viewModel.finalizeStreaming(
-            conversationID: conversationID,
-            error: finalError
-        )
-    }
+    // Removed consumeStream() as its logic is now orchestrated by MainApplicationViewModel
+    // which updates ChatHistoryViewModel. ChatHistoryView now just observes.
 
     private func scrollTo(proxy: ScrollViewProxy, anchor: any Hashable, position: UnitPoint, animated: Bool) {
         logger.debug("scrollTo called for anchor: \(String(describing: anchor)), position: \(String(describing: position)), animated: \(animated)")
@@ -181,173 +160,57 @@ struct ChatHistoryView: View {
     }
 }
 
-// MARK: - Thinking Indicator View
-fileprivate struct ThinkingIndicatorView: View {
+// MARK: - NEW: ShimmeringLoadingView
+fileprivate struct ShimmeringLoadingView: View {
+    let availableHeight: CGFloat
+    let chatInputAreaHeight: CGFloat
     @State private var isAnimating = false
 
     var body: some View {
-        HStack(spacing: UITheme.Spacing.small) {
-            Image(systemName: "sparkle")
-                .font(UITheme.Fonts.callout.weight(.bold))
-                .foregroundColor(UITheme.Colors.accent)
-                .opacity(isAnimating ? 1.0 : 0.5)
-                .animation(Animation.easeInOut(duration: 1).repeatForever(), value: isAnimating)
+        let userMessageHeight: CGFloat = 80 // Estimate for user message bubble + padding
+        let thinkingIndicatorHeight: CGFloat = 40 // Estimate for thinking indicator + padding
+        let contentHeight = userMessageHeight + thinkingIndicatorHeight + UITheme.Spacing.xlarge // Add spacing between messages
 
-            Text("Thinking...")
-                .font(UITheme.Fonts.callout)
-                .foregroundColor(UITheme.Colors.secondaryText)
-        }
-        .onAppear {
-            self.isAnimating = true
-        }
-        .frame(height: 22)
-    }
-}
+        // Calculate the shimmering view height
+        let shimmeringHeight = max(0, availableHeight - contentHeight - UITheme.Spacing.large - UITheme.Spacing.medium)
 
-
-// MARK: - ChatBubbleView
-struct ChatBubbleView: View {
-    let message: ChatMessage
-    @EnvironmentObject private var viewModel: MainApplicationViewModel
-
-    var body: some View {
-        HStack(alignment: .top, spacing: UITheme.Spacing.medium) {
-            if message.sender == .agent {
-                VStack(alignment: .leading, spacing: UITheme.Spacing.medium) {
-                    switch message.content {
-                    case .plainText(let text):
-                        Text(text)
-                            .font(UITheme.Fonts.body)
-                            .foregroundColor(UITheme.Colors.primaryText)
-                            .textSelection(.enabled)
-
-                    case .markdownText(let text):
-                        if message.isStreaming && text.isEmpty {
-                            ThinkingIndicatorView()
-                        } else if !text.isEmpty {
-                            ForEach(parseMarkdown(text)) { block in
-                                renderContentBlock(block)
-                            }
-                        }
-
-                    case .codeBlock(let language, let code):
-                        renderCodeBlock(language: language, code: code)
-
-                    case .error(let title, let details):
-                        ErrorMessageView(title: title, details: details)
-                            .cardStyle()
-
-                    case .image:
-                        Text("[Image Content]")
-                            .cardStyle()
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Spacer()
-            } else { // message.sender == .user
-                Spacer()
-                VStack(alignment: .trailing, spacing: UITheme.Spacing.small) {
-                    
-                    if let attachedTextFiles = message.attachedTextFiles, !attachedTextFiles.isEmpty {
-                        // This part can also be themed if needed
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(spacing: UITheme.Spacing.small) {
-                                ForEach(attachedTextFiles) { file in
-                                    Text(file.name)
-                                        .font(UITheme.Fonts.footnote)
-                                        .foregroundColor(.white.opacity(0.8))
-                                        .padding(.horizontal, UITheme.Spacing.medium)
-                                        .padding(.vertical, UITheme.Spacing.xsmall)
-                                        .background(Color.black.opacity(0.2))
-                                        .cornerRadius(UITheme.CornerRadius.medium)
-                                }
-                            }
-                        }
-                        .frame(height: 30)
-                    }
-
-                    if let textContent = message.content.textContent, !textContent.isEmpty {
-                        Text(textContent)
-                            .font(UITheme.Fonts.body)
-                            .chatBubbleStyle(isCurrentUser: true)
-                            .textSelection(.enabled)
-                    }
-                }
-                .frame(maxWidth: 600, alignment: .trailing)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
-    }
-    
-    @ViewBuilder
-    private func renderContentBlock(_ block: ContentBlock) -> some View {
-        switch block {
-        case .paragraph(let paragraphText):
-            Text(try! AttributedString(markdown: paragraphText))
-                .font(UITheme.Fonts.body)
-                .lineSpacing(UITheme.Spacing.xsmall)
-                .foregroundColor(UITheme.Colors.primaryText)
-                .padding(.bottom, UITheme.Spacing.small)
-                .textSelection(.enabled)
-        
-        case .code(let lang, let codeContent):
-            renderCodeBlock(language: lang, code: codeContent)
-
-        case .heading(let level, let headingText):
-            Text(headingText)
-                .font(fontForHeading(level: level))
-                .fontWeight(fontWeightForHeading(level: level))
-                .padding(.top, UITheme.Spacing.medium)
-                .padding(.bottom, UITheme.Spacing.xsmall)
-                .textSelection(.enabled)
-
-        case .listItem(let prefix, let itemText, let indentation):
-            HStack(alignment: .top, spacing: UITheme.Spacing.small) {
-                Text(prefix)
-                    .font(UITheme.Fonts.body)
-                    .foregroundColor(UITheme.Colors.secondaryText)
-                    .frame(minWidth: 20, alignment: .leading)
-                
-                Text(try! AttributedString(markdown: itemText))
-                    .font(UITheme.Fonts.body)
-                    .foregroundColor(UITheme.Colors.primaryText)
-                    .textSelection(.enabled)
-            }
-            .padding(.leading, CGFloat(indentation * 20)) // 20pt per indent level
-            .padding(.bottom, UITheme.Spacing.xxsmall)
-
-        case .horizontalRule:
-            Divider()
-                .padding(.vertical, UITheme.Spacing.medium)
-        }
-    }
-    
-    @ViewBuilder
-    private func renderCodeBlock(language: String?, code: String) -> some View {
-        if code.components(separatedBy: .newlines).count > CODE_BLOCK_LINE_LIMIT {
-            CodeBlockCardView(language: language ?? "code", lineCount: code.components(separatedBy: .newlines).count) {
-                viewModel.showCodeInViewer(language: language, code: code)
-            }
-        } else {
-            CodeBlockView(language: language ?? "code", content: code)
+        return VStack {
+            Spacer() // Pushes the content below it to the bottom of the shimmering area
+            Rectangle()
+                .fill(UITheme.Colors.controlBackground)
+                .frame(height: 20) // A small bar to simulate content
+                .cornerRadius(UITheme.CornerRadius.small)
+                .opacity(0.7)
+                .padding(.horizontal, 50)
                 .padding(.bottom, UITheme.Spacing.medium)
-                .frame(maxWidth: 700, alignment: .leading)
+
+            Rectangle()
+                .fill(UITheme.Colors.controlBackground)
+                .frame(height: 20)
+                .cornerRadius(UITheme.CornerRadius.small)
+                .opacity(0.7)
+                .padding(.horizontal, 80)
+                .padding(.bottom, UITheme.Spacing.medium)
         }
-    }
-    
-    private func fontForHeading(level: Int) -> Font {
-        switch level {
-        case 1: return UITheme.Fonts.title1
-        case 2: return UITheme.Fonts.title2
-        default: return UITheme.Fonts.title3
-        }
-    }
-    
-    private func fontWeightForHeading(level: Int) -> Font.Weight {
-        switch level {
-        case 1: return .bold
-        case 2: return .semibold
-        default: return .semibold
-        }
+        .frame(height: shimmeringHeight, alignment: .bottom) // Set the calculated height
+        .background(
+            LinearGradient(
+                gradient: Gradient(colors: [
+                    UITheme.Colors.controlBackground.opacity(0.0),
+                    UITheme.Colors.controlBackground.opacity(0.3),
+                    UITheme.Colors.controlBackground.opacity(0.0)
+                ]),
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .offset(x: isAnimating ? availableHeight : -availableHeight) // Move across the view
+            .animation(Animation.linear(duration: 1.5).repeatForever(autoreverses: false), value: isAnimating)
+            .onAppear {
+                isAnimating = true
+            }
+        )
+        .clipped() // Clip the shimmering effect to its bounds
     }
 }
+
+

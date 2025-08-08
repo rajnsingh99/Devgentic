@@ -12,20 +12,18 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct ActivityBarButton: View {
     let tab: SidebarTab
-    @Binding var selectedTab: SidebarTab? // For sidebar pane selection
-    @Binding var isSidebarVisible: Bool   // For sidebar pane visibility
+    @Binding var selectedTab: SidebarTab?
+    @Binding var isSidebarVisible: Bool
 
-    @EnvironmentObject var viewModel: MainApplicationViewModel // For panel toggles
-    @Environment(\.openWindow) var openWindow // Environment action to open new windows
+    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(\.openWindow) var openWindow
 
-    // Computed property to determine if this button should appear "active"
     private var isActive: Bool {
         if tab == .settings {
             return false
         } else if tab == .promptLibrary {
-            return viewModel.showPromptLibrary // Assuming prompt library is still an overlay
-        } else if tab == .ollama {
-            // For localModels, it's active if its content (LocalModelDiscoveryGridView) is visible in the sidebar
+            return selectedTab == tab && isSidebarVisible
+        } else if tab == .integration {
             return selectedTab == tab && isSidebarVisible
         }
         else {
@@ -59,8 +57,7 @@ struct ActivityBarButton: View {
                   isSidebarVisible = false
                   logger.debug("Hid sidebar pane via New Chat button.")
              }
-            if viewModel.showSettings { viewModel.showSettings = false } // Close old overlay if open
-            if viewModel.showPromptLibrary { viewModel.showPromptLibrary = false }
+            if viewModel.showSettings { viewModel.showSettings = false }
             selectedTab = nil
 
         case .settings:
@@ -73,11 +70,21 @@ struct ActivityBarButton: View {
             }
 
         case .promptLibrary:
-            viewModel.togglePromptLibrary()
-            logger.debug("Toggled prompt library panel via button. Show: \(viewModel.showPromptLibrary)")
+            if selectedTab == tab {
+                isSidebarVisible.toggle()
+                logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
+            } else {
+                selectedTab = tab
+                isSidebarVisible = true
+                logger.debug("Selected tab \(tab.title) via button. Sidebar pane forced visible.")
+            }
+            if viewModel.showSettings {
+                viewModel.showSettings = false
+                logger.debug("Hid old settings panel because sidebar tab '\(tab.title)' was selected.")
+            }
 
         // MARK: - Reverted: .localModels tab now re-activates sidebar pane, not opens new window
-        case .ollama:
+        case .integration:
             if selectedTab == tab {
                 isSidebarVisible.toggle()
                 logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
@@ -89,14 +96,9 @@ struct ActivityBarButton: View {
                     viewModel.showSettings = false
                     logger.debug("Hid old settings panel because sidebar tab '\(tab.title)' was selected.")
                 }
-                if viewModel.showPromptLibrary {
-                    viewModel.showPromptLibrary = false
-                    logger.debug("Hid prompt library panel because sidebar tab '\(tab.title)' was selected.")
-                }
             }
 
-
-        default: // For other tabs that open the sidebar pane
+        default:
             if selectedTab == tab {
                 isSidebarVisible.toggle()
                 logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
@@ -107,10 +109,6 @@ struct ActivityBarButton: View {
                 if viewModel.showSettings { // Close old overlay if open
                     viewModel.showSettings = false
                     logger.debug("Hid old settings panel because sidebar tab '\(tab.title)' was selected.")
-                }
-                if viewModel.showPromptLibrary {
-                    viewModel.showPromptLibrary = false
-                    logger.debug("Hid prompt library panel because sidebar tab '\(tab.title)' was selected.")
                 }
             }
         }
