@@ -6,7 +6,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     let conversationId: UUID
     let timestamp: Date
     let sender: SenderRole
-    var content: MessageContent // Changed to var
+    var content: MessageContent
     
     var attachedTextFiles: [AttachedTextFile]?
     var attachedImageFiles: [AttachedImageFile]?
@@ -24,12 +24,36 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         self.isStreaming = isStreaming
     }
 
-    // --- FIX: Updated Equatable conformance ---
-    // This now checks the content and streaming status, not just the ID.
-    // This is crucial for SwiftUI to detect changes and re-render the view.
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
         lhs.id == rhs.id &&
-        lhs.content == rhs.content && // Check if content has changed
-        lhs.isStreaming == rhs.isStreaming // Check if streaming status has changed
+        lhs.content == rhs.content &&
+        lhs.isStreaming == rhs.isStreaming
+    }
+}
+
+struct AttachedTextFile: Codable, Equatable, Identifiable {
+    var id = UUID()
+    let name: String
+    let url: URL
+    let fileExtension: String
+    let content: String
+    let size: Int64 // Size in bytes
+
+    static func == (lhs: AttachedTextFile, rhs: AttachedTextFile) -> Bool {
+        return lhs.id == rhs.id && lhs.url == rhs.url
+    }
+}
+
+/// A struct representing an image file attached to a chat message.
+struct AttachedImageFile: Codable, Equatable, Identifiable {
+    var id = UUID()
+    let name: String
+    let url: URL
+    let fileExtension: String
+    let binaryData: Data
+    let size: Int64
+
+    static func == (lhs: AttachedImageFile, rhs: AttachedImageFile) -> Bool {
+        return lhs.id == rhs.id && lhs.url == rhs.url
     }
 }

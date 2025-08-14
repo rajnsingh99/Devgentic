@@ -212,14 +212,23 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         await context.perform {
             for message in messages {
-                let newMessageEntity = ChatMessageEntity(context: context)
-                newMessageEntity.id = message.id
-                newMessageEntity.timestamp = message.timestamp
-                newMessageEntity.senderType = message.sender.rawValue
-                newMessageEntity.conversationId = message.conversationId
-                self.mapMessageContent(from: message.content, to: newMessageEntity)
+                // 1. Fetch existing message entity with the same ID
+                let fetchRequest: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
+                fetchRequest.predicate = NSPredicate(format: "id == %@", message.id as CVarArg)
                 
-                // --- Save Attached Text Files ---
+                let existingEntity = try? context.fetch(fetchRequest).first
+                
+                // 2. If entity exists, update it. Otherwise, create a new one.
+                let entityToUpdate = existingEntity ?? ChatMessageEntity(context: context)
+                
+                // 3. Configure the entity with the message data
+                entityToUpdate.id = message.id
+                entityToUpdate.timestamp = message.timestamp
+                entityToUpdate.senderType = message.sender.rawValue
+                entityToUpdate.conversationId = message.conversationId
+                self.mapMessageContent(from: message.content, to: entityToUpdate)
+                
+                // --- Update Attached Text Files ---
                 if let textFiles = message.attachedTextFiles {
                     let textFileEntities = textFiles.map { textFile -> AttachedTextFileEntity in
                         let entity = AttachedTextFileEntity(context: context)
@@ -231,10 +240,12 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                         entity.size = textFile.size
                         return entity
                     }
-                    newMessageEntity.addToAttachedTextFiles(NSSet(array: textFileEntities))
+                    // Use mutableSetValue to safely update the relationship
+                    entityToUpdate.mutableSetValue(forKey: "attachedTextFiles").removeAllObjects()
+                    entityToUpdate.addToAttachedTextFiles(NSSet(array: textFileEntities))
                 }
 
-                // --- Save Attached Image Files ---
+                // --- Update Attached Image Files ---
                 if let imageFiles = message.attachedImageFiles {
                     let imageFileEntities = imageFiles.map { imageFile -> AttachedImageFileEntity in
                         let entity = AttachedImageFileEntity(context: context)
@@ -246,12 +257,16 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                         entity.size = imageFile.size
                         return entity
                     }
-                    newMessageEntity.addToAttachedImageFiles(NSSet(array: imageFileEntities))
+                    entityToUpdate.mutableSetValue(forKey: "attachedImageFiles").removeAllObjects()
+                    entityToUpdate.addToAttachedImageFiles(NSSet(array: imageFileEntities))
                 }
 
-                conversation.addToMessages(newMessageEntity)
+                // Only add to conversation if it's a new entity
+                if existingEntity == nil {
+                    conversation.addToMessages(entityToUpdate)
+                }
                 
-                // ** RAG INTEGRATION: Index message content **
+                // RAG Indexing can still be performed
                 Task {
                     await self.indexMessageForRAG(message)
                 }
@@ -259,7 +274,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             conversation.timestamp = Date()
             self.saveContext()
         }
-        logger.debug("Finished async addMessages for \(messages.count) messages.")
+        logger.debug("Finished robust async addMessages (upsert) for \(messages.count) messages.")
     }
     
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?) {

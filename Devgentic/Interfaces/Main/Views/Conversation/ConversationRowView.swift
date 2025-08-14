@@ -16,23 +16,24 @@ struct ConversationRowView: View {
     @State private var isHovering = false
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 0) {
             if isRenaming {
-                // Show a TextField when in renaming mode
-                TextField("Enter new name", text: $editableName)
+                // Use a modern TextField style for renaming
+                TextField("", text: $editableName, prompt: Text("Enter new name").foregroundColor(.secondary))
                     .textFieldStyle(.plain)
                     .focused(isRenameFieldFocused)
-                    .onSubmit(onCommitRename) // Commit on Enter key
-                    .padding(.leading, 5) // Align with normal title position
+                    .onSubmit(onCommitRename)
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
             } else {
-                // Show the standard content when not renaming
                 standardContentView
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(backgroundView)
-        .cornerRadius(6)
+        .cornerRadius(8)
         .contentShape(Rectangle())
         .onTapGesture {
             if !isRenaming {
@@ -40,13 +41,12 @@ struct ConversationRowView: View {
             }
         }
         .onHover { hovering in
-            // Animate the change in hover state
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.easeInOut(duration: 0.1)) {
                 self.isHovering = hovering
             }
         }
-        // Animate changes when the selection state changes
         .animation(.easeInOut(duration: 0.2), value: isSelected)
+        .animation(.easeInOut(duration: 0.2), value: isHovering)
     }
     
     // The standard view content extracted for clarity
@@ -58,44 +58,52 @@ struct ConversationRowView: View {
                 .foregroundColor(conversation.statusColor)
                 .font(.body.weight(.medium))
                 .frame(width: 20, alignment: .center)
+                .padding(.leading, 4)
                 .transition(.opacity.animation(.easeInOut(duration: 0.2)))
         }
 
         // Title and Last Message Snippet
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(conversation.displayTitle)
                 .fontWeight(.medium)
                 .foregroundColor(.primary)
                 .lineLimit(1)
             
-            Text(conversation.lastMessageSnippet)
-                .font(.footnote)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            HStack {
+                Text(conversation.lastMessageSnippet)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                
+                Spacer()
+                
+                // Relative Timestamp
+                Text(conversation.relativeTimestamp)
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.8))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
         }
-
-        Spacer()
-
-        // Relative Timestamp
-        Text(conversation.relativeTimestamp)
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
+        .padding(.leading, conversation.isStreaming || conversation.hasError ? 4 : 12)
+        .padding(.trailing, 12)
     }
     
     @ViewBuilder
     private var backgroundView: some View {
-        // This view builder provides a more robust, animatable background.
-        if isSelected && !isRenaming {
-            // Prominent background for selected items.
-            Color.accentColor.opacity(0.3)
-        } else if !isRenaming {
-            // Subtle background for hover, which animates in and out.
-            Color.secondary.opacity(isHovering ? 0.2 : 0)
+        if isSelected {
+            // A more distinct selected state
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.accentColor.opacity(0.25))
+        } else if isHovering {
+            // Subtle background for hover
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.15))
+        } else {
+            // Default clear background
+            Color.clear
         }
-        // No background when renaming.
     }
 }
 
@@ -110,6 +118,7 @@ struct ConversationRowView_Previews: PreviewProvider {
         title: String?,
         lastMessageContent: MessageContent,
         isStreaming: Bool = false,
+        hasError: Bool = false,
         timestamp: Date
     ) -> Conversation {
         let message = ChatMessage(
@@ -129,49 +138,82 @@ struct ConversationRowView_Previews: PreviewProvider {
 
     static var previews: some View {
         let normalConv = createSample(
-            title: "SwiftUI Best Practices",
-            lastMessageContent: .plainText("Remember to use @State..."),
+            title: "SwiftUI Best Practices & Modern Layouts",
+            lastMessageContent: .plainText("Remember to use @State for transient UI state and..."),
             timestamp: Calendar.current.date(byAdding: .minute, value: -5, to: .now)!
         )
+        
+        let streamingConv = createSample(
+            title: "Live Code Generation",
+            lastMessageContent: .plainText("Here is the updated code snippet..."),
+            isStreaming: true,
+            timestamp: .now
+        )
+        
+        let errorConv = createSample(
+            title: "API Connection Issue",
+            lastMessageContent: .plainText("Failed to fetch the requested data."),
+            hasError: true,
+            timestamp: Calendar.current.date(byAdding: .hour, value: -1, to: .now)!
+        )
 
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Conversation List")
-                .font(.headline)
-                .padding(.horizontal, 8)
-            
-            ConversationRowView(
-                conversation: normalConv,
-                isSelected: true,
-                isRenaming: false,
-                editableName: .constant(""),
-                isRenameFieldFocused: $isFocused,
-                onSelect: {},
-                onCommitRename: {}
-            )
-            
-            ConversationRowView(
-                conversation: normalConv,
-                isSelected: false,
-                isRenaming: false,
-                editableName: .constant(""),
-                isRenameFieldFocused: $isFocused,
-                onSelect: {},
-                onCommitRename: {}
-            )
-            
-            ConversationRowView(
-                conversation: normalConv,
-                isSelected: false,
-                isRenaming: true,
-                editableName: .constant("New Awesome Title"),
-                isRenameFieldFocused: $isFocused,
-                onSelect: {},
-                onCommitRename: {}
-            )
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("MODERN SIDEBAR ROWS").font(.caption).foregroundColor(.secondary).padding(.horizontal, 8)
+                
+                ConversationRowView(
+                    conversation: normalConv,
+                    isSelected: true,
+                    isRenaming: false,
+                    editableName: .constant(""),
+                    isRenameFieldFocused: $isFocused,
+                    onSelect: {},
+                    onCommitRename: {}
+                )
+                
+                ConversationRowView(
+                    conversation: normalConv,
+                    isSelected: false,
+                    isRenaming: false,
+                    editableName: .constant(""),
+                    isRenameFieldFocused: $isFocused,
+                    onSelect: {},
+                    onCommitRename: {}
+                )
+                
+                ConversationRowView(
+                    conversation: streamingConv,
+                    isSelected: false,
+                    isRenaming: false,
+                    editableName: .constant(""),
+                    isRenameFieldFocused: $isFocused,
+                    onSelect: {},
+                    onCommitRename: {}
+                )
+                
+                ConversationRowView(
+                    conversation: errorConv,
+                    isSelected: false,
+                    isRenaming: false,
+                    editableName: .constant(""),
+                    isRenameFieldFocused: $isFocused,
+                    onSelect: {},
+                    onCommitRename: {}
+                )
+                
+                ConversationRowView(
+                    conversation: normalConv,
+                    isSelected: false,
+                    isRenaming: true,
+                    editableName: .constant("New Awesome Title"),
+                    isRenameFieldFocused: $isFocused,
+                    onSelect: {},
+                    onCommitRename: {}
+                )
+            }
+            .padding()
         }
-        .padding()
         .frame(width: 340)
         .background(Color(NSColor.windowBackgroundColor))
-        .previewLayout(.sizeThatFits)
     }
 }

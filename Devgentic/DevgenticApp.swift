@@ -97,8 +97,12 @@ struct DevgenticApp: App {
                 .keyboardShortcut("w", modifiers: .command)
             }
             CommandGroup(after: .appInfo) {
-                Button("Command Centre...") {
-                    openWindow(id: "command-centre")
+                Button("Settings...") {
+                    if let settingsWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "settings" }) {
+                        settingsWindow.makeKeyAndOrderFront(nil)
+                    } else {
+                        openWindow(id: "settings")
+                    }
                 }
                 .keyboardShortcut(",", modifiers: .command)
 
@@ -117,6 +121,13 @@ struct DevgenticApp: App {
                 .keyboardShortcut("q", modifiers: [.command, .option])
             }
         }
+
+        // MARK: - Settings Window
+        Window("Settings", id: "settings") {
+            SettingsView()
+                .environmentObject(mainApplicationViewModel)
+                .environmentObject(themeManager)
+        }.defaultSize(width: 1000, height: 850)
 
         // MARK: - Window Groups (Unchanged)
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in

@@ -36,10 +36,15 @@ struct ChatInputAreaView: View {
     @State private var suggestionQuery: String = ""
     @State private var filteredPrompts: [Prompt] = []
     @State private var activePromptTriggerRange: NSRange? = nil
+    @State private var selectedPromptSuggestionID: Prompt.ID? = nil
+    
     @State private var showFileSuggestions: Bool = false
     @State private var fileSuggestionQuery: String = ""
     @State private var filteredFiles: [FileSystemItem] = []
     @State private var activeFileMentionTriggerRange: NSRange? = nil
+    @State private var selectedFileSuggestionID: FileSystemItem.ID? = nil // Keyboard focus
+    @State private var fileSuggestion_multiSelectedIDs: Set<FileSystemItem.ID> = [] // Checkbox selections
+
     @State private var showingBackendSelectorPopup: Bool = false
     @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
@@ -127,7 +132,7 @@ struct ChatInputAreaView: View {
     }
 
     private var hasInputText: Bool {
-        !inputViewModel.userInput.isEmpty
+        !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     enum DynamicButtonMode: CustomStringConvertible {
@@ -144,7 +149,7 @@ struct ChatInputAreaView: View {
 
     private var currentDynamicButtonMode: DynamicButtonMode {
         if isSending { return .stop }
-        if hasInputText || !mainViewModel.attachedFiles.isEmpty { return .send }
+        if hasInputText { return .send }
         return .mic
     }
 
@@ -154,7 +159,8 @@ struct ChatInputAreaView: View {
                 PromptSuggestionView(
                     prompts: filteredPrompts,
                     suggestionQuery: suggestionQuery,
-                    onSelectPrompt: handlePromptSelection
+                    onSelectPrompt: handlePromptSelection,
+                    selectedItemID: $selectedPromptSuggestionID
                 )
                 .padding(.horizontal, 15)
                 .padding(.bottom, 4)
@@ -164,7 +170,8 @@ struct ChatInputAreaView: View {
                 FileSuggestionView(
                     files: filteredFiles,
                     suggestionQuery: fileSuggestionQuery,
-                    onSelectFile: handleFileSelection
+                    selectedItemID: $selectedFileSuggestionID,
+                    multiSelectedFileIDs: $fileSuggestion_multiSelectedIDs // Pass binding for multi-select
                 )
                 .padding(.horizontal, 15)
                 .padding(.bottom, 4)
@@ -196,37 +203,51 @@ struct ChatInputAreaView: View {
         }
         .frame(maxWidth: 1000)
         .frame(maxWidth: .infinity, alignment: .center)
-        // --- FIX: Replicated the working logic from file suggestions for prompt suggestions ---
         .onChange(of: showPromptSuggestions) { isShowing in
             if isShowing {
-                // When the view appears, perform an initial filter
                 self.filteredPrompts = promptStore.getAllPrompts().filter {
                     suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
                 }
+                self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
+            } else {
+                self.selectedPromptSuggestionID = nil
             }
         }
         .onChange(of: suggestionQuery) { newQuery in
-            // As the query changes, update the filtered list
             self.filteredPrompts = promptStore.getAllPrompts().filter {
                 newQuery.isEmpty || $0.title.lowercased().contains(newQuery.lowercased())
             }
+            self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
         }
         .onReceive(promptStore.$prompts) { _ in
-             // If the underlying prompts change (e.g., added/deleted), re-filter
             self.filteredPrompts = promptStore.getAllPrompts().filter {
                 suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
+            }
+            if selectedPromptSuggestionID == nil {
+                self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
             }
         }
         .onChange(of: showFileSuggestions) { isShowing in
             if isShowing {
-                self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
+                updateFilteredFiles(query: self.fileSuggestionQuery)
+            } else {
+                // Clear all file suggestion state when the view is hidden
+                self.selectedFileSuggestionID = nil
+                self.fileSuggestion_multiSelectedIDs = []
             }
         }
         .onChange(of: fileSuggestionQuery) { newQuery in
-            self.filteredFiles = explorerViewModel.suggestableFiles(query: newQuery)
+            updateFilteredFiles(query: newQuery)
         }
         .onReceive(explorerViewModel.objectWillChange) { _ in
-            self.filteredFiles = explorerViewModel.suggestableFiles(query: self.fileSuggestionQuery)
+            if showFileSuggestions {
+                updateFilteredFiles(query: self.fileSuggestionQuery)
+            }
+        }
+        .onReceive(mainViewModel.objectWillChange) { _ in
+            if showFileSuggestions {
+                updateFilteredFiles(query: self.fileSuggestionQuery)
+            }
         }
         .sheet(isPresented: $inputViewModel.showAPIKeyInputPopup, onDismiss: {
             inputViewModel.resetAPIKeyPopupState()
@@ -281,7 +302,9 @@ struct ChatInputAreaView: View {
                 attributedTextInsertion: $attributedTextInsertionRequest,
                 textViewRef: { nsTextViewInstance in
                     self.editorTextView = nsTextViewInstance
-                }
+                },
+                onNavigateSuggestions: navigateSuggestions,
+                onConfirmSuggestion: confirmSuggestionSelection
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
             .animation(.easeInOut(duration: 0.2), value: inputViewModel.userInput)
@@ -400,14 +423,14 @@ struct ChatInputAreaView: View {
             case .send:
                 guard let textView = editorTextView else {
                     logger.error("Send button: editorTextView is nil.");
-                    if !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty {
+                    if !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         let config = backendConfiguration.getRequestConfig()
                         onSendMessage(NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes), config)
                     }
                     return
                 }
                 let textToSend = textView.attributedString()
-                if !textToSend.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty {
+                if !textToSend.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let config = backendConfiguration.getRequestConfig()
                     onSendMessage(textToSend, config)
                 }
@@ -420,7 +443,7 @@ struct ChatInputAreaView: View {
                     .frame(width: dynamicButtonSize, height: dynamicButtonSize)
             } else {
                 ZStack {
-                    let canSend = mode == .send && (!inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !mainViewModel.attachedFiles.isEmpty)
+                    let canSend = mode == .send && !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     let isDisabledBySystem = showSettings || (mode == .send && (inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording))
 
                     Circle()
@@ -505,8 +528,8 @@ struct ChatInputAreaView: View {
         if backendConfiguration.selectedBackend == .none { return true }
         switch mode {
         case .send:
-            let isEmptyTextAndNoFiles = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && mainViewModel.attachedFiles.isEmpty
-            return isEmptyTextAndNoFiles || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing
+            let isEmptyText = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return isEmptyText || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing
         case .stop:
             return isSending || showSettings
         case .mic:
@@ -553,6 +576,22 @@ struct ChatInputAreaView: View {
     }
 
     // MARK: - File & Prompt Handling
+
+    private func updateFilteredFiles(query: String) {
+        let allSuggestions = explorerViewModel.suggestableFiles(query: query)
+        let attachedFileIDs = Set(mainViewModel.attachedFiles.map { $0.id })
+        let newFilteredFiles = allSuggestions.filter { !attachedFileIDs.contains($0.id) }
+        
+        if self.filteredFiles != newFilteredFiles {
+            self.filteredFiles = newFilteredFiles
+        }
+        
+        if let selectedID = selectedFileSuggestionID, !self.filteredFiles.contains(where: { $0.id == selectedID }) {
+            self.selectedFileSuggestionID = self.filteredFiles.first?.id
+        } else if selectedFileSuggestionID == nil {
+            self.selectedFileSuggestionID = self.filteredFiles.first?.id
+        }
+    }
     
     private func handlePromptSelection(_ prompt: Prompt) {
         guard let range = activePromptTriggerRange else {
@@ -569,20 +608,6 @@ struct ChatInputAreaView: View {
         self.suggestionQuery = ""
         self.activePromptTriggerRange = nil
         self.filteredPrompts = []
-    }
-    
-    private func handleFileSelection(_ file: FileSystemItem) {
-        mainViewModel.addAttachedFile(fileItem: file)
-
-        if let range = activeFileMentionTriggerRange {
-            let insertionText = NSAttributedString(string: "", attributes: defaultTypingAttributes)
-            self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
-        }
-
-        self.showFileSuggestions = false
-        self.fileSuggestionQuery = ""
-        self.activeFileMentionTriggerRange = nil
-        self.filteredFiles = []
     }
 
     private func openFilePicker() {
@@ -615,5 +640,120 @@ struct ChatInputAreaView: View {
                 }
             }
         }
+    }
+    
+    // MARK: - Keyboard Navigation for Suggestions
+    
+    enum SuggestionNavigationDirection {
+        case up, down
+    }
+
+    private func navigateSuggestions(direction: SuggestionNavigationDirection) {
+        if showFileSuggestions {
+            navigateFileSuggestions(direction: direction)
+        } else if showPromptSuggestions {
+            navigatePromptSuggestions(direction: direction)
+        }
+    }
+
+    private func confirmSuggestionSelection() {
+        if showFileSuggestions {
+            confirmFileSuggestionSelection()
+        } else if showPromptSuggestions {
+            confirmPromptSuggestionSelection()
+        }
+    }
+
+    private func navigateFileSuggestions(direction: SuggestionNavigationDirection) {
+        guard !filteredFiles.isEmpty else { return }
+
+        guard let currentSelectedID = selectedFileSuggestionID,
+              let currentIndex = filteredFiles.firstIndex(where: { $0.id == currentSelectedID }) else {
+            selectedFileSuggestionID = filteredFiles.first?.id
+            return
+        }
+
+        var nextIndex: Int
+        switch direction {
+        case .up:
+            nextIndex = currentIndex - 1
+            if nextIndex < 0 {
+                nextIndex = filteredFiles.count - 1
+            }
+        case .down:
+            nextIndex = currentIndex + 1
+            if nextIndex >= filteredFiles.count {
+                nextIndex = 0
+            }
+        }
+        
+        selectedFileSuggestionID = filteredFiles[nextIndex].id
+    }
+
+    private func confirmFileSuggestionSelection() {
+        var filesWereAttached = false
+
+        // Prioritize attaching multiple selected files
+        if !fileSuggestion_multiSelectedIDs.isEmpty {
+            let filesToAttach = filteredFiles.filter { fileSuggestion_multiSelectedIDs.contains($0.id) }
+            if !filesToAttach.isEmpty {
+                logger.log("Attaching \(filesToAttach.count) files from multi-selection.")
+                mainViewModel.addAttachedFiles(fileItems: filesToAttach)
+                filesWereAttached = true
+            }
+        }
+        // Fallback to the single focused item if no checkboxes are ticked
+        else if let selectedID = selectedFileSuggestionID,
+                let selectedFile = filteredFiles.first(where: { $0.id == selectedID }) {
+            logger.log("Attaching single focused file: \(selectedFile.name)")
+            mainViewModel.addAttachedFile(fileItem: selectedFile)
+            filesWereAttached = true
+        }
+
+        // If any file was attached, clear the @mention trigger text
+        if filesWereAttached, let range = activeFileMentionTriggerRange {
+            let insertionText = NSAttributedString(string: "", attributes: defaultTypingAttributes)
+            self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
+        }
+        
+        // Hide and reset the suggestion UI
+        self.showFileSuggestions = false
+        self.fileSuggestionQuery = ""
+        self.activeFileMentionTriggerRange = nil
+        self.filteredFiles = []
+    }
+
+    private func navigatePromptSuggestions(direction: SuggestionNavigationDirection) {
+        guard !filteredPrompts.isEmpty else { return }
+
+        guard let currentSelectedID = selectedPromptSuggestionID,
+              let currentIndex = filteredPrompts.firstIndex(where: { $0.id == currentSelectedID }) else {
+            selectedPromptSuggestionID = filteredPrompts.first?.id
+            return
+        }
+
+        var nextIndex: Int
+        switch direction {
+        case .up:
+            nextIndex = currentIndex - 1
+            if nextIndex < 0 {
+                nextIndex = filteredPrompts.count - 1
+            }
+        case .down:
+            nextIndex = currentIndex + 1
+            if nextIndex >= filteredPrompts.count {
+                nextIndex = 0
+            }
+        }
+
+        selectedPromptSuggestionID = filteredPrompts[nextIndex].id
+    }
+
+    private func confirmPromptSuggestionSelection() {
+        guard let selectedID = selectedPromptSuggestionID,
+              let selectedPrompt = filteredPrompts.first(where: { $0.id == selectedID }) else {
+            return
+        }
+        handlePromptSelection(selectedPrompt)
     }
 }

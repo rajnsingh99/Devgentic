@@ -8,20 +8,17 @@
 import SwiftUI
 import AppKit
 
-struct ExplorerView: View {
+struct ExplorerSidebarView: View {
 
     @EnvironmentObject var viewModel: ExplorerViewModel
     @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.openWindow) var openWindow
     
-    // State to control the visibility of action buttons on hover
     @State private var isHoveringHeader = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // --- Main Content Area ---
             if let rootURL = viewModel.selectedRootURL {
-                // --- NEW: Streamlined Header ---
                 VStack(spacing: 0) {
                     HStack {
                         Text(rootURL.lastPathComponent.uppercased())
@@ -74,29 +71,32 @@ struct ExplorerView: View {
                     Divider().background(themeManager.currentTheme.dividerColor)
                 }
                 
-                // --- File Outline ---
                 if let errorMessage = viewModel.errorMessage, viewModel.rootItems.isEmpty && !viewModel.isLoading {
-                     // Error view remains the same
                 } else {
                     FileOutlineView(viewModel: viewModel)
                 }
 
             } else {
-                // --- "No Folder Opened" View ---
-                VStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .center, spacing: 18) {
                     Spacer()
                     Image(systemName: "folder.badge.questionmark")
-                        .font(.system(size: 44))
+                        .font(.system(size: 48))
                         .foregroundColor(themeManager.currentTheme.secondaryText)
-                    Text("No Folder Opened")
-                        .font(.title3)
-                        .fontWeight(.medium)
+                    
+                    Text("Connect Your Project")
+                        .font(.title2)
+                        .fontWeight(.bold)
                         .foregroundColor(themeManager.currentTheme.primaryText)
-                    Text("Select a folder to view its contents in the explorer.")
-                        .font(.callout)
-                        .foregroundColor(themeManager.currentTheme.secondaryText)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Explore your entire project with ease.", systemImage: "sparkles")
+                        Label("Mention files with ‘@’ to give the AI instant context.", systemImage: "at.circle.fill")
+                        Label("Access quick actions like ‘Copy Path’ & ‘Open in Terminal’.", systemImage: "bolt.fill")
+                    }
+                    .font(.callout)
+                    .foregroundColor(themeManager.currentTheme.secondaryText)
+                    .padding(.horizontal, 30)
+
                     
                     Button {
                         viewModel.selectRootDirectory()
@@ -107,7 +107,7 @@ struct ExplorerView: View {
                     }
                     .controlSize(.regular)
                     .buttonStyle(.borderedProminent)
-                    .tint(themeManager.currentTheme.accentColor) // Use theme accent
+                    .tint(themeManager.currentTheme.accentColor)
                     .padding(.top, 8)
                     Spacer()
                     Spacer()
@@ -115,7 +115,7 @@ struct ExplorerView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(themeManager.currentTheme.primaryBackground) // Use theme background
+        .background(themeManager.currentTheme.primaryBackground)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -213,7 +213,7 @@ struct FileOutlineView: NSViewRepresentable {
             guard let fileItem = item as? FileSystemItem else { return nil }
 
             let view = ExplorerItemContentRow(item: fileItem, viewModel: viewModel)
-                .environmentObject(ThemeManager()) // Inject for preview and isolated use
+                .environmentObject(ThemeManager())
             let hostingView = NSHostingView(rootView: view)
             
             return hostingView
@@ -256,7 +256,7 @@ struct ExplorerItemContentRow: View {
     var body: some View {
         HStack {
             Image(systemName: item.iconName)
-                .foregroundColor(item.iconColor(for: themeManager.currentTheme)) // Use themed icon color
+                .foregroundColor(item.iconColor(for: themeManager.currentTheme))
             
             if viewModel.itemBeingRenamedID == item.id {
                 TextField("", text: $viewModel.currentEditName)
@@ -275,7 +275,7 @@ struct ExplorerItemContentRow: View {
                     }
             } else {
                 Text(item.name)
-                    .foregroundColor(themeManager.currentTheme.primaryText) // Use themed text color
+                    .foregroundColor(themeManager.currentTheme.primaryText)
                     .lineLimit(1)
             }
             Spacer()
@@ -283,7 +283,6 @@ struct ExplorerItemContentRow: View {
         .frame(height: 22)
         .background(Color.clear)
         .cornerRadius(4)
-        // --- STEP 2.3: Add Drag Functionality ---
         .onDrag {
             // We only want to drag files, not directories.
             guard !item.isDirectory else { return NSItemProvider() }
@@ -297,7 +296,7 @@ struct ExplorerItemContentRow: View {
 }
 
 // MARK: - Preview Provider
-struct ExplorerView_Previews: PreviewProvider {
+struct ExplorerSidebarView_Previews: PreviewProvider {
     static var previews: some View {
         let noFolderViewModel = ExplorerViewModel()
         let folderOpenedViewModel = ExplorerViewModel()
@@ -306,13 +305,13 @@ struct ExplorerView_Previews: PreviewProvider {
         // Mock data setup...
 
         return Group {
-            ExplorerView()
+            ExplorerSidebarView()
                 .environmentObject(noFolderViewModel)
                 .environmentObject(ThemeManager())
                 .previewDisplayName("No Folder Opened")
                 .frame(width: 300, height: 500)
 
-            ExplorerView()
+            ExplorerSidebarView()
                 .environmentObject(folderOpenedViewModel)
                 .environmentObject(ThemeManager())
                 .previewDisplayName("Folder Opened")

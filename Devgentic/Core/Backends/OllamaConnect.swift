@@ -28,6 +28,14 @@ struct OllamaChatRequest: Codable {
     let stream: Bool = false // Explicitly set to false for one-shot
 }
 
+/// Represents the payload for a STREAMING `/api/chat` request.
+struct OllamaStreamingChatRequest: Codable {
+    let model: String
+    let messages: [OllamaChatMessage]
+    let stream: Bool = true
+}
+
+
 /// Represents the response from a non-streaming `/api/chat` request.
 struct OllamaChatResponse: Codable {
     let model: String
@@ -35,6 +43,23 @@ struct OllamaChatResponse: Codable {
     let message: OllamaChatMessage
     let done: Bool
     
+    enum CodingKeys: String, CodingKey {
+        case model
+        case createdAt = "created_at"
+        case message
+        case done
+    }
+}
+
+/// Represents a single chunk from a streaming `/api/chat` response.
+struct OllamaChatStreamResponse: Codable {
+    let model: String
+    let createdAt: String
+    /// The message part of the response, may be absent in the final chunk.
+    let message: OllamaChatMessage?
+    /// Indicates if this is the final chunk.
+    let done: Bool
+
     enum CodingKeys: String, CodingKey {
         case model
         case createdAt = "created_at"
@@ -51,6 +76,44 @@ struct ModelPullProgress {
     let completed: Int64?   // Completed bytes (optional)
     let percentage: Double? // Calculated percentage (optional)
     let error: String?      // Error message from a streamed error object (optional)
+}
+
+// Represents the full details of a single model from the /api/show endpoint
+struct OllamaShowResponse: Codable {
+    let license: String?
+    let modelfile: String?
+    let parameters: String?
+    let template: String?
+    let details: OllamaModelDetails?
+}
+
+// Represents the detailed information about a model.
+struct OllamaModelDetails: Codable, Hashable {
+    let format: String?
+    let family: String?
+    let families: [String]?
+    let parameterSize: String?
+    let quantizationLevel: String?
+    
+    // Computed properties to determine capabilities
+    var supportsVision: Bool {
+        // A simple heuristic: if the model family is 'clip', it likely supports vision.
+        // A more robust check might involve looking at the modelfile content for specific keywords.
+        return family?.lowercased() == "clip" || families?.contains("clip") ?? false
+    }
+    
+    var supportsToolUse: Bool {
+        // This is a placeholder. Determining tool use support might require
+        // inspecting the 'modelfile' or 'template' for specific instructions or syntax.
+        // For now, we'll default to false.
+        return false
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case format, family, families
+        case parameterSize = "parameter_size"
+        case quantizationLevel = "quantization_level"
+    }
 }
 
 struct OllamaConnect {
@@ -175,6 +238,96 @@ struct OllamaConnect {
         }
     }
 
+    /// Sends a streaming chat request to the Ollama server.
+    /// - Parameters:
+    ///   - baseURL: The base URL of the Ollama server.
+    ///   - model: The name of the model to use for the chat.
+    ///   - history: The message history to send to the model.
+    /// - Returns: An `AsyncThrowingStream` that yields string tokens from the model.
+    /// - Throws: An error for network issues or bad initial responses.
+    static func streamChatRequest(
+        baseURL: String,
+        model: String,
+        history: [OllamaChatMessage]
+    ) -> AsyncThrowingStream<String, Error> {
+        return AsyncThrowingStream { continuation in
+            Task {
+                let endpoint = "/api/chat"
+                guard let url = URL(string: baseURL + endpoint) else {
+                    let error = URLError(.badURL, userInfo: [NSLocalizedDescriptionKey: "Invalid URL for streaming chat request: \(baseURL)\(endpoint)"])
+                    logger.error("\(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                    return
+                }
+                logger.debug("Starting streaming chat request to \(url.absoluteString) with model \(model)")
+
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+                let payload = OllamaStreamingChatRequest(model: model, messages: history)
+
+                do {
+                    request.httpBody = try JSONEncoder().encode(payload)
+                } catch {
+                    logger.error("Failed to encode OllamaStreamingChatRequest payload: \(error)")
+                    continuation.finish(throwing: error)
+                    return
+                }
+
+                do {
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+
+                    guard let httpResponse = response as? HTTPURLResponse else {
+                        throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Did not receive a valid HTTP response."])
+                    }
+                    
+                    guard (200..<300).contains(httpResponse.statusCode) else {
+                        var errorBody = ""
+                        for try await byte in bytes { errorBody.append(Character(UnicodeScalar(byte))) }
+                        logger.error("HTTP Error \(httpResponse.statusCode) from streaming chat request. Body: \(errorBody)")
+                        throw URLError(.badServerResponse, userInfo: [
+                            NSLocalizedDescriptionKey: "Server returned status \(httpResponse.statusCode).",
+                            "HTTPStatusCode": httpResponse.statusCode,
+                            "ResponseBody": errorBody
+                        ])
+                    }
+                    
+                    let decoder = JSONDecoder()
+
+                    for try await line in bytes.lines {
+                        guard !line.isEmpty, let data = line.data(using: .utf8) else { continue }
+                        
+                        do {
+                            let streamResponse = try decoder.decode(OllamaChatStreamResponse.self, from: data)
+                            
+                            if let token = streamResponse.message?.content {
+                                continuation.yield(token)
+                            }
+                            
+                            if streamResponse.done {
+                                logger.info("Streaming finished successfully (done: true received).")
+                                continuation.finish()
+                                return
+                            }
+                        } catch {
+                            logger.error("Failed to decode streaming chunk: '\(line)'. Error: \(error.localizedDescription)")
+                            // Continue to the next line, as some streams might have intermittent non-JSON lines.
+                        }
+                    }
+                    
+                    // If the loop finishes without a `done: true` packet (e.g., stream cut off), finish here.
+                    logger.info("Streaming finished because the byte stream ended.")
+                    continuation.finish()
+
+                } catch {
+                    logger.error("Error during streaming chat request: \(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+
 
     /// Fetches the list of local Ollama models from the server.
     /// - Parameter baseURL: The base URL of the Ollama server (e.g., "http://localhost:11434").
@@ -239,140 +392,138 @@ struct OllamaConnect {
     }
 
     /// Initiates pulling (downloading) an Ollama model from the server with streaming progress.
-    /// Increased timeout to accommodate large model downloads.
-    /// - Parameters:
-    ///   - name: The name of the model to pull (e.g., "llama3:latest").
-    ///   - baseURL: The base URL of the Ollama server (e.g., "http://localhost:11434").
-    ///   - progressHandler: A closure to call with progress updates (status, bytes, percentage).
-    /// - Throws: An error if the request fails, the server returns an error status code, or parsing fails.
-    static func pullOllamaModel(name: String, baseURL: String, progressHandler: @escaping (ModelPullProgress) -> Void) async throws {
-        let endpoint = "/api/pull"
+    /// This now returns a `Task` that can be cancelled.
+    @discardableResult // Add this to avoid warnings if the returned task is not used
+    static func pullOllamaModel(name: String, baseURL: String, progressHandler: @escaping (ModelPullProgress) -> Void) -> Task<Void, Error> {
+        let task = Task {
+            let endpoint = "/api/pull"
+            guard let url = URL(string: baseURL + endpoint) else {
+                logger.error("Invalid URL constructed for pulling model: \(baseURL)\(endpoint)")
+                throw URLError(.badURL)
+            }
+            logger.debug("Attempting to pull model '\(name)' from URL: \(url.absoluteString) with streaming.")
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+            let payload: [String: Any] = ["name": name, "stream": true]
+            do {
+                request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
+            } catch {
+                logger.error("Failed to serialize JSON payload for /api/pull: \(error)")
+                throw error
+            }
+
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 300.0
+            config.timeoutIntervalForResource = 1800.0
+
+            let session = URLSession(configuration: config)
+
+            do {
+                let (bytes, response) = try await session.bytes(for: request)
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    logger.error("Invalid response received from pulling model: \(url.absoluteString)")
+                    throw URLError(.cannotParseResponse)
+                }
+
+                logger.debug("Received status code \(httpResponse.statusCode) from pulling model stream")
+
+                guard (200..<300).contains(httpResponse.statusCode) else {
+                    var errorResponseBody = ""
+                    for try await line in bytes.lines {
+                        errorResponseBody += line + "\n"
+                    }
+                    logger.error("Bad server response (\(httpResponse.statusCode)) from pulling model stream. Body: \(errorResponseBody.prefix(500))...")
+
+                    throw URLError(.badServerResponse, userInfo: [
+                        NSLocalizedDescriptionKey: "Server returned status \(httpResponse.statusCode).",
+                        "HTTPStatusCode": httpResponse.statusCode,
+                        "ResponseBody": errorResponseBody
+                    ])
+                }
+
+                logger.info("Starting to process streaming pull response for model '\(name)'.")
+
+                for try await line in bytes.lines {
+                    try Task.checkCancellation() // Check for cancellation at the start of each loop iteration
+
+                    guard let data = line.data(using: .utf8) else {
+                        logger.warning("Received non-UTF8 line from pull stream.")
+                        continue
+                    }
+
+                    guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        logger.warning("Failed to parse JSON from stream line: \(line.prefix(100))...")
+                        continue
+                    }
+
+                    let status = json["status"] as? String ?? "unknown status"
+                    let total = json["total"] as? Int64
+                    let completed = json["completed"] as? Int64
+                    let digest = json["digest"] as? String
+                    let total_bytes = json["total_bytes"] as? Int64
+
+                    let currentTotal = total ?? total_bytes
+                    let currentCompleted = completed
+
+                    let percentage: Double?
+                    if let currentTotal = currentTotal, let currentCompleted = currentCompleted, currentTotal > 0 {
+                        percentage = Double(currentCompleted) / Double(currentTotal)
+                    } else {
+                        percentage = nil
+                    }
+
+                    let errorMsg = json["error"] as? String
+                    let progress = ModelPullProgress(status: status, total: currentTotal, completed: currentCompleted, percentage: percentage, error: errorMsg)
+
+                    progressHandler(progress)
+
+                    if let streamedError = errorMsg {
+                        logger.error("Received streamed error during pull: \(streamedError)")
+                        throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Ollama Stream Error: \(streamedError)"])
+                    }
+                }
+
+                logger.info("Streaming pull response for model '\(name)' finished.")
+
+            } catch let error as URLError where error.code == .cancelled {
+                logger.info("Model pull for '\(name)' was cancelled.")
+                throw error // Re-throw cancellation error so the caller can handle it
+            } catch {
+                logger.error("Error during streaming pull request for '\(name)' or while processing stream: \(error.localizedDescription)")
+                throw error
+            }
+        }
+        return task
+    }
+    
+    // NEW: Fetches detailed information for a specific model.
+    static func fetchModelDetails(name: String, baseURL: String) async throws -> OllamaShowResponse {
+        let endpoint = "/api/show"
         guard let url = URL(string: baseURL + endpoint) else {
-            logger.error("Invalid URL constructed for pulling model: \(baseURL)\(endpoint)")
             throw URLError(.badURL)
         }
-        logger.debug("Attempting to pull model '\(name)' from URL: \(url.absoluteString) with streaming.")
 
         var request = URLRequest(url: url)
-        request.httpMethod = "POST" // /api/pull uses POST
+        request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // CHANGE: Set stream to true for streaming progress updates
-        let payload: [String: Any] = ["name": name, "stream": true]
-         do {
-             request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
-         } catch {
-             logger.error("Failed to serialize JSON payload for /api/pull: \(error)")
-             throw error // Re-throw serialization error
-         }
+        let payload = ["name": name]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        // --- INCREASE TIMEOUT FOR PULL REQUEST (Still relevant for connection/initial response) ---
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 300.0 // 5 minutes
-        // timeoutIntervalForResource is less critical with streaming as we process chunks,
-        // but still good to have a final limit.
-        config.timeoutIntervalForResource = 1800.0 // 30 minutes (ample time for very large models)
+        let (data, response) = try await URLSession.shared.data(for: request)
 
-
-        // --- Use URLSession.bytes(for:) for streaming ---
-        let session = URLSession(configuration: config)
-
-        do {
-            let (bytes, response) = try await session.bytes(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                logger.error("Invalid response received from pulling model: \(url.absoluteString)")
-                throw URLError(.cannotParseResponse)
-            }
-
-            logger.debug("Received status code \(httpResponse.statusCode) from pulling model stream")
-
-            guard (200..<300).contains(httpResponse.statusCode) else {
-                 // Attempt to read error response body from the stream if available
-                 var errorResponseBody = ""
-                 for try await line in bytes.lines {
-                     errorResponseBody += line + "\n"
-                 }
-                 logger.error("Bad server response (\(httpResponse.statusCode)) from pulling model stream. Body: \(errorResponseBody.prefix(500))...")
-
-                 throw URLError(.badServerResponse, userInfo: [
-                     NSLocalizedDescriptionKey: "Server returned status \(httpResponse.statusCode).",
-                     "HTTPStatusCode": httpResponse.statusCode,
-                     "ResponseBody": errorResponseBody // Include collected error body
-                 ])
-             }
-
-            logger.info("Starting to process streaming pull response for model '\(name)'.")
-
-            // Process the streaming response line by line (each line is a JSON object)
-            for try await line in bytes.lines {
-                // Attempt to parse each line as a JSON object
-                guard let data = line.data(using: .utf8) else {
-                    logger.warning("Received non-UTF8 line from pull stream.")
-                    continue // Skip invalid lines
-                }
-
-                // Use JSONDecoder for more robust parsing if needed, but JSONSerialization is fine for simple structures
-                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                     logger.warning("Failed to parse JSON from stream line: \(line.prefix(100))...")
-                     continue // Skip lines that aren't valid JSON
-                 }
-
-                // Extract progress information from the JSON object
-                let status = json["status"] as? String ?? "unknown status"
-                let total = json["total"] as? Int64 // Bytes for current stage (e.g., download)
-                let completed = json["completed"] as? Int64 // Bytes completed for current stage
-                let digest = json["digest"] as? String // Digest when verifying
-                let total_bytes = json["total_bytes"] as? Int64 // Total bytes for the *entire* pull (often in done: true message)
-
-                // Determine which total/completed to use for percentage if both types are present
-                let currentTotal = total ?? total_bytes
-                let currentCompleted = completed
-
-                // Calculate percentage if relevant byte counts are available
-                let percentage: Double?
-                if let currentTotal = currentTotal, let currentCompleted = currentCompleted, currentTotal > 0 {
-                    percentage = Double(currentCompleted) / Double(currentTotal)
-                } else {
-                    percentage = nil // Percentage not available for this message
-                }
-
-
-                let errorMsg = json["error"] as? String // Ollama can stream error objects too
-
-                // Create and send the progress update back via the handler
-                let progress = ModelPullProgress(status: status, total: currentTotal, completed: currentCompleted, percentage: percentage, error: errorMsg)
-
-
-                // Report progress using the provided closure
-                // @escaping is needed because the async task might outlive the calling context
-                progressHandler(progress)
-
-                // Check for a streamed error message and throw an error if found
-                 if let streamedError = errorMsg {
-                     logger.error("Received streamed error during pull: \(streamedError)")
-                     throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Ollama Stream Error: \(streamedError)"])
-                 }
-
-                // The stream ends when the pull is complete.
-                // There might be a final JSON object with status "success" or similar,
-                // or the connection might just close. The loop will finish when the stream ends.
-                // We could look for a "completed" or "success" status here if needed,
-                // but the loop completing is a strong indicator of success for streaming endpoints.
-            }
-
-            // If the loop finishes without throwing an error, the pull is considered successful
-            logger.info("Streaming pull response for model '\(name)' finished.")
-
-        } catch let error as URLError where error.code == .cannotFindHost || error.code == .cannotConnectToHost || error.code == .networkConnectionLost || error.code == .cancelled {
-             // Handle specific network connection errors clearly, including cancellation
-             logger.error("Network error during streaming pull of model '\(name)': \(error.localizedDescription)")
-             throw error // Re-throw network error
-         } catch {
-            logger.error("Error during streaming pull request for '\(name)' or while processing stream: \(error.localizedDescription)")
-            throw error // Re-throw other errors (like JSON parsing errors)
+        guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+            throw URLError(.badServerResponse)
         }
+
+        let details = try JSONDecoder().decode(OllamaShowResponse.self, from: data)
+        return details
     }
+
 
     /// Removes a local Ollama model from the server.
     /// - Parameters:

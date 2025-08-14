@@ -7,23 +7,40 @@
 
 import SwiftUI
 
-/// A view that represents a collapsed card for a code block.
-/// It displays the language, line count, and a button to view the full code.
+
 struct CodeBlockCardView: View {
     let language: String
     let lineCount: Int
+    let fileName: String?
     let action: () -> Void
+
+    private var title: String {
+        if let fileName = fileName, !fileName.isEmpty {
+            return fileName
+        }
+        if language.isEmpty {
+            return "Code Block"
+        }
+        return "\(language.capitalized) Code"
+    }
+    
+    private var iconName: String {
+        if let fileName = fileName, !fileName.isEmpty {
+            return "doc.text.fill"
+        }
+        return "doc.richtext.fill"
+    }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 15) {
-                Image(systemName: "doc.text.fill")
+                Image(systemName: iconName)
                     .font(.largeTitle)
                     .foregroundColor(.accentColor)
                     .padding(.leading, 5)
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(language.isEmpty ? "Code Block" : "\(language.capitalized) Code")
+                    Text(title)
                         .font(.headline)
                         .foregroundColor(Color(NSColor.labelColor))
 
@@ -49,10 +66,6 @@ struct CodeBlockCardView: View {
                 RoundedRectangle(cornerRadius: 16)
                     .stroke(Color.accentColor.opacity(0.5), lineWidth: 1)
             )
-            // --- FIX: Removed .drawingGroup() ---
-            // The .drawingGroup() modifier was causing inconsistent tap gesture recognition.
-            // Removing it ensures the button's action is reliably triggered without
-            // any negative performance impact for a view this simple.
         }
         .buttonStyle(.plain)
         .frame(maxWidth: 300, alignment: .leading)
@@ -63,8 +76,14 @@ struct CodeBlockCardView: View {
 // MARK: - Preview Provider
 struct CodeBlockCardView_Previews: PreviewProvider {
     static var previews: some View {
-        CodeBlockCardView(language: "python", lineCount: 150) {
-            print("Code block card tapped!")
+        VStack(spacing: 20) {
+            CodeBlockCardView(language: "swift", lineCount: 78, fileName: "ChatHistoryViewModel.swift") {
+                print("File card tapped!")
+            }
+
+            CodeBlockCardView(language: "python", lineCount: 150, fileName: nil) {
+                print("Language card tapped!")
+            }
         }
         .padding()
         .preferredColorScheme(.dark)

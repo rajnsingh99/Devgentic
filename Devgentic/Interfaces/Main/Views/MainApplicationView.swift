@@ -21,7 +21,6 @@ struct MainApplicationView: View {
     
     @State private var isSidebarVisible: Bool = true
     @State private var currentSidebarPaneWidth: CGFloat = 300
-    @State private var chatInputAreaHeight: CGFloat = 100
 
     private let activityBarWidth: CGFloat = 50
     private var totalSidebarWidth: CGFloat {
@@ -123,7 +122,7 @@ struct MainApplicationView: View {
             ChatHistoryView()
                 .environmentObject(chatHistoryViewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.bottom, chatInputAreaHeight)
+                .padding(.bottom, 130)
                 .overlay {
                     if viewModel.selectedConversationID == nil {
                         Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
@@ -132,34 +131,22 @@ struct MainApplicationView: View {
                     }
                 }
 
-            VStack(spacing: 0) {
-                ChatInputAreaView(
-                    showContextArea: $viewModel.showContextArea,
-                    activeContextFilePath: $viewModel.activeContextFilePath,
-                    isSending: chatHistoryViewModel.isSending,
-                    showSettings: viewModel.showSettings,
-                    isInputFocused: $isInputFocused,
-                    backendConfiguration: viewModel.backendConfiguration,
-                    onSendMessage: viewModel.sendMessage,
-                    onToggleContext: {
-                        withAnimation { viewModel.toggleContextArea() }
-                    }
-                )
-                .padding(.horizontal)
-                .padding(.top, 4)
-                .padding(.bottom, 15)
-                .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
-            }
-            .background(GeometryReader { geometry in
-                Color.clear
-                    .onAppear {
-                        chatInputAreaHeight = geometry.size.height
-                    }
-                    .onChange(of: geometry.size.height) { newHeight in
-                        chatInputAreaHeight = newHeight
-                    }
-            })
+            ChatInputAreaView(
+                showContextArea: $viewModel.showContextArea,
+                activeContextFilePath: $viewModel.activeContextFilePath,
+                isSending: chatHistoryViewModel.isSending,
+                showSettings: viewModel.showSettings,
+                isInputFocused: $isInputFocused,
+                backendConfiguration: viewModel.backendConfiguration,
+                onSendMessage: viewModel.sendMessage,
+                onToggleContext: {
+                    withAnimation { viewModel.toggleContextArea() }
+                }
+            )
+            .padding(.horizontal)
+            .padding(.top, 4)
+            .padding(.bottom, 15)
+            .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: chatInputAreaHeight)
     }
 }

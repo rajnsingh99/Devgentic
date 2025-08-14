@@ -50,28 +50,21 @@ extension NSColor {
 }
 
 // MARK: - PHASE 2 COMPLETE: GapBuffer Data Structure
-/// A data structure optimized for efficient insertion and deletion of text.
-/// It uses an array with a "gap" that can be moved to the cursor's position.
-/// Edits within the gap are extremely fast (O(1) complexity).
 struct GapBuffer {
     private var buffer: [Character]
     private var gapStart: Int
     private var gapEnd: Int
     
-    /// The full text content derived from the buffer.
     var string: String {
         return String(buffer[0..<gapStart] + buffer[gapEnd..<buffer.count])
     }
     
-    /// Initializes the Gap Buffer with an initial string content.
     init(string: String) {
         self.buffer = Array(string)
         self.gapStart = buffer.count
         self.gapEnd = buffer.count
     }
     
-    /// Moves the gap to a specified position in the text.
-    /// This is the most expensive operation, but it makes subsequent edits fast.
     mutating func moveGap(to position: Int) {
         guard position != gapStart else { return }
         
@@ -89,24 +82,21 @@ struct GapBuffer {
         }
     }
     
-    /// Inserts a character at the current gap position.
     mutating func insert(_ char: Character) {
         ensureGap(ofSize: 1)
         buffer[gapStart] = char
         gapStart += 1
     }
     
-    /// Deletes a character from before the current gap position.
     mutating func delete() {
         if gapStart > 0 {
             gapStart -= 1
         }
     }
     
-    /// Ensures the gap has at least a certain size, resizing if necessary.
     private mutating func ensureGap(ofSize size: Int) {
         if gapEnd - gapStart < size {
-            let newGapSize = max(size, 64) // Ensure a minimum new gap size
+            let newGapSize = max(size, 64)
             buffer.insert(contentsOf: [Character](repeating: " ", count: newGapSize), at: gapStart)
             gapEnd = gapStart + newGapSize
         }
@@ -114,11 +104,8 @@ struct GapBuffer {
 }
 
 // MARK: - Centralized Data Model
-/// The document model now uses a `GapBuffer` for its content,
-/// enabling high-performance text manipulations.
 class CodeDocument: ObservableObject, Equatable {
     static func == (lhs: CodeDocument, rhs: CodeDocument) -> Bool {
-        // Documents are considered equal if they are the same object instance.
         return lhs === rhs
     }
     
@@ -144,7 +131,6 @@ struct CodeViewerPanelView: View {
     @State private var document: CodeDocument?
     @State private var didCopy: Bool = false
     
-    // NEW: State to hold the current snippet being viewed
     @State private var currentSnippet: CodeSnippet?
 
     var body: some View {
@@ -156,10 +142,15 @@ struct CodeViewerPanelView: View {
         .transition(.move(edge: .trailing))
         .shadow(radius: 10)
         .onReceive(chatHistoryViewModel.$codeViewerContent) { newContent in
-            // MODIFIED: Update the current snippet when the view model changes
+            // --- FIX ---
+            // The logic was too simple, causing unnecessary view re-renders when the
+            // diff view was toggled. This new logic ensures the `CodeDocument` is only
+            // recreated when the actual snippet content changes, not just any
+            // property on the view model.
             if let content = newContent {
                 let snippet = content.snippets[content.currentIndex]
-                if currentSnippet != snippet {
+                // Only update the document if the snippet ID has changed.
+                if currentSnippet?.id != snippet.id {
                     currentSnippet = snippet
                     document = CodeDocument(content: snippet.code, language: snippet.language)
                 }
@@ -193,7 +184,12 @@ struct CodeViewerPanelView: View {
         VStack(spacing: 0) {
             panelHeader
             ZStack(alignment: .top) {
-                if let document = document {
+                // MODIFIED: Conditionally show either the diff view or the code editor.
+                if chatHistoryViewModel.isShowingDiff,
+                   let originalCode = chatHistoryViewModel.originalCodeForDiff,
+                   let modifiedCode = currentSnippet?.code {
+                    CodeDiffView(originalCode: originalCode, modifiedCode: modifiedCode)
+                } else if let document = document {
                     HighPerformanceCodeViewRepresentable(
                         document: document,
                         fontSize: fontSize
@@ -212,9 +208,7 @@ struct CodeViewerPanelView: View {
     
     private var panelHeader: some View {
         ZStack {
-            // Left and Right aligned content
             HStack {
-                // Left side
                 HStack(spacing: 8) {
                     Image(systemName: languageIcon(for: currentSnippet?.language))
                         .font(.title2)
@@ -228,8 +222,32 @@ struct CodeViewerPanelView: View {
 
                 Spacer()
 
-                // Right side
                 HStack(spacing: 4) {
+                    // --- NEW: Apply Changes Button ---
+                    // This button is only visible when the diff view is active.
+                    if chatHistoryViewModel.isShowingDiff, let snippet = currentSnippet {
+                        HeaderButton(
+                            action: {
+                                chatHistoryViewModel.applyChanges(for: snippet)
+                            },
+                            icon: "checkmark.circle.fill",
+                            helpText: "Apply Changes to File",
+                            color: .green
+                        )
+                    }
+
+                    // Diff toggle button
+                    if let snippet = currentSnippet, snippet.sourceFileID != nil {
+                        HeaderButton(
+                            action: {
+                                chatHistoryViewModel.toggleDiffView(for: snippet)
+                            },
+                            icon: chatHistoryViewModel.isShowingDiff ? "doc.text.fill" : "arrow.left.arrow.right",
+                            helpText: chatHistoryViewModel.isShowingDiff ? "Show Final Code" : "Show Changes",
+                            color: chatHistoryViewModel.isShowingDiff ? .accentColor : .secondary
+                        )
+                    }
+                    
                     HeaderButton(
                         action: {
                             copyCodeToClipboard()
@@ -262,7 +280,6 @@ struct CodeViewerPanelView: View {
                 }
             }
 
-            // Centered content
             if let content = chatHistoryViewModel.codeViewerContent, content.snippets.count > 1 {
                 SnippetNavigatorView(
                     currentIndex: content.currentIndex,
@@ -332,24 +349,15 @@ struct CodeViewerPanelView: View {
     
     private func languageIcon(for languageID: String?) -> String {
         switch languageID?.lowercased() {
-        case "swift":
-            return "swift"
-        case "python":
-            return "chevron.left.forwardslash.chevron.right"
-        case "javascript", "typescript", "tsx":
-            return "curlybraces"
-        case "java":
-            return "cup.and.saucer.fill"
-        case "html":
-            return "chevron.left.slash.chevron.right"
-        case "css":
-            return "number"
-        case "ruby":
-            return "diamond.fill"
-        case "shell":
-            return "terminal.fill"
-        default:
-            return "doc.text"
+        case "swift": return "swift"
+        case "python": return "chevron.left.forwardslash.chevron.right"
+        case "javascript", "typescript", "tsx": return "curlybraces"
+        case "java": return "cup.and.saucer.fill"
+        case "html": return "chevron.left.slash.chevron.right"
+        case "css": return "number"
+        case "ruby": return "diamond.fill"
+        case "shell": return "terminal.fill"
+        default: return "doc.text"
         }
     }
 }
@@ -363,25 +371,12 @@ fileprivate struct SnippetNavigatorView: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            // Previous Button
-            NavButton(
-                action: onPrevious,
-                icon: "chevron.left",
-                enabled: currentIndex > 0
-            )
-
-            // Page Indicator
+            NavButton(action: onPrevious, icon: "chevron.left", enabled: currentIndex > 0)
             Text("\(currentIndex + 1) of \(totalCount)")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
-
-            // Next Button
-            NavButton(
-                action: onNext,
-                icon: "chevron.right",
-                enabled: currentIndex < totalCount - 1
-            )
+            NavButton(action: onNext, icon: "chevron.right", enabled: currentIndex < totalCount - 1)
         }
         .padding(4)
         .background(Color.black.opacity(0.2))
@@ -402,10 +397,7 @@ fileprivate struct NavButton: View {
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(enabled ? .primary : .secondary.opacity(0.5))
                 .frame(width: 24, height: 24)
-                .background(
-                    Circle()
-                        .fill(isHovering && enabled ? Color.gray.opacity(0.3) : Color.clear)
-                )
+                .background(Circle().fill(isHovering && enabled ? Color.gray.opacity(0.3) : Color.clear))
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -432,10 +424,7 @@ fileprivate struct HeaderButton: View {
                 .font(.system(size: 16, weight: .regular))
                 .foregroundColor(isEnabled ? color : .secondary.opacity(0.5))
                 .frame(width: 32, height: 32)
-                .background(
-                    Circle()
-                        .fill(isHovering && isEnabled ? Color.gray.opacity(0.25) : Color.clear)
-                )
+                .background(Circle().fill(isHovering && isEnabled ? Color.gray.opacity(0.25) : Color.clear))
         }
         .buttonStyle(.plain)
         .help(helpText)

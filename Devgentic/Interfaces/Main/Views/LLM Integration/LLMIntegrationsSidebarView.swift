@@ -11,39 +11,28 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMIntegrationsSidebarView")
 
 // MARK: - Model Extension for View Logic
-// FIX: Add extension to provide unified access to model properties, resolving "no member" errors.
 extension LLMIntegrationModel {
-    /// Provides a unified way to access the model name/identifier, regardless of provider type.
     var modelIdentifier: String? {
         switch providerType {
-        case .ollama:
-            return ollamaConfig?.modelName
-        case .remote:
-            return remoteConfig?.modelName
+        case .ollama: return ollamaConfig?.modelName
+        case .remote: return remoteConfig?.modelName
         }
     }
     
-    /// Provides a unified way to access the temperature setting.
     var temperature: Double? {
         switch providerType {
-        case .ollama:
-            return ollamaConfig?.temperature
-        case .remote:
-            return remoteConfig?.temperature
+        case .ollama: return ollamaConfig?.temperature
+        case .remote: return remoteConfig?.temperature
         }
     }
     
-    /// Provides a unified way to access the context window size.
     var contextWindowSize: Int? {
         switch providerType {
-        case .ollama:
-            return ollamaConfig?.contextWindowSize
-        case .remote:
-            return remoteConfig?.contextWindowSize
+        case .ollama: return ollamaConfig?.contextWindowSize
+        case .remote: return remoteConfig?.contextWindowSize
         }
     }
     
-    /// Provides a unified way to access the API key, which is only relevant for remote providers.
     var apiKey: String? {
         guard providerType == .remote else { return nil }
         return remoteConfig?.apiKey
@@ -54,55 +43,31 @@ extension LLMIntegrationModel {
 // MARK: - Main Sidebar View for LLM Integrations
 struct LLMIntegrationsSidebarView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    // Direct access to the store for the list of integrations
     @EnvironmentObject var llmIntegrationStore: LLMIntegrationStore
 
-    // State to track which integration is selected for viewing/editing in the bottom pane.
     @State private var selectedIntegrationForEditing: LLMIntegrationModel?
-    
-    // The `sidebarWidth` binding is passed from the parent view but is not directly used here,
-    // as the VSplitView manages its own internal dimensions. It's kept for potential future use
-    // or to maintain API consistency with the parent view.
     @Binding var sidebarWidth: CGFloat
 
-
     var body: some View {
-        // VSplitView creates the horizontal top/bottom split, as requested.
+        // The VSplitView is now the top-level component, with headers handled by the parent view.
         VSplitView {
-            // --- Top Pane: List of Integrations ---
+            // --- Top Pane: List of Integrations (No header here) ---
             IntegrationsList(
                 integrations: llmIntegrationStore.integrations,
-                // The list selection is bound to our state variable.
                 selectedIntegrationForEditing: $selectedIntegrationForEditing,
-                // Pass the active ID to show the checkmark for the chat-active model.
-                activeIntegrationID: viewModel.backendConfiguration.selectedIntegrationID,
-                llmIntegrationStore: llmIntegrationStore
+                activeIntegrationID: viewModel.backendConfiguration.selectedIntegrationID
             )
-            .frame(minHeight: 150, idealHeight: 250) // Define initial sizes for the top pane
+            .frame(minHeight: 150, idealHeight: 250)
 
-            // --- Bottom Pane: Advanced Settings for the selected integration ---
-            // FIX: Added a VStack to include a title for the settings pane.
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text("Advanced Settings")
-                        .font(.headline)
-                    Spacer()
-                }
-                .padding(.horizontal)
-                .padding(.top, 10)
-                .padding(.bottom, 5)
-                
-                LLMIntegrationSettingsView(
-                    // Pass a binding to the selected integration.
-                    integration: $selectedIntegrationForEditing,
-                    llmIntegrationStore: llmIntegrationStore,
-                    ollamaService: viewModel.ollamaService
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            // --- Bottom Pane: Settings (No header here) ---
+            LLMIntegrationSettingsView(
+                integration: $selectedIntegrationForEditing,
+                llmIntegrationStore: llmIntegrationStore,
+                ollamaService: viewModel.ollamaService
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
-            // For a better user experience, select the first integration in the list by default.
             if selectedIntegrationForEditing == nil {
                 selectedIntegrationForEditing = llmIntegrationStore.integrations.first
             }
@@ -113,52 +78,24 @@ struct LLMIntegrationsSidebarView: View {
     }
 }
 
-// MARK: - Top Pane: Integrations List
+// MARK: - Top Pane: Integrations List (Simplified)
 private struct IntegrationsList: View {
     let integrations: [LLMIntegrationModel]
     @Binding var selectedIntegrationForEditing: LLMIntegrationModel?
     let activeIntegrationID: UUID?
-    
-    // We need the store for the "Add" button action.
-    @ObservedObject var llmIntegrationStore: LLMIntegrationStore
-    @State private var showingAddIntegrationPopover = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header for the list pane
-            HStack {
-                Text("LLM Integrations")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    showingAddIntegrationPopover = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(PlainButtonStyle())
-                .help("Add New LLM Integration")
-                .popover(isPresented: $showingAddIntegrationPopover, arrowEdge: .bottom) {
-                    // --- FIX: Uncommented the view presentation ---
-                    AddLLMIntegrationView()
-                         .environmentObject(llmIntegrationStore)
-                }
+        // The view is now just the List, as the header and buttons are moved.
+        List(selection: $selectedIntegrationForEditing) {
+            ForEach(integrations) { integration in
+                IntegrationListRow(
+                    integration: integration,
+                    isActiveForChat: activeIntegrationID == integration.id
+                )
+                .tag(integration)
             }
-            .padding(.horizontal)
-            .padding(.top, 10)
-            .padding(.bottom, 5)
-
-            // The main list. The 'selection' parameter provides two-way binding.
-            List(selection: $selectedIntegrationForEditing) {
-                ForEach(integrations) { integration in
-                    IntegrationListRow(
-                        integration: integration,
-                        isActiveForChat: activeIntegrationID == integration.id
-                    )
-                    .tag(integration) // Each row must be tagged with its corresponding model object.
-                }
-            }
-            .listStyle(.sidebar) // A style that fits well in a sidebar context.
         }
+        .listStyle(.sidebar)
     }
 }
 
@@ -184,13 +121,12 @@ private struct IntegrationListRow: View {
 }
 
 
-// MARK: - Bottom Pane: Mocked Advanced Settings
+// MARK: - Bottom Pane: Advanced Settings
 private struct LLMIntegrationSettingsView: View {
     @Binding var integration: LLMIntegrationModel?
     @ObservedObject var llmIntegrationStore: LLMIntegrationStore
     @ObservedObject var ollamaService: OllamaService
     
-    // Local state for editing properties before saving.
     @State private var displayName: String = ""
     @State private var apiKey: String = ""
     @State private var modelName: String = ""
@@ -198,27 +134,24 @@ private struct LLMIntegrationSettingsView: View {
     @State private var contextWindow: Int = 4096
 
     var body: some View {
-        // Show settings only if an integration is selected.
         if let currentIntegration = integration {
+            // The Form is now the top-level view here.
             Form {
+                // The title "Advanced Settings" has been removed from here.
                 Section {
                     TextField("Display Name", text: $displayName)
                 }
 
-                // FIX: Use trailing closure syntax for Section header to fix compiler error.
-                Section {
+                Section("Authentication") {
                     if currentIntegration.providerType == .remote {
                         SecureField("API Key", text: $apiKey)
                     } else if let ollamaConfig = currentIntegration.ollamaConfig {
                         TextField("Ollama Base URL", text: .constant(ollamaConfig.baseURL))
                             .disabled(true)
                     }
-                } header: {
-                     Text("Authentication")
                 }
                 
-                // FIX: Use trailing closure syntax for Section header to fix compiler error.
-                Section {
+                Section("Model Configuration") {
                     TextField("Model Name / ID", text: $modelName)
                     
                     Slider(value: $temperature, in: 0...2, step: 0.1) {
@@ -230,11 +163,8 @@ private struct LLMIntegrationSettingsView: View {
                     }
                     
                     Stepper("Context Window: \(contextWindow)", value: $contextWindow, step: 1024)
-                } header: {
-                    Text("Model Configuration")
                 }
                 
-                // Conditionally show the local models section for Ollama integrations.
                 if currentIntegration.providerType == .ollama,
                    let ollamaConfig = currentIntegration.ollamaConfig {
                     LocalModelsSection(
@@ -248,13 +178,10 @@ private struct LLMIntegrationSettingsView: View {
                 HStack {
                     Spacer()
                     Button("Revert") {
-                        // Reload state from the model object
                         updateLocalState(from: currentIntegration)
                     }.disabled(isUnchanged(from: currentIntegration))
                     
                     Button("Apply") {
-                        // Here you would save the changes back to the store.
-                        // For now, it's a placeholder action.
                         logger.info("Apply button clicked for \(self.displayName)")
                     }
                     .buttonStyle(.borderedProminent)
@@ -263,18 +190,15 @@ private struct LLMIntegrationSettingsView: View {
             }
             .padding()
             .navigationTitle(displayName)
-            // When the selection from the list changes, update the local state of this view.
             .onChange(of: integration) { newIntegration in
                 if let newIntegration = newIntegration {
                     updateLocalState(from: newIntegration)
                 }
             }
-            // Also load state when the view first appears.
             .onAppear {
                 updateLocalState(from: currentIntegration)
             }
         } else {
-            // A placeholder view for when no integration is selected.
             VStack {
                 Image(systemName: "square.split.1x2")
                     .font(.system(size: 48))
@@ -290,19 +214,15 @@ private struct LLMIntegrationSettingsView: View {
         }
     }
     
-    /// Helper function to load the view's state from a model object.
     private func updateLocalState(from model: LLMIntegrationModel) {
-        // FIX: Use the computed properties from the extension to correctly access nested model data.
         self.displayName = model.displayName
         self.modelName = model.modelIdentifier ?? ""
         self.temperature = model.temperature ?? 0.8
         self.contextWindow = model.contextWindowSize ?? 4096
-        self.apiKey = model.apiKey ?? "" // Use empty string for non-remote or missing key
+        self.apiKey = model.apiKey ?? ""
     }
     
-    /// Helper to check if local state differs from the model object, for enabling Apply/Revert buttons.
     private func isUnchanged(from model: LLMIntegrationModel) -> Bool {
-        // FIX: Use the computed properties from the extension to correctly compare nested model data.
         return displayName == model.displayName &&
                modelName == (model.modelIdentifier ?? "") &&
                temperature == (model.temperature ?? 0.8) &&
@@ -312,33 +232,28 @@ private struct LLMIntegrationSettingsView: View {
 }
 
 
-// MARK: - Local Models Section (Re-integrated into the settings pane)
+// MARK: - Local Models Section
 private struct LocalModelsSection: View {
     @ObservedObject var ollamaService: OllamaService
     let ollamaBaseURL: String
     
     var body: some View {
-        // FIX: Use trailing closure syntax for Section header to fix compiler error.
-        Section {
+        Section("Local LLMs for Active Profile") {
             HStack {
                 Text("Ollama Server Status:")
                 Spacer()
                 OllamaStatusView(ollamaService: ollamaService)
             }
-            // You would list local models here, e.g., using another ForEach
             Text("(Local model list would appear here)")
                 .foregroundColor(.secondary)
-        } header: {
-            Text("Local LLMs for Active Profile")
         }
     }
 }
 
-// MARK: - Ollama Status View (Placeholder)
+// MARK: - Ollama Status View
 private struct OllamaStatusView: View {
     @ObservedObject var ollamaService: OllamaService
     var body: some View {
-        // A more detailed status view can be built out here.
         Text(ollamaService.serverStatus.rawValue.capitalized)
             .foregroundColor(ollamaService.serverStatus == .connected ? .green : .red)
     }

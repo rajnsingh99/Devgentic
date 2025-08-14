@@ -1,4 +1,3 @@
-// VSCodifiedSidebarContainerView.swift
 //
 //  VSCodifiedSidebarContainerView.swift
 //  Devgentic
@@ -12,12 +11,11 @@ import os
 
 // MARK: - Main Sidebar Container View
 struct VSCodifiedSidebarContainerView: View {
-    // --- State Management ---
+    
     @State private var selectedTab: SidebarTab? = .conversations
     @Binding var isSidebarVisible: Bool
     @Binding var sidebarWidth: CGFloat
     
-    // State to track hover over the divider
     @State private var isHoveringOnDivider = false
     
     private let minSidebarWidth: CGFloat = 300
@@ -26,10 +24,10 @@ struct VSCodifiedSidebarContainerView: View {
 
     @State private var preferredWidths: [SidebarTab: CGFloat] = [
         .newChat: 300,
-        .conversations: 300,
-        .explorer: 300,
+        .conversations: 350,
+        .explorer: 350,
         .integration: 400,
-        .promptLibrary: 400, // Fixed width for the prompt library
+        .promptLibrary: 400,
         .settings: 300,
         .user: 300
     ]
@@ -64,7 +62,6 @@ struct VSCodifiedSidebarContainerView: View {
                                 self.sidebarWidth = min(max(newWidth, self.minSidebarWidth), self.maxSidebarWidth)
                             }
                     )
-                    // Add hover effect to change cursor
                     .onHover { hovering in
                         self.isHoveringOnDivider = hovering
                         if hovering {
@@ -92,59 +89,5 @@ struct VSCodifiedSidebarContainerView: View {
     }
 }
 
-// MARK: - Preview Provider for VSCodifiedSidebarContainerView
-struct VSCodifiedSidebarContainerView_Previews: PreviewProvider {
-    struct PreviewWrapper: View {
-        @State var sidebarVisible = true
-        @State var currentSidebarWidth: CGFloat = 350
 
-        // MODIFIED: Initializer for the view model now explicitly creates ChatHistoryViewModel
-        @StateObject var vm = MainApplicationViewModel(
-            llmIntegrationStore: LLMIntegrationStore(),
-            agentStore: AgentStore(), // Ensure agentStore is initialized
-            fileProcessorService: FileProcessorService(), // Ensure fileProcessorService is initialized
-            chatHistoryViewModel: ChatHistoryViewModel() // Explicitly create ChatHistoryViewModel
-        )
 
-        var body: some View {
-             HStack(spacing: 0) {
-                 VStack {
-                      Button("Toggle Sidebar") {
-                           withAnimation(.easeInOut(duration: 0.2)) {
-                                sidebarVisible.toggle()
-                           }
-                      }
-                      Text("Current Width: \(currentSidebarWidth, specifier: "%.0f")")
-                      Spacer()
-                 }
-                 .padding()
-                 .frame(width: 150)
-
-                 VSCodifiedSidebarContainerView(
-                    isSidebarVisible: $sidebarVisible,
-                    sidebarWidth: $currentSidebarWidth
-                 )
-                 .environmentObject(vm)
-                 .background(Color.gray.opacity(0.3))
-                 
-                 VStack {
-                     Text("Main Content")
-                 }
-                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                 .background(Color.blue.opacity(0.2))
-             }
-             .frame(width: 800, height: 600)
-             .previewDisplayName("Resizable Sidebar Container")
-             .onAppear {
-                 // MARK: - Corrected: Configure the SHARED service instance for the preview
-                 let service = OllamaService.shared
-                 service.serverStatus = .connected
-                 service.localModels = ["preview-model:latest"]
-             }
-        }
-    }
-    
-    static var previews: some View {
-        PreviewWrapper()
-    }
-}

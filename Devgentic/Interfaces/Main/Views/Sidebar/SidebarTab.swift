@@ -29,9 +29,8 @@ enum SidebarTab: CaseIterable, Identifiable {
             return "message"
         case .integration:
             return "cpu"
-        // MARK: - Icon for Prompt Library
         case .promptLibrary:
-            return "books.vertical"
+            return "square.stack.3d.up.fill"
         case .settings:
             return "gearshape"
         case .user:
@@ -49,7 +48,8 @@ enum SidebarTab: CaseIterable, Identifiable {
         case .conversations:
             return "Conversations"
         case .integration:
-            return "integration"
+            // Updated title for a cleaner header
+            return "LLM Integrations"
         case .promptLibrary:
             return "Prompt Library"
         case .settings:
@@ -61,6 +61,8 @@ enum SidebarTab: CaseIterable, Identifiable {
         }
     }
 }
+
+// --- Placeholder Views remain the same ---
 
 struct ConversationsTabViewPlaceholder: View {
     var body: some View {

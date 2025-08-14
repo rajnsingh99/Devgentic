@@ -12,6 +12,7 @@ struct PromptSuggestionView: View {
     let prompts: [Prompt]
     let suggestionQuery: String
     let onSelectPrompt: (Prompt) -> Void
+    @Binding var selectedItemID: Prompt.ID? // The ID of the item selected via keyboard
 
     // MARK: - State
     @State private var hoveredItemID: Prompt.ID?
@@ -25,27 +26,38 @@ struct PromptSuggestionView: View {
     // MARK: - Body
     var body: some View {
         if !prompts.isEmpty {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(prompts) { prompt in
-                        Button(action: {
-                            onSelectPrompt(prompt)
-                        }) {
-                            rowContent(for: prompt)
-                        }
-                        .buttonStyle(PlainButtonStyle())
-                        .onHover { isHovering in
-                            withAnimation(.easeInOut(duration: 0.1)) {
-                                hoveredItemID = isHovering ? prompt.id : nil
+            ScrollViewReader { scrollViewProxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(prompts) { prompt in
+                            Button(action: {
+                                onSelectPrompt(prompt)
+                            }) {
+                                rowContent(for: prompt)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .id(prompt.id) // Assign an ID for ScrollViewReader
+                            .onHover { isHovering in
+                                withAnimation(.easeInOut(duration: 0.1)) {
+                                    hoveredItemID = isHovering ? prompt.id : nil
+                                }
+                            }
+
+                            if prompts.last?.id != prompt.id {
+                                Divider().padding(.leading, 48) // Indent divider
                             }
                         }
-
-                        if prompts.last?.id != prompt.id {
-                            Divider().padding(.leading, 48) // Indent divider
+                    }
+                    .padding(4)
+                }
+                .onChange(of: selectedItemID) { newId in
+                    // When the selection changes, scroll to make it visible
+                    if let newId = newId {
+                        withAnimation {
+                            scrollViewProxy.scrollTo(newId, anchor: .center)
                         }
                     }
                 }
-                .padding(4)
             }
             .frame(maxHeight: maxListHeight)
             .background(VisualEffectBlur(material: .popover).opacity(0.9))
@@ -56,6 +68,12 @@ struct PromptSuggestionView: View {
             )
             .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
+            .onAppear {
+                // When the view appears, if no item is selected, select the first one.
+                if selectedItemID == nil, let firstId = prompts.first?.id {
+                    selectedItemID = firstId
+                }
+            }
         } else if !suggestionQuery.isEmpty {
             Text("No prompts match \"\(suggestionQuery)\"")
                 .font(.caption)
@@ -76,6 +94,9 @@ struct PromptSuggestionView: View {
     // MARK: - View Builders
     @ViewBuilder
     private func rowContent(for prompt: Prompt) -> some View {
+        let isSelected = selectedItemID == prompt.id
+        let isHovered = hoveredItemID == prompt.id
+
         HStack(spacing: 12) {
             Image(systemName: "text.quote") // Using a generic but fitting icon
                 .resizable()
@@ -102,7 +123,9 @@ struct PromptSuggestionView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: rowHeight)
-        .background(hoveredItemID == prompt.id ? Color.gray.opacity(0.15) : Color.clear)
+        .background(
+            (isSelected || isHovered) ? Color.gray.opacity(isSelected ? 0.25 : 0.15) : Color.clear
+        )
         .cornerRadius(6)
     }
 
@@ -132,14 +155,14 @@ struct PromptSuggestionView_Previews: PreviewProvider {
     static var previews: some View {
         VStack(spacing: 20) {
             Text("Prompt Suggestions (Populated)").font(.headline)
-            PromptSuggestionView(prompts: samplePrompts, suggestionQuery: "sum") { selectedPrompt in
+            PromptSuggestionView(prompts: samplePrompts, suggestionQuery: "sum", onSelectPrompt: { selectedPrompt in
                 print("Selected prompt: \(selectedPrompt.title)")
-            }
+            }, selectedItemID: .constant(samplePrompts.first?.id))
 
             Text("Prompt Suggestions (No Results)").font(.headline)
-            PromptSuggestionView(prompts: [], suggestionQuery: "nonexistent") { selectedPrompt in
+            PromptSuggestionView(prompts: [], suggestionQuery: "nonexistent", onSelectPrompt: { selectedPrompt in
                 print("Selected prompt: \(selectedPrompt.title)")
-            }
+            }, selectedItemID: .constant(nil))
         }
         .frame(width: 450)
         .padding()

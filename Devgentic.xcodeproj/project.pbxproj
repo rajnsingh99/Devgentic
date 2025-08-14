@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 35243D362E26F08800602933 /* CodeEditSourceEditor */; settings = {ATTRIBUTES = (Required, ); }; };
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
-		35CDA7552E2A619500564AB7 /* Down in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7542E2A619500564AB7 /* Down */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
 		35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 35DB4C1F2DC53B9D002B3BF7 /* Splash */; };
@@ -41,9 +40,22 @@
 		35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		352739CB2E4D88AF00E5E74B /* Exceptions for "devgentic" folder in "devgentic" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Core/Models/Untitled.swift,
+			);
+			target = 35FCBA872DB5526B00D39123 /* devgentic */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		35FCBA8A2DB5526B00D39123 /* devgentic */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				352739CB2E4D88AF00E5E74B /* Exceptions for "devgentic" folder in "devgentic" target */,
+			);
 			path = devgentic;
 			sourceTree = "<group>";
 		};
@@ -66,7 +78,6 @@
 			files = (
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
-				35CDA7552E2A619500564AB7 /* Down in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
 				35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */,
@@ -153,7 +164,6 @@
 				35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */,
 				35243D362E26F08800602933 /* CodeEditSourceEditor */,
 				35CDA7422E2A2A3400564AB7 /* Highlightr */,
-				35CDA7542E2A619500564AB7 /* Down */,
 				35E68C412E313B0B00993F95 /* WhisperKit */,
 			);
 			productName = devgentic;
@@ -244,7 +254,6 @@
 				35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */,
 				35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
 				35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */,
-				35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */,
 				35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -456,6 +465,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Devgentic needs access to your microphone to capture audio for voice-to-text input.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Devgentic needs to send audio data to Apple's servers or process it on-device for speech recognition to convert your voice to text.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -484,6 +495,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = devgentic/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Devgentic needs access to your microphone to capture audio for voice-to-text input.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Devgentic needs to send audio data to Apple's servers or process it on-device for speech recognition to convert your voice to text.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -626,14 +639,6 @@
 				minimumVersion = 2.3.0;
 			};
 		};
-		35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/johnxnguyen/Down";
-			requirement = {
-				branch = master;
-				kind = branch;
-			};
-		};
 		35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/soffes/HotKey.git";
@@ -670,11 +675,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */;
 			productName = Highlightr;
-		};
-		35CDA7542E2A619500564AB7 /* Down */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35CDA7532E2A619500564AB7 /* XCRemoteSwiftPackageReference "Down" */;
-			productName = Down;
 		};
 		35CDCB0E2E2396B700A7B51B /* HotKey */ = {
 			isa = XCSwiftPackageProductDependency;

@@ -61,8 +61,8 @@ struct ActivityBarButton: View {
             selectedTab = nil
 
         case .settings:
-            logger.debug("Settings button tapped. Attempting to open Command Centre window.")
-            openWindow(id: "command-centre")
+            logger.debug("Settings button tapped. Attempting to open Settings window.")
+            openWindow(id: "settings") 
 
             if viewModel.showSettings {
                 viewModel.showSettings = false

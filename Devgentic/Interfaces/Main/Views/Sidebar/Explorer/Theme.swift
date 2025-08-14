@@ -40,12 +40,10 @@ protocol Theme {
 
 
 // MARK: - AppThemes
-/// A namespace to contain all the concrete theme implementations.
 enum AppThemes {}
 
 // MARK: - Default Theme
 extension AppThemes {
-    /// The Default Theme automatically adapts to the system's Light and Dark modes.
     struct DefaultTheme: Theme {
         let id = "default"
         let displayName = "Default (System)"
@@ -71,26 +69,25 @@ extension AppThemes {
 
 // MARK: - Dracula Theme
 extension AppThemes {
-    /// A popular dark theme for developers.
     struct DraculaTheme: Theme {
         let id = "dracula"
         let displayName = "Dracula"
 
         let primaryBackground: Color = Color(hex: "#282a36")
-        let secondaryBackground: Color = Color(hex: "#383A59") // A slightly lighter variant for sidebars
+        let secondaryBackground: Color = Color(hex: "#383A59")
         let tertiaryBackground: Color = Color(hex: "#44475a")
 
         let primaryText: Color = Color(hex: "#f8f8f2")
         let secondaryText: Color = Color(hex: "#6272a4")
         let tertiaryText: Color = Color(hex: "#44475a")
 
-        let accentColor: Color = Color(hex: "#bd93f9") // Purple
+        let accentColor: Color = Color(hex: "#bd93f9")
         let dividerColor: Color = Color(hex: "#44475a")
         let selectionColor: Color = Color(hex: "#44475a")
 
-        let errorColor: Color = Color(hex: "#ff5555") // Red
-        let successColor: Color = Color(hex: "#50fa7b") // Green
-        let warningColor: Color = Color(hex: "#f1fa8c") // Yellow
+        let errorColor: Color = Color(hex: "#ff5555")
+        let successColor: Color = Color(hex: "#50fa7b")
+        let warningColor: Color = Color(hex: "#f1fa8c")
     }
 }
 

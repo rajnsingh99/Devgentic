@@ -20,6 +20,11 @@ struct CustomTextEditor: NSViewRepresentable {
 
     @Binding var attributedTextInsertion: AttributedTextInsertionAction?
     var textViewRef: ((CustomTextEditor.CustomNSTextView?) -> Void)?
+    
+    // Callbacks for keyboard navigation
+    var onNavigateSuggestions: ((ChatInputAreaView.SuggestionNavigationDirection) -> Void)?
+    var onConfirmSuggestion: (() -> Void)?
+
 
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.CustomTextEditor", category: "CustomTextEditor_Input")
 
@@ -258,6 +263,27 @@ struct CustomTextEditor: NSViewRepresentable {
         // Handle key down events for custom behaviors
         override func keyDown(with event: NSEvent) {
             let suggestionsActive = coordinator?.parent.showPromptSuggestions == true || coordinator?.parent.showFileSuggestions == true
+            
+            // Intercept navigation keys if suggestions are active
+            if suggestionsActive {
+                switch event.keyCode {
+                case 125: // Down Arrow
+                    coordinator?.parent.logger.debug("Down Arrow pressed with suggestions active.")
+                    coordinator?.parent.onNavigateSuggestions?(.down)
+                    return // Consume the event
+                case 126: // Up Arrow
+                    coordinator?.parent.logger.debug("Up Arrow pressed with suggestions active.")
+                    coordinator?.parent.onNavigateSuggestions?(.up)
+                    return // Consume the event
+                case 36: // Return/Enter
+                    coordinator?.parent.logger.debug("Enter pressed with suggestions active. Confirming selection.")
+                    coordinator?.parent.onConfirmSuggestion?()
+                    return // Consume the event
+                default:
+                    break // Let other keys pass through
+                }
+            }
+            
             let keyCodeReturn: UInt16 = 36 // Key code for Return/Enter
 
             // Shift + Return: Insert newline
@@ -275,15 +301,9 @@ struct CustomTextEditor: NSViewRepresentable {
             }
 
             // Enter (alone): Commit/Send if suggestions are NOT active
-            // If suggestions ARE active, super.keyDown will handle it (e.g., selecting a suggestion)
             if event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty && event.keyCode == keyCodeReturn {
-                if suggestionsActive {
-                    coordinator?.parent.logger.debug("Enter pressed with suggestions active. Passing to super.")
-                    super.keyDown(with: event) // Allow suggestion view to handle Return
-                } else {
-                    coordinator?.parent.logger.debug("Enter pressed, no suggestions. Committing.")
-                    coordinator?.parent.onCommit(self.attributedString())
-                }
+                coordinator?.parent.logger.debug("Enter pressed, no suggestions. Committing.")
+                coordinator?.parent.onCommit(self.attributedString())
                 return // Explicitly return
             }
             

@@ -20,6 +20,9 @@ struct UITheme {
         static let textBackground = Color(NSColor.textBackgroundColor)
 
         static let accent = Color.accentColor
+        static let userBubbleBackground = Color.accentColor
+        static let attachmentBackground = Color(NSColor.controlBackgroundColor).opacity(0.7)
+        
         static let accentMuted = Color.accentColor.opacity(0.7)
         
         static let success = Color.green

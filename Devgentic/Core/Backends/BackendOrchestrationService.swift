@@ -101,8 +101,44 @@ class BackendOrchestrationService: ObservableObject {
                         }
                         continuation.finish()
 
-                    case .agent, .ollama:
-                        throw NSError(domain: "StreamingError", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for the \(config.backendType.rawValue) backend."])
+                    case .ollama:
+                        // 1. Get integration details
+                        guard let integrationID = config.integrationID,
+                              let integration = self.llmIntegrationStore.integrations.first(where: { $0.id == integrationID }),
+                              let ollamaConfig = integration.ollamaConfig else {
+                            throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected Ollama integration not found or is misconfigured."])
+                        }
+
+                        // 2. Prepare history for Ollama
+                        var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
+                            let role: String
+                            switch message.sender {
+                            case .user:
+                                role = "user"
+                            case .agent:
+                                role = "assistant"
+                            }
+                            return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
+                        }
+                        ollamaHistory.append(OllamaChatMessage(role: "user", content: finalUserQuery))
+                        
+                        logger.info("Initiating stream to Ollama with model \(ollamaConfig.modelName). History count: \(ollamaHistory.count).")
+
+                        // 3. Get the stream from OllamaConnect
+                        let stream = OllamaConnect.streamChatRequest(
+                            baseURL: ollamaConfig.baseURL,
+                            model: ollamaConfig.modelName,
+                            history: ollamaHistory
+                        )
+                        
+                        // 4. Relay the stream to the caller
+                        for try await token in stream {
+                            continuation.yield(token)
+                        }
+                        continuation.finish()
+                        
+                    case .agent:
+                        throw NSError(domain: "StreamingError", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for the Agent backend."])
                         
                     case .none:
                         throw NSError(domain: "BackendError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No backend has been selected."])

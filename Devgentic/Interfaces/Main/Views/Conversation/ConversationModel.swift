@@ -8,18 +8,66 @@
 import Foundation
 import SwiftUI
 
+// MARK: - String Extension for Markdown Stripping
+extension String {
+    /// Removes common markdown formatting from a string to create a clean preview.
+    func strippingMarkdownFormatting() -> String {
+        var result = self
+
+        // Remove headers (e.g., #, ##) from the start of the string
+        result = result.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+
+        // Remove bold/italic markers like **word**, *word*, _word_
+        // This regex finds text between pairs of *, **, or _ and replaces it with just the text.
+        result = result.replacingOccurrences(of: "(\\*\\*|\\*|_)(.+?)\\1", with: "$2", options: .regularExpression)
+
+        // Remove inline code backticks (`code`)
+        result = result.replacingOccurrences(of: "`(.+?)`", with: "$1", options: .regularExpression)
+        
+        // Remove strikethrough (~~text~~)
+        result = result.replacingOccurrences(of: "~~(.+?)~~", with: "$1", options: .regularExpression)
+
+        // Remove images and links, keeping only the descriptive text: ![alt](url) or [text](url) -> alt/text
+        result = result.replacingOccurrences(of: "!?\\[(.*?)\\]\\(.*?\\)", with: "$1", options: .regularExpression)
+
+        // Clean up extra whitespace that might result from removals and trim the result
+        result = result.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        return result
+    }
+}
+
+
 extension Date {
+    /// Generates a compact, shorthand string representing the time elapsed since the date.
+    /// e.g., "1y", "2mo", "3w", "4d", "5h", "6m", "7s"
     func timeAgoDisplay() -> String {
-        // RelativeDateTimeFormatter is a powerful, locale-aware formatter
-        // provided by Apple to handle exactly this kind of task.
-        let formatter = RelativeDateTimeFormatter()
-        
-        // .full style results in strings like "1 day ago" instead of "1d ago".
-        formatter.unitsStyle = .full
-        
-        // This calculates the difference between the date instance and the
-        // current time, and returns the appropriate localized string.
-        return formatter.localizedString(for: self, relativeTo: Date())
+        let calendar = Calendar.current
+        let now = Date()
+        let components = calendar.dateComponents([.year, .month, .weekOfYear, .day, .hour, .minute, .second], from: self, to: now)
+
+        if let year = components.year, year > 0 {
+            return "\(year)y"
+        }
+        if let month = components.month, month > 0 {
+            return "\(month)mo"
+        }
+        if let week = components.weekOfYear, week > 0 {
+            return "\(week)w"
+        }
+        if let day = components.day, day > 0 {
+            return "\(day)d"
+        }
+        if let hour = components.hour, hour > 0 {
+            return "\(hour)h"
+        }
+        if let minute = components.minute, minute > 0 {
+            return "\(minute)m"
+        }
+        if let second = components.second, second > 0 {
+            return "\(second)s"
+        }
+        return "now"
     }
 }
     
@@ -60,7 +108,8 @@ struct Conversation: Identifiable, Codable, Equatable {
             return "New Chat"
         }
         let previewLength = 30
-        let trimmedText = titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Use the cleaned-up text for the title as well
+        let trimmedText = titleText.strippingMarkdownFormatting()
         let prefix = String(trimmedText.prefix(previewLength))
         return trimmedText.count > previewLength ? prefix + "..." : prefix
     }
@@ -71,7 +120,8 @@ struct Conversation: Identifiable, Codable, Equatable {
         guard let lastMessage = messages.last else { return "No messages yet" }
         switch lastMessage.content {
         case .plainText(let text), .markdownText(let text):
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Apply the new markdown stripping method here
+            return text.strippingMarkdownFormatting()
         case .codeBlock:
             return "Code block"
         case .image:

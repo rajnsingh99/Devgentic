@@ -7,16 +7,17 @@
 
 import SwiftUI
 import os
-import Down
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatBubbleView")
 
 private let CODE_BLOCK_LINE_LIMIT = 50
 
 struct ChatBubbleView: View {
     let message: ChatMessage
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel // Observe ChatHistoryViewModel
+    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
 
     var body: some View {
-        HStack(alignment: .top, spacing: UITheme.Spacing.medium) {
+        HStack(alignment: .bottom, spacing: UITheme.Spacing.medium) {
             if message.sender == .agent {
                 VStack(alignment: .leading, spacing: UITheme.Spacing.medium) {
                     switch message.content {
@@ -28,15 +29,30 @@ struct ChatBubbleView: View {
 
                     case .markdownText(let text):
                         if message.isStreaming && text.isEmpty {
-                            ThinkingIndicatorView()
+                            AgentThinkingView()
                         } else if !text.isEmpty {
-                            ForEach(parseMarkdown(text)) { block in
-                                renderContentBlock(block)
+                            if message.isStreaming {
+                                FadeInTypewriterView(markdown: text, message: message)
+                            } else {
+                                // MARK: - FIX: Use the array index as a stable ID since ContentBlock is no longer Identifiable.
+                                let blocks = parseMarkdown(text)
+                                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                                    ContentBlockView(block: block, message: message)
+                                }
                             }
                         }
 
                     case .codeBlock(let language, let code):
-                        renderCodeBlock(language: language, code: code)
+                        if code.components(separatedBy: .newlines).count > CODE_BLOCK_LINE_LIMIT {
+                            CodeBlockCardView(language: language ?? "code", lineCount: code.components(separatedBy: .newlines).count, fileName: nil) {
+                                let snippet = CodeSnippet(language: language, code: code)
+                                chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
+                            }
+                        } else {
+                            CodeBlockView(language: language ?? "code", content: code)
+                                .padding(.bottom, UITheme.Spacing.medium)
+                                .frame(maxWidth: 700, alignment: .leading)
+                        }
 
                     case .error(let title, let details):
                         ErrorMessageView(title: title, details: details)
@@ -47,40 +63,39 @@ struct ChatBubbleView: View {
                             .cardStyle()
                     }
                     
-                    // Action buttons for completed agent messages
                     if !message.isStreaming && message.content.textContent != nil {
                         AgentMessageActionsView(message: message)
                             .environmentObject(chatHistoryViewModel)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: message.isStreaming ? 500 : nil, alignment: .topLeading)
                 .padding(.horizontal, 50)
                 Spacer()
             } else { // message.sender == .user
                 Spacer()
                 VStack(alignment: .trailing, spacing: UITheme.Spacing.small) {
-                    
                     if let attachedTextFiles = message.attachedTextFiles, !attachedTextFiles.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(spacing: UITheme.Spacing.small) {
+                            HStack(spacing: UITheme.Spacing.small) {
                                 ForEach(attachedTextFiles) { file in
-                                    Text(file.name)
-                                        .font(UITheme.Fonts.footnote)
-                                        .foregroundColor(.white.opacity(0.8))
-                                        .padding(.horizontal, UITheme.Spacing.medium)
-                                        .padding(.vertical, UITheme.Spacing.xsmall)
-                                        .background(Color.black.opacity(0.2))
-                                        .cornerRadius(UITheme.CornerRadius.medium)
+                                    FileAttachmentCardView(
+                                        fileName: file.name,
+                                        action: {
+                                            let fileExtension = (file.name as NSString).pathExtension
+                                            chatHistoryViewModel.showCodeInViewer(language: fileExtension, code: file.content)
+                                        }
+                                    )
                                 }
                             }
+                            .padding(.vertical, UITheme.Spacing.xsmall)
+                            .padding(.horizontal, UITheme.Spacing.xsmall)
                         }
-                        .frame(height: 30)
                     }
 
                     if let textContent = message.content.textContent, !textContent.isEmpty {
-                        Text(textContent)
-                            .font(UITheme.Fonts.body)
-                            .chatBubbleStyle(isCurrentUser: true)
+                        UserMessageContentView(text: textContent)
+                            .userBubbleStyle()
                             .textSelection(.enabled)
                     }
                 }
@@ -91,84 +106,72 @@ struct ChatBubbleView: View {
         .padding(.vertical, 30)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
     }
-    
-    @ViewBuilder
-    private func renderContentBlock(_ block: ContentBlock) -> some View {
-        switch block {
-        case .paragraph(let paragraphText):
-            Text(try! AttributedString(markdown: paragraphText))
+}
+
+// MARK: - User Message Content View with Expand/Collapse
+fileprivate struct UserMessageContentView: View {
+    let text: String
+    private let lineLimitCollapsed = 10
+    @State private var isExpanded = false
+    @State private var isTruncatable = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isTruncatable {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            isExpanded.toggle()
+                        }
+                    }) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white.opacity(0.7))
+                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                            .padding(6)
+                            .background(Color.black.opacity(0.25))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isExpanded ? "Collapse" : "Expand")
+                }
+            }
+
+            Text(text)
                 .font(UITheme.Fonts.body)
-                .lineSpacing(UITheme.Spacing.xsmall)
-                .foregroundColor(UITheme.Colors.primaryText)
-                .padding(.bottom, UITheme.Spacing.small)
-                .textSelection(.enabled)
+                .lineLimit(isExpanded ? nil : lineLimitCollapsed)
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear.onAppear {
+                            determineTruncation(availableWidth: geometry.size.width)
+                        }
+                    }
+                )
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .clipped()
+    }
+    
+    private func determineTruncation(availableWidth: CGFloat) {
+        let fullTextView = Text(text)
+            .font(UITheme.Fonts.body)
+            .frame(width: availableWidth, alignment: .leading)
         
-        case .code(let lang, let codeContent):
-            renderCodeBlock(language: lang, code: codeContent)
-
-        case .heading(let level, let headingText):
-            Text(headingText)
-                .font(fontForHeading(level: level))
-                .fontWeight(fontWeightForHeading(level: level))
-                .padding(.top, UITheme.Spacing.medium)
-                .padding(.bottom, UITheme.Spacing.xsmall)
-                .textSelection(.enabled)
-
-        case .listItem(let prefix, let itemText, let indentation):
-            HStack(alignment: .top, spacing: UITheme.Spacing.small) {
-                Text(prefix)
-                    .font(UITheme.Fonts.body)
-                    .foregroundColor(UITheme.Colors.secondaryText)
-                    .frame(minWidth: 20, alignment: .leading)
-                
-                Text(try! AttributedString(markdown: itemText))
-                    .font(UITheme.Fonts.body)
-                    .foregroundColor(UITheme.Colors.primaryText)
-                    .textSelection(.enabled)
-            }
-            .padding(.leading, CGFloat(indentation * 20)) // 20pt per indent level
-            .padding(.bottom, UITheme.Spacing.xxsmall)
-
-        case .horizontalRule:
-            Divider()
-                .padding(.vertical, UITheme.Spacing.medium)
-        }
-    }
-    
-    @ViewBuilder
-    private func renderCodeBlock(language: String?, code: String) -> some View {
-        if code.components(separatedBy: .newlines).count > CODE_BLOCK_LINE_LIMIT {
-            CodeBlockCardView(language: language ?? "code", lineCount: code.components(separatedBy: .newlines).count) {
-                // --- FIX ---
-                // The card was calling the wrong view model function.
-                // It now calls `openMessageInCodeViewer`, which contains the logic
-                // to scan the message for all large code blocks and enable navigation.
-                let snippet = CodeSnippet(language: language, code: code)
-                chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
-            }
-        } else {
-            CodeBlockView(language: language ?? "code", content: code)
-                .padding(.bottom, UITheme.Spacing.medium)
-                .frame(maxWidth: 700, alignment: .leading)
-        }
-    }
-    
-    private func fontForHeading(level: Int) -> Font {
-        switch level {
-        case 1: return UITheme.Fonts.title1
-        case 2: return UITheme.Fonts.title2
-        default: return UITheme.Fonts.title3
-        }
-    }
-    
-    private func fontWeightForHeading(level: Int) -> Font.Weight {
-        switch level {
-        case 1: return .bold
-        case 2: return .semibold
-        default: return .semibold
+        let truncatedTextView = Text(text)
+            .font(UITheme.Fonts.body)
+            .lineLimit(lineLimitCollapsed)
+            .frame(width: availableWidth, alignment: .leading)
+            
+        let fullSize = NSHostingView(rootView: fullTextView).fittingSize
+        let truncatedSize = NSHostingView(rootView: truncatedTextView).fittingSize
+        
+        if fullSize.height > truncatedSize.height + 2 {
+            self.isTruncatable = true
         }
     }
 }
+
 
 // MARK: - Reusable Action Button View
 fileprivate struct ActionButton<LabelContent: View>: View {
@@ -258,8 +261,8 @@ fileprivate struct AgentMessageActionsView: View {
 }
 
 
-// MARK: - Thinking Indicator View
-fileprivate struct ThinkingIndicatorView: View {
+// MARK: - Agent Thinking Placeholder View
+fileprivate struct AgentThinkingView: View {
     @State private var isAnimating = false
 
     var body: some View {
@@ -278,5 +281,30 @@ fileprivate struct ThinkingIndicatorView: View {
             self.isAnimating = true
         }
         .frame(height: 22)
+    }
+}
+
+
+// MARK: - Streaming FadeInTypewriter Animation View
+struct FadeInTypewriterView: View {
+    let markdown: String
+    let message: ChatMessage
+    
+    var body: some View {
+        VStack(alignment: .leading) {
+            // MARK: - FIX: Use the array index as a stable ID since ContentBlock is no longer Identifiable.
+            let blocks = parseMarkdown(markdown)
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                ContentBlockView(block: block, message: message)
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: markdown)
+        .onAppear {
+            logger.info("SequentialTypewriterView appeared with initial markdown.")
+        }
+        .onChange(of: markdown) { oldValue, newValue in
+            let newChars = newValue.count - oldValue.count
+            logger.debug("STREAM_TRACE: FadeInTypewriterView markdown content updated. Added \(newChars) characters.")
+        }
     }
 }

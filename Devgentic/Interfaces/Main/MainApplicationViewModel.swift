@@ -18,44 +18,35 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Dependencies
-    private let persistenceService: CoreDataServiceProtocol
-    private let fileProcessorService: FileProcessorService
-    private let backendOrchestrationService: BackendOrchestrationService
-    private let chatHistoryViewModel: ChatHistoryViewModel
-
-    // MARK: - Service & Store Observables
-    @ObservedObject var ollamaService = OllamaService.shared
-    @ObservedObject var llmIntegrationStore: LLMIntegrationStore
-    @ObservedObject var agentStore: AgentStore
     
     let backendConfiguration = BackendConfiguration()
     let explorerViewModel = ExplorerViewModel()
     let insertPromptText = PassthroughSubject<String, Never>()
     
     private var cancellables = Set<AnyCancellable>()
+    private var conversationLoader: AnyCancellable?
+    private var conversationLoadTask: Task<Void, Never>?
+    
+    private let persistenceService: CoreDataServiceProtocol
+    private let fileProcessorService: FileProcessorService
+    private let backendOrchestrationService: BackendOrchestrationService
+    private let chatHistoryViewModel: ChatHistoryViewModel
+    private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
+
+    // MARK: - Service & Store Observables
+    @ObservedObject var ollamaService = OllamaService.shared
+    @ObservedObject var llmIntegrationStore: LLMIntegrationStore
+    @ObservedObject var agentStore: AgentStore
     
     // MARK: - Published State Properties
     @Published var conversations: [Conversation] = []
-    
     @Published var selectedConversationID: UUID?
-    private var conversationLoader: AnyCancellable?
-    private var conversationLoadTask: Task<Void, Never>?
-
     @Published var isSidebarCollapsed: Bool = true
     @Published var showSettings: Bool = false
-    // @Published var showPromptLibrary: Bool = false // REMOVED
     @Published var showContextArea: Bool = false
     @Published var activeContextFilePath: String? = nil
     @Published var attachedFiles: [FileSystemItem] = []
-    
-    @Published var useStreamingResponse: Bool = false {
-        didSet {
-            logger.info("useStreamingResponse toggled to: \(self.useStreamingResponse)")
-        }
-    }
-
-    private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
-
+    @Published var useStreamingResponse: Bool = true
     @Published var isWebSearchEnabled: Bool = false
     @Published var webSearchAPIKey: String?
     @Published var isWebSearchActive: Bool = false
@@ -96,6 +87,9 @@ class MainApplicationViewModel: ObservableObject {
 
         logger.info("MainApplicationViewModel initialized.")
         
+        // Load settings from UserDefaults
+        loadSettings()
+        
         setupBindings()
         setupConversationLoader()
         
@@ -131,10 +125,29 @@ class MainApplicationViewModel: ObservableObject {
         conversationLoadTask?.cancel()
     }
 
+    // MARK: - Settings Management
+    private func loadSettings() {
+        // Check if the key exists. If not, set the default value to true.
+        if UserDefaults.standard.object(forKey: AppSettings.useStreamingResponseKey) == nil {
+            UserDefaults.standard.set(true, forKey: AppSettings.useStreamingResponseKey)
+        }
+        // Read the value from UserDefaults.
+        self.useStreamingResponse = UserDefaults.standard.bool(forKey: AppSettings.useStreamingResponseKey)
+        logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(self.useStreamingResponse)")
+    }
+
     // MARK: - Bindings Setup
     private func setupBindings() {
-        // This publisher updates the backend settings for the *currently active conversation*
-        // whenever the user makes a change in the UI (e.g., via the ChatInputAreaView popup).
+        
+        $useStreamingResponse
+            .dropFirst() // Don't save the initial value loaded from UserDefaults
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main) // Wait for changes to settle
+            .sink { newValue in
+                UserDefaults.standard.set(newValue, forKey: AppSettings.useStreamingResponseKey)
+                logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(newValue)")
+            }
+            .store(in: &cancellables)
+            
         backendConfiguration.$selectedBackend
             .combineLatest(backendConfiguration.$selectedAgentID, backendConfiguration.$selectedIntegrationID)
             .dropFirst()
@@ -152,10 +165,6 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // --- FIX: TWO-WAY SYNC FOR INTEGRATION SELECTION ---
-
-        // 1. When the UI's backend configuration changes, update the global default in the store.
-        //    This ensures that selecting a model in the chat input updates the "active" checkmark in the sidebar.
         backendConfiguration.$selectedIntegrationID
             .removeDuplicates()
             .sink { [weak self] newIntegrationID in
@@ -166,8 +175,6 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
             
-        // 2. When the global default in the store changes (e.g., from the main Settings screen), update the UI's backend configuration.
-        //    This ensures that changing the selection in the settings is reflected in the chat input area.
         llmIntegrationStore.$selectedIntegrationID
             .removeDuplicates()
             .sink { [weak self] newIntegrationID in
@@ -176,9 +183,6 @@ class MainApplicationViewModel: ObservableObject {
                     logger.debug("Syncing LLMStore -> BackendConfig. New Integration ID: \(newIntegrationID?.uuidString ?? "nil")")
                     self.backendConfiguration.selectedIntegrationID = newIntegrationID
                     
-                    // If an integration is selected, we must also update the backend *type* to match it.
-                    // This ensures the correct UI (e.g., Ollama vs. Remote) is shown.
-                    // If an agent was active, this will correctly switch the backend type away from .agent.
                     if let newId = newIntegrationID, let integration = self.llmIntegrationStore.integrations.first(where: { $0.id == newId }) {
                         let newBackendType: BackendType = integration.providerType == .ollama ? .ollama : .remote
                         if self.backendConfiguration.selectedBackend != newBackendType {
@@ -215,7 +219,6 @@ class MainApplicationViewModel: ObservableObject {
     
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
         if showSettings { showSettings = false }
-        // if showPromptLibrary { showPromptLibrary = false } // REMOVED
         
         let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -238,58 +241,52 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
-        // --- UPDATED: Create a local copy of files to send to the backend ---
-        // This prevents a race condition where the UI is cleared before the backend task runs.
         let filesForBackend = self.attachedFiles
         
         let userMessage = createUserMessage(
             conversationID: conversationIDToUse,
             query: plainUserQueryFromEditor,
-            files: filesForBackend // Use the local copy to create the message object
+            files: filesForBackend
         )
         
+        // --- START OF CHANGES ---
+
+        // 1. Create the agent's placeholder message immediately
+        let agentMessagePlaceholder = ChatMessage(
+            conversationId: conversationIDToUse,
+            sender: .agent,
+            content: .markdownText(""), // Start with empty content
+            isStreaming: true
+        )
+        logger.info("Created agent placeholder message with ID \(agentMessagePlaceholder.id.uuidString) to begin streaming.")
+        
+        // 2. Update UI at once with both user message and agent placeholder
+        chatHistoryViewModel.currentChatMessages.insert(contentsOf: [agentMessagePlaceholder, userMessage], at: 0)
+        logger.debug("Inserted user message and agent placeholder into UI.")
+        
+        // 3. Persist the user message
         Task {
             await persistenceService.addMessage(userMessage, to: targetConversationEntity)
             logger.debug("User message persisted successfully.")
         }
-        chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
-        logger.debug("User message inserted into UI.")
-        
-        // --- UPDATED: Clear the UI attachments immediately after making the local copy ---
+
+        // 4. Clear the input area
         self.clearAttachedFiles()
         logger.debug("Cleared user input and attachments from UI.")
 
         if useStreamingResponse {
-            let agentMessage = ChatMessage(
-                conversationId: conversationIDToUse,
-                sender: .agent,
-                content: .markdownText(""),
-                isStreaming: true
-            )
-            logger.info("Created initial empty agent message with ID \(agentMessage.id.uuidString) to begin streaming.")
-
-            chatHistoryViewModel.streamingMessage = agentMessage
-            logger.debug("Set active streaming message.")
-
-            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-            logger.debug("Inserted streaming agent message into UI.")
-
-            chatHistoryViewModel.streamingTriggerID = agentMessage.id
-            logger.info("Set streaming trigger ID to placeholder message ID \(agentMessage.id.uuidString).")
-
             let streamingTask = Task {
                 do {
-                    let historyForBackend = chatHistoryViewModel.currentChatMessages.filter { message in
-                        if case .error = message.content { return false }
-                        return true
-                    }.reversed().map { $0 }
+                    // History now includes the user message but not the placeholder
+                    let historyForBackend = chatHistoryViewModel.currentChatMessages
+                        .filter { $0.id != agentMessagePlaceholder.id }
+                        .reversed()
 
-                    // --- UPDATED: Pass the local copy of files to the backend ---
                     let stream = streamResponse(
                         withConfig: config,
                         conversationID: conversationIDToUse,
                         userQuery: plainUserQueryFromEditor,
-                        history: historyForBackend,
+                        history: Array(historyForBackend),
                         files: filesForBackend
                     )
                     for try await token in stream {
@@ -302,25 +299,14 @@ class MainApplicationViewModel: ObservableObject {
                 }
             }
             chatHistoryViewModel.setStreamingTask(streamingTask)
-        } else {
+        } else { // Non-streaming "one-shot" logic
             Task {
-                let thinkingAgentMessage = ChatMessage(
-                    conversationId: conversationIDToUse,
-                    sender: .agent,
-                    content: .markdownText(""),
-                    isStreaming: true
-                )
-                chatHistoryViewModel.oneShotThinkingMessage = thinkingAgentMessage
-                chatHistoryViewModel.currentChatMessages.insert(thinkingAgentMessage, at: 0)
-                logger.debug("Inserted one-shot thinking placeholder message into UI.")
-
                 do {
-                    let historyForBackend = chatHistoryViewModel.currentChatMessages.filter { message in
-                        if case .error = message.content { return false }
-                        return true
-                    }.reversed().map { $0 }
-
-                    // --- UPDATED: Pass the local copy of files to the backend ---
+                    // History now includes the user message but not the placeholder
+                    let historyForBackend = chatHistoryViewModel.currentChatMessages
+                        .filter { $0.id != agentMessagePlaceholder.id }
+                        .reversed()
+                    
                     let (messages, errorMessage) = await backendOrchestrationService.sendMessage(
                         withConfig: config,
                         conversationID: conversationIDToUse,
@@ -328,47 +314,41 @@ class MainApplicationViewModel: ObservableObject {
                         files: filesForBackend
                     )
 
-                    if var placeholder = chatHistoryViewModel.oneShotThinkingMessage,
-                       let index = chatHistoryViewModel.currentChatMessages.firstIndex(where: { $0.id == placeholder.id }) {
+                    // Find our placeholder message in the UI
+                    if let placeholderIndex = chatHistoryViewModel.currentChatMessages.firstIndex(where: { $0.id == agentMessagePlaceholder.id }) {
+                        var finalMessage = chatHistoryViewModel.currentChatMessages[placeholderIndex]
+                        finalMessage.isStreaming = false
                         
                         if let errorMessage = errorMessage {
-                            placeholder.content = .error(title: "Request Error", details: errorMessage)
-                        } else if let agentMessage = messages.first {
-                            placeholder.content = agentMessage.content
+                            finalMessage.content = .error(title: "Request Error", details: errorMessage)
+                        } else if let agentResponse = messages.first {
+                            finalMessage.content = agentResponse.content
                         }
-                        placeholder.isStreaming = false
-                        chatHistoryViewModel.currentChatMessages[index] = placeholder
-                        await persistenceService.addMessage(placeholder, to: targetConversationEntity)
-                    } else {
-                        if let errorMessage = errorMessage {
-                            let errorContent = MessageContent.error(title: "Request Error", details: errorMessage)
-                            let agentMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorContent)
-                            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-                            await persistenceService.addMessage(agentMessage, to: targetConversationEntity)
-                        } else if let agentMessage = messages.first {
-                            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-                            await persistenceService.addMessage(agentMessage, to: targetConversationEntity)
-                        }
+                        
+                        // Update the UI and persist the final message
+                        chatHistoryViewModel.currentChatMessages[placeholderIndex] = finalMessage
+                        await persistenceService.addMessage(finalMessage, to: targetConversationEntity)
                     }
+                    
                     await chatHistoryViewModel.resetSendingState()
+
                 } catch {
                     logger.error("One-shot request failed: \(error.localizedDescription)")
-                    if var placeholder = chatHistoryViewModel.oneShotThinkingMessage,
-                       let index = chatHistoryViewModel.currentChatMessages.firstIndex(where: { $0.id == placeholder.id }) {
-                        placeholder.content = .error(title: "Request Error", details: error.localizedDescription)
-                        placeholder.isStreaming = false
-                        chatHistoryViewModel.currentChatMessages[index] = placeholder
-                        await persistenceService.addMessage(placeholder, to: targetConversationEntity)
-                    } else {
-                        let errorContent = MessageContent.error(title: "Request Error", details: error.localizedDescription)
-                        let agentMessage = ChatMessage(conversationId: conversationIDToUse, sender: .agent, content: errorContent)
-                        chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-                        await persistenceService.addMessage(agentMessage, to: targetConversationEntity)
+                    // Find our placeholder message to update it with the error
+                    if let placeholderIndex = chatHistoryViewModel.currentChatMessages.firstIndex(where: { $0.id == agentMessagePlaceholder.id }) {
+                        var finalMessage = chatHistoryViewModel.currentChatMessages[placeholderIndex]
+                        finalMessage.isStreaming = false
+                        finalMessage.content = .error(title: "Request Error", details: error.localizedDescription)
+                        
+                        // Update the UI and persist the final message
+                        chatHistoryViewModel.currentChatMessages[placeholderIndex] = finalMessage
+                        await persistenceService.addMessage(finalMessage, to: targetConversationEntity)
                     }
                     await chatHistoryViewModel.resetSendingState()
                 }
             }
         }
+        // --- END OF CHANGES ---
     }
     
     func streamResponse(withConfig config: BackendRequestConfig, conversationID: UUID, userQuery: String, history: [ChatMessage], files: [FileSystemItem]) -> AsyncThrowingStream<String, Error> {
@@ -429,7 +409,6 @@ class MainApplicationViewModel: ObservableObject {
     
     func startNewConversation() {
         if showSettings { showSettings = false }
-        // if showPromptLibrary { showPromptLibrary = false } // REMOVED
         clearAttachedFiles()
         let newConversationID = createAndSelectNewConversation()
         let config = backendConfiguration.getRequestConfig()
@@ -440,7 +419,6 @@ class MainApplicationViewModel: ObservableObject {
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
         if showSettings { showSettings = false }
-        // if showPromptLibrary { showPromptLibrary = false } // REMOVED
         
         let config = backendConfiguration.getRequestConfig()
         var entityId: UUID?
@@ -461,6 +439,7 @@ class MainApplicationViewModel: ObservableObject {
             backendEntityId: entityId
         )
         persistenceService.addConversation(from: newConversation)
+        chatHistoryViewModel.currentChatMessages = []
         selectedConversationID = newConversation.id
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         return newConversation.id
@@ -548,15 +527,7 @@ class MainApplicationViewModel: ObservableObject {
 
     func toggleSidebar() { withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() } }
     func toggleSettings() { withAnimation { showSettings.toggle() } }
-    // func togglePromptLibrary() { withAnimation { showPromptLibrary.toggle() } } // REMOVED
     func toggleContextArea() { withAnimation { showContextArea.toggle() } }
-
-    // func requestEditPrompt(_ prompt: Prompt) { // REMOVED
-    //     if !showPromptLibrary { togglePromptLibrary() }
-    //     DispatchQueue.main.async {
-    //         NotificationCenter.default.post(name: NSNotification.Name("editPromptRequestedFromBriefView"), object: prompt)
-    //     }
-    // }
     
     func groupKey(for date: Date) -> String {
         if Calendar.current.isDateInToday(date) { return "Today" }
@@ -599,15 +570,12 @@ class MainApplicationViewModel: ObservableObject {
     
     // MARK: - Web Search Configuration (Using UserDefaults)
     
-    /// Toggles the active state of web search if an API key is enabled.
     func toggleWebSearch() {
         guard isWebSearchEnabled else { return }
         isWebSearchActive.toggle()
         logger.info("Web search active state toggled to: \(self.isWebSearchActive)")
     }
     
-    /// Saves the provided API key to UserDefaults and updates the application state.
-    /// - Parameter apiKey: The Google Search API key to save.
     func saveAndEnableWebSearch(apiKey: String) {
         UserDefaults.standard.set(apiKey, forKey: webSearchAPIKeyDefaultsKey)
         self.webSearchAPIKey = apiKey
@@ -616,7 +584,6 @@ class MainApplicationViewModel: ObservableObject {
         logger.info("Successfully saved web search API key to UserDefaults and enabled search.")
     }
 
-    /// Removes the web search API key from UserDefaults and disables the feature.
     func disableAndRemoveWebSearch() {
         UserDefaults.standard.removeObject(forKey: webSearchAPIKeyDefaultsKey)
         self.webSearchAPIKey = nil
