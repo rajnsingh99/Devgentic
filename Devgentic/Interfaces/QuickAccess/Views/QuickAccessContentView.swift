@@ -279,7 +279,7 @@ extension QuickAccessContentView {
         case .plainText(let text), .markdownText(let text): textToCopy = text
         case .codeBlock(_, let code): textToCopy = code
         case .error(_, let details): textToCopy = details
-        case .image(let url, let alt): textToCopy = url?.absoluteString ?? alt ?? "Image"
+        case .image(let url, let alt, _): textToCopy = url?.absoluteString ?? alt ?? "Image"
         }
         if !textToCopy.isEmpty {
             #if os(macOS)

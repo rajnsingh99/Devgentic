@@ -39,7 +39,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             GeneralSettingsView()
         case .ollama:
             // Use the new dedicated view for Ollama settings
-            OllamaSettingsView()
+            OllamaSettingsView_old()
         case .theme:
             Text("Theme Settings")
                 .font(.title2)
@@ -56,9 +56,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @State private var selectedCategory: SettingsCategory? = .general
     
-    // Fetch the MainApplicationViewModel from the environment.
-    // This view now requires it to be in its environment, which is appropriate
-    // since its child views (like GeneralSettingsView) depend on it.
     @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
 
     var body: some View {
@@ -71,10 +68,7 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
         } detail: {
-            // Display the destination view for the selected category
             if let category = selectedCategory {
-                // Explicitly pass the environment object to the destination view.
-                // This ensures that any view created by `destination` has access to it.
                 category.destination
                     .environmentObject(mainApplicationViewModel)
             } else {
@@ -87,11 +81,3 @@ struct SettingsView: View {
     }
 }
 
-struct SettingsView_Previews: PreviewProvider {
-    static var previews: some View {
-        // The preview provider already provides the necessary environment object.
-        // Now that SettingsView explicitly uses it, this setup is correct and complete.
-        SettingsView()
-            .environmentObject(MainApplicationViewModel())
-    }
-}

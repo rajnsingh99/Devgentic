@@ -9,6 +9,7 @@ import SwiftUI
 import os
 import Combine
 import AppKit
+import UniformTypeIdentifiers
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatInputAreaUI_V2")
 
@@ -51,7 +52,6 @@ struct ChatInputAreaView: View {
 
     // MARK: - Hover States for Buttons
     @State private var isPlusButtonHovering: Bool = false
-    @State private var isGlobeButtonHovering: Bool = false
     @State private var isBackendPickerHovering: Bool = false
     @State private var isDynamicButtonHovering: Bool = false
 
@@ -59,14 +59,18 @@ struct ChatInputAreaView: View {
     private let promptStore = PromptStore.shared
 
     // MARK: - Layout Constants
-    private let iconSize: CGFloat = 20
+    private let iconSize: CGFloat = 18
     private let dynamicButtonSize: CGFloat = 28
     private let cornerRadiusValue: CGFloat = 20
     private let textEditorMinHeight: CGFloat = 30
     private let textEditorMaxHeight: CGFloat = 200
 
     private var isInputEnabled: Bool {
-        !isSending && !showSettings
+        // The stop button should be enabled even when isSending is true.
+        if mainViewModel.streamingMessageID != nil {
+            return true
+        }
+        return !isSending && !showSettings
     }
 
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
@@ -115,17 +119,12 @@ struct ChatInputAreaView: View {
 
     private var profileButtonText: String {
         switch backendConfiguration.selectedBackend {
-        case .agent:
-            if let agentID = backendConfiguration.selectedAgentID,
-               let agent = mainViewModel.agentStore.agents.first(where: { $0.id == agentID }) {
-                return agent.name
-            }
         case .ollama, .remote:
             if let integrationID = backendConfiguration.selectedIntegrationID,
                let integration = mainViewModel.llmIntegrationStore.integrations.first(where: { $0.id == integrationID }) {
                 return integration.displayName
             }
-        case .none:
+        case .none, .agent:
             break
         }
         return "Select Backend"
@@ -136,20 +135,28 @@ struct ChatInputAreaView: View {
     }
 
     enum DynamicButtonMode: CustomStringConvertible {
-        case mic, stop, send
+        case mic, stopVoice, send, stopStreaming
 
         var description: String {
             switch self {
             case .mic: return "Mic"
-            case .stop: return "Stop"
+            case .stopVoice: return "Stop Voice"
             case .send: return "Send"
+            case .stopStreaming: return "Stop Streaming"
             }
         }
     }
 
     private var currentDynamicButtonMode: DynamicButtonMode {
-        if isSending { return .stop }
-        if hasInputText { return .send }
+        if mainViewModel.streamingMessageID != nil {
+            return .stopStreaming
+        }
+        if inputViewModel.voiceInputState == .recording {
+            return .stopVoice
+        }
+        if hasInputText {
+            return .send
+        }
         return .mic
     }
 
@@ -171,7 +178,7 @@ struct ChatInputAreaView: View {
                     files: filteredFiles,
                     suggestionQuery: fileSuggestionQuery,
                     selectedItemID: $selectedFileSuggestionID,
-                    multiSelectedFileIDs: $fileSuggestion_multiSelectedIDs // Pass binding for multi-select
+                    multiSelectedFileIDs: $fileSuggestion_multiSelectedIDs
                 )
                 .padding(.horizontal, 15)
                 .padding(.bottom, 4)
@@ -231,7 +238,6 @@ struct ChatInputAreaView: View {
             if isShowing {
                 updateFilteredFiles(query: self.fileSuggestionQuery)
             } else {
-                // Clear all file suggestion state when the view is hidden
                 self.selectedFileSuggestionID = nil
                 self.fileSuggestion_multiSelectedIDs = []
             }
@@ -271,7 +277,7 @@ struct ChatInputAreaView: View {
             editorAndPlaceholderArea
             toolbarArea
         }
-        .background(VisualEffectBlur(material: .underWindowBackground, blendingMode: .withinWindow))
+        .background(ChatGPTBackgroundView())
         .cornerRadius(cornerRadiusValue)
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadiusValue)
@@ -320,7 +326,7 @@ struct ChatInputAreaView: View {
         }
         .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
         .focused(isInputFocused)
-        .disabled(!isInputEnabled)
+        .disabled(!isInputEnabled && mainViewModel.streamingMessageID == nil)
     }
 
     private var placeholderText: String {
@@ -342,7 +348,13 @@ struct ChatInputAreaView: View {
             Button(action: openFilePicker) {
                 Image(systemName: "plus")
                     .resizable().scaledToFit().frame(width: iconSize, height: iconSize)
-                    .foregroundColor(isPlusButtonHovering ? .accentColor : .secondary)
+                    .foregroundColor(.secondary)
+                    .padding(5)
+                    .background(
+                        Circle()
+                            .fill(isPlusButtonHovering ? Color.white.opacity(0.15) : Color.clear)
+                    )
+                    .clipShape(Circle())
                     .scaleEffect(isPlusButtonHovering ? 1.1 : 1.0)
                     .animation(.easeOut(duration: 0.1), value: isPlusButtonHovering)
             }
@@ -352,19 +364,6 @@ struct ChatInputAreaView: View {
             }
             .help("Attach files")
 
-            Button(action: handleGlobeButtonTap) {
-                Image(systemName: "globe")
-                    .resizable().scaledToFit().frame(width: iconSize, height: iconSize)
-                    .foregroundColor(globeButtonColor)
-                    .scaleEffect(isGlobeButtonHovering ? 1.1 : 1.0)
-                    .animation(.easeOut(duration: 0.1), value: isGlobeButtonHovering)
-            }
-            .buttonStyle(.plain)
-            .onHover { hover in
-                isGlobeButtonHovering = hover
-            }
-            .help(globeButtonHelpText)
-
             backendPickerButton()
 
             Spacer()
@@ -373,7 +372,7 @@ struct ChatInputAreaView: View {
         }
         .padding(.horizontal, 15)
         .padding(.bottom, 10)
-        .disabled(!isInputEnabled)
+        .disabled(!isInputEnabled && mainViewModel.streamingMessageID == nil)
     }
 
     @ViewBuilder
@@ -395,7 +394,7 @@ struct ChatInputAreaView: View {
             .cornerRadius(6)
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(profileButtonBorderColor.opacity(isBackendPickerHovering ? 1.0 : 0.7), lineWidth: 1)
+                    .stroke(profileButtonBorderColor.opacity(isBackendPickerHovering ? 1.0 : 0.7), lineWidth: 0.75)
             )
             .animation(.easeOut(duration: 0.1), value: isBackendPickerHovering)
         }
@@ -404,7 +403,6 @@ struct ChatInputAreaView: View {
             BackendSelectorPopup(
                 configuration: backendConfiguration,
                 isPresented: $showingBackendSelectorPopup,
-                agentStore: mainViewModel.agentStore,
                 llmIntegrationStore: mainViewModel.llmIntegrationStore
             )
         }
@@ -434,11 +432,13 @@ struct ChatInputAreaView: View {
                     let config = backendConfiguration.getRequestConfig()
                     onSendMessage(textToSend, config)
                 }
-            case .mic, .stop:
+            case .mic, .stopVoice:
                 inputViewModel.toggleVoiceInput()
+            case .stopStreaming:
+                mainViewModel.cancelStreamingResponse()
             }
         }) {
-            if isSending && mode == .send {
+            if isSending && mainViewModel.streamingMessageID == nil {
                 ProgressView().controlSize(.small)
                     .frame(width: dynamicButtonSize, height: dynamicButtonSize)
             } else {
@@ -447,19 +447,46 @@ struct ChatInputAreaView: View {
                     let isDisabledBySystem = showSettings || (mode == .send && (inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording))
 
                     Circle()
-                        .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem)
-                              .opacity(isDynamicButtonHovering ? 0.8 : 1.0))
-                        .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering)
+                        .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem))
+                        .animation(.easeOut(duration: 0.2), value: mode)
 
-                    Image(systemName: dynamicActionButtonIconName(for: mode))
-                        .resizable().scaledToFit()
-                        .fontWeight(buttonIconWeight(for: mode))
-                        .frame(width: dynamicButtonSize * buttonIconScale(for: mode), height: dynamicButtonSize * buttonIconScale(for: mode))
-                        .foregroundColor(buttonIconForegroundColor(for: mode))
-                        .scaleEffect(isDynamicButtonHovering ? 1.1 : 1.0)
-                        .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering)
+                    // NEW: Animated Icon ZStack
+                    ZStack {
+                        // Mic and Stop Voice Icons
+                        if mode == .mic || mode == .stopVoice {
+                            Image(systemName: dynamicActionButtonIconName(for: mode))
+                                .resizable().scaledToFit()
+                                .fontWeight(buttonIconWeight(for: mode))
+                                .frame(width: dynamicButtonSize * buttonIconScale(for: mode), height: dynamicButtonSize * buttonIconScale(for: mode))
+                                .foregroundColor(buttonIconForegroundColor(for: mode))
+                                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                        }
+
+                        // Send Arrow
+                        if mode == .send {
+                            Image(systemName: "arrow.up")
+                                .resizable().scaledToFit()
+                                .fontWeight(.semibold)
+                                .frame(width: dynamicButtonSize * 0.5, height: dynamicButtonSize * 0.5)
+                                .foregroundColor(.white)
+                                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                        }
+
+                        // Stop Streaming Icon
+                        if mode == .stopStreaming {
+                            Image(systemName: "square.fill") // Using a more modern, solid square
+                                .resizable().scaledToFit()
+                                .fontWeight(.regular)
+                                .frame(width: dynamicButtonSize * 0.45, height: dynamicButtonSize * 0.45)
+                                .foregroundColor(.white)
+                                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                        }
+                    }
+                    .animation(.interpolatingSpring(stiffness: 300, damping: 15), value: mode)
                 }
                 .frame(width: dynamicButtonSize, height: dynamicButtonSize)
+                .scaleEffect(isDynamicButtonHovering ? 1.1 : 1.0)
+                .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering)
             }
         }
         .buttonStyle(PlainButtonStyle())
@@ -473,8 +500,12 @@ struct ChatInputAreaView: View {
     // MARK: - Helper Methods for Dynamic Button
     private func dynamicActionButtonIconName(for mode: DynamicButtonMode) -> String {
         switch mode {
-        case .send: return "arrow.up"
-        case .stop: return "stop.circle.fill"
+        // These cases are now handled directly in the ViewBuilder's ZStack
+        case .send, .stopStreaming:
+            return "" // This won't be used, but a value is required.
+        
+        case .stopVoice:
+            return "stop.circle.fill"
         case .mic:
             switch inputViewModel.voiceInputState {
             case .processing: return "hourglass.circle"
@@ -486,23 +517,30 @@ struct ChatInputAreaView: View {
     }
 
     private func buttonIconScale(for mode: DynamicButtonMode) -> CGFloat {
+        // This method is now only for .mic and .stopVoice
         switch mode {
-        case .send: return 0.5
-        case .stop: return 0.65
+        case .stopVoice: return 0.65
         case .mic: return 0.6
+        default: return 0.5 // Default for send/stop handled inline
         }
     }
 
     private func buttonIconWeight(for mode: DynamicButtonMode) -> Font.Weight {
-        mode == .send ? .semibold : .regular
+        // This method is now only for .mic and .stopVoice
+        switch mode {
+        case .send, .stopStreaming: return .regular // Default
+        default: return .regular
+        }
     }
 
     private func buttonBackgroundColor(for mode: DynamicButtonMode, canSend: Bool, isDisabledBySystem: Bool) -> Color {
         switch mode {
         case .send:
             return (canSend && !isDisabledBySystem) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
-        case .stop:
+        case .stopVoice:
             return Color.red.opacity(0.8)
+        case .stopStreaming:
+            return Color.gray.opacity(0.4)
         case .mic:
             return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
         }
@@ -510,8 +548,8 @@ struct ChatInputAreaView: View {
 
     private func buttonIconForegroundColor(for mode: DynamicButtonMode) -> Color {
         switch mode {
-        case .send: return .white
-        case .stop: return .white
+        case .send, .stopVoice, .stopStreaming:
+            return .white
         case .mic:
             switch inputViewModel.voiceInputState {
             case .recording: return .white
@@ -530,8 +568,10 @@ struct ChatInputAreaView: View {
         case .send:
             let isEmptyText = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             return isEmptyText || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing
-        case .stop:
+        case .stopVoice:
             return isSending || showSettings
+        case .stopStreaming:
+            return false // The stop button should always be enabled when visible
         case .mic:
             return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording
         }
@@ -540,7 +580,8 @@ struct ChatInputAreaView: View {
     private func buttonHelpText(for mode: DynamicButtonMode) -> String {
         switch mode {
         case .send: return "Send message (Enter)"
-        case .stop: return "Stop Voice Input"
+        case .stopVoice: return "Stop Voice Input"
+        case .stopStreaming: return "Stop generating response"
         case .mic:
             switch inputViewModel.voiceInputState {
             case .idle, .available: return "Start Voice Input (Mic button)"
@@ -553,28 +594,6 @@ struct ChatInputAreaView: View {
         }
     }
     
-    private var globeButtonColor: Color {
-        if mainViewModel.isWebSearchActive {
-            return .accentColor
-        }
-        return isGlobeButtonHovering ? .accentColor : .secondary
-    }
-
-    private var globeButtonHelpText: String {
-        if mainViewModel.isWebSearchEnabled {
-            return mainViewModel.isWebSearchActive ? "Web Search is Active" : "Web Search is Inactive"
-        }
-        return "Enable Web Search"
-    }
-
-    private func handleGlobeButtonTap() {
-        if mainViewModel.isWebSearchEnabled {
-            mainViewModel.toggleWebSearch()
-        } else {
-            inputViewModel.showAPIKeyInputPopup = true
-        }
-    }
-
     // MARK: - File & Prompt Handling
 
     private func updateFilteredFiles(query: String) {
@@ -623,6 +642,13 @@ struct ChatInputAreaView: View {
                 var fileItems: [FileSystemItem] = []
 
                 for url in selectedURLs {
+                    // Check the content type of the selected URL.
+                    if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+                       type.conforms(to: .video) || type.conforms(to: .movie) {
+                        logger.log("Skipping video file as it's not supported: \(url.lastPathComponent)")
+                        continue // Skip this file if it's a video or movie.
+                    }
+
                     var isDirectory: ObjCBool = false
                     if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
                         let newItem = FileSystemItem(
@@ -693,7 +719,6 @@ struct ChatInputAreaView: View {
     private func confirmFileSuggestionSelection() {
         var filesWereAttached = false
 
-        // Prioritize attaching multiple selected files
         if !fileSuggestion_multiSelectedIDs.isEmpty {
             let filesToAttach = filteredFiles.filter { fileSuggestion_multiSelectedIDs.contains($0.id) }
             if !filesToAttach.isEmpty {
@@ -702,7 +727,6 @@ struct ChatInputAreaView: View {
                 filesWereAttached = true
             }
         }
-        // Fallback to the single focused item if no checkboxes are ticked
         else if let selectedID = selectedFileSuggestionID,
                 let selectedFile = filteredFiles.first(where: { $0.id == selectedID }) {
             logger.log("Attaching single focused file: \(selectedFile.name)")
@@ -710,13 +734,11 @@ struct ChatInputAreaView: View {
             filesWereAttached = true
         }
 
-        // If any file was attached, clear the @mention trigger text
         if filesWereAttached, let range = activeFileMentionTriggerRange {
             let insertionText = NSAttributedString(string: "", attributes: defaultTypingAttributes)
             self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
         }
         
-        // Hide and reset the suggestion UI
         self.showFileSuggestions = false
         self.fileSuggestionQuery = ""
         self.activeFileMentionTriggerRange = nil

@@ -12,9 +12,9 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct LLMConnectService {
 
+    
     // MARK: - Ollama Validation (Refactored)
 
-    // --- REFACTORED: Now accepts an OllamaConfigModel ---
     static func validateOllama(config: OllamaConfigModel) async throws -> [String] {
         logger.info("Validating Ollama server at \(config.baseURL)...")
         
@@ -22,13 +22,11 @@ struct LLMConnectService {
             throw URLError(.badURL, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL provided."])
         }
         
-        // Check server reachability
         let (_, response) = try await URLSession.shared.data(from: url)
         guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
             throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Ollama server is not responding at \(config.baseURL)."])
         }
         
-        // Fetch models
         logger.info("Ollama server is reachable. Fetching models...")
         let tagsURL = url.appendingPathComponent("/api/tags")
         let (tagsData, tagsResponse) = try await URLSession.shared.data(from: tagsURL)
@@ -44,9 +42,9 @@ struct LLMConnectService {
         return modelNames
     }
 
+    
     // MARK: - Remote API Validation (Refactored)
 
-    // --- REFACTORED: Now accepts a RemoteConfigModel ---
     static func validateRemoteAPI(config: RemoteConfigModel) async throws -> [String] {
         logger.info("Validating API key for provider: \(config.provider.rawValue)")
         
@@ -56,7 +54,9 @@ struct LLMConnectService {
         case .anthropic:
             return try await validateAnthropic(apiKey: config.apiKey)
         case .google:
-            return try await validateGoogle(apiKey: config.apiKey)
+            // For Google, we will just validate the API key and return a dummy array
+            try await validateGoogle(apiKey: config.apiKey)
+            return [] // The model list is now managed locally in AddLLMIntegrationView
         }
     }
     
@@ -105,7 +105,7 @@ struct LLMConnectService {
         return ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
     }
 
-    private static func validateGoogle(apiKey: String) async throws -> [String] {
+    private static func validateGoogle(apiKey: String) async throws {
         guard var components = URLComponents(string: "https://generativelanguage.googleapis.com/v1beta/models") else { throw URLError(.badURL) }
         components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
         guard let url = components.url else { throw URLError(.badURL) }
@@ -113,25 +113,19 @@ struct LLMConnectService {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else { throw URLError(.cannotParseResponse) }
         
         if httpResponse.statusCode == 400 { throw URLError(.userAuthenticationRequired, userInfo: [NSLocalizedDescriptionKey: "Invalid Google API Key."]) }
         guard (200..<300).contains(httpResponse.statusCode) else { throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Failed to connect to Google. Status: \(httpResponse.statusCode)"]) }
         
-        let modelsResponse = try JSONDecoder().decode(GoogleModelsResponse.self, from: data)
-        let modelNames = modelsResponse.models
-            .filter { $0.supportedGenerationMethods.contains("generateContent") }
-            .map { $0.name.replacingOccurrences(of: "models/", with: "") }
-            .sorted()
-            
-        logger.info("Successfully fetched \(modelNames.count) models from Google.")
-        return modelNames
+        logger.info("Successfully validated Google API Key.")
     }
 }
 
 
 // MARK: - Codable Helper Structs for Parsing
+
 private struct OllamaTagsResponse: Codable { struct Model: Codable { let name: String }; let models: [Model] }
 private struct OpenAIModelsResponse: Codable { struct Model: Codable { let id: String }; let data: [Model] }
 private struct GoogleModelsResponse: Codable { struct Model: Codable { let name: String; let supportedGenerationMethods: [String] }; let models: [Model] }

@@ -92,7 +92,7 @@ struct Conversation: Identifiable, Codable, Equatable {
             switch $0.content {
             case .plainText(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .markdownText(let text): return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            case .image(_, let alt): return alt != nil && !alt!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .image(_, let alt, _): return alt != nil && !alt!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             default: return false
             }
         }) else {
@@ -102,7 +102,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         switch firstMessage.content {
         case .plainText(let text), .markdownText(let text):
             titleText = text
-        case .image(_, let alt):
+        case .image(_, let alt, _):
             titleText = alt ?? "Image"
         default:
             return "New Chat"

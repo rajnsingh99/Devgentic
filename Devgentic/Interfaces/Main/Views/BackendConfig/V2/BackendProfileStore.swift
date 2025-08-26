@@ -1,0 +1,214 @@
+//
+//  BackendProfileStore.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 22/08/25.
+//
+//  Refactored on 26/08/25 to support unified BackendProfileModel.
+//
+
+import Foundation
+import CoreData
+import os
+
+// MARK: - Backend Profile Store Protocol
+protocol BackendProfileStoreProtocol {
+    /// Fetches all stored backend profiles as the unified model type.
+    func fetchProfiles() -> [BackendProfileModel]
+    
+    /// Saves or updates a profile using the unified model type.
+    func saveProfile(_ profile: BackendProfileModel)
+    
+    /// Deletes a profile with the specified ID.
+    func deleteProfile(withId id: UUID)
+    
+    /// Commits changes to the persistent store.
+    func saveContext()
+}
+
+// MARK: - Core Data Backend Profile Store
+class BackendProfileStore: BackendProfileStoreProtocol {
+
+    // MARK: - Singleton Instance
+    static let shared = BackendProfileStore()
+
+    // MARK: - Private Properties
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendProfileStore")
+    
+    private var persistentContainer: NSPersistentContainer {
+        CoreDataPersistenceService.shared.persistentContainer
+    }
+
+    private var viewContext: NSManagedObjectContext {
+        persistentContainer.viewContext
+    }
+    
+    // MARK: - Initialization
+    private init() {}
+
+    // MARK: - Public API
+    
+    /// Fetches all stored backend profiles and converts them to `BackendProfileModel`.
+    func fetchProfiles() -> [BackendProfileModel] {
+        let request: NSFetchRequest<BackendProfileEntity> = BackendProfileEntity.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "lastSelected", ascending: false)]
+        
+        do {
+            let entities = try viewContext.fetch(request)
+            return entities.compactMap { $0.toBackendProfile() }
+        } catch {
+            logger.error("Failed to fetch Backend Profiles: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    /// Saves or updates a profile using the unified `BackendProfileModel`.
+    func saveProfile(_ profile: BackendProfileModel) {
+        let context = viewContext
+        
+        let request: NSFetchRequest<BackendProfileEntity> = BackendProfileEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", profile.id as NSUUID)
+        
+        let entity = (try? context.fetch(request).first) ?? BackendProfileEntity(context: context)
+        
+        configure(entity: entity, with: profile, in: context)
+        
+        logger.info("Saving profile '\(profile.displayName)' (ID: \(profile.id.uuidString))")
+        saveContext()
+    }
+
+    /// Deletes a profile with the specified ID.
+    func deleteProfile(withId id: UUID) {
+        let request: NSFetchRequest<BackendProfileEntity> = BackendProfileEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as NSUUID)
+        
+        do {
+            if let entityToDelete = try viewContext.fetch(request).first {
+                viewContext.delete(entityToDelete)
+                logger.info("Deleting profile with ID \(id.uuidString).")
+                saveContext()
+            }
+        } catch {
+            logger.error("Failed to delete profile with ID \(id.uuidString): \(error.localizedDescription)")
+        }
+    }
+
+    func saveContext() {
+        CoreDataPersistenceService.shared.saveContext()
+    }
+    
+    // MARK: - Private Configuration Logic
+    
+    /// The core logic for mapping a `BackendProfileModel` to Core Data entities.
+    private func configure(entity: BackendProfileEntity, with profile: BackendProfileModel, in context: NSManagedObjectContext) {
+        // 1. Configure common properties
+        entity.id = profile.id
+        entity.displayName = profile.displayName
+        entity.lastSelected = profile.lastSelected
+        entity.profileType = profile.profileType.rawValue
+
+        // 2. Switch on the details to handle type-specific configuration
+        switch profile.details {
+        case .bot(let llmConfig):
+            let botEntity = entity.botConfig ?? BotConfigEntity(context: context)
+            botEntity.llmConfig = encode(llmConfig)
+            entity.botConfig = botEntity
+            // Clean up other potential relationships
+            entity.agentConfig = nil
+            entity.workflowConfig = nil
+            
+        case .agent(let llmConfig, let tools):
+            let agentEntity = entity.agentConfig ?? AgentConfigEntity(context: context)
+            agentEntity.llmConfig = encode(llmConfig)
+            agentEntity.tools = encode(tools)
+            entity.agentConfig = agentEntity
+            // Clean up other potential relationships
+            entity.botConfig = nil
+            entity.workflowConfig = nil
+
+        case .workflow(let agents):
+            let workflowEntity = entity.workflowConfig ?? WorkflowConfigEntity(context: context)
+            workflowEntity.agents = encode(agents)
+            entity.workflowConfig = workflowEntity
+            // Clean up other potential relationships
+            entity.botConfig = nil
+            entity.agentConfig = nil
+        }
+    }
+    
+    /// A generic helper to encode any `Codable` value to `Data`.
+    private func encode<T: Codable>(_ value: T) -> Data? {
+        try? JSONEncoder().encode(value)
+    }
+}
+
+// MARK: - Core Data Entity Extensions
+extension BackendProfileEntity {
+    
+    /// Converts a `BackendProfileEntity` back into the unified `BackendProfileModel`.
+    func toBackendProfile() -> BackendProfileModel? {
+        guard let typeString = self.profileType,
+              let type = ProfileType(rawValue: typeString),
+              let id = self.id,
+              let displayName = self.displayName else {
+            return nil
+        }
+        
+        let details: ProfileDetails
+        
+        switch type {
+        case .bot:
+            guard let botDetails = createBotDetails() else { return nil }
+            details = botDetails
+        case .agent:
+            guard let agentDetails = createAgentDetails() else { return nil }
+            details = agentDetails
+        case .workflow:
+            guard let workflowDetails = createWorkflowDetails() else { return nil }
+            details = workflowDetails
+        }
+        
+        return BackendProfileModel(
+            id: id,
+            displayName: displayName,
+            lastSelected: self.lastSelected,
+            details: details
+        )
+    }
+    
+    // MARK: - Detail Creation Helpers
+    
+    private func createBotDetails() -> ProfileDetails? {
+        guard let configEntity = self.botConfig,
+              let configData = configEntity.llmConfig,
+              let llmConfig: ProviderConfig = decode(from: configData) else {
+            return nil
+        }
+        return .bot(llmConfig: llmConfig)
+    }
+    
+    private func createAgentDetails() -> ProfileDetails? {
+        guard let configEntity = self.agentConfig,
+              let llmConfigData = configEntity.llmConfig,
+              let toolsData = configEntity.tools,
+              let llmConfig: ProviderConfig = decode(from: llmConfigData),
+              let tools: [Tool] = decode(from: toolsData) else {
+            return nil
+        }
+        return .agent(llmConfig: llmConfig, tools: tools)
+    }
+    
+    private func createWorkflowDetails() -> ProfileDetails? {
+        guard let configEntity = self.workflowConfig,
+              let agentsData = configEntity.agents,
+              let agents: [BackendProfileModel] = decode(from: agentsData) else {
+            return nil
+        }
+        return .workflow(agents: agents)
+    }
+    
+    /// A generic helper to decode `Data` back into any `Decodable` type.
+    private func decode<T: Decodable>(from data: Data) -> T? {
+        try? JSONDecoder().decode(T.self, from: data)
+    }
+}

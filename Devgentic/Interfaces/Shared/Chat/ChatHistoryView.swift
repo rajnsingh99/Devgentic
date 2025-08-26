@@ -5,7 +5,6 @@
 //  Created by Raj Singh
 //
 
-
 import SwiftUI
 import os
 
@@ -18,94 +17,109 @@ struct ChatHistoryView: View {
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
     
     @State private var showScrollToBottomButton = false
+    @State private var isContentVisible = false // State to control content visibility
 
     var body: some View {
-        GeometryReader { geometry in
-            ScrollViewReader { proxy in
-                ZStack(alignment: .bottom) {
-                    chatScrollView(proxy: proxy, geometry: geometry)
-                        // MARK: - LOGGING ADDED
-                        .onChange(of: chatHistoryViewModel.currentChatMessages.first?.id) { oldValue, newValue in
-                            logger.debug("STREAM_TRACE: ScrollView onChange(of: message.id) triggered. Old ID: \(oldValue?.uuidString ?? "nil"), New ID: \(newValue?.uuidString ?? "nil"). Scrolling to top of new message.")
-                            if let firstMessageId = chatHistoryViewModel.currentChatMessages.first?.id {
-                               scrollTo(proxy: proxy, anchor: firstMessageId, position: .top, animated: true)
+        ZStack {
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    ZStack(alignment: .bottom) {
+                        chatScrollView(proxy: proxy, geometry: geometry)
+                            // Control opacity to prevent showing content before it's ready
+                            .opacity(isContentVisible ? 1 : 0)
+                            .onChange(of: chatHistoryViewModel.currentChatMessages) { _, newMessages in
+                                // Hide content immediately when conversation changes
+                                isContentVisible = false
+                                
+                                if let lastMessage = newMessages.last {
+                                    // Defer scroll to allow UI to render
+                                    DispatchQueue.main.async {
+                                        withAnimation(.none) { // Scroll without animation
+                                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                                        }
+                                        
+                                        // Defer showing the content until after the scroll has completed
+                                        DispatchQueue.main.async {
+                                            withAnimation(.easeIn(duration: 0.2)) {
+                                                isContentVisible = true
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // If there are no messages, show the (empty) view immediately
+                                    isContentVisible = true
+                                }
                             }
+
+                        if showScrollToBottomButton {
+                            scrollToBottomButton(proxy: proxy)
                         }
-                    
-                    if showScrollToBottomButton {
-                        scrollToBottomButton(proxy: proxy)
                     }
                 }
+            }
+            .onAppear {
+                // On initial launch, if no conversation is selected, the view should be considered "visible"
+                // to prevent the loading indicator from showing incorrectly.
+                if mainAppViewModel.selectedConversationID == nil {
+                    isContentVisible = true
+                }
+            }
+            
+            // Show a loading spinner on top ONLY when a conversation is actively being loaded.
+            if chatHistoryViewModel.isInitiallyLoadingConversation {
+                ProgressView()
+                    .controlSize(.large)
+                    .transition(.opacity)
             }
         }
     }
 
     private func chatScrollView(proxy: ScrollViewProxy, geometry: GeometryProxy) -> some View {
         ScrollView {
-            // MARK: - LOGGING ADDED
-            // This GeometryReader will help us track the size of the content inside the ScrollView.
-            GeometryReader { contentGeometry in
-                Color.clear.onAppear {
-                    logger.debug("STREAM_TRACE: ScrollView content GeometryReader appeared. Initial size: \(contentGeometry.size.height)")
-                }
-                // Log any change in the content's height.
-                .onChange(of: contentGeometry.size) { oldSize, newSize in
-                    logger.debug("STREAM_TRACE: ScrollView content size changed. Old height: \(oldSize.height), New height: \(newSize.height)")
-                }
-            }
-            
             LazyVStack(alignment: .leading, spacing: 0) {
                 if mainAppViewModel.selectedConversationID != nil {
-                    ForEach(Array(chatHistoryViewModel.currentChatMessages.enumerated()), id: \.element.id) { index, message in
+                    ForEach(chatHistoryViewModel.currentChatMessages) { message in
                         ChatBubbleView(message: message)
                             .id(message.id)
-                            .rotationEffect(.degrees(180))
-                            .scaleEffect(x: -1, y: 1, anchor: .center)
                             .onAppear {
-                                if chatHistoryViewModel.currentChatMessages.last?.id == message.id && chatHistoryViewModel.canLoadMorePages {
+                                // Logic to load more messages when the user scrolls to the top.
+                                if chatHistoryViewModel.currentChatMessages.first?.id == message.id && chatHistoryViewModel.canLoadMorePages {
                                     logger.debug("Reached top of chat, loading more messages.")
                                     Task {
                                         await chatHistoryViewModel.loadMoreMessages()
                                     }
                                 }
-                                
-                                if index > 5 {
-                                    withAnimation(.easeInOut) {
-                                        showScrollToBottomButton = true
-                                    }
-                                }
-                                if index < 2 {
-                                     withAnimation(.easeInOut) {
-                                        showScrollToBottomButton = false
-                                    }
-                                }
                             }
-
-                        if index < chatHistoryViewModel.currentChatMessages.count - 1 {
-                            Spacer().frame(height: UITheme.Spacing.xlarge)
-                                .rotationEffect(.degrees(180))
-                                .scaleEffect(x: -1, y: 1, anchor: .center)
-                        }
                     }
                 }
                 
-                Spacer(minLength: 0)
+                // This GeometryReader helps in determining the scroll position.
+                GeometryReader { innerProxy in
+                    Color.clear.preference(key: ScrollOffsetPreferenceKey.self, value: innerProxy.frame(in: .named("scrollview")).minY)
+                }
             }
-            .frame(maxWidth: 1100)
-            .frame(maxWidth: .infinity, alignment: .top)
             .padding(.top, UITheme.Spacing.large)
             .padding(.bottom, UITheme.Spacing.medium)
         }
-        .background(Color.clear)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .rotationEffect(.degrees(180))
-        .scaleEffect(x: -1, y: 1, anchor: .center)
+        .coordinateSpace(name: "scrollview")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+            // Heuristic to show/hide the "scroll to bottom" button.
+            let threshold: CGFloat = 100
+            let shouldShowButton = value < -threshold
+            if showScrollToBottomButton != shouldShowButton {
+                withAnimation {
+                    showScrollToBottomButton = shouldShowButton
+                }
+            }
+        }
     }
     
     private func scrollToBottomButton(proxy: ScrollViewProxy) -> some View {
         Button(action: {
-            if let lastMessageId = chatHistoryViewModel.currentChatMessages.first?.id {
-                scrollTo(proxy: proxy, anchor: lastMessageId, position: .top, animated: true)
+            if let lastMessageId = chatHistoryViewModel.currentChatMessages.last?.id {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    proxy.scrollTo(lastMessageId, anchor: .bottom)
+                }
             }
         }) {
             Image(systemName: "arrow.down")
@@ -120,15 +134,12 @@ struct ChatHistoryView: View {
         .padding(.bottom)
         .transition(.scale.combined(with: .opacity))
     }
+}
 
-    private func scrollTo(proxy: ScrollViewProxy, anchor: any Hashable, position: UnitPoint, animated: Bool) {
-        logger.debug("scrollTo called for anchor: \(String(describing: anchor)), position: \(String(describing: position)), animated: \(animated)")
-        if animated {
-            withAnimation(.easeOut(duration: 0.3)) {
-                proxy.scrollTo(anchor, anchor: position)
-            }
-        } else {
-            proxy.scrollTo(anchor, anchor: position)
-        }
+// PreferenceKey to track the scroll offset.
+struct ScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }

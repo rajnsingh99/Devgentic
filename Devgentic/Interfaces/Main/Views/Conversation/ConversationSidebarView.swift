@@ -142,7 +142,7 @@ struct ConversationSidebarView: View {
                 .padding(.top, 5)
             }
         }
-        .background(Color(.underPageBackgroundColor)) // Dark background color
+        .background(Color.black.opacity(0.4))
         .alert("Delete Conversation?", isPresented: $showingDeleteAlert, presenting: conversationToDelete) { conv in
             Button("Delete", role: .destructive) {
                 if let id = conv.id {

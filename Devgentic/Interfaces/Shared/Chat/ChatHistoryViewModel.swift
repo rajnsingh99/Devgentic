@@ -16,6 +16,7 @@ class ChatHistoryViewModel: ObservableObject {
 
     // MARK: - Dependencies
     private let persistenceService: CoreDataServiceProtocol
+    private let activeStreamManager: ActiveStreamManager
 
     // MARK: - Published State Properties for Code Viewer
     @Published var codeViewerContent: (snippets: [CodeSnippet], currentIndex: Int)? = nil
@@ -34,11 +35,13 @@ class ChatHistoryViewModel: ObservableObject {
     @Published var isSending: Bool = false
     @Published var isUserMessagesOnlyFilterActive: Bool = false
 
-    private var streamingTask: Task<Void, Never>?
-
     // MARK: - Initialization
-    init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared) {
+    init(
+        persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
+        activeStreamManager: ActiveStreamManager
+    ) {
         self.persistenceService = persistenceService
+        self.activeStreamManager = activeStreamManager
         logger.info("ChatHistoryViewModel initialized.")
     }
 
@@ -233,24 +236,36 @@ class ChatHistoryViewModel: ObservableObject {
             return
         }
         
-        if isSending && currentChatMessages.contains(where: { $0.conversationId == selectedID && $0.isStreaming }) {
-            logger.info("Race condition avoided: `loadConversation` called for a new chat while sending. Skipping DB fetch to preserve placeholder message.")
-            return
-        }
-        
-        logger.debug("Loading initial page for conversation \(selectedID.uuidString, privacy: .public).")
+        logger.debug("Loading conversation \(selectedID.uuidString, privacy: .public), merging with active streams.")
         
         isInitiallyLoadingConversation = true
         
         do {
             try Task.checkCancellation()
             
-            let messages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
+            // Fetch persisted messages (returns newest-to-oldest).
+            let persistedMessages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
             
             try Task.checkCancellation()
             
-            self.currentChatMessages = messages
-            self.canLoadMorePages = messages.count >= initialPageSize
+            let activeStreamingMessages = activeStreamManager.activeStreams.values
+                .filter { $0.conversationId == selectedID }
+            
+            var combinedMessages = activeStreamingMessages + persistedMessages
+            let uniqueMessageIDs = Set(combinedMessages.map { $0.id })
+            combinedMessages = uniqueMessageIDs.compactMap { id in
+                combinedMessages.first { $0.id == id }
+            }
+            
+            // Sort the combined list descending to ensure order before reversing.
+            let sortedDescending = combinedMessages.sorted { $0.timestamp > $1.timestamp }
+            
+            // **FIX**: Reverse the array to be ascending (oldest-to-newest) for the UI.
+            self.currentChatMessages = sortedDescending.reversed()
+            
+            self.canLoadMorePages = persistedMessages.count >= initialPageSize
+            
+            logger.info("Successfully loaded and merged \(persistedMessages.count) persisted and \(activeStreamingMessages.count) active messages.")
             
             if isUserMessagesOnlyFilterActive {
                 applyUserMessagesFilter()
@@ -262,6 +277,7 @@ class ChatHistoryViewModel: ObservableObject {
         self.isInitiallyLoadingConversation = false
     }
 
+
     func loadMoreMessages() async {
         guard !isLoadingPage, canLoadMorePages, let selectedID = persistenceService.getConversation(withId: currentChatMessages.first?.conversationId ?? UUID())?.id else {
             return
@@ -272,12 +288,14 @@ class ChatHistoryViewModel: ObservableObject {
         let offset = currentChatMessages.count
         logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString, privacy: .public).")
         
+        // Fetches the next page of older messages, sorted newest-to-oldest.
         let olderMessages = await persistenceService.fetchMessages(for: selectedID, offset: offset, limit: subsequentPageSize)
         
         if olderMessages.isEmpty {
             canLoadMorePages = false
         } else {
-            self.currentChatMessages.append(contentsOf: olderMessages)
+            // **FIX**: Insert the reversed (now oldest-to-newest) chunk at the beginning of the array.
+            self.currentChatMessages.insert(contentsOf: olderMessages.reversed(), at: 0)
             
             if isUserMessagesOnlyFilterActive {
                 applyUserMessagesFilter()
@@ -299,91 +317,9 @@ class ChatHistoryViewModel: ObservableObject {
             currentChatMessages = currentChatMessages.filter { $0.sender == .user }
         }
     }
-
-    // MARK: - Streaming Message Handling
-
-    func appendTokenToStreamingMessage(_ token: String) {
-        // MARK: - LOGGING ADDED
-        logger.debug("STREAM_TRACE: appendTokenToStreamingMessage called with token: '\(token)'")
-        
-        // Find the streaming message placeholder in the array.
-        guard let index = self.currentChatMessages.firstIndex(where: { $0.isStreaming }) else {
-            logger.warning("appendTokenToStreamingMessage called but no streaming message placeholder was found in the chat history.")
-            return
-        }
-
-        var message = self.currentChatMessages[index]
-        
-        if var currentText = message.content.textContent {
-            currentText += token
-            message.content = .markdownText(currentText)
-        }
-
-        self.currentChatMessages[index] = message
-        logger.trace("Appended token and updated message in UI array.")
-    }
-    
-    func finalizeResponse(conversationID: UUID, error: Error?) async {
-        logger.info("Finalizing response for conversation \(conversationID.uuidString).")
-        
-        // Find the streaming message placeholder in the array.
-        guard let index = self.currentChatMessages.firstIndex(where: { $0.isStreaming }) else {
-            logger.warning("finalizeResponse called but no streaming message placeholder was found. Resetting state.")
-            await resetSendingState()
-            return
-        }
-        
-        var finalMessage = self.currentChatMessages[index]
-        finalMessage.isStreaming = false
-        logger.debug("Marked message \(finalMessage.id.uuidString) as no longer streaming.")
-
-        if let error = error {
-            logger.error("Finalizing response with error: \(error.localizedDescription)")
-            finalMessage.content = .error(title: "Response Error", details: error.localizedDescription)
-        } else {
-            logger.info("Response finalized successfully with full text.")
-        }
-
-        self.currentChatMessages[index] = finalMessage
-        logger.debug("Updated final message in currentChatMessages array.")
-
-        if let targetEntity = persistenceService.getConversation(withId: conversationID) {
-            await persistenceService.addMessage(finalMessage, to: targetEntity)
-            logger.info("Persisted final message \(finalMessage.id.uuidString).")
-        } else {
-            logger.error("Could not find conversation entity \(conversationID.uuidString) to persist final message.")
-        }
-
-        await resetSendingState()
-    }
     
     func resetSendingState() async {
         self.isSending = false
-        self.streamingTask?.cancel()
-        self.streamingTask = nil
         logger.info("✅ [Request Finished] Sending state has been reset.")
-    }
-
-    func setStreamingTask(_ task: Task<Void, Never>?) {
-        self.streamingTask = task
-    }
-
-    func cancelStreaming() {
-        // Find if there is a streaming message in progress.
-        if self.currentChatMessages.contains(where: { $0.isStreaming }) {
-            logger.info("Streaming cancelled by user via ChatHistoryViewModel.")
-            streamingTask?.cancel()
-            // The `finalizeResponse` with a cancellation error will be called by the sending logic.
-            // We can also force a state reset here if needed.
-            Task {
-                // Finalize with a generic cancellation error.
-                if let conversationID = self.currentChatMessages.first?.conversationId {
-                    let cancellationError = NSError(domain: "UserCancellation", code: -999, userInfo: [NSLocalizedDescriptionKey: "The user cancelled the request."])
-                    await self.finalizeResponse(conversationID: conversationID, error: cancellationError)
-                } else {
-                    await self.resetSendingState()
-                }
-            }
-        }
     }
 }

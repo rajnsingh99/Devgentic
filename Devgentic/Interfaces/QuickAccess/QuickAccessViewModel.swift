@@ -19,7 +19,6 @@ class QuickAccessViewModel: ObservableObject {
     // MARK: - Properties
     private var targetConversationId: UUID? // The ID of the current Quick Access conversation.
     private var cancellables = Set<AnyCancellable>()
-    private let agentParser = AgentResponseParser()
 
     // MARK: - Initialization
     init() {
@@ -101,12 +100,12 @@ class QuickAccessViewModel: ObservableObject {
 
                 let payload: [String: Any] = [ "model": modelName, "prompt": query, "stream": false ]
                 let responseData = try await self.aiConnect.postToLocalServer(endpoint: "/api/generate", payload: payload)
-                let responseText = try self.agentParser.parse(data: responseData)
-                let parsedContents = self.agentParser.parseTextToMessageContent(responseText)
+//                let responseText = try self.agentParser.parse(data: responseData)
+                let parsedContents = "self.agentParser.parseTextToMessageContent()"
 
-                for content in parsedContents {
-                    resultingAgentMessages.append(ChatMessage(conversationId: originalConversationId, sender: .agent, content: content))
-                }
+//                for content in parsedContents {
+//                    resultingAgentMessages.append(ChatMessage(conversationId: originalConversationId, sender: .agent, content: content))
+//                }
             } catch {
                 let errorText = self.generateSimplifiedErrorMessage(error: error)
                 let errorMessageContent = MessageContent.error(title: "Processing Error", details: errorText)

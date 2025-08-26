@@ -18,13 +18,14 @@ class RemoteOrchestrationService {
     }
 
     /// Establishes a streaming connection to the configured remote LLM provider.
+    /// This function is already compliant with the new architecture, returning a raw data stream.
     func streamMessage(
         conversationID: UUID,
         userQuery: String,
         history: [ChatMessage],
         openAIThreadID: String?,
         integration: LLMIntegrationModel,
-        context: TraceContext // <-- Add context parameter
+        context: TraceContext
     ) -> AsyncThrowingStream<String, Error> {
         guard let remoteConfig = integration.remoteConfig else {
             return AsyncThrowingStream { continuation in
@@ -49,7 +50,8 @@ class RemoteOrchestrationService {
                 userQuery: userQuery,
                 history: history,
                 modelName: remoteConfig.modelName,
-                context: context // <-- Pass context down
+                generationType: remoteConfig.generationType,
+                context: context
             )
         case .openAI:
             let openAIService = OpenAIConnect(apiKey: remoteConfig.apiKey)
@@ -58,7 +60,7 @@ class RemoteOrchestrationService {
                 userQuery: userQuery,
                 history: history,
                 modelName: remoteConfig.modelName,
-                context: context // <-- Pass context down
+                context: context
             )
         case .anthropic:
             let anthropicService = AnthropicConnect(apiKey: remoteConfig.apiKey)
@@ -66,19 +68,21 @@ class RemoteOrchestrationService {
                 userQuery: userQuery,
                 history: history,
                 modelName: remoteConfig.modelName,
-                context: context // <-- Pass context down
+                context: context
             )
         }
     }
 
-    /// Sends a message to the configured remote LLM provider (non-streaming).
+    /// **REFACTORED for Step 2.2**
+    /// Sends a message to the configured remote LLM provider (non-streaming) and returns raw data.
+    /// This method no longer creates ChatMessage objects, fulfilling the "pure data provider" requirement.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
         history: [ChatMessage],
         openAIThreadID: String?,
         integration: LLMIntegrationModel
-    ) async throws -> (messages: [ChatMessage], newThreadID: String?, error: Error?) {
+    ) async throws -> (responseText: String?, responseImageData: Data?, newThreadID: String?, error: Error?) {
         
         guard let remoteConfig = integration.remoteConfig else {
             throw NSError(domain: "RemoteConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Missing remote configuration."])
@@ -87,14 +91,17 @@ class RemoteOrchestrationService {
         switch remoteConfig.provider {
         case .google:
             let geminiService = GeminiConnect(apiKey: remoteConfig.apiKey)
-            let (messages, error) = try await geminiService.sendMessage(
+            let (text, data, error) = try await geminiService.sendMessage(
                 conversationID: conversationID,
                 userQuery: userQuery,
                 history: history,
-                modelName: remoteConfig.modelName
+                modelName: remoteConfig.modelName,
+                generationType: remoteConfig.generationType
             )
-            return (messages: messages, newThreadID: nil, error: error)
+            return (responseText: text, responseImageData: data, newThreadID: nil, error: error)
+            
         case .openAI:
+            // This assumes OpenAIConnect is similarly refactored to return raw data.
             let openAIService = OpenAIConnect(apiKey: remoteConfig.apiKey)
             let (messages, newThreadID) = try await openAIService.sendMessage(
                 conversationID: conversationID,
@@ -102,8 +109,12 @@ class RemoteOrchestrationService {
                 openAIThreadID: openAIThreadID,
                 modelName: remoteConfig.modelName
             )
-            return (messages: messages, newThreadID: newThreadID, error: nil)
+            // We extract the raw text content here.
+            let responseText = messages.first?.content.textContent
+            return (responseText: responseText, responseImageData: nil, newThreadID: newThreadID, error: nil)
+
         case .anthropic:
+            // This assumes AnthropicConnect is similarly refactored.
             let anthropicService = AnthropicConnect(apiKey: remoteConfig.apiKey)
             let (messages, error) = try await anthropicService.sendMessage(
                 conversationID: conversationID,
@@ -111,7 +122,9 @@ class RemoteOrchestrationService {
                 history: history,
                 modelName: remoteConfig.modelName
             )
-            return (messages: messages, newThreadID: nil, error: error)
+            // We extract the raw text content here.
+            let responseText = messages.first?.content.textContent
+            return (responseText: responseText, responseImageData: nil, newThreadID: nil, error: error)
         }
     }
 }

@@ -139,13 +139,39 @@ struct ContentBlockView: View {
         }
     }
     
+    /// Creates and styles an AttributedString from a Markdown string.
+    private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
+        // 1. Try to create an AttributedString from the markdown text.
+        if var attributedString = try? AttributedString(markdown: text) {
+            // 2. Iterate through the runs of the attributed string to apply styles.
+            for run in attributedString.runs {
+                // Check if the run has the inline code attribute.
+                if run.inlinePresentationIntent == .code {
+                    // 3. Apply custom styling to the inline code runs.
+                    attributedString[run.range].backgroundColor = UITheme.Colors.inlineCodeBackground
+                    attributedString[run.range].foregroundColor = UITheme.Colors.inlineCodeText
+                    attributedString[run.range].font = .system(.body, design: .monospaced)
+                } else {
+                     // 4. Ensure regular text has the correct default font and color.
+                    attributedString[run.range].font = font.weight(weight)
+                    attributedString[run.range].foregroundColor = UITheme.Colors.primaryText
+                }
+            }
+            return attributedString
+        } else {
+            // 5. Fallback to a plain AttributedString if markdown parsing fails.
+            var fallbackString = AttributedString(text)
+            fallbackString.font = font.weight(weight)
+            fallbackString.foregroundColor = UITheme.Colors.primaryText
+            return fallbackString
+        }
+    }
+
+    /// Renders the styled text in a Text view.
     @ViewBuilder
     private func renderTextView(text: String, font: Font = UITheme.Fonts.body, weight: Font.Weight = .regular) -> some View {
-        Text(try! AttributedString(markdown: text))
-            .font(font)
-            .fontWeight(weight)
-            .lineSpacing(UITheme.Spacing.xsmall)
-            .foregroundColor(UITheme.Colors.primaryText)
+        Text(createStyledString(from: text, font: font, weight: weight))
+            .lineSpacing(UITheme.Spacing.small)
             .textSelection(.enabled)
     }
     

@@ -25,13 +25,6 @@ protocol CoreDataServiceProtocol {
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func togglePinStatus(for conversationId: UUID) // New method for pinning
 
-    // Agent Profile Methods
-    func getAgentProfile(withId id: UUID) -> AgentProfileEntity?
-    func fetchAgentProfiles() -> [AgentProfileEntity]
-    func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext)
-    func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel)
-    func deleteAgentProfile(with id: UUID)
-    
     // LLM Integration Methods
     func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity?
     func fetchLLMIntegrations() -> [LLMIntegrationEntity]
@@ -58,7 +51,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     // MARK: - Private Properties
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CoreDataPersistenceService")
     
-    // RAG Services
+    // RAG Services - Dependencies for creating vector embeddings
     private let embeddingService = EmbeddingService.shared
     private let vectorStoreService = VectorStoreService.shared
     private let textChunker = TextChunker()
@@ -66,8 +59,13 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "DevgenticDB")
         
+        AgentResponseTransformer.register()
+        
         // ** NEW: Register the transformer for the 'tags' attribute in PromptEntity **
         ValueTransformer.setValueTransformer(StringArrayTransformer(), forName: NSValueTransformerName("StringArrayTransformer"))
+        
+        // ** NEW: Register the transformer for the 'generationType' attributes **
+        ValueTransformer.setValueTransformer(GenerationTypeArrayTransformer(), forName: NSValueTransformerName("GenerationTypeArrayTransformer"))
         
         container.loadPersistentStores { (storeDescription, error) in
             if let error = error as NSError? {
@@ -134,20 +132,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 let chatMessages = entities.map { $0.toChatMessageStruct() }
 
                 self.logger.debug("Fetched \(chatMessages.count) messages for conversation \(conversationId.uuidString) (offset: \(offset), limit: \(limit)):")
-                for message in chatMessages {
-                    switch message.content {
-                    case .plainText(let text):
-                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: PlainText, Content: \"\(text)\"")
-                    case .markdownText(let text):
-                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: MarkdownText, Content: \"\(text)\"")
-                    case .codeBlock(let language, let code):
-                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: CodeBlock, Language: \(language ?? "N/A"), Code: \"\(code)\"")
-                    case .error(let title, let details):
-                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: Error, Title: \(title ?? "N/A"), Details: \"\(details)\"")
-                    case .image(let url, _):
-                        self.logger.debug("  - Message ID: \(message.id.uuidString), Sender: \(message.sender.rawValue), Type: Image, URL: \(url?.absoluteString ?? "N/A")")
-                    }
-                }
                 
                 return chatMessages
             } catch {
@@ -186,6 +170,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             newMessage.senderType = message.sender.rawValue
             newMessage.conversationId = message.conversationId
             mapMessageContent(from: message.content, to: newMessage)
+            // **FIX:** Use KVC to set the transformable attribute, bypassing compiler type checks.
+            newMessage.setValue(message.agentResponse, forKey: "agentResponse")
             newConversation.addToMessages(newMessage)
         }
         
@@ -212,61 +198,51 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         await context.perform {
             for message in messages {
-                // 1. Fetch existing message entity with the same ID
                 let fetchRequest: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
                 fetchRequest.predicate = NSPredicate(format: "id == %@", message.id as CVarArg)
                 
                 let existingEntity = try? context.fetch(fetchRequest).first
-                
-                // 2. If entity exists, update it. Otherwise, create a new one.
                 let entityToUpdate = existingEntity ?? ChatMessageEntity(context: context)
                 
-                // 3. Configure the entity with the message data
                 entityToUpdate.id = message.id
                 entityToUpdate.timestamp = message.timestamp
                 entityToUpdate.senderType = message.sender.rawValue
                 entityToUpdate.conversationId = message.conversationId
-                self.mapMessageContent(from: message.content, to: entityToUpdate)
                 
-                // --- Update Attached Text Files ---
+                if let currentAgentContent = message.currentAgentContent {
+                    self.mapMessageContent(from: currentAgentContent, to: entityToUpdate)
+                } else {
+                    self.mapMessageContent(from: message.content, to: entityToUpdate)
+                }
+                
+                // **FIX:** Use KVC to set the transformable attribute, bypassing compiler type checks.
+                entityToUpdate.setValue(message.agentResponse, forKey: "agentResponse")
+                self.logger.info("Saving message \(message.id.uuidString) with \(message.agentResponse?.variants.count ?? 0) variants.")
+                
                 if let textFiles = message.attachedTextFiles {
                     let textFileEntities = textFiles.map { textFile -> AttachedTextFileEntity in
                         let entity = AttachedTextFileEntity(context: context)
-                        entity.id = textFile.id
-                        entity.name = textFile.name
-                        entity.url = textFile.url.absoluteString
-                        entity.fileExtension = textFile.fileExtension
-                        entity.content = textFile.content
-                        entity.size = textFile.size
+                        entity.id = textFile.id; entity.name = textFile.name; entity.url = textFile.url.absoluteString; entity.fileExtension = textFile.fileExtension; entity.content = textFile.content; entity.size = textFile.size
                         return entity
                     }
-                    // Use mutableSetValue to safely update the relationship
                     entityToUpdate.mutableSetValue(forKey: "attachedTextFiles").removeAllObjects()
                     entityToUpdate.addToAttachedTextFiles(NSSet(array: textFileEntities))
                 }
 
-                // --- Update Attached Image Files ---
                 if let imageFiles = message.attachedImageFiles {
                     let imageFileEntities = imageFiles.map { imageFile -> AttachedImageFileEntity in
                         let entity = AttachedImageFileEntity(context: context)
-                        entity.id = imageFile.id
-                        entity.name = imageFile.name
-                        entity.url = imageFile.url.absoluteString
-                        entity.fileExtension = imageFile.fileExtension
-                        entity.content = imageFile.binaryData
-                        entity.size = imageFile.size
+                        entity.id = imageFile.id; entity.name = imageFile.name; entity.url = imageFile.url.absoluteString; entity.fileExtension = imageFile.fileExtension; entity.content = imageFile.binaryData; entity.size = imageFile.size
                         return entity
                     }
                     entityToUpdate.mutableSetValue(forKey: "attachedImageFiles").removeAllObjects()
                     entityToUpdate.addToAttachedImageFiles(NSSet(array: imageFileEntities))
                 }
 
-                // Only add to conversation if it's a new entity
                 if existingEntity == nil {
                     conversation.addToMessages(entityToUpdate)
                 }
                 
-                // RAG Indexing can still be performed
                 Task {
                     await self.indexMessageForRAG(message)
                 }
@@ -318,6 +294,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
         
         guard !textToProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            logger.debug("Message \(message.id.uuidString) has no text content to index for RAG.")
             return
         }
         
@@ -326,10 +303,9 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         for chunkText in chunks {
             if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
-                // --- UPDATED: Pass the conversationID when creating the chunk ---
                 let chunkEntity = ChunkEntity(
                     sourceMessageID: message.id,
-                    conversationID: message.conversationId, // This now links the chunk to the conversation
+                    conversationID: message.conversationId,
                     content: chunkText,
                     embedding: embedding,
                     timestamp: message.timestamp
@@ -341,69 +317,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         if !chunkEntities.isEmpty {
             vectorStoreService.add(chunks: chunkEntities)
             logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString) in conversation \(message.conversationId.uuidString).")
-        }
-    }
-
-    
-    // MARK: - Agent Profile Methods
-    
-    func getAgentProfile(withId id: UUID) -> AgentProfileEntity? {
-        let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
-        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        do {
-            return try viewContext.fetch(request).first
-        } catch {
-            logger.error("Failed to fetch AgentProfile with ID \(id.uuidString): \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    func fetchAgentProfiles() -> [AgentProfileEntity] {
-        let request: NSFetchRequest<AgentProfileEntity> = AgentProfileEntity.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
-        do {
-            return try viewContext.fetch(request)
-        } catch {
-            logger.error("Failed to fetch all AgentProfiles: \(error.localizedDescription)")
-            return []
-        }
-    }
-    
-    func addAgentProfile(from model: AgentProfileModel, in context: NSManagedObjectContext) {
-        let newAgent = AgentProfileEntity(context: context)
-        updateAgentProfile(entity: newAgent, with: model)
-        logger.info("Adding new Agent Profile '\(model.name)' to context.")
-        saveContext()
-    }
-
-    func updateAgentProfile(entity: AgentProfileEntity, with model: AgentProfileModel) {
-        let context = entity.managedObjectContext ?? viewContext
-        entity.id = model.id
-        entity.name = model.name
-        entity.role = model.role
-        entity.baseURL = model.baseURL
-        entity.linkedIntegrationID = model.linkedIntegrationID
-        
-        let currentSelectedTools = entity.mutableSetValue(forKey: "tools")
-        currentSelectedTools.removeAllObjects()
-
-        for selectedToolModel in model.tools {
-            let newSelectedToolEntity = SelectedToolEntity(context: context)
-            newSelectedToolEntity.id = UUID()
-            newSelectedToolEntity.toolName = selectedToolModel.toolName
-            newSelectedToolEntity.displayName = selectedToolModel.displayName
-            currentSelectedTools.add(newSelectedToolEntity)
-        }
-
-        logger.trace("Updating attributes for Agent Profile: \(model.name)")
-        saveContext()
-    }
-
-    func deleteAgentProfile(with id: UUID) {
-        if let agentToDelete = getAgentProfile(withId: id) {
-            viewContext.delete(agentToDelete)
-            logger.info("Deleting Agent Profile with ID \(id.uuidString) from context.")
-            saveContext()
         }
     }
     
@@ -442,20 +355,13 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         case .ollama:
             if let configModel = model.ollamaConfig {
                 let ollamaConfigEntity = OllamaConfigEntity(context: viewContext)
-                ollamaConfigEntity.baseURL = configModel.baseURL
-                ollamaConfigEntity.modelName = configModel.modelName
-                ollamaConfigEntity.temperature = configModel.temperature ?? 0.8
-                ollamaConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                ollamaConfigEntity.baseURL = configModel.baseURL; ollamaConfigEntity.modelName = configModel.modelName; ollamaConfigEntity.temperature = configModel.temperature ?? 0.8; ollamaConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); ollamaConfigEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
                 newIntegration.ollamaConfig = ollamaConfigEntity
             }
         case .remote:
             if let configModel = model.remoteConfig {
                 let remoteConfigEntity = RemoteConfigEntity(context: viewContext)
-                remoteConfigEntity.provider = configModel.provider.rawValue
-                remoteConfigEntity.apiKey = configModel.apiKey
-                remoteConfigEntity.modelName = configModel.modelName
-                remoteConfigEntity.temperature = configModel.temperature ?? 0.8
-                remoteConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                remoteConfigEntity.provider = configModel.provider.rawValue; remoteConfigEntity.apiKey = configModel.apiKey; remoteConfigEntity.modelName = configModel.modelName; remoteConfigEntity.temperature = configModel.temperature ?? 0.8; remoteConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); remoteConfigEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
                 newIntegration.remoteConfig = remoteConfigEntity
             }
         }
@@ -477,20 +383,13 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             case .ollama:
                 if let configModel = model.ollamaConfig {
                     let newConfig = OllamaConfigEntity(context: viewContext)
-                    newConfig.baseURL = configModel.baseURL
-                    newConfig.modelName = configModel.modelName
-                    newConfig.temperature = configModel.temperature ?? 0.8
-                    newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                    newConfig.baseURL = configModel.baseURL; newConfig.modelName = configModel.modelName; newConfig.temperature = configModel.temperature ?? 0.8; newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); newConfig.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
                     entity.ollamaConfig = newConfig
                 }
             case .remote:
                  if let configModel = model.remoteConfig {
                     let newConfig = RemoteConfigEntity(context: viewContext)
-                    newConfig.provider = configModel.provider.rawValue
-                    newConfig.apiKey = configModel.apiKey
-                    newConfig.modelName = configModel.modelName
-                    newConfig.temperature = configModel.temperature ?? 0.8
-                    newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                    newConfig.provider = configModel.provider.rawValue; newConfig.apiKey = configModel.apiKey; newConfig.modelName = configModel.modelName; newConfig.temperature = configModel.temperature ?? 0.8; newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); newConfig.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
                     entity.remoteConfig = newConfig
                 }
             }
@@ -498,18 +397,11 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             switch model.providerType {
             case .ollama:
                 if let configModel = model.ollamaConfig, let configEntity = entity.ollamaConfig {
-                    configEntity.baseURL = configModel.baseURL
-                    configEntity.modelName = configModel.modelName
-                    configEntity.temperature = configModel.temperature ?? 0.8
-                    configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                    configEntity.baseURL = configModel.baseURL; configEntity.modelName = configModel.modelName; configEntity.temperature = configModel.temperature ?? 0.8; configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); configEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
                 }
             case .remote:
                 if let configModel = model.remoteConfig, let configEntity = entity.remoteConfig {
-                    configEntity.provider = configModel.provider.rawValue
-                    configEntity.apiKey = configModel.apiKey
-                    configEntity.modelName = configModel.modelName
-                    configEntity.temperature = configModel.temperature ?? 0.8
-                    configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096)
+                    configEntity.provider = configModel.provider.rawValue; configEntity.apiKey = configModel.apiKey; configEntity.modelName = configModel.modelName; configEntity.temperature = configModel.temperature ?? 0.8; configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); configEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
                 }
             }
         }
@@ -603,6 +495,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         managedObject.error_title = nil
         managedObject.error_details = nil
         managedObject.image_url = nil
+        managedObject.image_data = nil
 
         switch content {
         case .plainText(let text):
@@ -619,14 +512,16 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             managedObject.messageType = "error"
             managedObject.error_title = title
             managedObject.error_details = details
-        case .image(let url, _):
+        case .image(let url, _, let imageData):
             managedObject.messageType = "image"
             managedObject.image_url = url?.absoluteString
+            managedObject.image_data = imageData
         }
     }
 }
 
-// MARK: - NSManagedObject Subclass Extensions
+
+// MARK: - Entity Extensions
 
 extension ConversationEntity {
     func toConversationStruct() -> Conversation {
@@ -638,7 +533,7 @@ extension ConversationEntity {
             messages: messagesArray.sorted(by: { $0.timestamp < $1.timestamp }),
             timestamp: self.timestamp ?? Date(),
             userDefinedTitle: self.userDefinedTitle,
-            isPinned: self.isPinned, // Read isPinned
+            isPinned: self.isPinned,
             openAIThreadID: self.openAIThreadID,
             backendType: backendType,
             backendEntityId: self.backendEntityId
@@ -647,23 +542,45 @@ extension ConversationEntity {
 }
 
 extension ChatMessageEntity {
+    // **FIX:** Add logger to the extension's scope.
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatMessageEntity")
+
     func toChatMessageStruct() -> ChatMessage {
-        var content: MessageContent = .error(title: "Unknown Content", details: "Could not decode message content from Core Data.")
+        let messageId = self.id ?? UUID()
+        Self.logger.debug("Decoding message \(messageId.uuidString)...")
         
-        switch self.messageType {
-        case "plainText":
-            content = .plainText(self.text_content ?? "")
-        case "markdownText":
-            content = .markdownText(self.text_content ?? "")
-        case "codeBlock":
-            content = .codeBlock(language: self.code_language, code: self.code_content ?? "")
-        case "error":
-            content = .error(title: self.error_title, details: self.error_details ?? "")
-        case "image":
-            let url = self.image_url.flatMap { URL(string: $0) }
-            content = .image(url: url, alt: nil)
-        default:
-            break
+        var finalContent: MessageContent
+        var finalAgentResponse: AgentResponse?
+
+        // **FIX:** Use KVC to retrieve the transformable attribute to bypass static type checks.
+        if let agentResponse = self.value(forKey: "agentResponse") as? AgentResponse, !agentResponse.variants.isEmpty {
+            Self.logger.info("✅ Successfully decoded AgentResponse for message \(messageId.uuidString) with \(agentResponse.variants.count) variants.")
+            finalAgentResponse = agentResponse
+            if agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
+                finalContent = agentResponse.variants[agentResponse.selectedVariantIndex].content
+            } else {
+                Self.logger.warning("Selected variant index \(agentResponse.selectedVariantIndex) is out of bounds. Using first variant.")
+                finalContent = agentResponse.variants.first!.content
+            }
+        } else {
+            // Fallback for older messages or decoding failures.
+            Self.logger.warning("⚠️ Could not decode AgentResponse for message \(messageId.uuidString). Using fallback content.")
+            switch self.messageType {
+            case "plainText": finalContent = .plainText(self.text_content ?? "")
+            case "markdownText": finalContent = .markdownText(self.text_content ?? "")
+            case "codeBlock": finalContent = .codeBlock(language: self.code_language, code: self.code_content ?? "")
+            case "error": finalContent = .error(title: self.error_title, details: self.error_details ?? "")
+            case "image":
+                let url = self.image_url.flatMap { URL(string: $0) }
+                finalContent = .image(url: url, alt: nil, imageData: self.image_data)
+            default:
+                finalContent = .error(title: "Unknown Content", details: "Could not decode message content.")
+            }
+            
+            if self.senderType == SenderRole.agent.rawValue {
+                let initialVariant = ResponseMessageVariant(content: finalContent, backendEntityId: nil)
+                finalAgentResponse = AgentResponse(variants: [initialVariant])
+            }
         }
         
         let textFileEntities = self.attachedTextFiles as? Set<AttachedTextFileEntity> ?? []
@@ -672,19 +589,21 @@ extension ChatMessageEntity {
         let imageFileEntities = self.attachedImageFiles as? Set<AttachedImageFileEntity> ?? []
         let attachedImageFiles = imageFileEntities.compactMap { $0.toAttachedImageFileStruct() }
         
-        return ChatMessage(
-            id: self.id ?? UUID(),
+        let chatMessage = ChatMessage(
+            id: messageId,
             conversationId: self.conversationId ?? UUID(),
             timestamp: self.timestamp ?? Date(),
             sender: SenderRole(rawValue: self.senderType ?? "user") ?? .user,
-            content: content,
+            content: finalContent,
             attachedTextFiles: attachedTextFiles.isEmpty ? nil : attachedTextFiles,
             attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles
         )
+        
+        chatMessage.agentResponse = finalAgentResponse
+        
+        return chatMessage
     }
 }
-
-// MARK: - Attached File Entity Extensions
 
 extension AttachedTextFileEntity {
     func toAttachedTextFileStruct() -> AttachedTextFile? {
@@ -724,33 +643,6 @@ extension AttachedImageFileEntity {
     }
 }
 
-
-extension AgentProfileEntity {
-    func toAgentProfileModel() -> AgentProfileModel {
-        let selectedToolsSet = self.tools as? Set<SelectedToolEntity> ?? []
-        let selectedToolsArray = selectedToolsSet.map { $0.toSelectedToolModel() }
-        
-        return AgentProfileModel(
-            id: self.id ?? UUID(),
-            name: self.name ?? "Unnamed Agent",
-            role: self.role ?? "",
-            baseURL: self.baseURL ?? "",
-            linkedIntegrationID: self.linkedIntegrationID,
-            tools: selectedToolsArray
-        )
-    }
-}
-
-
-extension SelectedToolEntity {
-    func toSelectedToolModel() -> SelectedTool {
-        return SelectedTool(
-            toolName: self.toolName ?? "unknown_tool",
-            displayName: self.displayName ?? "Unknown Tool"
-        )
-    }
-}
-
 extension LLMIntegrationEntity {
     func toLLMIntegrationModel() -> LLMIntegrationModel {
         let providerType = ProviderType(rawValue: self.providerType ?? "ollama") ?? .ollama
@@ -776,9 +668,13 @@ extension LLMIntegrationEntity {
 
 extension OllamaConfigEntity {
     func toOllamaConfigModel() -> OllamaConfigModel {
+        let generationTypeStrings = self.generationType as? [String]
+        let generationTypes = generationTypeStrings?.compactMap { GenerationType(rawValue: $0) }
+        
         return OllamaConfigModel(
             baseURL: self.baseURL ?? "",
             modelName: self.modelName ?? "",
+            generationType: generationTypes,
             temperature: self.temperature,
             contextWindowSize: Int(self.contextWindowSize)
         )
@@ -787,17 +683,20 @@ extension OllamaConfigEntity {
 
 extension RemoteConfigEntity {
     func toRemoteConfigModel() -> RemoteConfigModel {
+        let generationTypeStrings = self.generationType as? [String]
+        let generationTypes = generationTypeStrings?.compactMap { GenerationType(rawValue: $0) }
+        
         return RemoteConfigModel(
             provider: RemoteProvider(rawValue: self.provider ?? "openAI") ?? .openAI,
             apiKey: self.apiKey ?? "",
             modelName: self.modelName ?? "",
+            generationType: generationTypes,
             temperature: self.temperature,
             contextWindowSize: Int(self.contextWindowSize)
         )
     }
 }
 
-// MARK: - Prompt Entity Extension
 extension PromptEntity {
     func toPromptStruct() -> Prompt {
         return Prompt(
@@ -813,7 +712,8 @@ extension PromptEntity {
     }
 }
 
-// MARK: - Value Transformer for [String]
+// MARK: - Value Transformers
+
 @objc(StringArrayTransformer)
 final class StringArrayTransformer: NSSecureUnarchiveFromDataTransformer {
     override static var allowedTopLevelClasses: [AnyClass] {
@@ -823,5 +723,57 @@ final class StringArrayTransformer: NSSecureUnarchiveFromDataTransformer {
     static func register() {
         let transformer = StringArrayTransformer()
         ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "StringArrayTransformer"))
+    }
+}
+
+// MARK: - Value Transformer for [GenerationType]
+@objc(GenerationTypeArrayTransformer)
+final class GenerationTypeArrayTransformer: NSSecureUnarchiveFromDataTransformer {
+    override static var allowedTopLevelClasses: [AnyClass] {
+        [NSArray.self, NSString.self]
+    }
+
+    static func register() {
+        let transformer = GenerationTypeArrayTransformer()
+        ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "GenerationTypeArrayTransformer"))
+    }
+}
+
+@objc(AgentResponseTransformer)
+final class AgentResponseTransformer: ValueTransformer {
+
+    override class func transformedValueClass() -> AnyClass {
+        return NSData.self
+    }
+
+    override class func allowsReverseTransformation() -> Bool {
+        return true
+    }
+
+    override func transformedValue(_ value: Any?) -> Any? {
+        guard let agentResponse = value as? AgentResponse else { return nil }
+        do {
+            let data = try JSONEncoder().encode(agentResponse)
+            return data as NSData
+        } catch {
+            print("Failed to encode AgentResponse: \(error)")
+            return nil
+        }
+    }
+
+    override func reverseTransformedValue(_ value: Any?) -> Any? {
+        guard let data = value as? Data else { return nil }
+        do {
+            let agentResponse = try JSONDecoder().decode(AgentResponse.self, from: data)
+            return agentResponse
+        } catch {
+            print("Failed to decode AgentResponse: \(error)")
+            return nil
+        }
+    }
+
+    static func register() {
+        let transformer = AgentResponseTransformer()
+        ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "AgentResponseTransformer"))
     }
 }

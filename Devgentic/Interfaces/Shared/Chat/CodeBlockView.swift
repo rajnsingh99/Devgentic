@@ -92,7 +92,7 @@ struct AsyncHighlightedCodeView: View {
             highlightr.setTheme(to: "atom-one-dark")
 
             // Define the base font for the code.
-            let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 14, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 14)!
+            let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 12)!
             
             // Perform the potentially slow highlighting operation.
             let attributedCode = highlightr.highlight(code, as: language, fastRender: true) ?? NSAttributedString(string: code)

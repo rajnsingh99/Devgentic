@@ -13,14 +13,22 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 private let CODE_BLOCK_LINE_LIMIT = 50
 
 struct ChatBubbleView: View {
-    let message: ChatMessage
+    @ObservedObject var message: ChatMessage
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+
+    private var contentToDisplay: MessageContent {
+        if message.sender == .agent, let content = message.currentAgentContent {
+            return content
+        }
+        return message.content
+    }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: UITheme.Spacing.medium) {
             if message.sender == .agent {
                 VStack(alignment: .leading, spacing: UITheme.Spacing.medium) {
-                    switch message.content {
+                    switch contentToDisplay {
                     case .plainText(let text):
                         Text(text)
                             .font(UITheme.Fonts.body)
@@ -34,7 +42,6 @@ struct ChatBubbleView: View {
                             if message.isStreaming {
                                 FadeInTypewriterView(markdown: text, message: message)
                             } else {
-                                // MARK: - FIX: Use the array index as a stable ID since ContentBlock is no longer Identifiable.
                                 let blocks = parseMarkdown(text)
                                 ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                                     ContentBlockView(block: block, message: message)
@@ -58,18 +65,24 @@ struct ChatBubbleView: View {
                         ErrorMessageView(title: title, details: details)
                             .cardStyle()
 
-                    case .image:
-                        Text("[Image Content]")
-                            .cardStyle()
+                    case .image(_, _, let imageData):
+                        if let data = imageData {
+                            ImageView(imageData: data)
+                                .padding(.vertical, UITheme.Spacing.small)
+                                .frame(maxWidth: 500, alignment: .leading)
+                        } else {
+                            ErrorMessageView(title: "Image Not Available", details: "The image data could not be loaded.")
+                                .cardStyle()
+                        }
                     }
                     
-                    if !message.isStreaming && message.content.textContent != nil {
-                        AgentMessageActionsView(message: message)
+                    if !message.isStreaming && contentToDisplay.textContent != nil {
+                        AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
                             .environmentObject(chatHistoryViewModel)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(minHeight: message.isStreaming ? 500 : nil, alignment: .topLeading)
+                .frame(minHeight: message.isStreaming ? 50 : nil, alignment: .topLeading)
                 .padding(.horizontal, 50)
                 Spacer()
             } else { // message.sender == .user
@@ -94,7 +107,7 @@ struct ChatBubbleView: View {
                     }
 
                     if let textContent = message.content.textContent, !textContent.isEmpty {
-                        UserMessageContentView(text: textContent)
+                        UserMessageView(text: textContent)
                             .userBubbleStyle()
                             .textSelection(.enabled)
                     }
@@ -105,78 +118,15 @@ struct ChatBubbleView: View {
         }
         .padding(.vertical, 30)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
+        .animation(.easeInOut, value: message.agentResponse?.selectedVariantIndex)
     }
 }
-
-// MARK: - User Message Content View with Expand/Collapse
-fileprivate struct UserMessageContentView: View {
-    let text: String
-    private let lineLimitCollapsed = 10
-    @State private var isExpanded = false
-    @State private var isTruncatable = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if isTruncatable {
-                HStack {
-                    Spacer()
-                    Button(action: {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            isExpanded.toggle()
-                        }
-                    }) {
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white.opacity(0.7))
-                            .rotationEffect(.degrees(isExpanded ? 180 : 0))
-                            .padding(6)
-                            .background(Color.black.opacity(0.25))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(isExpanded ? "Collapse" : "Expand")
-                }
-            }
-
-            Text(text)
-                .font(UITheme.Fonts.body)
-                .lineLimit(isExpanded ? nil : lineLimitCollapsed)
-                .background(
-                    GeometryReader { geometry in
-                        Color.clear.onAppear {
-                            determineTruncation(availableWidth: geometry.size.width)
-                        }
-                    }
-                )
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .clipped()
-    }
-    
-    private func determineTruncation(availableWidth: CGFloat) {
-        let fullTextView = Text(text)
-            .font(UITheme.Fonts.body)
-            .frame(width: availableWidth, alignment: .leading)
-        
-        let truncatedTextView = Text(text)
-            .font(UITheme.Fonts.body)
-            .lineLimit(lineLimitCollapsed)
-            .frame(width: availableWidth, alignment: .leading)
-            
-        let fullSize = NSHostingView(rootView: fullTextView).fittingSize
-        let truncatedSize = NSHostingView(rootView: truncatedTextView).fittingSize
-        
-        if fullSize.height > truncatedSize.height + 2 {
-            self.isTruncatable = true
-        }
-    }
-}
-
 
 // MARK: - Reusable Action Button View
 fileprivate struct ActionButton<LabelContent: View>: View {
     let action: () -> Void
     @ViewBuilder let label: LabelContent
+    var disabled: Bool = false
 
     @State private var isHovering = false
 
@@ -187,10 +137,11 @@ fileprivate struct ActionButton<LabelContent: View>: View {
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(isHovering ? Color.gray.opacity(0.3) : Color.clear)
+                        .fill(isHovering && !disabled ? Color.gray.opacity(0.3) : Color.clear)
                 )
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.2)) {
                 isHovering = hovering
@@ -201,12 +152,16 @@ fileprivate struct ActionButton<LabelContent: View>: View {
 
 // MARK: - Agent Message Actions View
 fileprivate struct AgentMessageActionsView: View {
-    let message: ChatMessage
+    @ObservedObject var message: ChatMessage
+    var mainAppViewModel: MainApplicationViewModel
     @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
+    
     @State private var didCopy: Bool = false
+    @State private var showVariantsPopover: Bool = false
 
     private var containsCode: Bool {
-        switch message.content {
+        guard let content = message.currentAgentContent else { return false }
+        switch content {
         case .codeBlock:
             return true
         case .markdownText(let text):
@@ -236,13 +191,29 @@ fileprivate struct AgentMessageActionsView: View {
                     .animation(.easeInOut, value: didCopy)
                 }
 
+                // Variants Button
+                if message.agentResponse?.variants.count ?? 0 > 1 {
+                    ActionButton(action: {
+                        showVariantsPopover.toggle()
+                    }) {
+                        Label("\(message.agentResponse?.variants.count ?? 0) Versions", systemImage: "square.3.layers.3d.down.right")
+                    }
+                    .foregroundColor(.secondary)
+                    .help("Show other response versions")
+                    .popover(isPresented: $showVariantsPopover, arrowEdge: .bottom) {
+                        VariantsSelectionView(message: message, isPresented: $showVariantsPopover)
+                    }
+                }
+
+                // Redo Button
+                let isRedoDisabled = (message.agentResponse?.generationAttempts ?? 0) >= 5
                 ActionButton(action: {
-                    // TODO: Implement redo functionality
-                }) {
+                    mainAppViewModel.regenerateResponse(for: message)
+                }, disabled: isRedoDisabled) {
                     Label("Redo", systemImage: "arrow.clockwise")
                 }
-                .foregroundColor(.secondary)
-                .help("Generate a new response (not implemented)")
+                .foregroundColor(isRedoDisabled ? .gray.opacity(0.5) : .secondary)
+                .help(isRedoDisabled ? "Maximum number of responses generated" : "Generate a new response")
 
                 if containsCode {
                     ActionButton(action: {
@@ -257,6 +228,58 @@ fileprivate struct AgentMessageActionsView: View {
             .font(.system(size: 12))
             .padding(.top, UITheme.Spacing.small)
         }
+    }
+}
+
+// MARK: - Variants Selection Popover View
+fileprivate struct VariantsSelectionView: View {
+    @ObservedObject var message: ChatMessage
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Response Versions")
+                .font(.headline)
+                .padding()
+            
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let agentResponse = message.agentResponse {
+                        ForEach(Array(zip(agentResponse.variants.indices, agentResponse.variants)), id: \.0) { index, variant in
+                            Button(action: {
+                                message.agentResponse?.selectedVariantIndex = index
+                                isPresented = false
+                            }) {
+                                HStack {
+                                    Text(variant.content.textContent ?? "Empty Response")
+                                        .lineLimit(3)
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    
+                                    Spacer()
+                                    
+                                    if index == agentResponse.selectedVariantIndex {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.accentColor)
+                                    }
+                                }
+                                .padding()
+                                .background(index == agentResponse.selectedVariantIndex ? Color.accentColor.opacity(0.1) : Color.clear)
+                            }
+                            .buttonStyle(.plain)
+                            
+                            if index < agentResponse.variants.count - 1 {
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 300, idealWidth: 400, maxWidth: 500, minHeight: 200, idealHeight: 300, maxHeight: 400)
     }
 }
 
@@ -288,11 +311,10 @@ fileprivate struct AgentThinkingView: View {
 // MARK: - Streaming FadeInTypewriter Animation View
 struct FadeInTypewriterView: View {
     let markdown: String
-    let message: ChatMessage
+    @ObservedObject var message: ChatMessage
     
     var body: some View {
         VStack(alignment: .leading) {
-            // MARK: - FIX: Use the array index as a stable ID since ContentBlock is no longer Identifiable.
             let blocks = parseMarkdown(markdown)
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 ContentBlockView(block: block, message: message)

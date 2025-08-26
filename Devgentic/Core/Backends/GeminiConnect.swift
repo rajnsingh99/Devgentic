@@ -29,33 +29,35 @@ class GeminiConnect {
     private static func createStreamingURLSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         
-        // Per the research, this is the most critical setting for streaming.
-        // It prevents the session from timing out if the server is idle between events.
         configuration.timeoutIntervalForRequest = TimeInterval.greatestFiniteMagnitude
         configuration.timeoutIntervalForResource = TimeInterval.greatestFiniteMagnitude
-        
-        // Ensure we always fetch fresh data from the network.
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        
-        // Set required headers that will apply to all requests in this session.
         configuration.httpAdditionalHeaders = [
             "Content-Type": "application/json"
-            // Note: "Accept: text/event-stream" is removed as Gemini's streaming response
-            // is a fragmented JSON array, not a standard SSE stream.
         ]
         
         return URLSession(configuration: configuration)
     }
     
     /// Establishes a streaming connection to the Gemini API and returns an async stream of text parts.
+    /// This function is already compliant with the new architecture.
     func streamMessage(
         conversationID: UUID,
         userQuery: String,
         history: [ChatMessage],
         modelName: String,
+        generationType: [GenerationType]?,
         context: TraceContext
     ) -> AsyncThrowingStream<String, Error> {
-        AsyncThrowingStream { continuation in
+        // Check for image generation type
+        if generationType?.contains(.imageData) == true {
+            return AsyncThrowingStream { continuation in
+                let error = NSError(domain: "GeminiConnectService.StreamingError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Streaming is not supported for image generation models."])
+                continuation.finish(throwing: error)
+            }
+        }
+        
+        return AsyncThrowingStream { continuation in
             Task {
                 let apiContext = context.newSpan()
                 logger.info("API Call Start: Gemini. traceID: \(apiContext.traceID), spanID: \(apiContext.spanID)")
@@ -85,7 +87,6 @@ class GeminiConnect {
                 
                 do {
                     request.httpBody = try JSONEncoder().encode(requestBody)
-                    // --- ADDED: Robust payload logging ---
                     logRequestPayload(requestBody, for: "streamMessage")
                 } catch {
                     logger.error("Failed to encode Gemini request body: \(error.localizedDescription)")
@@ -99,7 +100,6 @@ class GeminiConnect {
                     guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
                         var errorBody = ""
-                        // Asynchronously read the error body
                         for try await byte in bytes { errorBody += String(data: Data([byte]), encoding: .utf8) ?? "" }
                         logger.error("Gemini API returned a non-200 status code: \(statusCode). Body: \(errorBody)")
                         let error = NSError(domain: "GeminiConnectService.APIError", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Gemini API Error: \(errorBody)"])
@@ -109,17 +109,12 @@ class GeminiConnect {
                     
                     var isFirstToken = true
 
-                    // --- NEW ROBUST PARSING LOGIC ---
-                    // This logic handles the fragmented, multi-line JSON stream from the Gemini API.
-                    // It buffers incoming data and parses complete JSON objects as they are formed.
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
                         logger.trace("Raw stream line received: \(line)")
 
-                        // The Gemini stream sends data in a Server-Sent Event (SSE) like format,
-                        // where each data payload is prefixed with "data: ".
                         if line.hasPrefix("data: ") {
-                            let jsonString = String(line.dropFirst(6)) // Remove "data: " prefix
+                            let jsonString = String(line.dropFirst(6))
 
                             if let data = jsonString.data(using: .utf8) {
                                 do {
@@ -133,13 +128,11 @@ class GeminiConnect {
                                         continuation.yield(newText)
                                     }
                                 } catch {
-                                    // This can happen if a JSON chunk is malformed. Log it and continue.
                                     logger.warning("Could not decode a JSON object-like line: \(error.localizedDescription). JSON: \(jsonString)")
                                 }
                             }
                         }
                     }
-                    // --- END OF NEW PARSING LOGIC ---
                     
                     let apiEndTime = Date()
                     if let firstTokenTime = firstTokenTime {
@@ -169,7 +162,6 @@ class GeminiConnect {
 
         for message in messages {
             guard message.content.textContent != nil, !message.content.textContent!.isEmpty else { continue }
-            // Gemini requires alternating roles. If the last message has the same sender, skip this one.
             if message.sender == lastRole {
                 logger.warning("Sanitizing history: found consecutive messages from the same sender (\(message.sender.rawValue)). Skipping.")
                 continue
@@ -179,7 +171,6 @@ class GeminiConnect {
             lastRole = message.sender
         }
         
-        // The conversation must start with a 'user' role message.
         if sanitized.first?.sender == .agent {
             logger.warning("Sanitizing history: first message was from the agent. Removing it.")
             sanitized.removeFirst()
@@ -188,14 +179,24 @@ class GeminiConnect {
         return sanitized
     }
 
+    /// **REFACTORED for Step 2.2**
+    /// Sends a non-streaming message and returns raw response data instead of a ChatMessage.
     func sendMessage(
         conversationID: UUID,
         userQuery: String,
         history: [ChatMessage],
-        modelName: String
-    ) async throws -> ([ChatMessage], Error?) {
-        // This non-streaming method can continue to use the same session.
-        // Its behavior is not affected by the long timeout.
+        modelName: String,
+        generationType: [GenerationType]?
+    ) async throws -> (responseText: String?, responseImageData: Data?, error: Error?) {
+        
+        if generationType?.contains(.imageData) == true {
+            return try await generateImage(
+                conversationID: conversationID,
+                userQuery: userQuery,
+                modelName: modelName
+            )
+        }
+        
         guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelName):generateContent?key=\(apiKey)") else {
             throw NSError(domain: "GeminiConnectService.URL", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid Gemini API URL for model: \(modelName)"])
         }
@@ -216,7 +217,6 @@ class GeminiConnect {
         
         do {
             request.httpBody = try JSONEncoder().encode(requestBody)
-            // --- ADDED: Robust payload logging ---
             logRequestPayload(requestBody, for: "sendMessage")
         } catch {
             logger.error("Failed to encode Gemini request body: \(error.localizedDescription)")
@@ -234,20 +234,19 @@ class GeminiConnect {
             }
             
             logger.error("Gemini API returned a non-200 status code: \(statusCode). Response: \(errorDetails)")
-            let errorContent = MessageContent.error(title: "Gemini API Error", details: "API Error (Code: \(statusCode)): \(errorDetails)")
-            return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
+            let error = NSError(domain: "GeminiConnectService.APIError", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "API Error (Code: \(statusCode)): \(errorDetails)"])
+            return (nil, nil, error)
         }
 
         do {
             let geminiResponse = try JSONDecoder().decode(GeminiResponse.self, from: data)
             
             if let responseText = geminiResponse.candidates.first?.content.parts.first?.text {
-                let agentMessage = ChatMessage(conversationId: conversationID, sender: .agent, content: .markdownText(responseText))
-                return ([agentMessage], nil)
+                return (responseText, nil, nil)
             } else {
                  let errorText = "Could not find valid text in the Gemini API response."
-                 let errorContent = MessageContent.error(title: "Invalid Response Structure", details: errorText)
-                 return ([ChatMessage(conversationId: conversationID, sender: .agent, content: errorContent)], nil)
+                 let error = NSError(domain: "GeminiConnectService.APIError", code: 0, userInfo: [NSLocalizedDescriptionKey: errorText])
+                 return (nil, nil, error)
             }
 
         } catch {
@@ -256,11 +255,68 @@ class GeminiConnect {
         }
     }
     
-    // --- ADDED: Private helper for logging request payloads ---
-    /// Encodes a `Codable` request body to a pretty-printed JSON string and logs it.
-    /// - Parameters:
-    ///   - payload: The `Codable` object to be logged.
-    ///   - functionName: The name of the calling function, for context in logs.
+    /// **REFACTORED for Step 2.2**
+    /// Generates an image and returns raw Data instead of a ChatMessage.
+    private func generateImage(
+        conversationID: UUID,
+        userQuery: String,
+        modelName: String
+    ) async throws -> (responseText: String?, responseImageData: Data?, error: Error?) {
+        logger.info("Initiating image generation with model: \(modelName)")
+        
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelName):generateContent?key=\(apiKey)") else {
+            throw NSError(domain: "GeminiConnectService.URL", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid Gemini Image API URL for model: \(modelName)"])
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+
+        let requestBody = GeminiImageRequest(
+            contents: [
+                Content(role: "user", parts: [Part(text: userQuery)])
+            ],
+            generationConfig: GenerationConfig(responseModalities: ["IMAGE", "TEXT"])
+        )
+
+        do {
+            request.httpBody = try JSONEncoder().encode(requestBody)
+            logRequestPayload(requestBody, for: "generateImage")
+        } catch {
+            logger.error("Failed to encode Gemini Image request body: \(error.localizedDescription)")
+            throw error
+        }
+
+        let (data, response) = try await self.session.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let errorDetails = String(data: data, encoding: .utf8) ?? "Unable to decode error response."
+            logger.error("Gemini Image API returned a non-200 status code: \(statusCode). Response: \(errorDetails)")
+            let error = NSError(domain: "GeminiConnectService.APIError", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "API Error (Code: \(statusCode)): \(errorDetails)"])
+            return (nil, nil, error)
+        }
+
+        do {
+            let geminiResponse = try JSONDecoder().decode(GeminiResponse.self, from: data)
+            
+            if let base64String = geminiResponse.candidates.first?.content.parts.first(where: { $0.inlineData != nil })?.inlineData?.data,
+               let imageData = Data(base64Encoded: base64String) {
+                
+                logger.info("Successfully decoded image data from Base64 string.")
+                return (nil, imageData, nil)
+                
+            } else {
+                let errorText = "Could not find valid image data in the Gemini API response."
+                logger.warning("\(errorText)")
+                let error = NSError(domain: "GeminiConnectService.APIError", code: 0, userInfo: [NSLocalizedDescriptionKey: errorText])
+                return (nil, nil, error)
+            }
+        } catch {
+            logger.error("Failed to decode Gemini Image JSON response: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
     private func logRequestPayload<T: Codable>(_ payload: T, for functionName: String) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -287,24 +343,31 @@ private struct GeminiRequest: Codable {
     let contents: [Content]
 }
 
-// Unified Content/Part for request and response
 private struct Content: Codable {
-    // Role is required for requests, but optional in response content.
     let role: String?
     let parts: [Part]
 }
 
 private struct Part: Codable {
-    let text: String
+    let text: String?
+    let inlineData: InlineData?
+    
+    init(text: String?, inlineData: InlineData? = nil) {
+        self.text = text
+        self.inlineData = inlineData
+    }
+    
+    struct InlineData: Codable {
+        let mimeType: String
+        let data: String
+    }
 }
 
-// Unified Response for both streaming chunks and full non-streaming responses
 private struct GeminiResponse: Codable {
     let candidates: [Candidate]
 
     struct Candidate: Codable {
         let content: Content
-        // Finish reason is optional, especially in streaming chunks.
         let finishReason: String?
     }
 }
@@ -317,4 +380,16 @@ private struct GeminiErrorResponse: Codable {
         let message: String
         let status: String
     }
+}
+
+
+// MARK: - Codable Structs for Gemini Image Generation API (generateContent)
+
+private struct GeminiImageRequest: Codable {
+    let contents: [Content]
+    let generationConfig: GenerationConfig
+}
+
+private struct GenerationConfig: Codable {
+    let responseModalities: [String]
 }

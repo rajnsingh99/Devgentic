@@ -59,6 +59,7 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.textContainer?.lineFragmentPadding = 10
         textView.typingAttributes = defaultTypingAttributes
         textView.delegate = context.coordinator
+        textView.allowsUndo = true // Enable undo functionality
         
         context.coordinator.isProgrammaticallyChangingText = true
         textView.string = text

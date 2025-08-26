@@ -23,20 +23,21 @@ class MainApplicationViewModel: ObservableObject {
     let explorerViewModel = ExplorerViewModel()
     let insertPromptText = PassthroughSubject<String, Never>()
     
+    // Dependencies are now injected and stored.
+    private let activeStreamManager: ActiveStreamManager
+    private let persistenceService: CoreDataServiceProtocol
+    private let fileProcessorService: FileProcessorService
+    private let chatHistoryViewModel: ChatHistoryViewModel
+
     private var cancellables = Set<AnyCancellable>()
     private var conversationLoader: AnyCancellable?
     private var conversationLoadTask: Task<Void, Never>?
     
-    private let persistenceService: CoreDataServiceProtocol
-    private let fileProcessorService: FileProcessorService
-    private let backendOrchestrationService: BackendOrchestrationService
-    private let chatHistoryViewModel: ChatHistoryViewModel
     private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
 
     // MARK: - Service & Store Observables
     @ObservedObject var ollamaService = OllamaService.shared
     @ObservedObject var llmIntegrationStore: LLMIntegrationStore
-    @ObservedObject var agentStore: AgentStore
     
     // MARK: - Published State Properties
     @Published var conversations: [Conversation] = []
@@ -50,6 +51,8 @@ class MainApplicationViewModel: ObservableObject {
     @Published var isWebSearchEnabled: Bool = false
     @Published var webSearchAPIKey: String?
     @Published var isWebSearchActive: Bool = false
+    
+    @Published var streamingMessageID: UUID? = nil
     
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -67,29 +70,22 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     // MARK: - Initialization
-    init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
-         llmIntegrationStore: LLMIntegrationStore,
-         agentStore: AgentStore = AgentStore(),
-         fileProcessorService: FileProcessorService = FileProcessorService(),
-         chatHistoryViewModel: ChatHistoryViewModel
+    init(
+        persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
+        llmIntegrationStore: LLMIntegrationStore,
+        fileProcessorService: FileProcessorService = FileProcessorService(),
+        activeStreamManager: ActiveStreamManager,
+        chatHistoryViewModel: ChatHistoryViewModel
     ) {
         self.persistenceService = persistenceService
         self.llmIntegrationStore = llmIntegrationStore
-        self.agentStore = agentStore
         self.fileProcessorService = fileProcessorService
+        self.activeStreamManager = activeStreamManager
         self.chatHistoryViewModel = chatHistoryViewModel
-        
-        self.backendOrchestrationService = BackendOrchestrationService(
-            agentStore: agentStore,
-            llmIntegrationStore: llmIntegrationStore,
-            fileProcessorService: fileProcessorService
-        )
 
         logger.info("MainApplicationViewModel initialized.")
         
-        // Load settings from UserDefaults
         loadSettings()
-        
         setupBindings()
         setupConversationLoader()
         
@@ -103,20 +99,6 @@ class MainApplicationViewModel: ObservableObject {
             logger.info("Web search is disabled (API key not found in UserDefaults).")
         }
     }
- 
-    convenience init() {
-        let fpService = FileProcessorService()
-        let llmStore = LLMIntegrationStore()
-        let agStore = AgentStore()
-        let chatHistoryVM = ChatHistoryViewModel()
-
-        self.init(
-            llmIntegrationStore: llmStore,
-            agentStore: agStore,
-            fileProcessorService: fpService,
-            chatHistoryViewModel: chatHistoryVM
-        )
-    }
 
     deinit {
         logger.info("MainApplicationViewModel deinitialized.")
@@ -124,14 +106,12 @@ class MainApplicationViewModel: ObservableObject {
         NotificationCenter.default.removeObserver(self)
         conversationLoadTask?.cancel()
     }
-
+    
     // MARK: - Settings Management
     private func loadSettings() {
-        // Check if the key exists. If not, set the default value to true.
         if UserDefaults.standard.object(forKey: AppSettings.useStreamingResponseKey) == nil {
             UserDefaults.standard.set(true, forKey: AppSettings.useStreamingResponseKey)
         }
-        // Read the value from UserDefaults.
         self.useStreamingResponse = UserDefaults.standard.bool(forKey: AppSettings.useStreamingResponseKey)
         logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(self.useStreamingResponse)")
     }
@@ -140,8 +120,8 @@ class MainApplicationViewModel: ObservableObject {
     private func setupBindings() {
         
         $useStreamingResponse
-            .dropFirst() // Don't save the initial value loaded from UserDefaults
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main) // Wait for changes to settle
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { newValue in
                 UserDefaults.standard.set(newValue, forKey: AppSettings.useStreamingResponseKey)
                 logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(newValue)")
@@ -218,150 +198,155 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Message Sending Logic
     
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
-        if showSettings { showSettings = false }
-        
-        let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        guard !chatHistoryViewModel.isSending else {
-            logger.warning("[sendMessage] Message sending already in progress. Ignoring new request.")
-            return
-        }
-        guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
-            return
-        }
-
-        chatHistoryViewModel.isSending = true
-        logger.info("Beginning message send process with backend: \(config.backendType.rawValue)")
-        
-        let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
-        
-        guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
-            logger.error("[sendMessage] CRITICAL: Could not find or create conversation entity for ID: \(conversationIDToUse.uuidString)")
-            chatHistoryViewModel.isSending = false
-            return
-        }
-
-        let filesForBackend = self.attachedFiles
-        
-        let userMessage = createUserMessage(
-            conversationID: conversationIDToUse,
-            query: plainUserQueryFromEditor,
-            files: filesForBackend
-        )
-        
-        // --- START OF CHANGES ---
-
-        // 1. Create the agent's placeholder message immediately
-        let agentMessagePlaceholder = ChatMessage(
-            conversationId: conversationIDToUse,
-            sender: .agent,
-            content: .markdownText(""), // Start with empty content
-            isStreaming: true
-        )
-        logger.info("Created agent placeholder message with ID \(agentMessagePlaceholder.id.uuidString) to begin streaming.")
-        
-        // 2. Update UI at once with both user message and agent placeholder
-        chatHistoryViewModel.currentChatMessages.insert(contentsOf: [agentMessagePlaceholder, userMessage], at: 0)
-        logger.debug("Inserted user message and agent placeholder into UI.")
-        
-        // 3. Persist the user message
-        Task {
-            await persistenceService.addMessage(userMessage, to: targetConversationEntity)
-            logger.debug("User message persisted successfully.")
-        }
-
-        // 4. Clear the input area
-        self.clearAttachedFiles()
-        logger.debug("Cleared user input and attachments from UI.")
-
-        if useStreamingResponse {
-            let streamingTask = Task {
-                do {
-                    // History now includes the user message but not the placeholder
-                    let historyForBackend = chatHistoryViewModel.currentChatMessages
-                        .filter { $0.id != agentMessagePlaceholder.id }
-                        .reversed()
-
-                    let stream = streamResponse(
-                        withConfig: config,
-                        conversationID: conversationIDToUse,
-                        userQuery: plainUserQueryFromEditor,
-                        history: Array(historyForBackend),
-                        files: filesForBackend
-                    )
-                    for try await token in stream {
-                        chatHistoryViewModel.appendTokenToStreamingMessage(token)
-                    }
-                    await chatHistoryViewModel.finalizeResponse(conversationID: conversationIDToUse, error: nil)
-                } catch {
-                    logger.error("Streaming failed: \(error.localizedDescription)")
-                    await chatHistoryViewModel.finalizeResponse(conversationID: conversationIDToUse, error: error)
-                }
+            if showSettings { showSettings = false }
+            
+            let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            guard !chatHistoryViewModel.isSending else {
+                logger.warning("[sendMessage] Message sending already in progress. Ignoring new request.")
+                return
             }
-            chatHistoryViewModel.setStreamingTask(streamingTask)
-        } else { // Non-streaming "one-shot" logic
+            guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
+                return
+            }
+
+            chatHistoryViewModel.isSending = true
+            logger.info("Beginning message send process with backend: \(config.backendType.rawValue)")
+            
+            let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
+            
+            guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
+                logger.error("[sendMessage] CRITICAL: Could not find or create conversation entity for ID: \(conversationIDToUse.uuidString)")
+                chatHistoryViewModel.isSending = false
+                return
+            }
+
+            let filesForBackend = self.attachedFiles
+            
+            let userMessage = createUserMessage(
+                conversationID: conversationIDToUse,
+                query: plainUserQueryFromEditor,
+                files: filesForBackend
+            )
+            
+            // **FIX**: Append new user message to the end of the array.
+            chatHistoryViewModel.currentChatMessages.append(userMessage)
+            logger.debug("Appended user message into UI.")
+            
             Task {
-                do {
-                    // History now includes the user message but not the placeholder
-                    let historyForBackend = chatHistoryViewModel.currentChatMessages
-                        .filter { $0.id != agentMessagePlaceholder.id }
-                        .reversed()
-                    
-                    let (messages, errorMessage) = await backendOrchestrationService.sendMessage(
-                        withConfig: config,
-                        conversationID: conversationIDToUse,
-                        userQuery: plainUserQueryFromEditor,
-                        files: filesForBackend
-                    )
-
-                    // Find our placeholder message in the UI
-                    if let placeholderIndex = chatHistoryViewModel.currentChatMessages.firstIndex(where: { $0.id == agentMessagePlaceholder.id }) {
-                        var finalMessage = chatHistoryViewModel.currentChatMessages[placeholderIndex]
-                        finalMessage.isStreaming = false
-                        
-                        if let errorMessage = errorMessage {
-                            finalMessage.content = .error(title: "Request Error", details: errorMessage)
-                        } else if let agentResponse = messages.first {
-                            finalMessage.content = agentResponse.content
-                        }
-                        
-                        // Update the UI and persist the final message
-                        chatHistoryViewModel.currentChatMessages[placeholderIndex] = finalMessage
-                        await persistenceService.addMessage(finalMessage, to: targetConversationEntity)
-                    }
-                    
-                    await chatHistoryViewModel.resetSendingState()
-
-                } catch {
-                    logger.error("One-shot request failed: \(error.localizedDescription)")
-                    // Find our placeholder message to update it with the error
-                    if let placeholderIndex = chatHistoryViewModel.currentChatMessages.firstIndex(where: { $0.id == agentMessagePlaceholder.id }) {
-                        var finalMessage = chatHistoryViewModel.currentChatMessages[placeholderIndex]
-                        finalMessage.isStreaming = false
-                        finalMessage.content = .error(title: "Request Error", details: error.localizedDescription)
-                        
-                        // Update the UI and persist the final message
-                        chatHistoryViewModel.currentChatMessages[placeholderIndex] = finalMessage
-                        await persistenceService.addMessage(finalMessage, to: targetConversationEntity)
-                    }
-                    await chatHistoryViewModel.resetSendingState()
-                }
+                await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+                logger.debug("User message persisted successfully.")
             }
-        }
-        // --- END OF CHANGES ---
+
+            self.clearAttachedFiles()
+            logger.debug("Cleared user input and attachments from UI.")
+
+            let agentMessage = activeStreamManager.startMessageStream(
+                withConfig: config,
+                conversationID: conversationIDToUse,
+                userQuery: plainUserQueryFromEditor,
+                history: chatHistoryViewModel.currentChatMessages.reversed(),
+                files: filesForBackend,
+                updating: nil, // This is a new message, not a regeneration
+                onComplete: { [weak self] in
+                    // This block is called when the stream finishes or is cancelled.
+                    DispatchQueue.main.async {
+                        self?.streamingMessageID = nil
+                        logger.info("Stream completed. Resetting streamingMessageID.")
+                    }
+                }
+            )
+
+            self.streamingMessageID = agentMessage.id
+
+            // **FIX**: Append new agent message to the end of the array.
+            chatHistoryViewModel.currentChatMessages.append(agentMessage)
+            logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
+
+            Task {
+                await chatHistoryViewModel.resetSendingState()
+            }
     }
     
-    func streamResponse(withConfig config: BackendRequestConfig, conversationID: UUID, userQuery: String, history: [ChatMessage], files: [FileSystemItem]) -> AsyncThrowingStream<String, Error> {
-        let context = TraceContext()
-        logger.info("🚀 [streamResponse] Providing stream to consumer. History count: \(history.count). traceID: \(context.traceID)")
-        return backendOrchestrationService.streamMessage(
-            withConfig: config,
-            conversationID: conversationID,
-            userQuery: userQuery,
-            history: history,
-            files: files,
-            context: context
+    // MARK: - Response Regeneration
+    
+    @MainActor
+    func regenerateResponse(for agentMessage: ChatMessage) {
+        // 1. Guard against max attempts (e.g., 5).
+        guard let agentResponse = agentMessage.agentResponse, agentResponse.generationAttempts < 5 else {
+            logger.warning("Max generation attempts reached for message \(agentMessage.id.uuidString).")
+            // Optionally show an alert to the user.
+            return
+        }
+
+        // 2. Reconstruct the chat history up to the message preceding the agent's response.
+        guard let agentMessageIndex = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
+            logger.error("Could not find agent message in chat history to regenerate.")
+            return
+        }
+        
+        // History for the backend should be in chronological order (oldest first).
+        // Our view model's array is newest first, so we take everything after the agent message and reverse it.
+        let historyForRegeneration = Array(chatHistoryViewModel.currentChatMessages.dropFirst(agentMessageIndex + 1).reversed())
+        
+        // The user query is the message immediately preceding the agent's response.
+        guard let userQueryMessage = chatHistoryViewModel.currentChatMessages[safe: agentMessageIndex + 1],
+              userQueryMessage.sender == .user else {
+            logger.error("Could not find the preceding user query for regeneration.")
+            return
+        }
+        let userQuery = userQueryMessage.content.textContent ?? ""
+        
+        // **FIXED: Correctly initialize FileSystemItem with all required parameters.**
+        let filesForBackend = (userQueryMessage.attachedTextFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? []) +
+                              (userQueryMessage.attachedImageFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? [])
+
+        // 3. Get the currently selected backend configuration from the UI.
+        let config = backendConfiguration.getRequestConfig()
+        let entityId = config.backendType == .agent ? config.agentID : config.integrationID
+
+        // 4. Create a new, empty variant and add it to the message.
+        // This will instantly update the UI to show a "Thinking..." state.
+        let newVariant = ResponseMessageVariant(
+            content: .markdownText(""),
+            backendEntityId: entityId
         )
+        agentMessage.agentResponse?.variants.append(newVariant)
+        agentMessage.agentResponse?.selectedVariantIndex = (agentMessage.agentResponse?.variants.count ?? 1) - 1
+        agentMessage.agentResponse?.generationAttempts += 1
+        agentMessage.isStreaming = true
+
+        // 5. Call the updated ActiveStreamManager to begin the stream,
+        // targeting the existing message for content updates.
+        let streamingMessage = activeStreamManager.startMessageStream(
+            withConfig: config,
+            conversationID: agentMessage.conversationId,
+            userQuery: userQuery,
+            history: historyForRegeneration,
+            files: filesForBackend,
+            updating: agentMessage, // Pass the message to update
+            onComplete: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.streamingMessageID = nil
+                    logger.info("Regeneration stream completed for message \(agentMessage.id.uuidString).")
+                }
+            }
+        )
+        
+        // Track the streaming message ID to manage the UI state (e.g., show cancel button)
+        self.streamingMessageID = streamingMessage.id
+    }
+    
+    /// Cancels the currently active streaming response.
+    func cancelStreamingResponse() {
+        guard let messageID = streamingMessageID else {
+            logger.warning("cancelStreamingResponse called but no streamingMessageID is set.")
+            return
+        }
+        
+        logger.info("User requested to cancel streaming for message: \(messageID.uuidString)")
+        activeStreamManager.cancelStream(for: messageID)
+        // The onComplete handler in `sendMessage` or `regenerateResponse` will set streamingMessageID to nil.
     }
     
     private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) -> ChatMessage {
@@ -471,7 +456,7 @@ class MainApplicationViewModel: ObservableObject {
             self.backendConfiguration.selectedAgentID = nil
             self.backendConfiguration.selectedIntegrationID = nil
         }
-        logger.info("Loaded backend state for conversation \(conversationID.uuidString, privacy: .public): \(backendType.rawValue)")
+        logger.info("Loaded backend state for conversation \(conversationID, privacy: .public): \(backendType.rawValue)")
     }
 
     private func updateBackendForCurrentConversation(conversationID: UUID, backendType: BackendType, agentID: UUID?, integrationID: UUID?) {
@@ -580,7 +565,7 @@ class MainApplicationViewModel: ObservableObject {
         UserDefaults.standard.set(apiKey, forKey: webSearchAPIKeyDefaultsKey)
         self.webSearchAPIKey = apiKey
         self.isWebSearchEnabled = true
-        self.isWebSearchActive = true // Also activate it immediately
+        self.isWebSearchActive = true
         logger.info("Successfully saved web search API key to UserDefaults and enabled search.")
     }
 
@@ -588,7 +573,14 @@ class MainApplicationViewModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: webSearchAPIKeyDefaultsKey)
         self.webSearchAPIKey = nil
         self.isWebSearchEnabled = false
-        self.isWebSearchActive = false // Deactivate it as well
+        self.isWebSearchActive = false
         logger.info("Successfully removed web search API key from UserDefaults and disabled search.")
+    }
+}
+
+extension Collection {
+    /// Returns the element at the specified index if it is within bounds, otherwise nil.
+    subscript (safe index: Index) -> Element? {
+        return indices.contains(index) ? self[index] : nil
     }
 }

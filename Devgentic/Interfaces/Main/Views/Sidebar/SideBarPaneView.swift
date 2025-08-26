@@ -111,32 +111,3 @@ struct SideBarPaneView: View {
         .frame(maxHeight: .infinity)
     }
 }
-
-
-// MARK: - Preview Provider
-struct SideBarPaneView_Previews: PreviewProvider {
-    static func createMockViewModel() -> MainApplicationViewModel {
-        let agentStore = AgentStore()
-        if agentStore.agents.isEmpty {
-            agentStore.agents.append(AgentProfileModel.defaultAgent())
-        }
-    
-        return MainApplicationViewModel(llmIntegrationStore: LLMIntegrationStore(), agentStore: agentStore, chatHistoryViewModel: ChatHistoryViewModel())
-    }
-
-    static var previews: some View {
-        let mockViewModel = createMockViewModel()
-        let themeManager = ThemeManager()
-
-        Group {
-            SideBarPaneView(selectedTab: .constant(.integration), sidebarWidth: .constant(350))
-                .previewDisplayName("Integrations Pane (With Hover)")
-
-            SideBarPaneView(selectedTab: .constant(.conversations), sidebarWidth: .constant(350))
-                .previewDisplayName("Conversations Pane")
-        }
-        .environmentObject(mockViewModel)
-        .environmentObject(themeManager)
-        .frame(height: 600)
-    }
-}

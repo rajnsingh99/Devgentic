@@ -13,7 +13,7 @@ struct ActivityBarView: View {
     // Binding to the sidebar visibility state in the container view
     @Binding var isSidebarVisible: Bool
 
-    // Define the order of top icons explicitly, including the Prompt Library
+    // Define the order of top icons explicitly, including the new Backend Provider tab
     private let topTabs: [SidebarTab] = [.newChat, .conversations, .explorer, .integration, .promptLibrary]
     // Define the order of bottom icons explicitly
     private let bottomTabs: [SidebarTab] = [.settings, .user]

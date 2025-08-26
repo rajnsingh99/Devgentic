@@ -176,12 +176,12 @@ struct APIKeyInputPopup: View {
     }
 }
 
-#Preview {
-    // Create mock view models for the preview
-    let mainVM = MainApplicationViewModel()
-    let inputVM = ChatInputViewModel()
-    
-    return APIKeyInputPopup()
-        .environmentObject(mainVM)
-        .environmentObject(inputVM)
-}
+//#Preview {
+//    // Create mock view models for the preview
+//    let mainVM = MainApplicationViewModel()
+//    let inputVM = ChatInputViewModel()
+//    
+//    return APIKeyInputPopup()
+//        .environmentObject(mainVM)
+//        .environmentObject(inputVM)
+//}

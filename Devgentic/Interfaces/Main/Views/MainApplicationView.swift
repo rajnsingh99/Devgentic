@@ -32,20 +32,22 @@ struct MainApplicationView: View {
     // MARK: - Body
     var body: some View {
         ZStack(alignment: .leading) {
+            ChatGPTBackgroundView()
+            
             ZStack {
                 VStack(spacing: 0) {
-                    ChatHeaderView(
-                        chatTitle: viewModel.currentConversationTitle,
-                        isFilterActive: chatHistoryViewModel.isUserMessagesOnlyFilterActive,
-                        onEyeButtonTapped: {
-                            chatHistoryViewModel.toggleUserMessagesFilter()
-                            logger.info("Header eye button tapped. Filter active: \(chatHistoryViewModel.isUserMessagesOnlyFilterActive)")
-                        },
-                        onTransferButtonTapped: {
-                            viewModel.transferSelectedConversationToOverlay()
-                        },
-                        isConversationSelected: viewModel.selectedConversationID != nil
-                    )
+//                    ChatHeaderView(
+//                        chatTitle: viewModel.currentConversationTitle,
+//                        isFilterActive: chatHistoryViewModel.isUserMessagesOnlyFilterActive,
+//                        onEyeButtonTapped: {
+//                            chatHistoryViewModel.toggleUserMessagesFilter()
+//                            logger.info("Header eye button tapped. Filter active: \(chatHistoryViewModel.isUserMessagesOnlyFilterActive)")
+//                        },
+//                        onTransferButtonTapped: {
+//                            viewModel.transferSelectedConversationToOverlay()
+//                        },
+//                        isConversationSelected: viewModel.selectedConversationID != nil
+//                    )
                     
                     chatArea
                 }
@@ -122,12 +124,10 @@ struct MainApplicationView: View {
             ChatHistoryView()
                 .environmentObject(chatHistoryViewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.bottom, 130)
+                .padding(.bottom, 115)
                 .overlay {
                     if viewModel.selectedConversationID == nil {
-                        Text(viewModel.conversations.isEmpty ? "Start a new conversation to begin." : "Select or start a conversation.")
-                            .font(.title3)
-                            .foregroundColor(.gray.opacity(0.7))
+                        WelcomeView()
                     }
                 }
 

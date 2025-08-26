@@ -94,6 +94,7 @@ struct AttachedFilePillView: View {
         .padding(.vertical, 7)
         .background(pillBackgroundColor)
         .cornerRadius(pillCornerRadius)
+        .frame(maxWidth: 250) // Constrain the maximum width of the pill
     }
 }
 
@@ -139,7 +140,7 @@ struct AttachedFilePillView_Previews: PreviewProvider {
             Text("Example with longer names:")
                 .font(.caption)
             AttachedFilePillView(
-                fileItem: createDummyFile(name: "VeryLongFileNameThatDefinitelyNeedsTruncation", ext: "js"),
+                fileItem: createDummyFile(name: "VeryLongFileNameThatDefinitelyNeedsTruncationAndShouldBeHandledGracefully", ext: "js"),
                 onRemove: { print("Remove JS file") }
             )
         }

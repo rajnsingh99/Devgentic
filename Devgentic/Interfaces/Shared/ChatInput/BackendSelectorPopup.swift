@@ -20,13 +20,9 @@ struct BackendSelectorPopup: View {
     @Environment(\.openWindow) var openWindow
 
     // MARK: - Data Sources
-    @ObservedObject var agentStore: AgentStore
     @ObservedObject var llmIntegrationStore: LLMIntegrationStore
 
     // MARK: - Computed Properties for Data Filtering
-    private var agents: [AgentProfileModel] {
-        agentStore.agents.sorted { $0.name < $1.name }
-    }
     private var localIntegrations: [LLMIntegrationModel] {
         llmIntegrationStore.integrations.filter { $0.providerType == .ollama }.sorted { $0.displayName < $1.displayName }
     }
@@ -36,31 +32,10 @@ struct BackendSelectorPopup: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            let showAgentColumn = !agentStore.agents.isEmpty
             let showLocalColumn = !localIntegrations.isEmpty
             let showRemoteColumn = !remoteIntegrations.isEmpty
 
-            // Column 1: Agents
-            if showAgentColumn {
-                AgentColumnView(
-                    configuration: configuration,
-                    agents: agents,
-                    onSelect: {
-                        self.isPresented = false
-                    },
-                    onEdit: { agentID in
-                        openWindow(id: "agent-config", value: agentID)
-                        self.isPresented = false
-                    }
-                )
-                .frame(minWidth: 180, idealWidth: 200)
-            }
-
-            if showAgentColumn && (showLocalColumn || showRemoteColumn) {
-                Divider()
-            }
-
-            // Column 2: Local LLMs
+            // Column 1: Local LLMs
             if showLocalColumn {
                 LLMColumnView(
                     title: "Local Models",
@@ -83,7 +58,7 @@ struct BackendSelectorPopup: View {
                 Divider()
             }
 
-            // Column 3: Remote LLMs
+            // Column 2: Remote LLMs
             if showRemoteColumn {
                 LLMColumnView(
                     title: "Remote Models",
@@ -105,44 +80,6 @@ struct BackendSelectorPopup: View {
         .padding(.vertical, 8)
         .frame(maxHeight: 450)
         .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-
-// MARK: - Agent Column View
-private struct AgentColumnView: View {
-    @ObservedObject var configuration: BackendConfiguration
-    let agents: [AgentProfileModel]
-    let onSelect: () -> Void
-    let onEdit: (UUID) -> Void
-
-    var body: some View {
-        VStack(alignment: .center, spacing: 5) {
-            Text("Agents")
-                .font(.headline)
-                .padding(.bottom, 4)
-            
-            ScrollView {
-                VStack(alignment: .center, spacing: 0) {
-                    ForEach(agents) { agent in
-                        let isSelected = configuration.selectedBackend == .agent && configuration.selectedAgentID == agent.id
-                        
-                        ItemCell(
-                            name: agent.name,
-                            detail: agent.role,
-                            isSelected: isSelected
-                        )
-                        .onTapGesture(count: 2) { onEdit(agent.id) }
-                        .onTapGesture(count: 1) {
-                            configuration.selectedBackend = .agent
-                            configuration.selectedAgentID = agent.id
-                            self.onSelect()
-                        }
-                    }
-                }
-            }
-        }
-        .padding(.vertical, 8)
     }
 }
 

@@ -19,7 +19,7 @@ struct VSCodifiedSidebarContainerView: View {
     @State private var isHoveringOnDivider = false
     
     private let minSidebarWidth: CGFloat = 300
-    private let maxSidebarWidth: CGFloat = 400
+    private let maxSidebarWidth: CGFloat = 450 // Increased max width for the new panel
     private let activityBarWidth: CGFloat = 50
 
     @State private var preferredWidths: [SidebarTab: CGFloat] = [
@@ -88,6 +88,3 @@ struct VSCodifiedSidebarContainerView: View {
         }
     }
 }
-
-
-

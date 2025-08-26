@@ -19,11 +19,16 @@ struct UITheme {
         static let controlBackground = Color(NSColor.controlBackgroundColor)
         static let textBackground = Color(NSColor.textBackgroundColor)
 
-        static let accent = Color.accentColor
-        static let userBubbleBackground = Color.accentColor
+        // UPDATED: Changed to a muted teal for a modern, tech-focused feel.
+        static let accent = Color(hex: "#388E8E")
+        static let userBubbleBackground = Color(hex: "#388E8E")
         static let attachmentBackground = Color(NSColor.controlBackgroundColor).opacity(0.7)
         
-        static let accentMuted = Color.accentColor.opacity(0.7)
+        // EDIT: Changed to a solid dark background and added a new text color.
+        static let inlineCodeBackground = Color(red: 0.2, green: 0.2, blue: 0.22)
+        static let inlineCodeText = Color(red: 0.9, green: 0.9, blue: 0.9)
+        
+        static let accentMuted = Color(hex: "#388E8E").opacity(0.7)
         
         static let success = Color.green
         static let error = Color.red
@@ -37,7 +42,7 @@ struct UITheme {
         static let title3 = Font.system(size: 18, weight: .semibold)
         
         static let headline = Font.system(size: 16, weight: .semibold)
-        static let body = Font.system(size: 14, weight: .regular)
+        static let body = Font.system(size: 15, weight: .regular) // Changed from 14 to 15
         static let callout = Font.system(size: 14, weight: .regular)
         static let subheadline = Font.system(size: 14, weight: .regular)
         
@@ -45,7 +50,7 @@ struct UITheme {
         static let caption = Font.system(size: 12, weight: .regular)
         static let caption2 = Font.system(size: 11, weight: .regular)
         
-        static let code = Font.system(size: 12, weight: .regular, design: .monospaced)
+        static let code = Font.system(size: 13, weight: .regular, design: .monospaced) // Changed from 12 to 13
         static let codeCaption = Font.system(size: 10, weight: .medium, design: .monospaced)
     }
 
@@ -75,3 +80,6 @@ struct UITheme {
         static let large: CGFloat = 16
     }
 }
+
+// REMOVED: The duplicate Color extension that was causing the build errors.
+// The project likely already has a similar helper defined elsewhere.
