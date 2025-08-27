@@ -25,13 +25,6 @@ protocol CoreDataServiceProtocol {
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func togglePinStatus(for conversationId: UUID) // New method for pinning
 
-    // LLM Integration Methods
-    func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity?
-    func fetchLLMIntegrations() -> [LLMIntegrationEntity]
-    func addLLMIntegration(from model: LLMIntegrationModel)
-    func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel)
-    func deleteLLMIntegration(with id: UUID)
-    
     // Prompt Methods
     func fetchPrompts() -> [Prompt]
     func addPrompt(from model: Prompt)
@@ -61,10 +54,10 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         AgentResponseTransformer.register()
         
-        // ** NEW: Register the transformer for the 'tags' attribute in PromptEntity **
+        // Register the transformer for the 'tags' attribute in PromptEntity
         ValueTransformer.setValueTransformer(StringArrayTransformer(), forName: NSValueTransformerName("StringArrayTransformer"))
         
-        // ** NEW: Register the transformer for the 'generationType' attributes **
+        // Register the transformer for the 'generationType' attributes
         ValueTransformer.setValueTransformer(GenerationTypeArrayTransformer(), forName: NSValueTransformerName("GenerationTypeArrayTransformer"))
         
         container.loadPersistentStores { (storeDescription, error) in
@@ -320,104 +313,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         }
     }
     
-    // MARK: - LLM Integration Methods
-    
-    func getLLMIntegration(withId id: UUID) -> LLMIntegrationEntity? {
-        let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
-        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        do {
-            return try viewContext.fetch(request).first
-        } catch {
-            logger.error("Failed to fetch LLMIntegrationEntity with ID \(id.uuidString): \(error.localizedDescription)")
-            return nil
-        }
-    }
-
-    func fetchLLMIntegrations() -> [LLMIntegrationEntity] {
-        let request: NSFetchRequest<LLMIntegrationEntity> = LLMIntegrationEntity.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "displayName", ascending: true)]
-        do {
-            return try viewContext.fetch(request)
-        } catch {
-            logger.error("Failed to fetch all LLMIntegrationEntity objects: \(error.localizedDescription)")
-            return []
-        }
-    }
-
-    func addLLMIntegration(from model: LLMIntegrationModel) {
-        let newIntegration = LLMIntegrationEntity(context: viewContext)
-        newIntegration.id = model.id
-        newIntegration.displayName = model.displayName
-        newIntegration.providerType = model.providerType.rawValue
-        newIntegration.lastSelected = model.lastSelected
-        
-        switch model.providerType {
-        case .ollama:
-            if let configModel = model.ollamaConfig {
-                let ollamaConfigEntity = OllamaConfigEntity(context: viewContext)
-                ollamaConfigEntity.baseURL = configModel.baseURL; ollamaConfigEntity.modelName = configModel.modelName; ollamaConfigEntity.temperature = configModel.temperature ?? 0.8; ollamaConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); ollamaConfigEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
-                newIntegration.ollamaConfig = ollamaConfigEntity
-            }
-        case .remote:
-            if let configModel = model.remoteConfig {
-                let remoteConfigEntity = RemoteConfigEntity(context: viewContext)
-                remoteConfigEntity.provider = configModel.provider.rawValue; remoteConfigEntity.apiKey = configModel.apiKey; remoteConfigEntity.modelName = configModel.modelName; remoteConfigEntity.temperature = configModel.temperature ?? 0.8; remoteConfigEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); remoteConfigEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
-                newIntegration.remoteConfig = remoteConfigEntity
-            }
-        }
-        
-        logger.info("Adding new LLM Integration '\(model.displayName)' with \(model.providerType.rawValue) config.")
-        saveContext()
-    }
-
-    func updateLLMIntegration(entity: LLMIntegrationEntity, with model: LLMIntegrationModel) {
-        entity.displayName = model.displayName
-        entity.lastSelected = model.lastSelected
-        
-        if entity.providerType != model.providerType.rawValue {
-            if let ollamaConfig = entity.ollamaConfig { viewContext.delete(ollamaConfig); entity.ollamaConfig = nil }
-            if let remoteConfig = entity.remoteConfig { viewContext.delete(remoteConfig); entity.remoteConfig = nil }
-            
-            entity.providerType = model.providerType.rawValue
-            switch model.providerType {
-            case .ollama:
-                if let configModel = model.ollamaConfig {
-                    let newConfig = OllamaConfigEntity(context: viewContext)
-                    newConfig.baseURL = configModel.baseURL; newConfig.modelName = configModel.modelName; newConfig.temperature = configModel.temperature ?? 0.8; newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); newConfig.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
-                    entity.ollamaConfig = newConfig
-                }
-            case .remote:
-                 if let configModel = model.remoteConfig {
-                    let newConfig = RemoteConfigEntity(context: viewContext)
-                    newConfig.provider = configModel.provider.rawValue; newConfig.apiKey = configModel.apiKey; newConfig.modelName = configModel.modelName; newConfig.temperature = configModel.temperature ?? 0.8; newConfig.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); newConfig.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
-                    entity.remoteConfig = newConfig
-                }
-            }
-        } else {
-            switch model.providerType {
-            case .ollama:
-                if let configModel = model.ollamaConfig, let configEntity = entity.ollamaConfig {
-                    configEntity.baseURL = configModel.baseURL; configEntity.modelName = configModel.modelName; configEntity.temperature = configModel.temperature ?? 0.8; configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); configEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
-                }
-            case .remote:
-                if let configModel = model.remoteConfig, let configEntity = entity.remoteConfig {
-                    configEntity.provider = configModel.provider.rawValue; configEntity.apiKey = configModel.apiKey; configEntity.modelName = configModel.modelName; configEntity.temperature = configModel.temperature ?? 0.8; configEntity.contextWindowSize = Int64(configModel.contextWindowSize ?? 4096); configEntity.generationType = configModel.generationType?.compactMap { $0.rawValue } as NSArray?
-                }
-            }
-        }
-
-        logger.trace("Updating attributes for LLM Integration: \(model.displayName)")
-        saveContext()
-    }
-
-    func deleteLLMIntegration(with id: UUID) {
-        if let integrationToDelete = getLLMIntegration(withId: id) {
-            viewContext.delete(integrationToDelete)
-            logger.info("Deleting LLM Integration with ID \(id.uuidString) from context.")
-            saveContext()
-        }
-    }
-    
     // MARK: - Prompt Methods
     
     func fetchPrompts() -> [Prompt] {
@@ -639,60 +534,6 @@ extension AttachedImageFileEntity {
             fileExtension: fileExtension,
             binaryData: binaryData,
             size: self.size
-        )
-    }
-}
-
-extension LLMIntegrationEntity {
-    func toLLMIntegrationModel() -> LLMIntegrationModel {
-        let providerType = ProviderType(rawValue: self.providerType ?? "ollama") ?? .ollama
-        var ollamaConfig: OllamaConfigModel? = nil
-        var remoteConfig: RemoteConfigModel? = nil
-        
-        if providerType == .ollama, let configEntity = self.ollamaConfig {
-            ollamaConfig = configEntity.toOllamaConfigModel()
-        } else if providerType == .remote, let configEntity = self.remoteConfig {
-            remoteConfig = configEntity.toRemoteConfigModel()
-        }
-        
-        return LLMIntegrationModel(
-            id: self.id ?? UUID(),
-            displayName: self.displayName ?? "Unnamed Integration",
-            providerType: providerType,
-            lastSelected: self.lastSelected,
-            ollamaConfig: ollamaConfig,
-            remoteConfig: remoteConfig
-        )
-    }
-}
-
-extension OllamaConfigEntity {
-    func toOllamaConfigModel() -> OllamaConfigModel {
-        let generationTypeStrings = self.generationType as? [String]
-        let generationTypes = generationTypeStrings?.compactMap { GenerationType(rawValue: $0) }
-        
-        return OllamaConfigModel(
-            baseURL: self.baseURL ?? "",
-            modelName: self.modelName ?? "",
-            generationType: generationTypes,
-            temperature: self.temperature,
-            contextWindowSize: Int(self.contextWindowSize)
-        )
-    }
-}
-
-extension RemoteConfigEntity {
-    func toRemoteConfigModel() -> RemoteConfigModel {
-        let generationTypeStrings = self.generationType as? [String]
-        let generationTypes = generationTypeStrings?.compactMap { GenerationType(rawValue: $0) }
-        
-        return RemoteConfigModel(
-            provider: RemoteProvider(rawValue: self.provider ?? "openAI") ?? .openAI,
-            apiKey: self.apiKey ?? "",
-            modelName: self.modelName ?? "",
-            generationType: generationTypes,
-            temperature: self.temperature,
-            contextWindowSize: Int(self.contextWindowSize)
         )
     }
 }

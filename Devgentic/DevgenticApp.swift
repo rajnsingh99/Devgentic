@@ -4,6 +4,9 @@
 //
 //  Created by Raj Singh.
 //
+//  Refactored on 27/08/25 to remove LLM Integration window and commands.
+//  Refactored on 27/08/25 to add Backend Profiles window and commands.
+//
 
 import SwiftUI
 import CoreData
@@ -17,14 +20,12 @@ struct DevgenticApp: App {
     private let coreDataService = CoreDataPersistenceService.shared
     
     @StateObject private var themeManager = ThemeManager()
-    @StateObject private var llmIntegrationStore: LLMIntegrationStore
     @StateObject private var agentManager = AgentManager()
 
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
     @StateObject private var chatHistoryViewModel: ChatHistoryViewModel
 
     init() {
-        let integrationStore = LLMIntegrationStore()
         let persistence = CoreDataPersistenceService.shared
         let fileProcessor = FileProcessorService()
 
@@ -40,13 +41,11 @@ struct DevgenticApp: App {
 
         let mainVM = MainApplicationViewModel(
             persistenceService: persistence,
-            llmIntegrationStore: integrationStore,
             fileProcessorService: fileProcessor,
             activeStreamManager: streamManager,
             chatHistoryViewModel: chatHistoryVM
         )
 
-        self._llmIntegrationStore = StateObject(wrappedValue: integrationStore)
         self._chatHistoryViewModel = StateObject(wrappedValue: chatHistoryVM)
         self._mainApplicationViewModel = StateObject(wrappedValue: mainVM)
     }
@@ -60,7 +59,6 @@ struct DevgenticApp: App {
                     .environmentObject(mainApplicationViewModel)
                     .environmentObject(mainApplicationViewModel.explorerViewModel)
                     .environmentObject(agentManager)
-                    .environmentObject(llmIntegrationStore)
                     .environmentObject(chatHistoryViewModel)
                     .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
                     .onAppear {
@@ -98,11 +96,11 @@ struct DevgenticApp: App {
                     }
                 }
                 .keyboardShortcut(",", modifiers: .command)
-
-                Button("LLM Integrations...") {
-                    openWindow(id: "llm-integrations")
+                
+                Button("Backend Profiles...") {
+                    openWindow(id: "backend-profiles")
                 }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
+                .keyboardShortcut("p", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .appTermination) {
                 Button("Stop Agent and Quit") {
@@ -122,17 +120,18 @@ struct DevgenticApp: App {
                 .environmentObject(themeManager)
         }.defaultSize(width: 1000, height: 850)
 
-        // MARK: - Window Groups (Unchanged)
+        // MARK: - Window Groups
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
             if let url = fileURL {
                 FileWindowViewer(fileURL: url)
                     .environmentObject(themeManager)
             }
         }
-        WindowGroup("Profile Configuration", id: "llm-integrations") {
+        
+        WindowGroup("Backend Profiles", id: "backend-profiles") {
             BackendProfilePanelView()
                 .environmentObject(mainApplicationViewModel)
-                .environmentObject(llmIntegrationStore)
                 .environmentObject(themeManager)
-        }.defaultSize(width: 850, height: 700)    }
+        }.defaultSize(width: 850, height: 700)
+    }
 }

@@ -4,6 +4,8 @@
 //
 //  Created by Raj Singh on 17/05/25.
 //
+//  Refactored on 27/08/25 to remove LLM Integration sidebar.
+//
 
 import SwiftUI
 import Combine
@@ -19,14 +21,13 @@ struct VSCodifiedSidebarContainerView: View {
     @State private var isHoveringOnDivider = false
     
     private let minSidebarWidth: CGFloat = 300
-    private let maxSidebarWidth: CGFloat = 450 // Increased max width for the new panel
+    private let maxSidebarWidth: CGFloat = 450
     private let activityBarWidth: CGFloat = 50
 
     @State private var preferredWidths: [SidebarTab: CGFloat] = [
         .newChat: 300,
         .conversations: 350,
         .explorer: 350,
-        .integration: 400,
         .promptLibrary: 400,
         .settings: 300,
         .user: 300
@@ -49,10 +50,8 @@ struct VSCodifiedSidebarContainerView: View {
                     .frame(width: sidebarWidth)
                     .transition(.move(edge: .leading))
 
-                // The draggable divider
                 Divider()
                     .frame(width: 2)
-                    // Change background based on hover state for better visual feedback
                     .background(isHoveringOnDivider ? Color.blue.opacity(0.5) : Color.gray.opacity(0.01))
                     .contentShape(Rectangle())
                     .gesture(

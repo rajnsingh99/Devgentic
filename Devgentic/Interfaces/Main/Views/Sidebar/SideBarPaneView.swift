@@ -4,11 +4,65 @@
 //
 //  Created by Raj Singh.
 //
+//  Refactored on 27/08/25 to remove LLM Integration sidebar.
+//  Refactored on 27/08/25 to add Backend Profiles window tab.
+//
 
 import SwiftUI
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SideBarPaneView")
+
+enum SidebarTab: CaseIterable, Identifiable {
+    case newChat
+    case conversations
+    case explorer
+    case promptLibrary
+    case backendProfiles
+    case settings
+    case user
+
+    var id: Self { self }
+
+    var iconName: String {
+        switch self {
+        case .newChat:
+            return "plus.bubble"
+        case .conversations:
+            return "message"
+        case .promptLibrary:
+            return "square.stack.3d.up.fill"
+        case .backendProfiles:
+            return "cpu"
+        case .settings:
+            return "gearshape"
+        case .user:
+            return "person.crop.circle"
+        case .explorer:
+            return "folder"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .newChat:
+            return "New Conversation"
+        case .conversations:
+            return "Conversations"
+        case .promptLibrary:
+            return "Prompt Library"
+        case .backendProfiles:
+            return "Backend Profiles"
+        case .settings:
+            return "Settings"
+        case .user:
+            return "Account"
+        case .explorer:
+            return "Explorer"
+        }
+    }
+}
+
 
 struct SideBarPaneView: View {
     @Binding var selectedTab: SidebarTab?
@@ -20,61 +74,13 @@ struct SideBarPaneView: View {
     @Environment(\.openWindow) var openWindow
 
     // State for popovers and hover effects
-    @State private var showingAddIntegrationPopover = false
     @State private var isHoveringSettingsButton = false
     @State private var isHoveringAddButton = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // --- Unified Header ---
             if let tab = selectedTab {
-                // Specific, unified header for LLM Integrations
-                if tab == .integration {
-                    HStack {
-                        Text(tab.title) // Displays "LLM Integrations"
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                            .foregroundColor(themeManager.currentTheme.primaryText)
-                        
-                        Spacer()
-                        
-                        // Add Button with Popover and Hover Effect
-                        Button {
-                            showingAddIntegrationPopover = true
-                        } label: {
-                            Image(systemName: "plus.circle") // Better icon
-                                .padding(4)
-                                .background(isHoveringAddButton ? Color.secondary.opacity(0.2) : Color.clear)
-                                .cornerRadius(5)
-                        }
-                        .buttonStyle(.plain)
-                        .onHover { isHoveringAddButton = $0 }
-                        .help("Add New LLM Integration")
-                        .popover(isPresented: $showingAddIntegrationPopover, arrowEdge: .bottom) {
-                            AddLLMIntegrationView()
-                                 .environmentObject(viewModel.llmIntegrationStore)
-                        }
-
-                        // Settings Button with Hover Effect
-                        Button {
-                            openWindow(id: "llm-integrations")
-                        } label: {
-                            Image(systemName: "gearshape.fill") // Better icon
-                                .padding(4)
-                                .background(isHoveringSettingsButton ? Color.secondary.opacity(0.2) : Color.clear)
-                                .cornerRadius(5)
-                        }
-                        .buttonStyle(.plain)
-                        .onHover { isHoveringSettingsButton = $0 }
-                        .help("Manage Backend Profiles & Settings")
-                    }
-                    .padding(.horizontal).padding(.top, 12).padding(.bottom, 8)
-                    
-                    Divider()
-                        .background(themeManager.currentTheme.dividerColor)
-                }
-                // Header for other tabs
-                else if tab != .explorer && tab != .conversations && tab != .promptLibrary && tab != .settings {
+                if tab != .explorer && tab != .conversations && tab != .promptLibrary && tab != .settings {
                      HStack {
                          Text(tab.title)
                              .font(.title3)
@@ -90,15 +96,14 @@ struct SideBarPaneView: View {
                 }
             }
 
-            // --- Main Content ---
+            
             VStack {
                 switch selectedTab {
                 case .newChat: NewChatTabView()
                 case .explorer: ExplorerSidebarView()
                 case .conversations: ConversationSidebarView()
-                case .integration: LLMIntegrationsSidebarView(sidebarWidth: $sidebarWidth)
                 case .promptLibrary: PromptLibrarySidebarView()
-                case .settings, .user, .none:
+                case .settings, .user, .none, .backendProfiles:
                     Spacer()
                     Text(selectedTab?.title ?? "Nothing Selected")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)

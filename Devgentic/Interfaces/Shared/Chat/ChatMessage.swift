@@ -9,6 +9,14 @@ import Foundation
 import Combine
 
 
+enum GenerationType: String, Codable, CaseIterable, Identifiable {
+    case text
+    case imageData
+    case videoData
+    
+    var id: String { self.rawValue }
+}
+
 struct ResponseMessageVariant: Codable, Equatable {
     let variantId: UUID = UUID()
     var content: MessageContent

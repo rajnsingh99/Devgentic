@@ -84,10 +84,4 @@ struct RemoteConfigModel: Codable, Hashable {
 }
 
 // MARK: - New Enum for Model Types
-enum GenerationType: String, Codable, CaseIterable, Identifiable {
-    case text
-    case imageData
-    case videoData
-    
-    var id: String { self.rawValue }
-}
+

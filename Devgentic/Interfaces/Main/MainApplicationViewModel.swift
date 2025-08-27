@@ -37,7 +37,6 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Service & Store Observables
     @ObservedObject var ollamaService = OllamaService.shared
-    @ObservedObject var llmIntegrationStore: LLMIntegrationStore // Kept for other parts of the app for now
     
     // MARK: - Published State Properties
     @Published var conversations: [Conversation] = []
@@ -72,13 +71,11 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Initialization
     init(
         persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
-        llmIntegrationStore: LLMIntegrationStore,
         fileProcessorService: FileProcessorService = FileProcessorService(),
         activeStreamManager: ActiveStreamManager,
         chatHistoryViewModel: ChatHistoryViewModel
     ) {
         self.persistenceService = persistenceService
-        self.llmIntegrationStore = llmIntegrationStore
         self.fileProcessorService = fileProcessorService
         self.activeStreamManager = activeStreamManager
         self.chatHistoryViewModel = chatHistoryViewModel
