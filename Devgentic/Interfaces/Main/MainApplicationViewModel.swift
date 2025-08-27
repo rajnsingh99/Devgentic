@@ -125,7 +125,6 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
             
-        // NEW: Simplified binding to sync profile changes with the current conversation
         backendConfiguration.$selectedProfileID
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
@@ -173,10 +172,8 @@ class MainApplicationViewModel: ObservableObject {
         guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
             return
         }
-        // NEW: Ensure a valid config exists before sending
         guard let config = backendConfiguration.getRequestConfig() else {
             logger.error("[sendMessage] CRITICAL: Could not get backend request config. Is a profile selected?")
-            // Optionally show an alert to the user
             return
         }
 
@@ -260,7 +257,6 @@ class MainApplicationViewModel: ObservableObject {
         let filesForBackend = (userQueryMessage.attachedTextFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? []) +
                               (userQueryMessage.attachedImageFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? [])
 
-        // NEW: Get the currently selected backend configuration
         guard let config = backendConfiguration.getRequestConfig() else {
             logger.error("[regenerateResponse] Could not get backend request config. Is a profile selected?")
             return
@@ -353,19 +349,27 @@ class MainApplicationViewModel: ObservableObject {
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         logger.info("Started new conversation with ID \(newConversationID.uuidString).")
     }
+    
+    // NEW: Function to deselect conversation and return to the welcome screen
+    func deselectConversationAndShowWelcome() {
+        if showSettings { showSettings = false }
+        clearAttachedFiles()
+        selectedConversationID = nil
+        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
+        logger.info("Deselected conversation, returning to welcome screen.")
+    }
 
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
         if showSettings { showSettings = false }
         
-        // The conversation will now store the selected profile ID.
         let profileID = backendConfiguration.selectedProfileID
         
         let newConversation = Conversation(
             id: UUID(),
             messages: [],
             timestamp: Date(),
-            backendType: .none, // This field is becoming legacy.
+            backendType: .none,
             backendEntityId: profileID
         )
         persistenceService.addConversation(from: newConversation)
@@ -373,7 +377,6 @@ class MainApplicationViewModel: ObservableObject {
         selectedConversationID = newConversation.id
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         
-        // Update the backend for the new conversation explicitly.
         updateBackendForCurrentConversation(conversationID: newConversation.id, profileID: profileID)
         
         return newConversation.id
@@ -388,7 +391,6 @@ class MainApplicationViewModel: ObservableObject {
 
         let conversation = conversationEntity.toConversationStruct()
         
-        // The backendEntityId is now the profile ID.
         let profileID = conversation.backendEntityId
         self.backendConfiguration.selectedProfileID = profileID
 
@@ -396,10 +398,6 @@ class MainApplicationViewModel: ObservableObject {
     }
 
     private func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
-        // This method now only needs to persist the profile ID.
-        // The `backendType` is derived from the profile itself when needed, but for persistence,
-        // we need to map it back for now.
-        
         var legacyBackendType: BackendType = .none
         if let id = profileID, let profile = BackendProfileStore.shared.fetchProfiles().first(where: { $0.id == id }) {
             switch profile.profileType {
@@ -412,7 +410,7 @@ class MainApplicationViewModel: ObservableObject {
                     legacyBackendType = .remote
                 }
             case .workflow:
-                legacyBackendType = .none // No direct mapping for workflow yet
+                legacyBackendType = .none
             }
         }
         

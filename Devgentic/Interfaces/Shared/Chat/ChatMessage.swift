@@ -76,7 +76,10 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id &&
+        lhs.content == rhs.content &&
+        lhs.isStreaming == rhs.isStreaming &&
+        lhs.agentResponse == rhs.agentResponse
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {

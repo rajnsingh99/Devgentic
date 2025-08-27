@@ -5,6 +5,9 @@
 //  Created by Raj Singh on 17/05/25.
 //
 //  Refactored on 27/08/25 to remove LLM Integration sidebar.
+//  Refactored on 27/08/25 to remove redundant NewChatTabView.
+//  Refactored on 27/08/25 to improve UI to match modern standards.
+//  Refactored on 28/08/25 to slim down the sidebar for a cleaner aesthetic.
 //
 
 import SwiftUI
@@ -21,16 +24,15 @@ struct VSCodifiedSidebarContainerView: View {
     @State private var isHoveringOnDivider = false
     
     private let minSidebarWidth: CGFloat = 300
-    private let maxSidebarWidth: CGFloat = 450
+    private let maxSidebarWidth: CGFloat = 500
     private let activityBarWidth: CGFloat = 50
 
     @State private var preferredWidths: [SidebarTab: CGFloat] = [
-        .newChat: 300,
         .conversations: 350,
         .explorer: 350,
-        .promptLibrary: 400,
-        .settings: 300,
-        .user: 300
+        .promptLibrary: 350,
+        .settings: 0,
+        .user: 0
     ]
 
     @EnvironmentObject var viewModel: MainApplicationViewModel
