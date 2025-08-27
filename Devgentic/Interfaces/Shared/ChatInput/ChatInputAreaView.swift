@@ -59,7 +59,7 @@ struct ChatInputAreaView: View {
     @State private var isDynamicButtonHovering: Bool = false
 
 
-    private let promptStore = PromptStore.shared
+    private let promptService = PromptService.shared
 
     // MARK: - Layout Constants
     private let iconSize: CGFloat = 18
@@ -202,7 +202,7 @@ struct ChatInputAreaView: View {
         }
         .onChange(of: showPromptSuggestions) { isShowing in
             if isShowing {
-                self.filteredPrompts = promptStore.getAllPrompts().filter {
+                self.filteredPrompts = promptService.getAllPrompts().filter {
                     suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
                 }
                 self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
@@ -211,13 +211,13 @@ struct ChatInputAreaView: View {
             }
         }
         .onChange(of: suggestionQuery) { newQuery in
-            self.filteredPrompts = promptStore.getAllPrompts().filter {
+            self.filteredPrompts = promptService.getAllPrompts().filter {
                 newQuery.isEmpty || $0.title.lowercased().contains(newQuery.lowercased())
             }
             self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
         }
-        .onReceive(promptStore.$prompts) { _ in
-            self.filteredPrompts = promptStore.getAllPrompts().filter {
+        .onReceive(promptService.$prompts) { _ in
+            self.filteredPrompts = promptService.getAllPrompts().filter {
                 suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
             }
             if selectedPromptSuggestionID == nil {

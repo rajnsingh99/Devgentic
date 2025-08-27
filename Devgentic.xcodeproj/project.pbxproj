@@ -11,7 +11,6 @@
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
-		35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */ = {isa = PBXBuildFile; productRef = 35DB4C1F2DC53B9D002B3BF7 /* Splash */; };
 		35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 35E68C412E313B0B00993F95 /* WhisperKit */; };
 		35F483FA2E23C8680031D7CB /* EntityInfo-devgentic.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */; };
 /* End PBXBuildFile section */
@@ -40,22 +39,9 @@
 		35FCBAA32DB5526B00D39123 /* devgenticUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = devgenticUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		352739CB2E4D88AF00E5E74B /* Exceptions for "devgentic" folder in "devgentic" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Core/Models/Untitled.swift,
-			);
-			target = 35FCBA872DB5526B00D39123 /* devgentic */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		35FCBA8A2DB5526B00D39123 /* devgentic */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				352739CB2E4D88AF00E5E74B /* Exceptions for "devgentic" folder in "devgentic" target */,
-			);
 			path = devgentic;
 			sourceTree = "<group>";
 		};
@@ -80,7 +66,6 @@
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
-				35DB4C202DC53B9D002B3BF7 /* Splash in Frameworks */,
 				35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -159,7 +144,6 @@
 			);
 			name = devgentic;
 			packageProductDependencies = (
-				35DB4C1F2DC53B9D002B3BF7 /* Splash */,
 				35CDCB0E2E2396B700A7B51B /* HotKey */,
 				35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */,
 				35243D362E26F08800602933 /* CodeEditSourceEditor */,
@@ -249,7 +233,6 @@
 			mainGroup = 35FCBA7F2DB5526B00D39123;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */,
 				35CDCB0D2E2396B700A7B51B /* XCRemoteSwiftPackageReference "HotKey" */,
 				35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */,
 				35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
@@ -623,14 +606,6 @@
 				minimumVersion = 0.14.1;
 			};
 		};
-		35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/JohnSundell/Splash.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.16.0;
-			};
-		};
 		35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/raspu/Highlightr.git";
@@ -685,11 +660,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */;
 			productName = ObjectBox.xcframework;
-		};
-		35DB4C1F2DC53B9D002B3BF7 /* Splash */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35A144B62DC50E15005D476C /* XCRemoteSwiftPackageReference "Splash" */;
-			productName = Splash;
 		};
 		35E68C412E313B0B00993F95 /* WhisperKit */ = {
 			isa = XCSwiftPackageProductDependency;

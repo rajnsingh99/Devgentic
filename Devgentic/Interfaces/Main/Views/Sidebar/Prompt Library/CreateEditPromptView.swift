@@ -124,8 +124,8 @@ struct CreateEditPromptView_Previews: PreviewProvider {
         let vm = PromptLibraryViewModel()
         if isEditing {
             let examplePrompt = Prompt.examplePrompts.first ?? Prompt(title: "Test Edit", text: "Editing this prompt.", category: "Testing", isUserDefined: true, tags: ["edit", "test"])
-            if PromptStore.shared.getPrompt(withId: examplePrompt.id) == nil {
-                 PromptStore.shared.addPrompt(examplePrompt)
+            if PromptService.shared.getPrompt(withId: examplePrompt.id) == nil {
+                 PromptService.shared.addPrompt(examplePrompt)
             }
             vm.prepareToEditPrompt(examplePrompt)
         } else {
@@ -147,8 +147,8 @@ struct CreateEditPromptView_Previews: PreviewProvider {
                 .frame(width: 550, height: 500)
         }
         .onAppear {
-             if PromptStore.shared.prompts.isEmpty {
-                 Prompt.examplePrompts.forEach { PromptStore.shared.addPrompt($0) }
+             if PromptService.shared.prompts.isEmpty {
+                 Prompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
              }
         }
     }

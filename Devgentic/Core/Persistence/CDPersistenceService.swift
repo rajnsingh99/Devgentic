@@ -24,12 +24,6 @@ protocol CoreDataServiceProtocol {
     func deleteConversation(with id: UUID)
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func togglePinStatus(for conversationId: UUID) // New method for pinning
-
-    // Prompt Methods
-    func fetchPrompts() -> [Prompt]
-    func addPrompt(from model: Prompt)
-    func updatePrompt(from model: Prompt)
-    func deletePrompt(withId id: UUID)
     
     func saveContext()
 }
@@ -311,75 +305,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             vectorStoreService.add(chunks: chunkEntities)
             logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString) in conversation \(message.conversationId.uuidString).")
         }
-    }
-    
-    // MARK: - Prompt Methods
-    
-    func fetchPrompts() -> [Prompt] {
-        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
-        
-        do {
-            let entities = try viewContext.fetch(request)
-            let prompts = entities.map { $0.toPromptStruct() }
-            logger.info("Successfully fetched \(prompts.count) prompts from Core Data.")
-            return prompts
-        } catch {
-            logger.error("Failed to fetch prompts from Core Data: \(error.localizedDescription)")
-            return []
-        }
-    }
-    
-    func addPrompt(from model: Prompt) {
-        let newPromptEntity = PromptEntity(context: viewContext)
-        configure(entity: newPromptEntity, with: model)
-        logger.info("Adding new prompt '\(model.title)' to Core Data.")
-        saveContext()
-    }
-    
-    func updatePrompt(from model: Prompt) {
-        guard let promptToUpdate = getPromptEntity(withId: model.id) else {
-            logger.warning("Attempted to update a prompt that does not exist in Core Data (ID: \(model.id.uuidString)). Adding it instead.")
-            addPrompt(from: model)
-            return
-        }
-        configure(entity: promptToUpdate, with: model)
-        logger.info("Updating prompt '\(model.title)' in Core Data.")
-        saveContext()
-    }
-    
-    func deletePrompt(withId id: UUID) {
-        guard let promptToDelete = getPromptEntity(withId: id) else {
-            logger.warning("Attempted to delete a prompt that does not exist in Core Data (ID: \(id.uuidString)).")
-            return
-        }
-        viewContext.delete(promptToDelete)
-        logger.info("Deleting prompt with ID \(id.uuidString) from Core Data.")
-        saveContext()
-    }
-    
-    private func getPromptEntity(withId id: UUID) -> PromptEntity? {
-        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
-        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        request.fetchLimit = 1
-        
-        do {
-            return try viewContext.fetch(request).first
-        } catch {
-            logger.error("Failed to fetch PromptEntity with ID \(id.uuidString): \(error.localizedDescription)")
-            return nil
-        }
-    }
-    
-    private func configure(entity: PromptEntity, with model: Prompt) {
-        entity.id = model.id
-        entity.title = model.title
-        entity.text = model.text
-        entity.category = model.category
-        entity.createdAt = model.createdAt
-        entity.lastUsedAt = model.lastUsedAt
-        entity.isUserDefined = model.isUserDefined
-        entity.tags = model.tags as NSArray?
     }
 
     // MARK: - Private Helper Methods

@@ -2,100 +2,97 @@
 //  PromptStore.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 10/05/25.
+//  Created by Raj Singh on 27/08/25.
 //
 
-// Stores/PromptStore.swift
 import Foundation
-import Combine
+import CoreData
 import os
 
-/// Manages the collection of prompts, handling persistence and providing access.
-@MainActor // Ensures changes to @Published properties are on the main thread
-class PromptStore: ObservableObject {
-    static let shared = PromptStore()
+protocol PromptStoreProtocol {
+    func fetchPrompts() -> [Prompt]
+    func addPrompt(from model: Prompt)
+    func updatePrompt(from model: Prompt)
+    func deletePrompt(withId id: UUID)
+}
 
-    // Use the Core Data service as the primary persistence layer.
-    private let persistenceService: CoreDataServiceProtocol
+class PromptStore: PromptStoreProtocol {
+    
+    private let coreDataService: CoreDataPersistenceService
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptStore")
 
-    /// The collection of all prompts, published for UI updates.
-    @Published var prompts: [Prompt] = []
-
-    private init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared) {
-        self.persistenceService = persistenceService
-        
-        // Load all prompts from the Core Data store.
-        loadPrompts()
-        
-        // If the library is still empty after loading (e.g., first launch), add default prompts.
-        if prompts.isEmpty {
-            logger.info("Prompt library is empty. Adding default example prompts to Core Data.")
-            addDefaultPrompts()
-        }
-        
-        logger.info("PromptStore initialized. Loaded \(self.prompts.count) prompts from Core Data.")
+    init(coreDataService: CoreDataPersistenceService = .shared) {
+        self.coreDataService = coreDataService
     }
 
-    /// Loads prompts from the Core Data persistence service.
-    private func loadPrompts() {
-        self.prompts = persistenceService.fetchPrompts().sorted(by: { $0.createdAt > $1.createdAt })
+    private var viewContext: NSManagedObjectContext {
+        coreDataService.viewContext
+    }
+
+    func fetchPrompts() -> [Prompt] {
+        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+        
+        do {
+            let entities = try viewContext.fetch(request)
+            let prompts = entities.map { $0.toPromptStruct() }
+            logger.info("Successfully fetched \(prompts.count) prompts from Core Data.")
+            return prompts
+        } catch {
+            logger.error("Failed to fetch prompts from Core Data: \(error.localizedDescription)")
+            return []
+        }
     }
     
-    /// Adds the default set of prompts to the store.
-    private func addDefaultPrompts() {
-        for prompt in Prompt.examplePrompts {
-            persistenceService.addPrompt(from: prompt)
+    func addPrompt(from model: Prompt) {
+        let newPromptEntity = PromptEntity(context: viewContext)
+        configure(entity: newPromptEntity, with: model)
+        logger.info("Adding new prompt '\(model.title)' to Core Data.")
+        coreDataService.saveContext()
+    }
+    
+    func updatePrompt(from model: Prompt) {
+        guard let promptToUpdate = getPromptEntity(withId: model.id) else {
+            logger.warning("Attempted to update a prompt that does not exist in Core Data (ID: \(model.id.uuidString)). Adding it instead.")
+            addPrompt(from: model)
+            return
         }
-        // Reload from persistence to ensure the UI has the latest data.
-        loadPrompts()
+        configure(entity: promptToUpdate, with: model)
+        logger.info("Updating prompt '\(model.title)' in Core Data.")
+        coreDataService.saveContext()
     }
-
-    // MARK: - CRUD Operations (Now interacting with Core Data)
-
-    /// Adds a new prompt to the store and saves changes via the persistence service.
-    /// - Parameter prompt: The `Prompt` to add.
-    func addPrompt(_ prompt: Prompt) {
-        persistenceService.addPrompt(from: prompt)
-        loadPrompts() // Reload to update the @Published array
-        logger.info("Added new prompt via Core Data: '\(prompt.title)'")
-    }
-
-    /// Updates an existing prompt in the store and saves changes via the persistence service.
-    /// - Parameter prompt: The `Prompt` to update.
-    func updatePrompt(_ prompt: Prompt) {
-        persistenceService.updatePrompt(from: prompt)
-        loadPrompts() // Reload to update the @Published array
-        logger.info("Updated prompt via Core Data: '\(prompt.title)'")
-    }
-
-    /// Deletes a prompt from the store by its ID and saves changes via the persistence service.
-    /// - Parameter id: The `UUID` of the prompt to delete.
+    
     func deletePrompt(withId id: UUID) {
-        persistenceService.deletePrompt(withId: id)
-        loadPrompts() // Reload to update the @Published array
-        logger.info("Deleted prompt via Core Data with ID: \(id.uuidString)")
-    }
-
-    /// Deletes multiple prompts from the store by their IDs.
-    /// - Parameter ids: A `Set` of `UUID`s of the prompts to delete.
-    func deletePrompts(withIds ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        for id in ids {
-            persistenceService.deletePrompt(withId: id)
+        guard let promptToDelete = getPromptEntity(withId: id) else {
+            logger.warning("Attempted to delete a prompt that does not exist in Core Data (ID: \(id.uuidString)).")
+            return
         }
-        loadPrompts() // Reload to update the @Published array
-        logger.info("Deleted \(ids.count) prompts via Core Data.")
-    }
-
-    /// Retrieves a prompt by its ID from the local array.
-    /// - Parameter id: The `UUID` of the prompt to retrieve.
-    /// - Returns: An optional `Prompt` if found, otherwise `nil`.
-    func getPrompt(withId id: UUID) -> Prompt? {
-        return prompts.first { $0.id == id }
+        viewContext.delete(promptToDelete)
+        logger.info("Deleting prompt with ID \(id.uuidString) from Core Data.")
+        coreDataService.saveContext()
     }
     
-    func getAllPrompts() -> [Prompt] {
-        return prompts
+    private func getPromptEntity(withId id: UUID) -> PromptEntity? {
+        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        request.fetchLimit = 1
+        
+        do {
+            return try viewContext.fetch(request).first
+        } catch {
+            logger.error("Failed to fetch PromptEntity with ID \(id.uuidString): \(error.localizedDescription)")
+            return nil
+        }
+    }
+    
+    private func configure(entity: PromptEntity, with model: Prompt) {
+        entity.id = model.id
+        entity.title = model.title
+        entity.text = model.text
+        entity.category = model.category
+        entity.createdAt = model.createdAt
+        entity.lastUsedAt = model.lastUsedAt
+        entity.isUserDefined = model.isUserDefined
+        entity.tags = model.tags as NSArray?
     }
 }

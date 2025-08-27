@@ -12,7 +12,7 @@ import os
 @MainActor
 class PromptLibraryViewModel: ObservableObject {
     // MARK: - Dependencies
-    private let promptStore = PromptStore.shared
+    private let promptService = PromptService.shared
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptLibraryViewModel")
     private var cancellables = Set<AnyCancellable>()
 
@@ -39,7 +39,7 @@ class PromptLibraryViewModel: ObservableObject {
         Publishers.CombineLatest3(
             $searchText.debounce(for: .milliseconds(300), scheduler: DispatchQueue.main),
             $selectedCategory,
-            promptStore.$prompts
+            promptService.$prompts
         )
         // FIX: Pass the values from the publisher directly into the filter function.
         .sink { [weak self] (searchText, category, prompts) in
@@ -59,7 +59,7 @@ class PromptLibraryViewModel: ObservableObject {
     private func filterPrompts(searchText: String, category: String) {
         logger.trace("--- Starting filterPrompts ---")
         // Get the full, unfiltered list from the store.
-        let allPrompts = promptStore.getAllPrompts()
+        let allPrompts = promptService.getAllPrompts()
         logger.trace("Fetched \(allPrompts.count) total prompts from store.")
 
         // 1. Apply the category filter using the 'category' parameter.
@@ -142,7 +142,7 @@ class PromptLibraryViewModel: ObservableObject {
             editingPrompt.category = editablePromptCategory
             editingPrompt.tags = tagsArray.isEmpty ? nil : tagsArray
             
-            promptStore.updatePrompt(editingPrompt)
+            promptService.updatePrompt(editingPrompt)
             logger.info("Successfully updated prompt: '\(editingPrompt.title)'")
             if selectedPrompt?.id == editingPrompt.id {
                 selectPrompt(editingPrompt)
@@ -157,7 +157,7 @@ class PromptLibraryViewModel: ObservableObject {
                 isUserDefined: true,
                 tags: tagsArray.isEmpty ? nil : tagsArray
             )
-            promptStore.addPrompt(newPrompt)
+            promptService.addPrompt(newPrompt)
             logger.info("Successfully created new prompt. ID: \(newPrompt.id.uuidString)")
         }
         showingCreateOrEditPromptSheet = false
@@ -171,7 +171,7 @@ class PromptLibraryViewModel: ObservableObject {
     
     func deletePrompt(_ prompt: Prompt) {
         logger.info("Attempting to delete prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
-        promptStore.deletePrompt(withId: prompt.id)
+        promptService.deletePrompt(withId: prompt.id)
         
         filterPrompts(searchText: self.searchText, category: self.selectedCategory)
         
@@ -186,7 +186,7 @@ class PromptLibraryViewModel: ObservableObject {
     func updatePromptUsage(prompt: Prompt) {
         var mutablePrompt = prompt
         mutablePrompt.lastUsedAt = Date()
-        promptStore.updatePrompt(mutablePrompt)
+        promptService.updatePrompt(mutablePrompt)
         logger.info("Updated last used time for prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
     }
 }

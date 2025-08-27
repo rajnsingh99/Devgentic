@@ -212,8 +212,8 @@ struct PromptLibrarySidebarView_Previews: PreviewProvider {
         PromptLibrarySidebarView()
             .frame(width: 350, height: 700)
             .onAppear {
-                if PromptStore.shared.prompts.isEmpty {
-                    Prompt.examplePrompts.forEach { PromptStore.shared.addPrompt($0) }
+                if PromptService.shared.prompts.isEmpty {
+                    Prompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
                 }
             }
             .previewDisplayName("Prompt Library Sidebar")
