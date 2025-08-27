@@ -29,7 +29,6 @@ struct DevgenticApp: App {
         let fileProcessor = FileProcessorService()
 
         let streamManager = ActiveStreamManager(
-            llmIntegrationStore: integrationStore,
             persistenceService: persistence,
             fileProcessorService: fileProcessor
         )

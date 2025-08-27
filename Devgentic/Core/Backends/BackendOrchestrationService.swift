@@ -18,7 +18,6 @@ class BackendOrchestrationService: ObservableObject {
     // MARK: - Dependencies
     private let ollamaService: OllamaService
     private let remoteOrchestrationService: RemoteOrchestrationService
-    private let llmIntegrationStore: LLMIntegrationStore
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     
@@ -30,10 +29,8 @@ class BackendOrchestrationService: ObservableObject {
 
     // MARK: - Initialization
     init(
-        llmIntegrationStore: LLMIntegrationStore,
         fileProcessorService: FileProcessorService
     ) {
-        self.llmIntegrationStore = llmIntegrationStore
         self.fileProcessorService = fileProcessorService
         self.ollamaService = OllamaService.shared
         self.remoteOrchestrationService = RemoteOrchestrationService()
@@ -54,7 +51,7 @@ class BackendOrchestrationService: ObservableObject {
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             Task {
-                logger.info("ORCHESTRATION START (Stream): Routing with config - Backend: \(config.backendType.rawValue), AgentID: \(config.agentID?.uuidString ?? "nil"), IntegrationID: \(config.integrationID?.uuidString ?? "nil"). TraceID: \(context.traceID)")
+                logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
                 let augmentedQuery = await self.augmentQueryWithContext(userQuery: userQuery, conversationID: conversationID)
                 
@@ -73,62 +70,66 @@ class BackendOrchestrationService: ObservableObject {
                 }
                 
                 do {
-                    switch config.backendType {
-                    case .remote:
-                        guard let integrationID = config.integrationID,
-                              let integration = self.llmIntegrationStore.integrations.first(where: { $0.id == integrationID }) else {
-                            throw NSError(domain: "RemoteConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected remote integration not found."])
+                    // New routing logic based on ProfileType
+                    switch config.profile.profileType {
+                    
+                    case .bot:
+                        guard case .bot(let llmConfig) = config.profile.details else {
+                            throw NSError(domain: "ProfileError", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not extract bot configuration from profile."])
                         }
                         
-                        let stream = self.remoteOrchestrationService.streamMessage(
-                            conversationID: conversationID,
-                            userQuery: finalUserQuery,
-                            history: conversationHistory,
-                            openAIThreadID: nil,
-                            integration: integration,
-                            context: context
-                        )
+                        // Nested switch for the API provider
+                        switch llmConfig.apiProvider {
                         
-                        for try await token in stream {
-                            continuation.yield(token)
-                        }
-                        continuation.finish()
-
-                    case .ollama:
-                        guard let integrationID = config.integrationID,
-                              let integration = self.llmIntegrationStore.integrations.first(where: { $0.id == integrationID }),
-                              let ollamaConfig = integration.ollamaConfig else {
-                            throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected Ollama integration not found or is misconfigured."])
-                        }
-
-                        var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
-                            let role: String
-                            switch message.sender {
-                            case .user: role = "user"
-                            case .agent: role = "assistant"
+                        case .ollama:
+                            guard let baseURL = llmConfig.baseURL else {
+                                throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Ollama base URL is missing in the profile."])
                             }
-                            return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
-                        }
-                        ollamaHistory.append(OllamaChatMessage(role: "user", content: finalUserQuery))
-                        
-                        logger.info("Initiating stream to Ollama with model \(ollamaConfig.modelName). History count: \(ollamaHistory.count).")
+                            
+                            var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
+                                let role: String
+                                switch message.sender {
+                                case .user: role = "user"
+                                case .agent: role = "assistant"
+                                }
+                                return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
+                            }
+                            ollamaHistory.append(OllamaChatMessage(role: "user", content: finalUserQuery))
+                            
+                            logger.info("Initiating stream to Ollama with model \(llmConfig.modelName). History count: \(ollamaHistory.count).")
 
-                        let stream = OllamaConnect.streamChatRequest(
-                            baseURL: ollamaConfig.baseURL,
-                            model: ollamaConfig.modelName,
-                            history: ollamaHistory
-                        )
-                        
-                        for try await token in stream {
-                            continuation.yield(token)
+                            let stream = OllamaConnect.streamChatRequest(
+                                baseURL: baseURL,
+                                model: llmConfig.modelName,
+                                history: ollamaHistory
+                            )
+                            
+                            for try await token in stream {
+                                continuation.yield(token)
+                            }
+                            continuation.finish()
+
+                        case .openAI, .google, .anthropic:
+                            // Defer to the remote orchestration service
+                            let stream = self.remoteOrchestrationService.streamMessage(
+                                conversationID: conversationID,
+                                userQuery: finalUserQuery,
+                                history: conversationHistory,
+                                profile: config.profile,
+                                context: context
+                            )
+                            
+                            for try await token in stream {
+                                continuation.yield(token)
+                            }
+                            continuation.finish()
                         }
-                        continuation.finish()
-                        
+
                     case .agent:
-                        throw NSError(domain: "StreamingError", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for the Agent backend."])
+                        throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Agent profiles."])
                         
-                    case .none:
-                        throw NSError(domain: "BackendError", code: 404, userInfo: [NSLocalizedDescriptionKey: "No backend has been selected."])
+                    case .workflow:
+                        throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Workflow profiles."])
                     }
                 } catch {
                     continuation.finish(throwing: error)
@@ -137,93 +138,7 @@ class BackendOrchestrationService: ObservableObject {
         }
     }
 
-    // MARK: - Main Sending Logic (Non-Streaming)
-    
-//    func sendMessage(
-//        withConfig config: BackendRequestConfig,
-//        conversationID: UUID,
-//        userQuery: String,
-//        files: [FileSystemItem]
-//    ) async -> ([ChatMessage], String?) {
-//        
-//        logger.info("ORCHESTRATION START (One-shot): Routing with config - Backend: \(config.backendType.rawValue), AgentID: \(config.agentID?.uuidString ?? "nil"), IntegrationID: \(config.integrationID?.uuidString ?? "nil")")
-//        
-//        let augmentedQuery = await augmentQueryWithContext(userQuery: userQuery, conversationID: conversationID)
-//        
-//        let conversationEntity = persistenceService.getConversation(withId: conversationID)
-//        let conversation = conversationEntity?.toConversationStruct()
-//        
-//        let conversationHistory = (conversation?.messages ?? []).filter { message in
-//            if case .error = message.content { return false }
-//            return true
-//        }
-//        
-//        var finalUserQuery = augmentedQuery
-//        
-//        if !files.isEmpty {
-//            logger.info("Assembling content for \(files.count) attached files.")
-//            let fileContext = assembleTextFileContent(for: files)
-//            if !fileContext.isEmpty {
-//                finalUserQuery = fileContext + "\n\n" + finalUserQuery
-//            }
-//        }
-//        
-//        do {
-//            switch config.backendType {
-//            case .agent:
-//                guard let agentID = config.agentID else {
-//                    return ([], "No agent selected for the Agent backend.")
-//                }
-//                let (messages, error) = try await sendToAgent(conversationID: conversationID, userQuery: finalUserQuery, files: files, agentID: agentID)
-//                return (messages, error?.localizedDescription)
-//                
-//            case .ollama:
-//                guard let integrationID = config.integrationID else {
-//                    return ([], "No Ollama integration selected.")
-//                }
-//                let (messages, error) = try await sendToOllama(
-//                    conversationID: conversationID,
-//                    userQuery: finalUserQuery,
-//                    history: conversationHistory,
-//                    files: files,
-//                    integrationID: integrationID
-//                )
-//                return (messages, error?.localizedDescription)
-//
-//            case .remote:
-//                 guard let integrationID = config.integrationID else {
-//                    return ([], "No remote integration selected.")
-//                }
-//                
-//                let (messages, newThreadID, error) = try await sendToRemote(
-//                    conversationID: conversationID,
-//                    userQuery: finalUserQuery,
-//                    history: conversationHistory,
-//                    openAIThreadID: conversation?.openAIThreadID,
-//                    integrationID: integrationID
-//                )
-//                
-//                if let newThreadID = newThreadID {
-//                    persistenceService.updateOpenAIThreadID(for: conversationID, with: newThreadID)
-//                }
-//                
-//                return (messages, error?.localizedDescription)
-//
-//            case .none:
-//                return ([], "No backend has been selected. Please select a backend from the input area.")
-//            }
-//        } catch {
-//            let userFriendlyError = ErrorHandling.generateUserFriendlyMessage(for: error, backendType: config.backendType)
-//            return ([], userFriendlyError)
-//        }
-//    }
-    
-    // MARK: - RAG Context Retrieval
-    
-    /// **STEP 2.1: RAG RETRIEVAL**
-    /// This function uses the VectorStoreService to find relevant context from the current conversation
-    /// and prepends it to the user's query before sending it to the AI.
-    private func augmentQueryWithContext(userQuery: String, conversationID: UUID) async -> String {
+   private func augmentQueryWithContext(userQuery: String, conversationID: UUID) async -> String {
         logger.info("RAG: Attempting to augment query with context for conversation: \(conversationID.uuidString)")
         
         // 1. Generate a vector embedding for the user's query.
@@ -267,156 +182,5 @@ class BackendOrchestrationService: ObservableObject {
         }
         
         return assembledContent
-    }
-
-    // MARK: - Backend-Specific Logic
-//    private func sendToAgent(conversationID: UUID, userQuery: String, files: [FileSystemItem], agentID: UUID) async throws -> ([ChatMessage], Error?) {
-//        guard let selectedAgent = agentStore.agents.first(where: { $0.id == agentID }) else {
-//            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent profile could not be found."])
-//        }
-//        
-//        guard let linkedIntegration = llmIntegrationStore.integrations.first(where: { $0.id == selectedAgent.linkedIntegrationID }) else {
-//            throw NSError(domain: "AgentConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "The selected agent's LLM integration is not found."])
-//        }
-//
-//        guard linkedIntegration.providerType == .ollama, let ollamaConfig = linkedIntegration.ollamaConfig else {
-//            throw NSError(domain: "AgentConfigError", code: 400, userInfo: [NSLocalizedDescriptionKey: "The agent's linked LLM must be a configured Ollama provider."])
-//        }
-//
-//        let llmSettings = OllamaLLMSettings(
-//            baseUrl: ollamaConfig.baseURL,
-//            modelName: ollamaConfig.modelName,
-//            contextWindowSize: ollamaConfig.contextWindowSize ?? 4096
-//        )
-//
-//        let rootAgentConfig = AgentConfig(
-//            agentId: selectedAgent.id.uuidString,
-//            parentId: nil,
-//            roleObjective: userQuery,
-//            tools: selectedAgent.tools.map { $0.id },
-//            llmSettings: .ollama(llmSettings)
-//        )
-//
-//        let payload = AgentOrchestrationRequest(
-//            conversationId: conversationID.uuidString,
-//            files: files.map { FileObject(uri: $0.url.absoluteString, name: $0.name) },
-//            agentConfigs: [rootAgentConfig]
-//        )
-//        
-//        let (messageContents, error) = try await self.agentService.sendMessage(payload: payload)
-//        
-//        if let error = error {
-//            let chatError = ChatMessage(conversationId: conversationID, sender: .agent, content: .error(title: "Agent Error", details: error.localizedDescription))
-//            return ([chatError], error)
-//        }
-//    
-//        let messages = messageContents.map { ChatMessage(conversationId: conversationID, sender: .agent, content: $0) }
-//        return (messages, nil)
-//    }
-
-    private func sendToOllama(
-        conversationID: UUID,
-        userQuery: String,
-        history: [ChatMessage],
-        files: [FileSystemItem],
-        integrationID: UUID
-    ) async throws -> ([ChatMessage], Error?) {
-        guard let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID && $0.providerType == .ollama }),
-              let ollamaConfig = integration.ollamaConfig else {
-             throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected Ollama integration not found or is misconfigured."])
-        }
-        
-        var ollamaHistory = history.map { message -> OllamaChatMessage in
-            let role: String
-            switch message.sender {
-            case .user: role = "user"
-            case .agent: role = "assistant"
-            }
-            return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
-        }
-        
-        ollamaHistory.append(OllamaChatMessage(role: "user", content: userQuery))
-
-        do {
-            let response = try await OllamaConnect.sendChatRequest(
-                baseURL: ollamaConfig.baseURL,
-                model: ollamaConfig.modelName,
-                history: ollamaHistory
-            )
-
-            let agentMessageContent = MessageContent.markdownText(response.message.content)
-            let agentMessage = ChatMessage(
-                conversationId: conversationID,
-                sender: .agent,
-                content: agentMessageContent
-            )
-
-            return ([agentMessage], nil)
-
-        } catch {
-            logger.error("Error sending message to Ollama: \(error.localizedDescription)")
-            return ([], error)
-        }
-    }
-
-    /// **UPDATED for Step 2.2**
-    /// This function now receives raw data from the `RemoteOrchestrationService` and is responsible
-    /// for creating the final `ChatMessage` objects.
-    private func sendToRemote(
-        conversationID: UUID,
-        userQuery: String,
-        history: [ChatMessage],
-        openAIThreadID: String?,
-        integrationID: UUID
-    ) async throws -> (messages: [ChatMessage], newThreadID: String?, error: Error?) {
-        
-        guard let integration = llmIntegrationStore.integrations.first(where: { $0.id == integrationID && $0.providerType == .remote }) else {
-            throw NSError(domain: "RemoteConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Selected remote integration not found."])
-        }
-        
-        // 1. Call the refactored service method that returns raw data instead of ChatMessage objects.
-        let (responseText, responseImageData, newThreadID, error) = try await remoteOrchestrationService.sendMessage(
-            conversationID: conversationID,
-            userQuery: userQuery,
-            history: history,
-            openAIThreadID: openAIThreadID,
-            integration: integration
-        )
-
-        // 2. Handle any errors returned by the service.
-        if let error = error {
-            let errorMessage = ChatMessage(conversationId: conversationID, sender: .agent, content: .error(title: "Remote API Error", details: error.localizedDescription))
-            return ([errorMessage], newThreadID, error)
-        }
-
-        var responseMessages: [ChatMessage] = []
-
-        // 3. Create a ChatMessage from the response text, if it exists.
-        if let text = responseText {
-            let agentMessage = ChatMessage(
-                conversationId: conversationID,
-                sender: .agent,
-                content: .markdownText(text)
-            )
-            responseMessages.append(agentMessage)
-        }
-
-        // 4. Create a ChatMessage from the response image data, if it exists.
-        if let imageData = responseImageData {
-            let agentMessage = ChatMessage(
-                conversationId: conversationID,
-                sender: .agent,
-                content: .image(url: nil, alt: userQuery, imageData: imageData)
-            )
-            responseMessages.append(agentMessage)
-        }
-        
-        // 5. Handle the case where there is no content but also no error.
-        if responseMessages.isEmpty && error == nil {
-             let errorMessage = ChatMessage(conversationId: conversationID, sender: .agent, content: .error(title: "Empty Response", details: "The remote API returned an empty response."))
-             responseMessages.append(errorMessage)
-        }
-
-        return (messages: responseMessages, newThreadID: newThreadID, error: nil)
     }
 }

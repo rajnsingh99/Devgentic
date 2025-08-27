@@ -12,65 +12,80 @@ import os
 struct BackendSelectorPopup: View {
 
     // MARK: - State Bindings
-    // --- UPDATED: Receive the whole configuration object ---
     @ObservedObject var configuration: BackendConfiguration
     @Binding var isPresented: Bool
     
     // MARK: - Environment
     @Environment(\.openWindow) var openWindow
 
-    // MARK: - Data Sources
-    @ObservedObject var llmIntegrationStore: LLMIntegrationStore
-
+    // MARK: - Data Source
+    @State private var profiles: [BackendProfileModel] = []
+    
     // MARK: - Computed Properties for Data Filtering
-    private var localIntegrations: [LLMIntegrationModel] {
-        llmIntegrationStore.integrations.filter { $0.providerType == .ollama }.sorted { $0.displayName < $1.displayName }
+    private var botProfiles: [BackendProfileModel] {
+        profiles.filter { $0.profileType == .bot }.sorted { $0.displayName < $1.displayName }
     }
-    private var remoteIntegrations: [LLMIntegrationModel] {
-        llmIntegrationStore.integrations.filter { $0.providerType == .remote }.sorted { $0.displayName < $1.displayName }
+    private var agentProfiles: [BackendProfileModel] {
+        profiles.filter { $0.profileType == .agent }.sorted { $0.displayName < $1.displayName }
+    }
+    private var workflowProfiles: [BackendProfileModel] {
+        profiles.filter { $0.profileType == .workflow }.sorted { $0.displayName < $1.displayName }
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            let showLocalColumn = !localIntegrations.isEmpty
-            let showRemoteColumn = !remoteIntegrations.isEmpty
+            let showBots = !botProfiles.isEmpty
+            let showAgents = !agentProfiles.isEmpty
+            let showWorkflows = !workflowProfiles.isEmpty
 
-            // Column 1: Local LLMs
-            if showLocalColumn {
-                LLMColumnView(
-                    title: "Local Models",
-                    backendTypeForColumn: .ollama,
-                    integrations: localIntegrations,
+            // Column 1: Bots
+            if showBots {
+                ProfileColumnView(
+                    title: "Bots",
+                    profiles: botProfiles,
                     configuration: configuration,
-                    onSelect: {
-                        self.isPresented = false
-                    },
-                    onEdit: { integrationID in
-                        llmIntegrationStore.selectedIntegrationID = integrationID
-                        openWindow(id: "llm-integrations")
+                    onSelect: { self.isPresented = false },
+                    onEdit: { profileID in
+                        // Placeholder for future edit action
+                        // openWindow(id: "profile-editor", value: profileID)
                         self.isPresented = false
                     }
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
             
-            if showLocalColumn && showRemoteColumn {
+            if showBots && (showAgents || showWorkflows) {
                 Divider()
             }
 
-            // Column 2: Remote LLMs
-            if showRemoteColumn {
-                LLMColumnView(
-                    title: "Remote Models",
-                    backendTypeForColumn: .remote,
-                    integrations: remoteIntegrations,
+            // Column 2: Agents
+            if showAgents {
+                ProfileColumnView(
+                    title: "Agents",
+                    profiles: agentProfiles,
                     configuration: configuration,
-                    onSelect: {
+                    onSelect: { self.isPresented = false },
+                    onEdit: { profileID in
+                        // openWindow(id: "profile-editor", value: profileID)
                         self.isPresented = false
-                    },
-                    onEdit: { integrationID in
-                        llmIntegrationStore.selectedIntegrationID = integrationID
-                        openWindow(id: "llm-integrations")
+                    }
+                )
+                .frame(minWidth: 180, idealWidth: 200)
+            }
+            
+            if showAgents && showWorkflows {
+                Divider()
+            }
+
+            // Column 3: Workflows
+            if showWorkflows {
+                ProfileColumnView(
+                    title: "Workflows",
+                    profiles: workflowProfiles,
+                    configuration: configuration,
+                    onSelect: { self.isPresented = false },
+                    onEdit: { profileID in
+                        // openWindow(id: "profile-editor", value: profileID)
                         self.isPresented = false
                     }
                 )
@@ -80,15 +95,17 @@ struct BackendSelectorPopup: View {
         .padding(.vertical, 8)
         .frame(maxHeight: 450)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            self.profiles = BackendProfileStore.shared.fetchProfiles()
+        }
     }
 }
 
 
-// MARK: - LLM Integration Column View
-private struct LLMColumnView: View {
+// MARK: - Profile Column View
+private struct ProfileColumnView: View {
     let title: String
-    let backendTypeForColumn: BackendType
-    let integrations: [LLMIntegrationModel]
+    let profiles: [BackendProfileModel]
     @ObservedObject var configuration: BackendConfiguration
     let onSelect: () -> Void
     let onEdit: (UUID) -> Void
@@ -101,18 +118,16 @@ private struct LLMColumnView: View {
 
             ScrollView {
                 VStack(alignment: .center, spacing: 0) {
-                    ForEach(integrations) { integration in
-                        let isSelected = configuration.selectedBackend == backendTypeForColumn && configuration.selectedIntegrationID == integration.id
+                    ForEach(profiles) { profile in
+                        let isSelected = configuration.selectedProfileID == profile.id
                         
                         ItemCell(
-                            name: integration.displayName,
-                            detail: integration.providerType == .ollama ? integration.ollamaConfig?.modelName : integration.remoteConfig?.modelName,
+                            profile: profile,
                             isSelected: isSelected
                         )
-                        .onTapGesture(count: 2) { onEdit(integration.id) }
+                        .onTapGesture(count: 2) { onEdit(profile.id) }
                         .onTapGesture(count: 1) {
-                            configuration.selectedBackend = backendTypeForColumn
-                            configuration.selectedIntegrationID = integration.id
+                            configuration.selectedProfileID = profile.id
                             self.onSelect()
                         }
                     }
@@ -126,21 +141,31 @@ private struct LLMColumnView: View {
 
 // MARK: - Reusable Item Cell
 private struct ItemCell: View {
-    let name: String
-    let detail: String?
+    let profile: BackendProfileModel
     let isSelected: Bool
+
+    private var detailText: String? {
+        switch profile.details {
+        case .bot(let llmConfig):
+            return llmConfig.modelName
+        case .agent:
+            return "Agent" // Placeholder
+        case .workflow:
+            return "Workflow" // Placeholder
+        }
+    }
 
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
                 Spacer()
                 VStack(alignment: .center, spacing: 2) {
-                    Text(name)
+                    Text(profile.displayName)
                         .fontWeight(.semibold)
                         .foregroundColor(.primary)
                         .lineLimit(1)
 
-                    if let detail = detail, !detail.isEmpty {
+                    if let detail = detailText, !detail.isEmpty {
                         Text(detail)
                             .font(.caption)
                             .foregroundColor(.secondary)

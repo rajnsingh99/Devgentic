@@ -5,6 +5,8 @@
 //  Created by Raj Singh on 22/08/25.
 //
 //  Refactored to a unified model on 26/08/25.
+//  Fixed on 27/08/25 to correct AnyCodable decoding order.
+//  Fixed on 27/08/25 to correct AnyCodable encoding order to prevent precision loss.
 //
 
 import Foundation
@@ -152,12 +154,14 @@ struct AnyCodable: Codable, Hashable {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self.value = ()
-        } else if let bool = try? container.decode(Bool.self) {
-            self.value = bool
+        // **FIXED**: Reordered decoding attempts to prioritize numbers over booleans.
+        // This prevents numbers like 1 or 0 from being misinterpreted as true/false.
         } else if let int = try? container.decode(Int.self) {
             self.value = int
         } else if let double = try? container.decode(Double.self) {
             self.value = double
+        } else if let bool = try? container.decode(Bool.self) {
+            self.value = bool
         } else if let string = try? container.decode(String.self) {
             self.value = string
         } else if let array = try? container.decode([AnyCodable].self) {
@@ -176,10 +180,12 @@ struct AnyCodable: Codable, Hashable {
             try container.encodeNil()
         case let bool as Bool:
             try container.encode(bool)
-        case let int as Int:
-            try container.encode(int)
+        // **FIXED**: Reordered encoding attempts to prioritize Double over Int.
+        // This prevents a Double like 1.0 from being encoded as an Int (1), losing its type information.
         case let double as Double:
             try container.encode(double)
+        case let int as Int:
+            try container.encode(int)
         case let string as String:
             try container.encode(string)
         case let array as [Any]:

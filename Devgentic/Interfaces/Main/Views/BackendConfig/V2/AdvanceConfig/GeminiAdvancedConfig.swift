@@ -4,6 +4,8 @@
 //
 //  Created by Raj Singh on 22/08/25.
 //
+//  Fixed on 27/08/25 to add robust decoding for legacy boolean values for both Int and Double.
+//
 
 import Foundation
 
@@ -50,6 +52,69 @@ struct GeminiAdvancedConfig: Codable, Hashable {
             ]
         )
     }
+    
+    // MARK: - Codable Implementation
+    
+    // Keys for manual decoding to handle potential type mismatches from older versions.
+    private enum CodingKeys: String, CodingKey {
+        case temperature, topP, topK, maxOutputTokens, stopSequences, safetySettings
+    }
+
+    // Since we provide a custom decoder, we must also provide a memberwise initializer
+    // so that methods like `default()` continue to function correctly.
+    init(temperature: Double?, topP: Double?, topK: Int?, maxOutputTokens: Int?, stopSequences: [String]?, safetySettings: [SafetySetting]?) {
+        self.temperature = temperature
+        self.topP = topP
+        self.topK = topK
+        self.maxOutputTokens = maxOutputTokens
+        self.stopSequences = stopSequences
+        self.safetySettings = safetySettings
+    }
+
+    /// Custom decoder to handle cases where a numeric type was incorrectly saved as a Bool.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        // For `temperature`, first try to decode a Double. If that fails, try a Bool.
+        if let tempDouble = try? container.decode(Double.self, forKey: .temperature) {
+            self.temperature = tempDouble
+        } else if let tempBool = try? container.decode(Bool.self, forKey: .temperature) {
+            self.temperature = tempBool ? 1.0 : 0.0 // Convert bool to a sensible default double
+        } else {
+            self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+        }
+
+        // For `topP`, first try to decode a Double. If that fails, try a Bool.
+        if let topPDouble = try? container.decode(Double.self, forKey: .topP) {
+            self.topP = topPDouble
+        } else if let topPBool = try? container.decode(Bool.self, forKey: .topP) {
+            self.topP = topPBool ? 1.0 : 0.0 // Convert bool to a sensible default double
+        } else {
+            self.topP = try container.decodeIfPresent(Double.self, forKey: .topP)
+        }
+
+        // **FIXED**: For `topK`, first try to decode an Int. If that fails, try a Bool.
+        if let topKInt = try? container.decode(Int.self, forKey: .topK) {
+            self.topK = topKInt
+        } else if let topKBool = try? container.decode(Bool.self, forKey: .topK) {
+            self.topK = topKBool ? 1 : 0 // Convert bool to a sensible default int
+        } else {
+            self.topK = try container.decodeIfPresent(Int.self, forKey: .topK)
+        }
+        
+        // **FIXED**: For `maxOutputTokens`, first try to decode an Int. If that fails, try a Bool.
+        if let maxTokensInt = try? container.decode(Int.self, forKey: .maxOutputTokens) {
+            self.maxOutputTokens = maxTokensInt
+        } else if let maxTokensBool = try? container.decode(Bool.self, forKey: .maxOutputTokens) {
+            self.maxOutputTokens = maxTokensBool ? 2048 : 0 // Convert bool to a sensible default int
+        } else {
+            self.maxOutputTokens = try container.decodeIfPresent(Int.self, forKey: .maxOutputTokens)
+        }
+
+        // Decode all other properties normally.
+        self.stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences)
+        self.safetySettings = try container.decodeIfPresent([SafetySetting].self, forKey: .safetySettings)
+    }
 }
 
 // MARK: - Supporting Enums and Structs for Safety Settings
@@ -57,11 +122,8 @@ struct GeminiAdvancedConfig: Codable, Hashable {
 /// Represents a single safety setting for a specific harm category.
 /// Conforms to `Identifiable` so it can be used in a `ForEach` loop.
 struct SafetySetting: Codable, Hashable, Identifiable {
-    // FIXED: Add `id` to conform to Identifiable. The category is a unique identifier.
     var id: HarmCategory { category }
-    
     let category: HarmCategory
-    // FIXED: Change `threshold` from `let` to `var` so the Picker can modify it.
     var threshold: HarmBlockThreshold
 }
 

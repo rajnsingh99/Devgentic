@@ -37,7 +37,7 @@ class MainApplicationViewModel: ObservableObject {
 
     // MARK: - Service & Store Observables
     @ObservedObject var ollamaService = OllamaService.shared
-    @ObservedObject var llmIntegrationStore: LLMIntegrationStore
+    @ObservedObject var llmIntegrationStore: LLMIntegrationStore // Kept for other parts of the app for now
     
     // MARK: - Published State Properties
     @Published var conversations: [Conversation] = []
@@ -128,48 +128,15 @@ class MainApplicationViewModel: ObservableObject {
             }
             .store(in: &cancellables)
             
-        backendConfiguration.$selectedBackend
-            .combineLatest(backendConfiguration.$selectedAgentID, backendConfiguration.$selectedIntegrationID)
+        // NEW: Simplified binding to sync profile changes with the current conversation
+        backendConfiguration.$selectedProfileID
             .dropFirst()
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] backendType, agentID, integrationID in
+            .sink { [weak self] profileID in
                 guard let self = self, let conversationID = self.selectedConversationID else { return }
                 
-                logger.info("Backend configuration changed. Updating current conversation \(conversationID.uuidString).")
-                self.updateBackendForCurrentConversation(
-                    conversationID: conversationID,
-                    backendType: backendType,
-                    agentID: agentID,
-                    integrationID: integrationID
-                )
-            }
-            .store(in: &cancellables)
-
-        backendConfiguration.$selectedIntegrationID
-            .removeDuplicates()
-            .sink { [weak self] newIntegrationID in
-                if self?.llmIntegrationStore.selectedIntegrationID != newIntegrationID {
-                    logger.debug("Syncing BackendConfig -> LLMStore. New Integration ID: \(newIntegrationID?.uuidString ?? "nil")")
-                    self?.llmIntegrationStore.selectedIntegrationID = newIntegrationID
-                }
-            }
-            .store(in: &cancellables)
-            
-        llmIntegrationStore.$selectedIntegrationID
-            .removeDuplicates()
-            .sink { [weak self] newIntegrationID in
-                guard let self = self else { return }
-                if self.backendConfiguration.selectedIntegrationID != newIntegrationID {
-                    logger.debug("Syncing LLMStore -> BackendConfig. New Integration ID: \(newIntegrationID?.uuidString ?? "nil")")
-                    self.backendConfiguration.selectedIntegrationID = newIntegrationID
-                    
-                    if let newId = newIntegrationID, let integration = self.llmIntegrationStore.integrations.first(where: { $0.id == newId }) {
-                        let newBackendType: BackendType = integration.providerType == .ollama ? .ollama : .remote
-                        if self.backendConfiguration.selectedBackend != newBackendType {
-                            self.backendConfiguration.selectedBackend = newBackendType
-                        }
-                    }
-                }
+                logger.info("Backend profile changed. Updating current conversation \(conversationID.uuidString).")
+                self.updateBackendForCurrentConversation(conversationID: conversationID, profileID: profileID)
             }
             .store(in: &cancellables)
     }
@@ -198,98 +165,94 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Message Sending Logic
     
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
-            if showSettings { showSettings = false }
-            
-            let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
-            
-            guard !chatHistoryViewModel.isSending else {
-                logger.warning("[sendMessage] Message sending already in progress. Ignoring new request.")
-                return
-            }
-            guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
-                return
-            }
+        if showSettings { showSettings = false }
+        
+        let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        guard !chatHistoryViewModel.isSending else {
+            logger.warning("[sendMessage] Message sending already in progress. Ignoring new request.")
+            return
+        }
+        guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
+            return
+        }
+        // NEW: Ensure a valid config exists before sending
+        guard let config = backendConfiguration.getRequestConfig() else {
+            logger.error("[sendMessage] CRITICAL: Could not get backend request config. Is a profile selected?")
+            // Optionally show an alert to the user
+            return
+        }
 
-            chatHistoryViewModel.isSending = true
-            logger.info("Beginning message send process with backend: \(config.backendType.rawValue)")
-            
-            let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
-            
-            guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
-                logger.error("[sendMessage] CRITICAL: Could not find or create conversation entity for ID: \(conversationIDToUse.uuidString)")
-                chatHistoryViewModel.isSending = false
-                return
-            }
+        chatHistoryViewModel.isSending = true
+        logger.info("Beginning message send process with profile: \(config.profile.displayName)")
+        
+        let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
+        
+        guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
+            logger.error("[sendMessage] CRITICAL: Could not find or create conversation entity for ID: \(conversationIDToUse.uuidString)")
+            chatHistoryViewModel.isSending = false
+            return
+        }
 
-            let filesForBackend = self.attachedFiles
-            
-            let userMessage = createUserMessage(
-                conversationID: conversationIDToUse,
-                query: plainUserQueryFromEditor,
-                files: filesForBackend
-            )
-            
-            // **FIX**: Append new user message to the end of the array.
-            chatHistoryViewModel.currentChatMessages.append(userMessage)
-            logger.debug("Appended user message into UI.")
-            
-            Task {
-                await persistenceService.addMessage(userMessage, to: targetConversationEntity)
-                logger.debug("User message persisted successfully.")
-            }
+        let filesForBackend = self.attachedFiles
+        
+        let userMessage = createUserMessage(
+            conversationID: conversationIDToUse,
+            query: plainUserQueryFromEditor,
+            files: filesForBackend
+        )
+        
+        chatHistoryViewModel.currentChatMessages.append(userMessage)
+        logger.debug("Appended user message into UI.")
+        
+        Task {
+            await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+            logger.debug("User message persisted successfully.")
+        }
 
-            self.clearAttachedFiles()
-            logger.debug("Cleared user input and attachments from UI.")
+        self.clearAttachedFiles()
+        logger.debug("Cleared user input and attachments from UI.")
 
-            let agentMessage = activeStreamManager.startMessageStream(
-                withConfig: config,
-                conversationID: conversationIDToUse,
-                userQuery: plainUserQueryFromEditor,
-                history: chatHistoryViewModel.currentChatMessages.reversed(),
-                files: filesForBackend,
-                updating: nil, // This is a new message, not a regeneration
-                onComplete: { [weak self] in
-                    // This block is called when the stream finishes or is cancelled.
-                    DispatchQueue.main.async {
-                        self?.streamingMessageID = nil
-                        logger.info("Stream completed. Resetting streamingMessageID.")
-                    }
+        let agentMessage = activeStreamManager.startMessageStream(
+            withConfig: config,
+            conversationID: conversationIDToUse,
+            userQuery: plainUserQueryFromEditor,
+            history: chatHistoryViewModel.currentChatMessages.reversed(),
+            files: filesForBackend,
+            updating: nil,
+            onComplete: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.streamingMessageID = nil
+                    logger.info("Stream completed. Resetting streamingMessageID.")
                 }
-            )
-
-            self.streamingMessageID = agentMessage.id
-
-            // **FIX**: Append new agent message to the end of the array.
-            chatHistoryViewModel.currentChatMessages.append(agentMessage)
-            logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
-
-            Task {
-                await chatHistoryViewModel.resetSendingState()
             }
+        )
+
+        self.streamingMessageID = agentMessage.id
+        chatHistoryViewModel.currentChatMessages.append(agentMessage)
+        logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
+
+        Task {
+            await chatHistoryViewModel.resetSendingState()
+        }
     }
     
     // MARK: - Response Regeneration
     
     @MainActor
     func regenerateResponse(for agentMessage: ChatMessage) {
-        // 1. Guard against max attempts (e.g., 5).
         guard let agentResponse = agentMessage.agentResponse, agentResponse.generationAttempts < 5 else {
             logger.warning("Max generation attempts reached for message \(agentMessage.id.uuidString).")
-            // Optionally show an alert to the user.
             return
         }
 
-        // 2. Reconstruct the chat history up to the message preceding the agent's response.
         guard let agentMessageIndex = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
             logger.error("Could not find agent message in chat history to regenerate.")
             return
         }
         
-        // History for the backend should be in chronological order (oldest first).
-        // Our view model's array is newest first, so we take everything after the agent message and reverse it.
         let historyForRegeneration = Array(chatHistoryViewModel.currentChatMessages.dropFirst(agentMessageIndex + 1).reversed())
         
-        // The user query is the message immediately preceding the agent's response.
         guard let userQueryMessage = chatHistoryViewModel.currentChatMessages[safe: agentMessageIndex + 1],
               userQueryMessage.sender == .user else {
             logger.error("Could not find the preceding user query for regeneration.")
@@ -297,34 +260,31 @@ class MainApplicationViewModel: ObservableObject {
         }
         let userQuery = userQueryMessage.content.textContent ?? ""
         
-        // **FIXED: Correctly initialize FileSystemItem with all required parameters.**
         let filesForBackend = (userQueryMessage.attachedTextFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? []) +
                               (userQueryMessage.attachedImageFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? [])
 
-        // 3. Get the currently selected backend configuration from the UI.
-        let config = backendConfiguration.getRequestConfig()
-        let entityId = config.backendType == .agent ? config.agentID : config.integrationID
-
-        // 4. Create a new, empty variant and add it to the message.
-        // This will instantly update the UI to show a "Thinking..." state.
+        // NEW: Get the currently selected backend configuration
+        guard let config = backendConfiguration.getRequestConfig() else {
+            logger.error("[regenerateResponse] Could not get backend request config. Is a profile selected?")
+            return
+        }
+        
         let newVariant = ResponseMessageVariant(
             content: .markdownText(""),
-            backendEntityId: entityId
+            backendEntityId: config.profile.id
         )
         agentMessage.agentResponse?.variants.append(newVariant)
         agentMessage.agentResponse?.selectedVariantIndex = (agentMessage.agentResponse?.variants.count ?? 1) - 1
         agentMessage.agentResponse?.generationAttempts += 1
         agentMessage.isStreaming = true
 
-        // 5. Call the updated ActiveStreamManager to begin the stream,
-        // targeting the existing message for content updates.
         let streamingMessage = activeStreamManager.startMessageStream(
             withConfig: config,
             conversationID: agentMessage.conversationId,
             userQuery: userQuery,
             history: historyForRegeneration,
             files: filesForBackend,
-            updating: agentMessage, // Pass the message to update
+            updating: agentMessage,
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
                     self?.streamingMessageID = nil
@@ -333,11 +293,9 @@ class MainApplicationViewModel: ObservableObject {
             }
         )
         
-        // Track the streaming message ID to manage the UI state (e.g., show cancel button)
         self.streamingMessageID = streamingMessage.id
     }
     
-    /// Cancels the currently active streaming response.
     func cancelStreamingResponse() {
         guard let messageID = streamingMessageID else {
             logger.warning("cancelStreamingResponse called but no streamingMessageID is set.")
@@ -346,7 +304,6 @@ class MainApplicationViewModel: ObservableObject {
         
         logger.info("User requested to cancel streaming for message: \(messageID.uuidString)")
         activeStreamManager.cancelStream(for: messageID)
-        // The onComplete handler in `sendMessage` or `regenerateResponse` will set streamingMessageID to nil.
     }
     
     private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) -> ChatMessage {
@@ -396,86 +353,78 @@ class MainApplicationViewModel: ObservableObject {
         if showSettings { showSettings = false }
         clearAttachedFiles()
         let newConversationID = createAndSelectNewConversation()
-        let config = backendConfiguration.getRequestConfig()
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-        logger.info("Started new conversation with ID \(newConversationID.uuidString). Backend state initialized to \(config.backendType.rawValue).")
+        logger.info("Started new conversation with ID \(newConversationID.uuidString).")
     }
 
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
         if showSettings { showSettings = false }
         
-        let config = backendConfiguration.getRequestConfig()
-        var entityId: UUID?
-        switch config.backendType {
-        case .agent:
-            entityId = config.agentID
-        case .ollama, .remote:
-            entityId = config.integrationID
-        case .none:
-            entityId = nil
-        }
-
+        // The conversation will now store the selected profile ID.
+        let profileID = backendConfiguration.selectedProfileID
+        
         let newConversation = Conversation(
             id: UUID(),
             messages: [],
             timestamp: Date(),
-            backendType: config.backendType,
-            backendEntityId: entityId
+            backendType: .none, // This field is becoming legacy.
+            backendEntityId: profileID
         )
         persistenceService.addConversation(from: newConversation)
         chatHistoryViewModel.currentChatMessages = []
         selectedConversationID = newConversation.id
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
+        
+        // Update the backend for the new conversation explicitly.
+        updateBackendForCurrentConversation(conversationID: newConversation.id, profileID: profileID)
+        
         return newConversation.id
     }
     
     private func loadBackendStateForSelectedConversation(conversationID: UUID) {
         guard let conversationEntity = persistenceService.getConversation(withId: conversationID) else {
-            logger.warning("Could not find conversation entity \(conversationID.uuidString) to load backend state. Resetting to .none.")
-            self.backendConfiguration.selectedBackend = .none
-            self.backendConfiguration.selectedAgentID = nil
-            self.backendConfiguration.selectedIntegrationID = nil
+            logger.warning("Could not find conversation entity \(conversationID.uuidString) to load backend state. Resetting.")
+            self.backendConfiguration.selectedProfileID = nil
             return
         }
 
         let conversation = conversationEntity.toConversationStruct()
-        let backendType = conversation.backendType ?? .none
-        let backendEntityId = conversation.backendEntityId
-
-        self.backendConfiguration.selectedBackend = backendType
         
-        switch backendType {
-        case .agent:
-            self.backendConfiguration.selectedAgentID = backendEntityId
-            self.backendConfiguration.selectedIntegrationID = nil
-        case .ollama, .remote:
-            self.backendConfiguration.selectedIntegrationID = backendEntityId
-            self.backendConfiguration.selectedAgentID = nil
-        case .none:
-            self.backendConfiguration.selectedAgentID = nil
-            self.backendConfiguration.selectedIntegrationID = nil
-        }
-        logger.info("Loaded backend state for conversation \(conversationID, privacy: .public): \(backendType.rawValue)")
+        // The backendEntityId is now the profile ID.
+        let profileID = conversation.backendEntityId
+        self.backendConfiguration.selectedProfileID = profileID
+
+        logger.info("Loaded backend profile ID \(profileID?.uuidString ?? "nil") for conversation \(conversationID, privacy: .public)")
     }
 
-    private func updateBackendForCurrentConversation(conversationID: UUID, backendType: BackendType, agentID: UUID?, integrationID: UUID?) {
-        var entityId: UUID?
-        switch backendType {
-        case .agent:
-            entityId = agentID
-        case .ollama, .remote:
-            entityId = integrationID
-        case .none:
-            entityId = nil
+    private func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
+        // This method now only needs to persist the profile ID.
+        // The `backendType` is derived from the profile itself when needed, but for persistence,
+        // we need to map it back for now.
+        
+        var legacyBackendType: BackendType = .none
+        if let id = profileID, let profile = BackendProfileStore.shared.fetchProfiles().first(where: { $0.id == id }) {
+            switch profile.profileType {
+            case .agent:
+                legacyBackendType = .agent
+            case .bot:
+                if case .bot(let config) = profile.details, config.apiProvider == .ollama {
+                    legacyBackendType = .ollama
+                } else {
+                    legacyBackendType = .remote
+                }
+            case .workflow:
+                legacyBackendType = .none // No direct mapping for workflow yet
+            }
         }
         
         persistenceService.updateBackendForConversation(
             id: conversationID,
-            backendType: backendType,
-            backendEntityId: entityId
+            backendType: legacyBackendType,
+            backendEntityId: profileID
         )
-        logger.debug("Persisted backend type \(backendType.rawValue) and entity ID \(entityId?.uuidString ?? "nil") for conversation \(conversationID.uuidString).")
+        logger.debug("Persisted profile ID \(profileID?.uuidString ?? "nil") for conversation \(conversationID.uuidString).")
     }
     
     func transferSelectedConversationToOverlay() {

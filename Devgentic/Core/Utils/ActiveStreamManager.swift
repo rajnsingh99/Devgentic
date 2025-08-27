@@ -22,24 +22,20 @@ class ActiveStreamManager: ObservableObject {
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
     
     // MARK: - Dependencies
-    private let llmIntegrationStore: LLMIntegrationStore
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     private let backendOrchestrationService: BackendOrchestrationService
 
-    // The initializer is no longer private and now accepts dependencies.
     init(
-        llmIntegrationStore: LLMIntegrationStore,
         persistenceService: CoreDataServiceProtocol,
         fileProcessorService: FileProcessorService
     ) {
-        self.llmIntegrationStore = llmIntegrationStore
         self.persistenceService = persistenceService
         self.fileProcessorService = fileProcessorService
         
         // The manager creates its own instance of the orchestration service.
+        // The dependency on LLMIntegrationStore has been removed.
         self.backendOrchestrationService = BackendOrchestrationService(
-            llmIntegrationStore: llmIntegrationStore,
             fileProcessorService: fileProcessorService
         )
         logger.info("ActiveStreamManager initialized.")
@@ -63,13 +59,13 @@ class ActiveStreamManager: ObservableObject {
             agentMessage = messageToUpdate
             logger.notice("🚀 [STREAM_REGENERATE] Updating message \(agentMessage.id.uuidString) in conversation \(conversationID.uuidString).")
         } else {
-            let entityId = config.backendType == .agent ? config.agentID : config.integrationID
+            // The backendEntityId is now the ID of the profile used for the request.
             agentMessage = ChatMessage(
                 conversationId: conversationID,
                 sender: .agent,
                 content: .markdownText(""),
                 isStreaming: true,
-                backendEntityId: entityId
+                backendEntityId: config.profile.id
             )
             logger.notice("🚀 [STREAM_START] Created message \(agentMessage.id.uuidString) for conversation \(conversationID.uuidString).")
         }
@@ -78,6 +74,7 @@ class ActiveStreamManager: ObservableObject {
         
         let streamTask = Task { [weak self] in
             do {
+                // The call now passes the new config object.
                 let stream = self?.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,

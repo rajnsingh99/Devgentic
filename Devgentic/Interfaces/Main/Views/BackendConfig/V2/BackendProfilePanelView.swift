@@ -35,7 +35,7 @@ struct BackendProfilePanelView: View {
     private var sidebarView: some View {
         VStack(alignment: .leading) {
             HStack {
-                Text("Backend Profiles")
+                Text("Profiles")
                     .font(.headline)
                 Spacer()
                 Button {

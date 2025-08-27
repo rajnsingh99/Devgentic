@@ -52,12 +52,12 @@ struct LLMIntegrationsSidebarView: View {
         // The VSplitView is now the top-level component, with headers handled by the parent view.
         VSplitView {
             // --- Top Pane: List of Integrations (No header here) ---
-            IntegrationsList(
-                integrations: llmIntegrationStore.integrations,
-                selectedIntegrationForEditing: $selectedIntegrationForEditing,
-                activeIntegrationID: viewModel.backendConfiguration.selectedIntegrationID
-            )
-            .frame(minHeight: 150, idealHeight: 250)
+//            IntegrationsList(
+//                integrations: llmIntegrationStore.integrations,
+//                selectedIntegrationForEditing: $selectedIntegrationForEditing,
+//                activeIntegrationID: viewModel.backendConfiguration.selectedIntegrationID
+//            )
+//            .frame(minHeight: 150, idealHeight: 250)
 
             // --- Bottom Pane: Settings (No header here) ---
             LLMIntegrationSettingsView(

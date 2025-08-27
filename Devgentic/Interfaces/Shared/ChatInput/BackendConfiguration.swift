@@ -13,77 +13,48 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 // This struct will be a snapshot of the configuration, passed with each request.
 struct BackendRequestConfig {
-    let backendType: BackendType
-    let agentID: UUID?
-    let integrationID: UUID?
+    let profile: BackendProfileModel
 }
 
 @MainActor
 final class BackendConfiguration: ObservableObject {
-    @Published var selectedBackend: BackendType
-    @Published var selectedAgentID: UUID?
-    @Published var selectedIntegrationID: UUID?
+    @Published var selectedProfileID: UUID?
 
     private var cancellables = Set<AnyCancellable>()
-    private let userDefaultsSelectedBackendKey = "userDefaultsSelectedBackend"
-    private let userDefaultsSelectedAgentIDKey = "userDefaultsSelectedAgentID"
-    private let userDefaultsSelectedIntegrationIDKey = "userDefaultsSelectedIntegrationID"
+    private let userDefaultsSelectedProfileIDKey = "userDefaultsSelectedProfileIDKey"
 
     init() {
         // Load initial values from UserDefaults
-        let backendRawValue = UserDefaults.standard.string(forKey: userDefaultsSelectedBackendKey)
-        self.selectedBackend = BackendType(rawValue: backendRawValue ?? "") ?? .none
-
-        if let agentIDString = UserDefaults.standard.string(forKey: userDefaultsSelectedAgentIDKey) {
-            self.selectedAgentID = UUID(uuidString: agentIDString)
-        }
-
-        if let integrationIDString = UserDefaults.standard.string(forKey: userDefaultsSelectedIntegrationIDKey) {
-            self.selectedIntegrationID = UUID(uuidString: integrationIDString)
+        if let profileIDString = UserDefaults.standard.string(forKey: userDefaultsSelectedProfileIDKey) {
+            self.selectedProfileID = UUID(uuidString: profileIDString)
         }
         
-        logger.info("Initialized with backend: \(self.selectedBackend.rawValue), agent: \(self.selectedAgentID?.uuidString ?? "nil"), integration: \(self.selectedIntegrationID?.uuidString ?? "nil")")
+        logger.info("Initialized with selected profile ID: \(self.selectedProfileID?.uuidString ?? "nil")")
 
         // Set up persistence pipeline
         setupPersistence()
     }
 
     private func setupPersistence() {
-        $selectedBackend
-            .combineLatest($selectedAgentID, $selectedIntegrationID)
+        $selectedProfileID
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
-            .sink { [weak self] backend, agentId, integrationId in
+            .sink { [weak self] profileId in
                 guard let self = self else { return }
                 
-                // When backend changes, ensure only the relevant ID is stored.
-                var finalAgentId: UUID? = agentId
-                var finalIntegrationId: UUID? = integrationId
+                UserDefaults.standard.set(profileId?.uuidString, forKey: self.userDefaultsSelectedProfileIDKey)
                 
-                switch backend {
-                case .agent:
-                    finalIntegrationId = nil
-                case .ollama, .remote:
-                    finalAgentId = nil
-                case .none:
-                    finalAgentId = nil
-                    finalIntegrationId = nil
-                }
-
-                UserDefaults.standard.set(backend.rawValue, forKey: self.userDefaultsSelectedBackendKey)
-                UserDefaults.standard.set(finalAgentId?.uuidString, forKey: self.userDefaultsSelectedAgentIDKey)
-                UserDefaults.standard.set(finalIntegrationId?.uuidString, forKey: self.userDefaultsSelectedIntegrationIDKey)
-                
-                logger.debug("Persisted backend config to UserDefaults.")
+                logger.debug("Persisted selected profile ID to UserDefaults.")
             }
             .store(in: &cancellables)
     }
 
     // Helper to get an immutable snapshot for requests
-    func getRequestConfig() -> BackendRequestConfig {
-        return BackendRequestConfig(
-            backendType: self.selectedBackend,
-            agentID: self.selectedAgentID,
-            integrationID: self.selectedIntegrationID
-        )
+    func getRequestConfig() -> BackendRequestConfig? {
+        guard let profileID = selectedProfileID,
+              let profile = BackendProfileStore.shared.fetchProfiles().first(where: { $0.id == profileID }) else {
+            logger.warning("Could not create request config: Profile ID is nil or profile not found in store.")
+            return nil
+        }
+        return BackendRequestConfig(profile: profile)
     }
 }

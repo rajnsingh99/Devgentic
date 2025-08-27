@@ -49,6 +49,9 @@ struct ChatInputAreaView: View {
     @State private var showingBackendSelectorPopup: Bool = false
     @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
+    
+    // NEW: Local state for the selected profile to drive the UI
+    @State private var selectedProfile: BackendProfileModel?
 
     // MARK: - Hover States for Buttons
     @State private var isPlusButtonHovering: Bool = false
@@ -80,54 +83,35 @@ struct ChatInputAreaView: View {
         ]
     }
 
-    // MARK: - Dynamic UI Properties
-
-    private enum ProfileType {
-        case agent, local, remote, none
-    }
-
-    private var currentProfileType: ProfileType {
-        switch backendConfiguration.selectedBackend {
-        case .agent:
-            return .agent
-        case .ollama:
-            return .local
-        case .remote:
-            return .remote
-        case .none:
-            return .none
-        }
-    }
+    // MARK: - Dynamic UI Properties (Refactored for BackendProfileModel)
 
     private var profileButtonIconName: String {
-        switch currentProfileType {
-        case .agent: return "person.2.fill"
-        case .local: return "cpu"
-        case .remote: return "cloud.fill"
-        case .none: return "questionmark.circle"
+        guard let profile = selectedProfile else { return "questionmark.circle" }
+        switch profile.profileType {
+        case .agent:
+            return "person.2.fill"
+        case .bot:
+            // Differentiate between local and remote bots
+            if case .bot(let config) = profile.details, config.apiProvider == .ollama {
+                return "cpu"
+            }
+            return "cloud.fill"
+        case .workflow:
+            return "square.stack.3d.up.fill"
         }
     }
 
     private var profileButtonBorderColor: Color {
-        switch currentProfileType {
+        guard let profile = selectedProfile else { return .gray.opacity(0.5) }
+        switch profile.profileType {
         case .agent: return .red
-        case .local: return .green
-        case .remote: return .blue
-        case .none: return .gray.opacity(0.5)
+        case .bot: return .green
+        case .workflow: return .blue
         }
     }
 
     private var profileButtonText: String {
-        switch backendConfiguration.selectedBackend {
-        case .ollama, .remote:
-            if let integrationID = backendConfiguration.selectedIntegrationID,
-               let integration = mainViewModel.llmIntegrationStore.integrations.first(where: { $0.id == integrationID }) {
-                return integration.displayName
-            }
-        case .none, .agent:
-            break
-        }
-        return "Select Backend"
+        return selectedProfile?.displayName ?? "Select Backend"
     }
 
     private var hasInputText: Bool {
@@ -210,6 +194,12 @@ struct ChatInputAreaView: View {
         }
         .frame(maxWidth: 1000)
         .frame(maxWidth: .infinity, alignment: .center)
+        .onAppear {
+            updateSelectedProfile(profileID: backendConfiguration.selectedProfileID)
+        }
+        .onChange(of: backendConfiguration.selectedProfileID) { newID in
+            updateSelectedProfile(profileID: newID)
+        }
         .onChange(of: showPromptSuggestions) { isShowing in
             if isShowing {
                 self.filteredPrompts = promptStore.getAllPrompts().filter {
@@ -271,6 +261,15 @@ struct ChatInputAreaView: View {
             }
         }
     }
+    
+    private func updateSelectedProfile(profileID: UUID?) {
+        if let id = profileID {
+            // Fetch the profile from the store. This could be optimized by passing profiles down.
+            self.selectedProfile = BackendProfileStore.shared.fetchProfiles().first { $0.id == id }
+        } else {
+            self.selectedProfile = nil
+        }
+    }
 
     private var mainInputArea: some View {
         VStack(spacing: 3) {
@@ -292,9 +291,10 @@ struct ChatInputAreaView: View {
             CustomTextEditor(
                 text: $inputViewModel.userInput,
                 onCommit: { attributedString in
-                    if isInputEnabled {
-                        let config = backendConfiguration.getRequestConfig()
+                    if isInputEnabled, let config = backendConfiguration.getRequestConfig() {
                         self.onSendMessage(attributedString, config)
+                    } else {
+                        logger.warning("Commit triggered but no backend profile is selected.")
                     }
                 },
                 minHeight: textEditorMinHeight,
@@ -330,7 +330,7 @@ struct ChatInputAreaView: View {
     }
 
     private var placeholderText: String {
-        if backendConfiguration.selectedBackend == .none { return "Please select a backend to begin..." }
+        if backendConfiguration.selectedProfileID == nil { return "Please select a backend to begin..." }
         if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
         if inputViewModel.userInput.isEmpty {
             switch inputViewModel.voiceInputState {
@@ -400,16 +400,16 @@ struct ChatInputAreaView: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingBackendSelectorPopup, arrowEdge: .bottom) {
+            // NOTE: llmIntegrationStore is no longer needed here
             BackendSelectorPopup(
                 configuration: backendConfiguration,
-                isPresented: $showingBackendSelectorPopup,
-                llmIntegrationStore: mainViewModel.llmIntegrationStore
+                isPresented: $showingBackendSelectorPopup
             )
         }
         .onHover { hover in
             isBackendPickerHovering = hover
         }
-        .help("Select a backend (Agent or direct Model)")
+        .help("Select a backend (Bot, Agent, or Workflow)")
     }
 
     @ViewBuilder
@@ -419,17 +419,19 @@ struct ChatInputAreaView: View {
         Button(action: {
             switch mode {
             case .send:
+                guard let config = backendConfiguration.getRequestConfig() else {
+                    logger.error("Send button: Could not get backend config. Is a profile selected?");
+                    return
+                }
                 guard let textView = editorTextView else {
                     logger.error("Send button: editorTextView is nil.");
                     if !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        let config = backendConfiguration.getRequestConfig()
                         onSendMessage(NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes), config)
                     }
                     return
                 }
                 let textToSend = textView.attributedString()
                 if !textToSend.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let config = backendConfiguration.getRequestConfig()
                     onSendMessage(textToSend, config)
                 }
             case .mic, .stopVoice:
@@ -450,9 +452,7 @@ struct ChatInputAreaView: View {
                         .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem))
                         .animation(.easeOut(duration: 0.2), value: mode)
 
-                    // NEW: Animated Icon ZStack
                     ZStack {
-                        // Mic and Stop Voice Icons
                         if mode == .mic || mode == .stopVoice {
                             Image(systemName: dynamicActionButtonIconName(for: mode))
                                 .resizable().scaledToFit()
@@ -462,7 +462,6 @@ struct ChatInputAreaView: View {
                                 .transition(.scale(scale: 0.5).combined(with: .opacity))
                         }
 
-                        // Send Arrow
                         if mode == .send {
                             Image(systemName: "arrow.up")
                                 .resizable().scaledToFit()
@@ -472,9 +471,8 @@ struct ChatInputAreaView: View {
                                 .transition(.scale(scale: 0.5).combined(with: .opacity))
                         }
 
-                        // Stop Streaming Icon
                         if mode == .stopStreaming {
-                            Image(systemName: "square.fill") // Using a more modern, solid square
+                            Image(systemName: "square.fill")
                                 .resizable().scaledToFit()
                                 .fontWeight(.regular)
                                 .frame(width: dynamicButtonSize * 0.45, height: dynamicButtonSize * 0.45)
@@ -500,9 +498,8 @@ struct ChatInputAreaView: View {
     // MARK: - Helper Methods for Dynamic Button
     private func dynamicActionButtonIconName(for mode: DynamicButtonMode) -> String {
         switch mode {
-        // These cases are now handled directly in the ViewBuilder's ZStack
         case .send, .stopStreaming:
-            return "" // This won't be used, but a value is required.
+            return ""
         
         case .stopVoice:
             return "stop.circle.fill"
@@ -517,18 +514,16 @@ struct ChatInputAreaView: View {
     }
 
     private func buttonIconScale(for mode: DynamicButtonMode) -> CGFloat {
-        // This method is now only for .mic and .stopVoice
         switch mode {
         case .stopVoice: return 0.65
         case .mic: return 0.6
-        default: return 0.5 // Default for send/stop handled inline
+        default: return 0.5
         }
     }
 
     private func buttonIconWeight(for mode: DynamicButtonMode) -> Font.Weight {
-        // This method is now only for .mic and .stopVoice
         switch mode {
-        case .send, .stopStreaming: return .regular // Default
+        case .send, .stopStreaming: return .regular
         default: return .regular
         }
     }
@@ -563,7 +558,7 @@ struct ChatInputAreaView: View {
     }
 
     private func isDynamicButtonDisabled(for mode: DynamicButtonMode) -> Bool {
-        if backendConfiguration.selectedBackend == .none { return true }
+        if backendConfiguration.selectedProfileID == nil { return true }
         switch mode {
         case .send:
             let isEmptyText = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -571,7 +566,7 @@ struct ChatInputAreaView: View {
         case .stopVoice:
             return isSending || showSettings
         case .stopStreaming:
-            return false // The stop button should always be enabled when visible
+            return false
         case .mic:
             return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording
         }
@@ -642,11 +637,10 @@ struct ChatInputAreaView: View {
                 var fileItems: [FileSystemItem] = []
 
                 for url in selectedURLs {
-                    // Check the content type of the selected URL.
                     if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
                        type.conforms(to: .video) || type.conforms(to: .movie) {
                         logger.log("Skipping video file as it's not supported: \(url.lastPathComponent)")
-                        continue // Skip this file if it's a video or movie.
+                        continue
                     }
 
                     var isDirectory: ObjCBool = false
