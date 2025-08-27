@@ -326,7 +326,7 @@ struct FadeInTypewriterView: View {
         }
         .onChange(of: markdown) { oldValue, newValue in
             let newChars = newValue.count - oldValue.count
-            logger.debug("STREAM_TRACE: FadeInTypewriterView markdown content updated. Added \(newChars) characters.")
+//            logger.debug("STREAM_TRACE: FadeInTypewriterView markdown content updated. Added \(newChars) characters.")
         }
     }
 }

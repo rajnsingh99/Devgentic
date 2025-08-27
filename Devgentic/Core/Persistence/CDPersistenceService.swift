@@ -442,14 +442,14 @@ extension ChatMessageEntity {
 
     func toChatMessageStruct() -> ChatMessage {
         let messageId = self.id ?? UUID()
-        Self.logger.debug("Decoding message \(messageId.uuidString)...")
+//        Self.logger.debug("Decoding message \(messageId.uuidString)...")
         
         var finalContent: MessageContent
         var finalAgentResponse: AgentResponse?
 
         // **FIX:** Use KVC to retrieve the transformable attribute to bypass static type checks.
         if let agentResponse = self.value(forKey: "agentResponse") as? AgentResponse, !agentResponse.variants.isEmpty {
-            Self.logger.info("✅ Successfully decoded AgentResponse for message \(messageId.uuidString) with \(agentResponse.variants.count) variants.")
+//            Self.logger.info("✅ Successfully decoded AgentResponse for message \(messageId.uuidString) with \(agentResponse.variants.count) variants.")
             finalAgentResponse = agentResponse
             if agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
                 finalContent = agentResponse.variants[agentResponse.selectedVariantIndex].content
@@ -459,7 +459,7 @@ extension ChatMessageEntity {
             }
         } else {
             // Fallback for older messages or decoding failures.
-            Self.logger.warning("⚠️ Could not decode AgentResponse for message \(messageId.uuidString). Using fallback content.")
+//            Self.logger.warning("⚠️ Could not decode AgentResponse for message \(messageId.uuidString). Using fallback content.")
             switch self.messageType {
             case "plainText": finalContent = .plainText(self.text_content ?? "")
             case "markdownText": finalContent = .markdownText(self.text_content ?? "")

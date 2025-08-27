@@ -27,7 +27,7 @@ class AnthropicConnect {
         userQuery: String,
         history: [ChatMessage],
         modelName: String,
-        context: TraceContext // <-- Add context parameter
+        context: TraceContext
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -53,7 +53,6 @@ class AnthropicConnect {
                     let requestBody = AnthropicStreamRequest(model: modelName, messages: apiMessages, stream: true, max_tokens: 4096)
                     
                     request.httpBody = try JSONEncoder().encode(requestBody)
-                    // --- ADDED: Robust payload logging ---
                     logRequestPayload(requestBody, for: "streamMessage")
 
 
@@ -92,10 +91,10 @@ class AnthropicConnect {
                     let apiEndTime = Date()
                     if let firstTokenTime = firstTokenTime {
                         let ttftDuration = firstTokenTime.timeIntervalSince(apiStartTime)
-                        await MetricsManager.shared.record(duration: ttftDuration, for: "time_to_first_token", context: apiContext, provider: .anthropic)
+                        await MetricsManager.shared.record(duration: ttftDuration, for: "time_to_first_token", context: apiContext)
                     }
                     let totalDuration = apiEndTime.timeIntervalSince(apiStartTime)
-                    await MetricsManager.shared.record(duration: totalDuration, for: "api_call_duration", context: apiContext, provider: .anthropic)
+                    await MetricsManager.shared.record(duration: totalDuration, for: "api_call_duration", context: apiContext)
                     logger.info("API Call Finished: Anthropic. traceID: \(apiContext.traceID), spanID: \(apiContext.spanID)")
                     // --- End Metrics ---
                     
@@ -143,7 +142,6 @@ class AnthropicConnect {
         )
 
         request.httpBody = try JSONEncoder().encode(requestBody)
-        // --- ADDED: Robust payload logging ---
         logRequestPayload(requestBody, for: "sendMessage")
         
         let (data, response) = try await urlSession.data(for: request)
@@ -167,7 +165,6 @@ class AnthropicConnect {
         }
     }
     
-    // --- ADDED: Private helper for logging request payloads ---
     /// Encodes a `Codable` request body to a pretty-printed JSON string and logs it.
     /// - Parameters:
     ///   - payload: The `Codable` object to be logged.

@@ -30,7 +30,7 @@ class OpenAIConnect {
         userQuery: String,
         history: [ChatMessage],
         modelName: String,
-        context: TraceContext // <-- Add context parameter
+        context: TraceContext
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -51,7 +51,6 @@ class OpenAIConnect {
                     let requestBody = OpenAIStreamRequest(model: modelName, messages: apiMessages, stream: true)
                     
                     request.httpBody = try JSONEncoder().encode(requestBody)
-                    // --- ADDED: Robust payload logging ---
                     logRequestPayload(requestBody, for: "streamMessage")
 
                     let (bytes, response) = try await self.urlSession.bytes(for: request)
@@ -81,10 +80,10 @@ class OpenAIConnect {
                     let apiEndTime = Date()
                     if let firstTokenTime = firstTokenTime {
                         let ttftDuration = firstTokenTime.timeIntervalSince(apiStartTime)
-                        await MetricsManager.shared.record(duration: ttftDuration, for: "time_to_first_token", context: apiContext, provider: .openAI)
+                        await MetricsManager.shared.record(duration: ttftDuration, for: "time_to_first_token", context: apiContext)
                     }
                     let totalDuration = apiEndTime.timeIntervalSince(apiStartTime)
-                    await MetricsManager.shared.record(duration: totalDuration, for: "api_call_duration", context: apiContext, provider: .openAI)
+                    await MetricsManager.shared.record(duration: totalDuration, for: "api_call_duration", context: apiContext)
                     logger.info("API Call Finished: OpenAI. traceID: \(apiContext.traceID), spanID: \(apiContext.spanID)")
                     // --- End Metrics ---
 
@@ -150,7 +149,6 @@ class OpenAIConnect {
         var request = makeAssistantsRequest(url: url, method: "POST")
         let requestBody = OpenAIMessageRequest(role: "user", content: text)
         request.httpBody = try JSONEncoder().encode(requestBody)
-        // --- ADDED: Robust payload logging ---
         logRequestPayload(requestBody, for: "addMessage")
         
         let (_, response) = try await urlSession.data(for: request)
@@ -162,7 +160,6 @@ class OpenAIConnect {
         var request = makeAssistantsRequest(url: url, method: "POST")
         let requestBody = OpenAIRunRequest(assistant_id: assistantID, model: modelName)
         request.httpBody = try JSONEncoder().encode(requestBody)
-        // --- ADDED: Robust payload logging ---
         logRequestPayload(requestBody, for: "createRun")
 
         let (data, response) = try await urlSession.data(for: request)
@@ -221,7 +218,6 @@ class OpenAIConnect {
         }
     }
     
-    // --- ADDED: Private helper for logging request payloads ---
     /// Encodes a `Codable` request body to a pretty-printed JSON string and logs it.
     /// - Parameters:
     ///   - payload: The `Codable` object to be logged.

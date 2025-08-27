@@ -10,18 +10,16 @@ import Combine
 import os
 
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ActiveStreamManager_Trace")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ActiveStreamManager")
 
 @MainActor
 class ActiveStreamManager: ObservableObject {
 
-    /// A dictionary holding the active, streaming ChatMessage objects, keyed by their unique ID.
     @Published private(set) var activeStreams: [UUID: ChatMessage] = [:]
     
-    /// A dictionary to hold references to the active streaming tasks, allowing for cancellation.
+    // MARK: - Dependencies
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
     
-    // MARK: - Dependencies
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     private let backendOrchestrationService: BackendOrchestrationService
@@ -32,9 +30,6 @@ class ActiveStreamManager: ObservableObject {
     ) {
         self.persistenceService = persistenceService
         self.fileProcessorService = fileProcessorService
-        
-        // The manager creates its own instance of the orchestration service.
-        // The dependency on LLMIntegrationStore has been removed.
         self.backendOrchestrationService = BackendOrchestrationService(
             fileProcessorService: fileProcessorService
         )
@@ -48,7 +43,7 @@ class ActiveStreamManager: ObservableObject {
         userQuery: String,
         history: [ChatMessage],
         files: [FileSystemItem],
-        updating existingMessage: ChatMessage? = nil, // Optional parameter for regeneration
+        updating existingMessage: ChatMessage? = nil,
         onComplete: @escaping () -> Void
     ) -> ChatMessage {
         
@@ -59,7 +54,6 @@ class ActiveStreamManager: ObservableObject {
             agentMessage = messageToUpdate
             logger.notice("🚀 [STREAM_REGENERATE] Updating message \(agentMessage.id.uuidString) in conversation \(conversationID.uuidString).")
         } else {
-            // The backendEntityId is now the ID of the profile used for the request.
             agentMessage = ChatMessage(
                 conversationId: conversationID,
                 sender: .agent,
@@ -74,14 +68,13 @@ class ActiveStreamManager: ObservableObject {
         
         let streamTask = Task { [weak self] in
             do {
-                // The call now passes the new config object.
                 let stream = self?.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,
                     userQuery: userQuery,
                     history: history,
                     files: files,
-                    context: TraceContext()
+                    context: TraceContext(profile: config.profile)
                 )
                 
                 logger.info("👂 [STREAM_LISTEN] Now listening for tokens for message \(agentMessage.id.uuidString)...")
@@ -92,7 +85,6 @@ class ActiveStreamManager: ObservableObject {
                         try Task.checkCancellation()
                         
                         tokenCount += 1
-                        logger.trace("✅ [STREAM_TOKEN] Received token #\(tokenCount) for message \(agentMessage.id.uuidString): \"\(token)\"")
                         
                         if isRegeneration {
                             guard let agentResponse = agentMessage.agentResponse,
@@ -130,7 +122,6 @@ class ActiveStreamManager: ObservableObject {
             }
             
             await self?.removeTask(for: agentMessage.id)
-            // Call the completion handler when the task is done.
             onComplete()
         }
         
@@ -157,14 +148,12 @@ class ActiveStreamManager: ObservableObject {
         if let error = error {
             let errorContent = MessageContent.error(title: "Response Error", details: error.localizedDescription)
             message.content = errorContent
-            // Also update the current variant if it exists
+            
             if let agentResponse = message.agentResponse,
                agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
                 message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = errorContent
             }
         } else {
-            // **FIX:** Before saving, sync the main `content` property with the final, selected variant's content.
-            // This ensures data consistency for the persistence layer.
             if let currentAgentContent = message.currentAgentContent {
                 message.content = currentAgentContent
             }
@@ -191,3 +180,4 @@ class ActiveStreamManager: ObservableObject {
         }
     }
 }
+

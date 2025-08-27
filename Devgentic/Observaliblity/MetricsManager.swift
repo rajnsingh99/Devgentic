@@ -13,14 +13,25 @@ class MetricsManager {
     
     private init() {}
 
-    func record(duration: TimeInterval, for key: String, context: TraceContext, backend: BackendType? = nil, provider: RemoteProvider? = nil) {
+    /// Records a performance metric using the detailed information from the TraceContext.
+    /// - Parameters:
+    ///   - duration: The time interval to record.
+    ///   - key: A descriptive key for the metric (e.g., "time_to_first_token").
+    ///   - context: The TraceContext containing profile and trace identifiers.
+    func record(duration: TimeInterval, for key: String, context: TraceContext) {
+        let profile = context.profileInfo
         var attributes: [String] = []
-        if let backend = backend { attributes.append("backend: \(backend.rawValue)") }
-        if let provider = provider { attributes.append("provider: \(provider.rawValue)") }
+        
+        // Add specific, useful attributes from the profile context.
+        attributes.append("profileName: \(profile.name)")
+        attributes.append("profileType: \(profile.type.rawValue)")
+        if let provider = profile.provider {
+            attributes.append("provider: \(provider.rawValue)")
+        }
         
         let attributesString = attributes.isEmpty ? "" : ", " + attributes.joined(separator: ", ")
         
+        // Log the metric with the enriched context.
         print("📊 METRIC [\(key)]: \(String(format: "%.4f", duration))s (traceID: \(context.traceID)\(attributesString))")
     }
 }
-

@@ -40,7 +40,6 @@ class GeminiConnect {
     }
     
     /// Establishes a streaming connection to the Gemini API and returns an async stream of text parts.
-    /// This function is already compliant with the new architecture.
     func streamMessage(
         conversationID: UUID,
         userQuery: String,
@@ -111,7 +110,7 @@ class GeminiConnect {
 
                     for try await line in bytes.lines {
                         try Task.checkCancellation()
-                        logger.trace("Raw stream line received: \(line)")
+//                        logger.trace("Raw stream line received: \(line)")
 
                         if line.hasPrefix("data: ") {
                             let jsonString = String(line.dropFirst(6))
@@ -124,7 +123,7 @@ class GeminiConnect {
                                             firstTokenTime = Date()
                                             isFirstToken = false
                                         }
-                                        logger.debug("Stream received token: \"\(newText.replacingOccurrences(of: "\n", with: "\\n"))\"")
+//                                        logger.debug("Stream received token: \"\(newText.replacingOccurrences(of: "\n", with: "\\n"))\"")
                                         continuation.yield(newText)
                                     }
                                 } catch {
@@ -137,10 +136,10 @@ class GeminiConnect {
                     let apiEndTime = Date()
                     if let firstTokenTime = firstTokenTime {
                         let ttftDuration = firstTokenTime.timeIntervalSince(apiStartTime)
-                        await MetricsManager.shared.record(duration: ttftDuration, for: "time_to_first_token", context: apiContext, provider: .google)
+                        await MetricsManager.shared.record(duration: ttftDuration, for: "time_to_first_token", context: apiContext)
                     }
                     let totalDuration = apiEndTime.timeIntervalSince(apiStartTime)
-                    await MetricsManager.shared.record(duration: totalDuration, for: "api_call_duration", context: apiContext, provider: .google)
+                    await MetricsManager.shared.record(duration: totalDuration, for: "api_call_duration", context: apiContext)
                     logger.info("API Call Finished: Gemini. traceID: \(apiContext.traceID), spanID: \(apiContext.spanID)")
                     
                     continuation.finish()
@@ -179,7 +178,6 @@ class GeminiConnect {
         return sanitized
     }
 
-    /// **REFACTORED for Step 2.2**
     /// Sends a non-streaming message and returns raw response data instead of a ChatMessage.
     func sendMessage(
         conversationID: UUID,
@@ -255,7 +253,6 @@ class GeminiConnect {
         }
     }
     
-    /// **REFACTORED for Step 2.2**
     /// Generates an image and returns raw Data instead of a ChatMessage.
     private func generateImage(
         conversationID: UUID,
