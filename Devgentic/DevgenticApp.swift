@@ -20,7 +20,6 @@ struct DevgenticApp: App {
     private let coreDataService = CoreDataPersistenceService.shared
     
     @StateObject private var themeManager = ThemeManager()
-    @StateObject private var agentManager = AgentManager()
 
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
     @StateObject private var chatHistoryViewModel: ChatHistoryViewModel
@@ -53,32 +52,12 @@ struct DevgenticApp: App {
     var body: some Scene {
         // MARK: - Main Application Window
         WindowGroup {
-            if isOnboardingComplete {
-                MainApplicationView()
-                    .environmentObject(themeManager)
-                    .environmentObject(mainApplicationViewModel)
-                    .environmentObject(mainApplicationViewModel.explorerViewModel)
-                    .environmentObject(agentManager)
-                    .environmentObject(chatHistoryViewModel)
-                    .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
-                    .onAppear {
-                        agentManager.startAgentIfNeeded()
-                    }
-            } else {
-                AgentOnboardingRootView(
-                    onComplete: { isOnboardingComplete = true },
-                    onAgentReady: { agentURL, agentPID in
-                        let placeholderVenvPath = ""
-                        agentManager.onboardingDidComplete(
-                            agentURL: agentURL,
-                            agentPID: agentPID,
-                            venvPythonPath: placeholderVenvPath
-                        )
-                    }
-                )
+            MainApplicationView()
                 .environmentObject(themeManager)
-                .environmentObject(agentManager)
-            }
+                .environmentObject(mainApplicationViewModel)
+                .environmentObject(mainApplicationViewModel.explorerViewModel)
+                .environmentObject(chatHistoryViewModel)
+                .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
         }
         .commands {
             CommandMenu("File") {
@@ -101,15 +80,6 @@ struct DevgenticApp: App {
                     openWindow(id: "backend-profiles")
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-            }
-            CommandGroup(replacing: .appTermination) {
-                Button("Stop Agent and Quit") {
-                    agentManager.stopAgent(reason: "Manual Quit Command")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        NSApplication.shared.terminate(nil)
-                    }
-                }
-                .keyboardShortcut("q", modifiers: [.command, .option])
             }
         }
 

@@ -14,7 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AppDelegate")
     
-    private(set) var agentManager: AgentManager?
+//    private(set) var agentManager: AgentManager?
     
     static var shared: AppDelegate {
         return NSApplication.shared.delegate as! AppDelegate
@@ -26,32 +26,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let sessionTimeoutDuration: TimeInterval = 1800
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Self.logger.info("Application did finish launching.")
-        agentManager = AgentManager()
-        Self.logger.info("AgentManager initialized in AppDelegate.")
-        
-        if UserDefaults.standard.bool(forKey: GlobalConstants.isOnboardingComplete) {
-            Self.logger.info("Onboarding is complete. Attempting to start agent if not already running via AgentManager.")
-            agentManager?.startAgentIfNeeded()
-        } else {
-            Self.logger.info("Onboarding not yet complete. Agent will not be started automatically by AppDelegate.")
-        }
-        
-        setupHotkey()
-        setupNotificationObserver()
+//        Self.logger.info("Application did finish launching.")
+//        agentManager = AgentManager()
+//        Self.logger.info("AgentManager initialized in AppDelegate.")
+//        
+//        if UserDefaults.standard.bool(forKey: GlobalConstants.isOnboardingComplete) {
+//            Self.logger.info("Onboarding is complete. Attempting to start agent if not already running via AgentManager.")
+//            agentManager?.startAgentIfNeeded()
+//        } else {
+//            Self.logger.info("Onboarding not yet complete. Agent will not be started automatically by AppDelegate.")
+//        }
+//        
+//        setupHotkey()
+//        setupNotificationObserver()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        Self.logger.info("Application will terminate. Stopping agent via AgentManager.")
-        agentManager?.stopAgent(reason: "Application shutting down")
-        
-        NotificationCenter.default.removeObserver(
-            self,
-            name: GlobalConstants.showQuickAccessPanelNotification,
-            object: nil
-        )
-        hotKey = nil
-        Self.logger.info("AppDelegate cleaned up hotkey and observers.")
+//        Self.logger.info("Application will terminate. Stopping agent via AgentManager.")
+//        agentManager?.stopAgent(reason: "Application shutting down")
+//        
+//        NotificationCenter.default.removeObserver(
+//            self,
+//            name: GlobalConstants.showQuickAccessPanelNotification,
+//            object: nil
+//        )
+//        hotKey = nil
+//        Self.logger.info("AppDelegate cleaned up hotkey and observers.")
         
         // Save any pending Core Data changes on exit.
         CoreDataPersistenceService.shared.saveContext()
