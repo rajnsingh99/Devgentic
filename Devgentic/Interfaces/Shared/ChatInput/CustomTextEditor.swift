@@ -24,6 +24,10 @@ struct CustomTextEditor: NSViewRepresentable {
     // Callbacks for keyboard navigation
     var onNavigateSuggestions: ((ChatInputAreaView.SuggestionNavigationDirection) -> Void)?
     var onConfirmSuggestion: (() -> Void)?
+    
+    // NEW: Callbacks for query history
+    var onNavigateQueryHistory: ((MainApplicationViewModel.QueryNavigationDirection) -> Void)?
+    var onTextManuallyChanged: (() -> Void)?
 
 
     let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.CustomTextEditor", category: "CustomTextEditor_Input")
@@ -285,6 +289,24 @@ struct CustomTextEditor: NSViewRepresentable {
                 }
             }
             
+            let isAtStart = self.selectedRange().location == 0
+            let isAtEnd = self.selectedRange().location == self.string.count
+            let isEmpty = self.string.isEmpty
+
+            // Up Arrow for history (if not in suggestions mode)
+            if event.keyCode == 126 && (isEmpty || isAtStart) {
+                coordinator?.parent.logger.debug("Up Arrow pressed at start/empty. Navigating history.")
+                coordinator?.parent.onNavigateQueryHistory?(.up)
+                return // Consume event
+            }
+
+            // Down Arrow for history (if not in suggestions mode)
+            if event.keyCode == 125 && (isEmpty || isAtEnd) {
+                coordinator?.parent.logger.debug("Down Arrow pressed at end/empty. Navigating history.")
+                coordinator?.parent.onNavigateQueryHistory?(.down)
+                return // Consume event
+            }
+            
             let keyCodeReturn: UInt16 = 36 // Key code for Return/Enter
 
             // Shift + Return: Insert newline
@@ -360,6 +382,9 @@ struct CustomTextEditor: NSViewRepresentable {
                 parent.logger.trace("Coordinator.textDidChange: Ignoring change as it was programmatic. TextView content: \"\(textView.string.prefix(50))\"")
                 return
             }
+            
+            // User is typing, so reset the history index
+            parent.onTextManuallyChanged?()
             
             let currentPlainText = textView.string
             if parent.text != currentPlainText {

@@ -53,6 +53,14 @@ class MainApplicationViewModel: ObservableObject {
     
     @Published var streamingMessageID: UUID? = nil
     
+    // MARK: - Query History Properties
+    @Published private(set) var queryHistory: [String] = []
+    private var currentHistoryIndex: Int = -1
+    
+    enum QueryNavigationDirection {
+        case up, down
+    }
+    
     private let groupDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMMM d, yy"
@@ -180,6 +188,12 @@ class MainApplicationViewModel: ObservableObject {
         chatHistoryViewModel.isSending = true
         logger.info("Beginning message send process with profile: \(config.profile.displayName)")
         
+        // Add to query history
+        if !plainUserQueryFromEditor.isEmpty, queryHistory.last != plainUserQueryFromEditor {
+            queryHistory.append(plainUserQueryFromEditor)
+        }
+        resetQueryHistoryIndex() // Reset index after sending a new message
+        
         let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
         
         guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
@@ -229,6 +243,41 @@ class MainApplicationViewModel: ObservableObject {
         Task {
             await chatHistoryViewModel.resetSendingState()
         }
+    }
+    
+    // MARK: - Query History Navigation
+    
+    func getQueryFromHistory(direction: QueryNavigationDirection) -> String? {
+        if queryHistory.isEmpty { return nil }
+
+        if currentHistoryIndex == -1 {
+            if direction == .up {
+                currentHistoryIndex = queryHistory.count - 1
+                return queryHistory[currentHistoryIndex]
+            }
+            return nil // Can't go down from "new" input state
+        }
+
+        if direction == .up {
+            if currentHistoryIndex > 0 {
+                currentHistoryIndex -= 1
+                return queryHistory[currentHistoryIndex]
+            }
+            return queryHistory[0] // Return the oldest item if already at the top
+        } else { // direction == .down
+            if currentHistoryIndex < queryHistory.count - 1 {
+                currentHistoryIndex += 1
+                return queryHistory[currentHistoryIndex]
+            } else {
+                // Navigated past the most recent query, back to a new input state
+                currentHistoryIndex = -1
+                return "" // Return empty string to clear the input field
+            }
+        }
+    }
+
+    func resetQueryHistoryIndex() {
+        currentHistoryIndex = -1
     }
     
     // MARK: - Response Regeneration

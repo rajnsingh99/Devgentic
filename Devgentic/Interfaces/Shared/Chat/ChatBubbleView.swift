@@ -11,11 +11,16 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatBubbleView")
 
 private let CODE_BLOCK_LINE_LIMIT = 50
+private let STREAMING_BUBBLE_MIN_HEIGHT: CGFloat = 550
 
 struct ChatBubbleView: View {
     @ObservedObject var message: ChatMessage
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
     @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+
+    // MARK: - FIX: State to control the animation
+    // This state will be false initially and toggled to true on appear to animate the height change.
+    @State private var applyMinHeight: Bool = false
 
     private var contentToDisplay: MessageContent {
         if message.sender == .agent, let content = message.currentAgentContent {
@@ -82,7 +87,9 @@ struct ChatBubbleView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(minHeight: message.isStreaming ? 50 : nil, alignment: .topLeading)
+                // MARK: - FIX: Use the state property for minHeight
+                // The height is now conditional on our `applyMinHeight` state property.
+                .frame(minHeight: applyMinHeight ? STREAMING_BUBBLE_MIN_HEIGHT : nil, alignment: .topLeading)
                 .padding(.horizontal, 50)
                 Spacer()
             } else { // message.sender == .user
@@ -119,6 +126,16 @@ struct ChatBubbleView: View {
         .padding(.vertical, 30)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
         .animation(.easeInOut, value: message.agentResponse?.selectedVariantIndex)
+        // MARK: - FIX: Add the .onAppear modifier
+        // When the view appears, we check if it's a streaming message and then
+        // trigger the animation.
+        .onAppear {
+            if message.isStreaming && !applyMinHeight {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    applyMinHeight = true
+                }
+            }
+        }
     }
 }
 

@@ -67,7 +67,7 @@ struct ActivityBarButton: View {
             handleButtonTap()
         } label: {
             Image(systemName: tab.iconName)
-                .font(.system(size: 22))
+                .font(.system(size: 18))
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }

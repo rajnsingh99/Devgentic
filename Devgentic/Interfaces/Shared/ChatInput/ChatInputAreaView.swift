@@ -69,11 +69,9 @@ struct ChatInputAreaView: View {
     private let textEditorMaxHeight: CGFloat = 200
 
     private var isInputEnabled: Bool {
-        // The stop button should be enabled even when isSending is true.
-        if mainViewModel.streamingMessageID != nil {
-            return true
-        }
-        return !isSending && !showSettings
+        // Input is enabled only when no message is being sent or streamed, and settings are not shown.
+        let isQueryInProgress = isSending || mainViewModel.streamingMessageID != nil
+        return !isQueryInProgress && !showSettings
     }
 
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
@@ -255,11 +253,6 @@ struct ChatInputAreaView: View {
         .animation(.spring(), value: mainViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
         .fixedSize(horizontal: false, vertical: true)
-        .onChange(of: isSending) { newValue in
-            if !newValue {
-                inputViewModel.userInput = ""
-            }
-        }
     }
     
     private func updateSelectedProfile(profileID: UUID?) {
@@ -282,7 +275,6 @@ struct ChatInputAreaView: View {
             RoundedRectangle(cornerRadius: cornerRadiusValue)
                 .stroke(Color.white.opacity(0.2), lineWidth: 1)
         )
-        .opacity(isInputEnabled ? 1.0 : 0.6)
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
 
@@ -293,6 +285,7 @@ struct ChatInputAreaView: View {
                 onCommit: { attributedString in
                     if isInputEnabled, let config = backendConfiguration.getRequestConfig() {
                         self.onSendMessage(attributedString, config)
+                        self.inputViewModel.userInput = ""
                     } else {
                         logger.warning("Commit triggered but no backend profile is selected.")
                     }
@@ -310,7 +303,20 @@ struct ChatInputAreaView: View {
                     self.editorTextView = nsTextViewInstance
                 },
                 onNavigateSuggestions: navigateSuggestions,
-                onConfirmSuggestion: confirmSuggestionSelection
+                onConfirmSuggestion: confirmSuggestionSelection,
+                onNavigateQueryHistory: { direction in
+                    if let historicalQuery = mainViewModel.getQueryFromHistory(direction: direction) {
+                        inputViewModel.userInput = historicalQuery
+                        
+                        // Move cursor to the end of the text
+                        DispatchQueue.main.async {
+                            editorTextView?.setSelectedRange(NSRange(location: historicalQuery.count, length: 0))
+                        }
+                    }
+                },
+                onTextManuallyChanged: {
+                    mainViewModel.resetQueryHistoryIndex()
+                }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
             .animation(.easeInOut(duration: 0.2), value: inputViewModel.userInput)
@@ -326,7 +332,8 @@ struct ChatInputAreaView: View {
         }
         .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
         .focused(isInputFocused)
-        .disabled(!isInputEnabled && mainViewModel.streamingMessageID == nil)
+        .disabled(!isInputEnabled)
+        .opacity(isInputEnabled ? 1.0 : 0.5)
     }
 
     private var placeholderText: String {
@@ -363,8 +370,12 @@ struct ChatInputAreaView: View {
                 isPlusButtonHovering = hover
             }
             .help("Attach files")
+            .disabled(!isInputEnabled)
+            .opacity(isInputEnabled ? 1.0 : 0.5)
 
             backendPickerButton()
+                .disabled(!isInputEnabled)
+                .opacity(isInputEnabled ? 1.0 : 0.5)
 
             Spacer()
 
@@ -372,7 +383,6 @@ struct ChatInputAreaView: View {
         }
         .padding(.horizontal, 15)
         .padding(.bottom, 10)
-        .disabled(!isInputEnabled && mainViewModel.streamingMessageID == nil)
     }
 
     @ViewBuilder
@@ -427,12 +437,14 @@ struct ChatInputAreaView: View {
                     logger.error("Send button: editorTextView is nil.");
                     if !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         onSendMessage(NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes), config)
+                        inputViewModel.userInput = ""
                     }
                     return
                 }
                 let textToSend = textView.attributedString()
                 if !textToSend.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     onSendMessage(textToSend, config)
+                    inputViewModel.userInput = ""
                 }
             case .mic, .stopVoice:
                 inputViewModel.toggleVoiceInput()
@@ -535,7 +547,7 @@ struct ChatInputAreaView: View {
         case .stopVoice:
             return Color.red.opacity(0.8)
         case .stopStreaming:
-            return Color.gray.opacity(0.4)
+            return Color.blue
         case .mic:
             return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
         }
