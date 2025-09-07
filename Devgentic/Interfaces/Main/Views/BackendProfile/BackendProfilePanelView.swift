@@ -5,13 +5,12 @@
 //  Created by Raj Singh on 22/08/25.
 //
 //  Refactored on 26/08/25 to support unified BackendProfileModel.
+//  Updated on 05/09/25 to integrate AgentConfigDetailView.
 //
 
 import SwiftUI
 
-// The `AnyBackendProfile` wrapper is no longer needed and has been removed.
 
-/// The main container view for the `BackendProfile` management flow.
 struct BackendProfilePanelView: View {
     
     // MARK: - State Management
@@ -47,7 +46,6 @@ struct BackendProfilePanelView: View {
             }
             .padding([.leading, .top, .trailing])
 
-            // The list now iterates directly over the array of `BackendProfileModel`.
             List(selection: $selectedProfileID) {
                 ForEach(profileService.profiles) { profile in
                     ProfileRowView(profile: profile)
@@ -67,10 +65,8 @@ struct BackendProfilePanelView: View {
     @ViewBuilder
     private var detailView: some View {
         if let selectedID = selectedProfileID,
-           // Find the index of the selected profile in the service's array.
            let selectedIndex = profileService.profiles.firstIndex(where: { $0.id == selectedID }) {
             
-            // Pass a binding directly to the model at the found index.
             BackendProfileDetailView(profile: $profileService.profiles[selectedIndex])
             
         } else {
@@ -81,9 +77,43 @@ struct BackendProfilePanelView: View {
     }
 }
 
+// MARK: - Backend Profile Detail View
+
+struct BackendProfileDetailView: View {
+    @Binding var profile: BackendProfileModel
+    @EnvironmentObject var profileService: BackendProfileService
+
+    var body: some View {
+        VStack {
+            switch profile.profileType {
+            case .bot:
+                BotConfigDetailView(profile: $profile)
+            case .agent:
+                AgentConfigDetailView(profile: $profile)
+            case .workflow:
+                placeholderView(for: .workflow)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    @ViewBuilder
+    private func placeholderView(for type: ProfileType) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "hammer.fill")
+                .font(.largeTitle)
+                .foregroundColor(.secondary)
+            Text("\(type.rawValue) configuration is not yet available.")
+                .font(.headline)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 // MARK: - Profile Row View
 private struct ProfileRowView: View {
-    // This view now takes the concrete model type.
     let profile: BackendProfileModel
 
     var body: some View {

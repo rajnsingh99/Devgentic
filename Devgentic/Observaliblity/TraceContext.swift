@@ -26,7 +26,7 @@ struct ProfileInfo {
         switch profile.details {
         case .bot(let llmConfig):
             self.provider = llmConfig.apiProvider
-        case .agent(let llmConfig, _):
+        case .agent(let llmConfig, _, _, _, _):
             self.provider = llmConfig.apiProvider
         case .workflow:
             self.provider = nil

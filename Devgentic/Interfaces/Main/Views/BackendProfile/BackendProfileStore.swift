@@ -117,10 +117,12 @@ class BackendProfileStore: BackendProfileStoreProtocol {
             entity.agentConfig = nil
             entity.workflowConfig = nil
             
-        case .agent(let llmConfig, let tools):
+        case .agent(let llmConfig, let tools, let description, let instructions, let knowledgeSources):
             let agentEntity = entity.agentConfig ?? AgentConfigEntity(context: context)
             agentEntity.llmConfig = encode(llmConfig)
             agentEntity.tools = encode(tools)
+            // Note: Persisting description, instructions, and knowledgeSources requires a CoreData model migration.
+            // These new fields are not saved yet to avoid crashing with an older database model.
             entity.agentConfig = agentEntity
             // Clean up other potential relationships
             entity.botConfig = nil
@@ -195,7 +197,9 @@ extension BackendProfileEntity {
               let tools: [Tool] = decode(from: toolsData) else {
             return nil
         }
-        return .agent(llmConfig: llmConfig, tools: tools)
+        // Note: Loading new agent properties will require a CoreData model migration.
+        // Returning nil for new properties ensures backward compatibility with older data.
+        return .agent(llmConfig: llmConfig, tools: tools, description: nil, instructions: nil, knowledgeSources: nil)
     }
     
     private func createWorkflowDetails() -> ProfileDetails? {
@@ -212,3 +216,4 @@ extension BackendProfileEntity {
         try? JSONDecoder().decode(T.self, from: data)
     }
 }
+

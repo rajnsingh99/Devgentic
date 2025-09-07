@@ -95,7 +95,13 @@ struct AddBackendProfileView: View {
         case .bot:
             details = .bot(llmConfig: defaultLLMConfig)
         case .agent:
-            details = .agent(llmConfig: defaultLLMConfig, tools: [])
+                    details = .agent(
+                        llmConfig: defaultLLMConfig,
+                        tools: [],
+                        description: nil,
+                        instructions: nil,
+                        knowledgeSources: nil
+                    )
         case .workflow:
             details = .workflow(agents: [])
         }

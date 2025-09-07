@@ -7,6 +7,7 @@
 //  Refactored to a unified model on 26/08/25.
 //  Fixed on 27/08/25 to correct AnyCodable decoding order.
 //  Fixed on 27/08/25 to correct AnyCodable encoding order to prevent precision loss.
+//  Updated on 05/09/25 to expand Agent configuration.
 //
 
 import Foundation
@@ -54,7 +55,7 @@ enum ProfileDetails: Codable, Hashable {
     case bot(llmConfig: ProviderConfig)
 
     /// An agent that extends a bot's capabilities with tools.
-    case agent(llmConfig: ProviderConfig, tools: [Tool])
+    case agent(llmConfig: ProviderConfig, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
 
     /// A sequence or graph of other profiles working together.
     /// Note: The array holds the unified `BackendProfileModel` to allow for nested, complex workflows.
@@ -64,7 +65,7 @@ enum ProfileDetails: Codable, Hashable {
     
     // Defines the keys used for encoding and decoding to and from formats like JSON.
     private enum CodingKeys: String, CodingKey {
-        case profileType, llmConfig, tools, agents
+        case profileType, llmConfig, tools, agents, description, instructions, knowledgeSources
     }
 
     // Custom decoder to handle the different cases based on the `profileType` key.
@@ -80,7 +81,10 @@ enum ProfileDetails: Codable, Hashable {
         case .agent:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
             let tools = try container.decode([Tool].self, forKey: .tools)
-            self = .agent(llmConfig: llmConfig, tools: tools)
+            let description = try container.decodeIfPresent(String.self, forKey: .description)
+            let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
+            let knowledgeSources = try container.decodeIfPresent([KnowledgeSource].self, forKey: .knowledgeSources)
+            self = .agent(llmConfig: llmConfig, tools: tools, description: description, instructions: instructions, knowledgeSources: knowledgeSources)
         case .workflow:
             let agents = try container.decode([BackendProfileModel].self, forKey: .agents)
             self = .workflow(agents: agents)
@@ -96,10 +100,13 @@ enum ProfileDetails: Codable, Hashable {
         case .bot(let llmConfig):
             try container.encode(ProfileType.bot, forKey: .profileType)
             try container.encode(llmConfig, forKey: .llmConfig)
-        case .agent(let llmConfig, let tools):
+        case .agent(let llmConfig, let tools, let description, let instructions, let knowledgeSources):
             try container.encode(ProfileType.agent, forKey: .profileType)
             try container.encode(llmConfig, forKey: .llmConfig)
             try container.encode(tools, forKey: .tools)
+            try container.encodeIfPresent(description, forKey: .description)
+            try container.encodeIfPresent(instructions, forKey: .instructions)
+            try container.encodeIfPresent(knowledgeSources, forKey: .knowledgeSources)
         case .workflow(let agents):
             try container.encode(ProfileType.workflow, forKey: .profileType)
             try container.encode(agents, forKey: .agents)
@@ -126,6 +133,19 @@ struct Tool: Codable, Hashable, Identifiable {
     let description: String
     var isEnabled: Bool = true
 }
+
+/// Represents a source of knowledge for an agent, which can be a local file or a remote URL.
+struct KnowledgeSource: Codable, Hashable, Identifiable {
+    let id = UUID()
+    var type: SourceType
+    var location: String // This will store file path or URL string
+
+    enum SourceType: String, Codable {
+        case file = "File"
+        case url = "URL"
+    }
+}
+
 
 /// A single, unified list of all supported provider types.
 enum ApiProvider: String, Codable, CaseIterable, Identifiable {
