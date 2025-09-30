@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 22/08/25.
 //
 //  Refactored on 26/08/25 to support unified BackendProfileModel.
+//  Updated on 10/09/25 to persist new Agent properties.
 //
 
 import Foundation
@@ -121,8 +122,10 @@ class BackendProfileStore: BackendProfileStoreProtocol {
             let agentEntity = entity.agentConfig ?? AgentConfigEntity(context: context)
             agentEntity.llmConfig = encode(llmConfig)
             agentEntity.tools = encode(tools)
-            // Note: Persisting description, instructions, and knowledgeSources requires a CoreData model migration.
-            // These new fields are not saved yet to avoid crashing with an older database model.
+            // Persist the newly added agent properties
+            agentEntity.agentDescription = description
+            agentEntity.instructions = instructions
+            agentEntity.knowledgeSources = encode(knowledgeSources)
             entity.agentConfig = agentEntity
             // Clean up other potential relationships
             entity.botConfig = nil
@@ -139,8 +142,9 @@ class BackendProfileStore: BackendProfileStoreProtocol {
     }
     
     /// A generic helper to encode any `Codable` value to `Data`.
-    private func encode<T: Codable>(_ value: T) -> Data? {
-        try? JSONEncoder().encode(value)
+    private func encode<T: Codable>(_ value: T?) -> Data? {
+        guard let value = value else { return nil }
+        return try? JSONEncoder().encode(value)
     }
 }
 
@@ -197,9 +201,19 @@ extension BackendProfileEntity {
               let tools: [Tool] = decode(from: toolsData) else {
             return nil
         }
-        // Note: Loading new agent properties will require a CoreData model migration.
-        // Returning nil for new properties ensures backward compatibility with older data.
-        return .agent(llmConfig: llmConfig, tools: tools, description: nil, instructions: nil, knowledgeSources: nil)
+        
+        // Load the persisted agent properties
+        let description = configEntity.agentDescription
+        let instructions = configEntity.instructions
+        let knowledgeSources: [KnowledgeSource]? = decode(from: configEntity.knowledgeSources)
+        
+        return .agent(
+            llmConfig: llmConfig,
+            tools: tools,
+            description: description,
+            instructions: instructions,
+            knowledgeSources: knowledgeSources
+        )
     }
     
     private func createWorkflowDetails() -> ProfileDetails? {
@@ -212,8 +226,8 @@ extension BackendProfileEntity {
     }
     
     /// A generic helper to decode `Data` back into any `Decodable` type.
-    private func decode<T: Decodable>(from data: Data) -> T? {
-        try? JSONDecoder().decode(T.self, from: data)
+    private func decode<T: Decodable>(from data: Data?) -> T? {
+        guard let data = data else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 }
-

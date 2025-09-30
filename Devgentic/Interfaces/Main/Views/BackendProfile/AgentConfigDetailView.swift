@@ -21,6 +21,9 @@ struct AgentConfigDetailView: View {
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
     
+    // A single state variable to present the unified tool library.
+    @State private var showingToolLibrary = false
+    
     // MARK: - Computed Bindings
     
     /// Creates a binding to the `ProviderConfig` inside the `profile.details` enum.
@@ -68,11 +71,13 @@ struct AgentConfigDetailView: View {
                 return ""
             },
             set: { newValue in
+                // Enforce a 250-character limit
+                let truncatedValue = String(newValue.prefix(250))
                 if case .agent(let llmConfig, let tools, _, let instructions, let knowledgeSources) = profile.details {
                     profile.details = .agent(
                         llmConfig: llmConfig,
                         tools: tools,
-                        description: newValue.isEmpty ? nil : newValue,
+                        description: truncatedValue.isEmpty ? nil : truncatedValue,
                         instructions: instructions,
                         knowledgeSources: knowledgeSources
                     )
@@ -90,12 +95,14 @@ struct AgentConfigDetailView: View {
                 return ""
             },
             set: { newValue in
+                // Enforce a 5000-character limit
+                let truncatedValue = String(newValue.prefix(5000))
                 if case .agent(let llmConfig, let tools, let description, _, let knowledgeSources) = profile.details {
                     profile.details = .agent(
                         llmConfig: llmConfig,
                         tools: tools,
                         description: description,
-                        instructions: newValue.isEmpty ? nil : newValue,
+                        instructions: truncatedValue.isEmpty ? nil : truncatedValue,
                         knowledgeSources: knowledgeSources
                     )
                 }
@@ -124,6 +131,29 @@ struct AgentConfigDetailView: View {
             }
         )
     }
+    
+    /// Creates a binding to the `tools` array within the `profile.details` enum.
+    private var toolsBinding: Binding<[Tool]> {
+        Binding<[Tool]>(
+            get: {
+                if case .agent(_, let tools, _, _, _) = profile.details {
+                    return tools
+                }
+                return [] // Should not happen if view is used correctly
+            },
+            set: { newTools in
+                if case .agent(let llmConfig, _, let description, let instructions, let knowledgeSources) = profile.details {
+                    profile.details = .agent(
+                        llmConfig: llmConfig,
+                        tools: newTools,
+                        description: description,
+                        instructions: instructions,
+                        knowledgeSources: knowledgeSources
+                    )
+                }
+            }
+        )
+    }
 
 
     // MARK: - Body
@@ -135,14 +165,22 @@ struct AgentConfigDetailView: View {
                 }
                 
                 Section(header: Text("Agent Details").font(.headline)) {
-                    TextField("Description", text: descriptionBinding)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Description")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextEditor(text: descriptionBinding)
+                            .frame(minHeight: 60, maxHeight: 250)
+                            .padding(4)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                    }
                     
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Instructions")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         TextEditor(text: instructionsBinding)
-                            .frame(minHeight: 100, maxHeight: 250)
+                            .frame(minHeight: 100, maxHeight: 400)
                             .padding(4)
                             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
                     }
@@ -161,10 +199,31 @@ struct AgentConfigDetailView: View {
                 // The advanced settings are now displayed inline.
                 advancedSettingsView
                 
-                Section(header: Text("Tools").font(.headline)) {
-                     Text("Tool configuration is not yet available.")
-                         .foregroundColor(.secondary)
-                 }
+                // UNIFIED TOOL MANAGEMENT SECTION
+                Section {
+                     HStack {
+                         Text("Enabled Tools")
+                         Spacer()
+                         let enabledToolsCount = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
+                         Text("\(enabledToolsCount) enabled")
+                             .foregroundColor(.secondary)
+                     }
+                     
+                     HStack {
+                         Spacer()
+                         Button("Manage Tools...") {
+                             showingToolLibrary = true
+                         }
+                         Spacer()
+                     }
+                } header: {
+                    HStack {
+                        Text("Tools")
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                    }
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                }
 
                  Section(header: Text("Knowledge Sources").font(.headline)) {
                      ForEach(knowledgeSourcesBinding.wrappedValue) { source in
@@ -202,6 +261,9 @@ struct AgentConfigDetailView: View {
             
             actionButtons
                 .padding()
+        }
+        .sheet(isPresented: $showingToolLibrary) {
+            ToolLibraryView(configuredTools: toolsBinding)
         }
         .onAppear {
             // Store the initial state and load advanced settings when the view appears

@@ -8,6 +8,7 @@
 //  Fixed on 27/08/25 to correct AnyCodable decoding order.
 //  Fixed on 27/08/25 to correct AnyCodable encoding order to prevent precision loss.
 //  Updated on 05/09/25 to expand Agent configuration.
+//  Updated on 17/09/25 to add executable tool protocols.
 //
 
 import Foundation
@@ -236,3 +237,4 @@ struct AnyCodable: Codable, Hashable {
         }
     }
 }
+

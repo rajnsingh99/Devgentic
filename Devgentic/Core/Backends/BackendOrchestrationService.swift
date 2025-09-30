@@ -20,6 +20,7 @@ class BackendOrchestrationService: ObservableObject {
     private let remoteOrchestrationService: RemoteOrchestrationService
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
+    private let agentConnect: AgentConnect
     
     // RAG Services
     private let embeddingService = EmbeddingService.shared
@@ -35,6 +36,10 @@ class BackendOrchestrationService: ObservableObject {
         self.ollamaService = OllamaService.shared
         self.remoteOrchestrationService = RemoteOrchestrationService()
         self.persistenceService = CoreDataPersistenceService.shared
+        
+        // Initialize AgentConnect with the server URL
+        // In a real app, this URL should come from a configuration file.
+        self.agentConnect = AgentConnect(baseURL: URL(string: "http://127.0.0.1:8000")!)
         
         logger.info("BackendOrchestrationService initialized.")
     }
@@ -53,27 +58,31 @@ class BackendOrchestrationService: ObservableObject {
             Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
-                let augmentedQuery = await self.augmentQueryWithContext(userQuery: userQuery, conversationID: conversationID)
-                
                 let conversationHistory = history.filter { message in
                     if case .error = message.content { return false }
                     return true
                 }
 
-                var finalUserQuery = augmentedQuery
+                // **FIX:** Moved query augmentation to be conditional.
+                // It will now only run for .bot profiles.
+                
+                var queryForRequest = userQuery
                 if !files.isEmpty {
                     logger.info("Assembling content for \(files.count) attached files.")
                     let fileContext = self.assembleTextFileContent(for: files)
                     if !fileContext.isEmpty {
-                        finalUserQuery = fileContext + "\n\n" + finalUserQuery
+                        queryForRequest = fileContext + "\n\n" + queryForRequest
                     }
                 }
                 
                 do {
-                    // New routing logic based on ProfileType
+                    
                     switch config.profile.profileType {
                     
                     case .bot:
+                        // **FIX:** Augment the query with RAG context ONLY for bot profiles.
+                        let augmentedQuery = await self.augmentQueryWithContext(userQuery: queryForRequest, conversationID: conversationID)
+                        
                         guard case .bot(let llmConfig) = config.profile.details else {
                             throw NSError(domain: "ProfileError", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not extract bot configuration from profile."])
                         }
@@ -94,7 +103,7 @@ class BackendOrchestrationService: ObservableObject {
                                 }
                                 return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
                             }
-                            ollamaHistory.append(OllamaChatMessage(role: "user", content: finalUserQuery))
+                            ollamaHistory.append(OllamaChatMessage(role: "user", content: augmentedQuery))
                             
                             logger.info("Initiating stream to Ollama with model \(llmConfig.modelName). History count: \(ollamaHistory.count).")
 
@@ -110,10 +119,10 @@ class BackendOrchestrationService: ObservableObject {
                             continuation.finish()
 
                         case .openAI, .google, .anthropic:
-                            // Defer to the remote orchestration service
+                            // Defer to the remote orchestration service for other cloud bots
                             let stream = self.remoteOrchestrationService.streamMessage(
                                 conversationID: conversationID,
-                                userQuery: finalUserQuery,
+                                userQuery: augmentedQuery,
                                 history: conversationHistory,
                                 profile: config.profile,
                                 context: context
@@ -126,12 +135,32 @@ class BackendOrchestrationService: ObservableObject {
                         }
 
                     case .agent:
-                        throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Agent profiles."])
+                        // **FIX:** Pass the original, non-augmented query directly to the agent.
+                        logger.info("Routing to AgentConnect for profile: \(config.profile.displayName)")
+                        let stream = agentConnect.streamAgentResponse(
+                            for: config.profile,
+                            userInput: queryForRequest,
+                            chatHistory: conversationHistory
+                        )
+                        
+                        var tokensReceived = 0
+                        for try await eventData in stream {
+                            logger.debug("AGENT_CONNECT_DATA: Received token: \(eventData)")
+                            tokensReceived += 1
+                            continuation.yield(eventData)
+                        }
+                        
+                        if tokensReceived == 0 {
+                            logger.warning("AGENT_CONNECT_DATA: Stream finished without receiving any tokens.")
+                        }
+                        
+                        continuation.finish()
                         
                     case .workflow:
                         throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Workflow profiles."])
                     }
                 } catch {
+                    logger.error("AGENT_CONNECT_ERROR: The stream failed with an error: \(error.localizedDescription)")
                     continuation.finish(throwing: error)
                 }
             }

@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 35243D362E26F08800602933 /* CodeEditSourceEditor */; settings = {ATTRIBUTES = (Required, ); }; };
+		355A5C2A2E80724B007C22CC /* Hummingbird in Frameworks */ = {isa = PBXBuildFile; productRef = 355A5C292E80724B007C22CC /* Hummingbird */; };
+		355A5D9F2E882BA0007C22CC /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 355A5D9E2E882BA0007C22CC /* MCP */; };
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
@@ -65,7 +67,9 @@
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
+				355A5C2A2E80724B007C22CC /* Hummingbird in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
+				355A5D9F2E882BA0007C22CC /* MCP in Frameworks */,
 				35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -149,6 +153,8 @@
 				35243D362E26F08800602933 /* CodeEditSourceEditor */,
 				35CDA7422E2A2A3400564AB7 /* Highlightr */,
 				35E68C412E313B0B00993F95 /* WhisperKit */,
+				355A5C292E80724B007C22CC /* Hummingbird */,
+				355A5D9E2E882BA0007C22CC /* MCP */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -238,6 +244,8 @@
 				35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
 				35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */,
 				35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */,
+				355A5C282E80724B007C22CC /* XCRemoteSwiftPackageReference "hummingbird" */,
+				355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -606,6 +614,22 @@
 				minimumVersion = 0.14.1;
 			};
 		};
+		355A5C282E80724B007C22CC /* XCRemoteSwiftPackageReference "hummingbird" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/hummingbird-project/hummingbird.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.16.0;
+			};
+		};
+		355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.10.2;
+			};
+		};
 		35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/raspu/Highlightr.git";
@@ -645,6 +669,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */;
 			productName = CodeEditSourceEditor;
+		};
+		355A5C292E80724B007C22CC /* Hummingbird */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 355A5C282E80724B007C22CC /* XCRemoteSwiftPackageReference "hummingbird" */;
+			productName = Hummingbird;
+		};
+		355A5D9E2E882BA0007C22CC /* MCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */;
+			productName = MCP;
 		};
 		35CDA7422E2A2A3400564AB7 /* Highlightr */ = {
 			isa = XCSwiftPackageProductDependency;

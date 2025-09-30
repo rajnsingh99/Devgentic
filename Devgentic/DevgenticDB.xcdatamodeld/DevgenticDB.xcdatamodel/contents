@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788.4" systemVersion="24G84" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="23788.4" systemVersion="25A354" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
     <entity name="AgentConfigEntity" representedClassName="AgentConfigEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="agentDescription" optional="YES" attributeType="String"/>
+        <attribute name="instructions" optional="YES" attributeType="String"/>
+        <attribute name="knowledgeSources" optional="YES" attributeType="Binary"/>
         <attribute name="llmConfig" optional="YES" attributeType="Binary"/>
         <attribute name="tools" optional="YES" attributeType="Binary"/>
         <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="agentConfig" inverseEntity="BackendProfileEntity"/>
@@ -70,6 +73,11 @@
         <relationship name="ollamaConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="OllamaConfigEntity" inverseName="integration" inverseEntity="OllamaConfigEntity"/>
         <relationship name="remoteConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="RemoteConfigEntity" inverseName="integration" inverseEntity="RemoteConfigEntity"/>
     </entity>
+    <entity name="MCPToolEntity" representedClassName="MCPToolEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="name" optional="YES" attributeType="String"/>
+        <attribute name="toolDescription" optional="YES" attributeType="String"/>
+        <relationship name="toolItem" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ToolItemEntity" inverseName="tools" inverseEntity="ToolItemEntity"/>
+    </entity>
     <entity name="OllamaConfigEntity" representedClassName="OllamaConfigEntity" syncable="YES" codeGenerationType="class">
         <attribute name="baseURL" attributeType="String"/>
         <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
@@ -96,6 +104,12 @@
         <attribute name="provider" attributeType="String"/>
         <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
         <relationship name="integration" maxCount="1" deletionRule="Nullify" destinationEntity="LLMIntegrationEntity" inverseName="remoteConfig" inverseEntity="LLMIntegrationEntity"/>
+    </entity>
+    <entity name="ToolItemEntity" representedClassName="ToolItemEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="mcpConfig" optional="YES" attributeType="Binary"/>
+        <attribute name="serverName" optional="YES" attributeType="String"/>
+        <relationship name="tools" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="MCPToolEntity" inverseName="toolItem" inverseEntity="MCPToolEntity"/>
     </entity>
     <entity name="WorkflowConfigEntity" representedClassName="WorkflowConfigEntity" syncable="YES" codeGenerationType="class">
         <attribute name="agents" optional="YES" attributeType="Binary"/>
