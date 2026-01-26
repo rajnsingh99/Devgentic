@@ -181,6 +181,7 @@ struct ToolLibraryView: View {
                         // Use a custom view for the row to handle the binding logic
                         ToolSelectionRowView(
                             toolDefinition: toolDef,
+                            source: source, // Pass the entire source object
                             configuredTools: $configuredTools
                         )
                     }
@@ -206,35 +207,56 @@ struct ToolLibraryView: View {
 
 /// A private view for a single row in the expanded tool list, handling selection logic.
 private struct ToolSelectionRowView: View {
+    /// The complete definition of the tool to display, including its parameter schema.
     let toolDefinition: ToolDefinition
+    
+    /// The source (e.g., "Built-in Tools", "Slack Server") that provides this tool.
+    let source: ToolSource
+    
+    /// A binding to the agent's master list of configured tools, which this view will modify.
     @Binding var configuredTools: [Tool]
 
-    /// A custom binding to manage the enabled/disabled state for this specific tool.
+    /// A custom binding that manages the enabled/disabled state for this specific tool.
+    /// It contains the logic to add or remove the tool from the agent's configuration.
     private var isEnabled: Binding<Bool> {
         Binding<Bool>(
             get: {
-                // The tool is enabled if its name exists in the agent's configuredTools array.
-                configuredTools.contains { $0.name == toolDefinition.name }
+                // A tool is considered "enabled" if a tool with the same name and from the
+                // same source exists in the agent's configuration. This handles potential
+                // duplicate tool names from different sources.
+                configuredTools.contains { $0.name == toolDefinition.name && $0.sourceId == source.id }
             },
-            set: { isEnabled in
-                if isEnabled {
-                    // If toggled ON, add the tool if it's not already there.
-                    if !configuredTools.contains(where: { $0.name == toolDefinition.name }) {
-                        let newTool = Tool(name: toolDefinition.name, description: toolDefinition.description, isEnabled: true)
+            set: { shouldBeEnabled in
+                if shouldBeEnabled {
+                    // If the toggle is turned ON, add the tool to the agent's configuration
+                    // but only if it's not already there.
+                    if !configuredTools.contains(where: { $0.name == toolDefinition.name && $0.sourceId == source.id }) {
+                        // Create the persistent `Tool` model from the `ToolDefinition`.
+                        // This is the critical step where the parameter schema is preserved.
+                        let newTool = Tool(
+                            name: toolDefinition.name,
+                            description: toolDefinition.description,
+                            isEnabled: true,
+                            sourceId: source.id,
+                            parameters: toolDefinition.parameters
+                        )
                         configuredTools.append(newTool)
                     }
                 } else {
-                    // If toggled OFF, remove the tool from the agent's configuration.
-                    configuredTools.removeAll { $0.name == toolDefinition.name }
+                    // If the toggle is turned OFF, remove the tool from the agent's configuration.
+                    configuredTools.removeAll { $0.name == toolDefinition.name && $0.sourceId == source.id }
                 }
             }
         )
     }
 
     var body: some View {
+        // The main UI for the row is a toggle switch.
         HStack(alignment: .top, spacing: 8) {
-            // The toggle now directly uses our custom binding.
+            // The Toggle uses our custom `isEnabled` binding to manage its state
+            // and trigger the add/remove logic.
             Toggle(isOn: isEnabled) {
+                // The label for the toggle displays the tool's name and description.
                 VStack(alignment: .leading, spacing: 2) {
                     Text(toolDefinition.name)
                         .font(.subheadline)
@@ -251,3 +273,4 @@ private struct ToolSelectionRowView: View {
         }
     }
 }
+

@@ -4,41 +4,13 @@
 //
 //  Created by Raj Singh on 25/09/25.
 //
+//  Refactored on 10/10/25 to remove embedded model definitions.
+//
 
 import SwiftUI
 
-// MARK: - UNIFIED Data Models (STEP 1)
-
-/// A generic representation of a single tool's definition, regardless of its source.
-/// NOTE: In a real app, this struct would be in a shared Models file.
-struct ToolDefinition: Identifiable, Hashable, Codable {
-    var id: String { name }
-    let name: String
-    let description: String
-}
-
-/// An enum to differentiate between the origins of a tool source.
-enum ToolSourceType: Hashable, Codable {
-    case local
-    case mcp
-}
-
-
-/// A unified, persistent structure representing a source of tools, which can be
-/// the built-in local tools or a configured MCP server.
-struct ToolSource: Identifiable, Hashable {
-    let id: UUID
-    let type: ToolSourceType
-    let serverName: String // For local, this can be "Built-in Tools"
-    let tools: [ToolDefinition]
-    
-    // This is optional because local tools don't have a server definition.
-    let serverDefinition: ServerDefinition?
-    
-    var displayName: String {
-        "\(serverName) (\(tools.map { $0.name }.joined(separator: ", ")))"
-    }
-}
+// NOTE: All data models (ToolDefinition, ToolSource, etc.) have been moved to ToolModel.swift
+// to serve as a single source of truth and prevent compiler conflicts.
 
 /// A view for managing and selecting MCP (Model Context Protocol) tools.
 struct MCPLibraryView: View {
@@ -261,3 +233,4 @@ struct MCPLibraryView: View {
         selectedTools[tool.id]?.contains(toolName) ?? false
     }
 }
+

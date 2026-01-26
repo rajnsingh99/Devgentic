@@ -19,7 +19,6 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
     
     private var activeContinuations: [URLSessionTask: AsyncThrowingStream<String, Error>.Continuation] = [:]
     
-    // **FIX 1: Add a buffer to handle fragmented data streams.**
     private var buffer: Data = Data()
     
     private let jsonDecoder = JSONDecoder()
@@ -51,26 +50,37 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
                 }
 
                 let systemPrompt = buildSystemPrompt(description: description, instructions: instructions)
-                let allAvailableTools = await LocalToolManager.shared.availableTools()
+                
+                // --- TOOL NAMESPACING LOGIC ---
+                // MODIFIED: The logic is now much simpler. The 'enabledTool' struct
+                // from the profile already contains all necessary information, including parameters.
+                let allSources = await UnifiedToolStore.shared.sources
                 let enabledTools = profileTools.filter { $0.isEnabled }
                 
                 let toolConfigs: [AgentToolConfig] = enabledTools.compactMap { enabledTool -> AgentToolConfig? in
-                    guard let executableTool = allAvailableTools.first(where: { $0.name == enabledTool.name }) else {
-                        logger.warning("Could not find executable tool details for '\(enabledTool.name)'. It will be excluded.")
+                    // 1. Find the source name for creating the prefixed name.
+                    guard let source = allSources.first(where: { $0.id == enabledTool.sourceId }) else {
+                        logger.warning("Could not find source with ID '\(String(describing: enabledTool.sourceId))' for tool '\(enabledTool.name)'. It will be excluded.")
                         return nil
                     }
                     
+                    // REMOVED: The complex logic to differentiate between local and MCP tools
+                    // to find parameters is no longer needed. The correct parameters are already
+                    // part of the 'enabledTool' object.
+                    
+                    // 2. Create the unique, prefixed name (e.g., "BuiltinTools_execute_shell")
+                    let namespacedName = ToolNamer.prefixedName(for: enabledTool.name, from: source.serverName)
+
+                    // 3. Create the final config for the Python agent using the data directly from the tool.
                     return AgentToolConfig(
-                        name: executableTool.name,
-                        description: executableTool.description,
-                        parameters: executableTool.parameters
+                        name: namespacedName,
+                        description: enabledTool.description,
+                        parameters: enabledTool.parameters
                     )
                 }
+                // --- END TOOL NAMESPACING LOGIC ---
 
-                // THE FIX: The `chatHistory` array from the client includes the latest user query,
-                // which is also sent separately in the `userInput` field. The Python server expects
-                // the history *without* this latest query, as it adds it back from the `input` field.
-                // We drop the last message here to prevent it from being duplicated in the prompt.
+
                 let historyForPayload = chatHistory.dropLast()
 
                 let requestPayload = SingleAgentRequest(
@@ -89,7 +99,6 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
                     )
                 )
                 
-                // Log the final payload for debugging
                 do {
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = .prettyPrinted
@@ -101,7 +110,6 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
                     logger.error("Failed to encode agent request payload for logging: \(error.localizedDescription)")
                 }
                 
-                // Create and start the data task
                 do {
                     var request = URLRequest(url: endpointURL)
                     request.httpMethod = "POST"
@@ -130,7 +138,6 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
     // MARK: - URLSessionDataDelegate Methods
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        // **FIX 2: Append incoming data to the buffer and process it.**
         buffer.append(data)
         processBuffer(for: dataTask)
     }
@@ -138,8 +145,6 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let continuation = activeContinuations[task] else { return }
         
-        // **FIX 4: Process any remaining data in the buffer before finishing.**
-        // This catches the final message sent just before the connection closes.
         if !buffer.isEmpty {
             processBuffer(for: task as! URLSessionDataTask)
         }
@@ -152,20 +157,16 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
         activeContinuations.removeValue(forKey: task)
     }
     
-    /// **FIX 3: A new robust method to parse Server-Sent Events from the buffer.**
     private func processBuffer(for dataTask: URLSessionDataTask) {
         guard let continuation = activeContinuations[dataTask] else { return }
         
-        // SSE messages are separated by double newlines.
         let separator = "\n\n".data(using: .utf8)!
         
-        // Process all complete messages in the buffer.
         while let range = buffer.range(of: separator) {
             let eventData = buffer.subdata(in: 0..<range.lowerBound)
             buffer.removeSubrange(0..<range.upperBound)
 
             if let eventString = String(data: eventData, encoding: .utf8) {
-                // Each message can have multiple lines (e.g., event, data, id).
                 let lines = eventString.split(whereSeparator: \.isNewline)
                 for line in lines {
                     if line.hasPrefix("data: ") {
@@ -262,24 +263,5 @@ struct AgentChatMessage: Codable {
         
         guard let textContent = message.content.textContent else { return nil }
         self.content = textContent
-    }
-}
-
-
-// MARK: - Helper Extensions
-
-extension ApiProvider {
-    /// Maps the Swift `ApiProvider` enum to the string expected by the Python backend.
-    var providerString: String {
-        switch self {
-        case .google:
-            return "google"
-        case .openAI:
-            return "openai"
-        case .ollama:
-            return "ollama"
-        case .anthropic:
-            return "anthropic"
-        }
     }
 }

@@ -23,10 +23,8 @@ struct BackendProfileModel: Codable, Identifiable, Hashable {
     var displayName: String
     var lastSelected: Date?
 
-    /// The detailed configuration, specific to the profile type, is stored here.
     var details: ProfileDetails
 
-    /// A computed property to easily identify the type of profile based on the details.
     var profileType: ProfileType {
         switch details {
         case .bot:
@@ -49,22 +47,13 @@ struct BackendProfileModel: Codable, Identifiable, Hashable {
 
 // MARK: - Profile Details Enum
 
-/// An enum that holds the specific configuration data for each profile type.
-/// This uses associated values to ensure that a profile has exactly the data it needs.
 enum ProfileDetails: Codable, Hashable {
-    /// A foundational bot powered by a single LLM integration.
     case bot(llmConfig: ProviderConfig)
-
-    /// An agent that extends a bot's capabilities with tools.
     case agent(llmConfig: ProviderConfig, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
-
-    /// A sequence or graph of other profiles working together.
-    /// Note: The array holds the unified `BackendProfileModel` to allow for nested, complex workflows.
     case workflow(agents: [BackendProfileModel])
 
     // MARK: - Manual Codable Implementation
     
-    // Defines the keys used for encoding and decoding to and from formats like JSON.
     private enum CodingKeys: String, CodingKey {
         case profileType, llmConfig, tools, agents, description, instructions, knowledgeSources
     }
@@ -133,13 +122,16 @@ struct Tool: Codable, Hashable, Identifiable {
     let name: String
     let description: String
     var isEnabled: Bool = true
+    
+    let sourceId: UUID
+    let parameters: ToolParameters
 }
 
 /// Represents a source of knowledge for an agent, which can be a local file or a remote URL.
 struct KnowledgeSource: Codable, Hashable, Identifiable {
     let id = UUID()
     var type: SourceType
-    var location: String // This will store file path or URL string
+    var location: String
 
     enum SourceType: String, Codable {
         case file = "File"
@@ -155,6 +147,19 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable {
    case anthropic = "Anthropic"
    case google = "Google"
    var id: String { self.rawValue }
+    
+    var providerString: String {
+        switch self {
+        case .google:
+            return "google"
+        case .openAI:
+            return "openai"
+        case .ollama:
+            return "ollama"
+        case .anthropic:
+            return "anthropic"
+        }
+    }
 }
 
 /// A single, unified configuration model for all LLM providers.
@@ -175,8 +180,6 @@ struct AnyCodable: Codable, Hashable {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {
             self.value = ()
-        // **FIXED**: Reordered decoding attempts to prioritize numbers over booleans.
-        // This prevents numbers like 1 or 0 from being misinterpreted as true/false.
         } else if let int = try? container.decode(Int.self) {
             self.value = int
         } else if let double = try? container.decode(Double.self) {
@@ -201,8 +204,6 @@ struct AnyCodable: Codable, Hashable {
             try container.encodeNil()
         case let bool as Bool:
             try container.encode(bool)
-        // **FIXED**: Reordered encoding attempts to prioritize Double over Int.
-        // This prevents a Double like 1.0 from being encoded as an Int (1), losing its type information.
         case let double as Double:
             try container.encode(double)
         case let int as Int:
@@ -237,4 +238,3 @@ struct AnyCodable: Codable, Hashable {
         }
     }
 }
-

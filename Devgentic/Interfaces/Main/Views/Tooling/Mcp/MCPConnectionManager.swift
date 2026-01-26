@@ -4,97 +4,127 @@
 //
 //  Created by Raj Singh on 28/09/25.
 //
+//  Updated on 17/10/25 to support both remote and local connections.
+//  Fixed on 19/10/25 to safely unwrap the optional command property.
+//
 
 import Foundation
 import MCP
+import os
 #if canImport(System)
 import System
 #else
 @preconcurrency import SystemPackage
 #endif
 
-/// A singleton manager responsible for the on-demand lifecycle of MCP tool servers.
-///
-/// This class acts as a connection pool. It launches, connects to, and caches connections
-/// to external MCP server processes only when a tool from that server is requested for
-/// execution. It ensures that system resources are used efficiently by only running
-/// processes that are actively needed.
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MCPConnectionManager")
+
 @MainActor
 class MCPConnectionManager {
     
-    /// The shared singleton instance.
     static let shared = MCPConnectionManager()
     
-    /// A cache to hold live connections. The key is the ToolSource's unique ID,
-    /// and the value is a tuple containing the active MCP client and its running process.
-    private var activeConnections: [UUID: (client: MCP.Client, process: Process)] = [:]
+    private var activeConnections: [UUID: (client: MCP.Client, process: Process?)] = [:]
     
-    /// Private initializer to enforce singleton pattern.
     private init() {}
 
-    /// The main public entry point for executing an MCP tool.
-    /// - Parameters:
-    ///   - toolName: The name of the tool to execute.
-    ///   - arguments: The arguments for the tool.
-    ///   - source: The `ToolSource` that provides this tool.
-    /// - Returns: A string containing the result of the tool's execution or an error message.
     func execute(toolName: String, arguments: [String: Any], source: ToolSource) async -> String {
+        logger.info("--- executing mcp tool ---")
+        logger.info("Tool: '\(toolName)' on source '\(source.serverName)'")
+        logger.info("Arguments: \(String(describing: arguments))")
+        
         do {
-            // Step 1: Get a live connection, either from cache or by launching a new process.
             let client = try await getConnection(for: source)
             
-            // Step 2: Convert arguments from [String: Any] to [String: MCP.Value] via JSON.
+            logger.info("-> Connection established. Converting arguments to MCP.Value.")
             let argumentsData = try JSONSerialization.data(withJSONObject: arguments)
             let decoder = JSONDecoder()
             let mcpArguments = try decoder.decode([String: MCP.Value].self, from: argumentsData)
 
-            // Step 3: Execute the tool using the 'callTool' method.
+            logger.info("-> Calling remote tool via MCP.")
             let result = try await client.callTool(name: toolName, arguments: mcpArguments)
             
-            // Step 4: Process the [Tool.Content] array from the result into a single readable string.
             let resultParts = result.content.map { contentPart -> String in
-                // Handle the content based on the available cases in your SDK version.
                 switch contentPart {
                 case .text(let text):
                     return text
                 @unknown default:
-                    // This handles any future cases that might be added to the SDK
-                    // and prevents compiler errors if the enum is non-exhaustive.
                     return "Unsupported tool content type received."
                 }
             }
             
-            // Join multiple content parts with newlines.
-            return resultParts.joined(separator: "\n")
+            let finalResult = resultParts.joined(separator: "\n")
+            logger.info("-> MCP tool execution successful.")
+            return finalResult
             
         } catch {
-            return "Error executing MCP tool '\(toolName)': \(error.localizedDescription)"
+            let errorMsg = "Error executing MCP tool '\(toolName)': \(error.localizedDescription)"
+            logger.error("\(errorMsg)")
+            return errorMsg
         }
     }
     
-    /// Retrieves a live MCP client for a given tool source, creating one if it doesn't exist.
     private func getConnection(for source: ToolSource) async throws -> MCP.Client {
-        // If a connection is already cached, return it.
         if let existingConnection = activeConnections[source.id] {
+            logger.info("Found cached connection for '\(source.serverName)'. Reusing.")
             return existingConnection.client
         }
         
-        // Ensure the source has a server definition to launch.
+        logger.info("No cached connection found for '\(source.serverName)'. Creating a new one.")
         guard let serverDef = source.serverDefinition else {
-            // This is a logic error if we get here for an MCP tool.
             throw MCPManagerError.invalidJSONConfiguration("Server definition missing for MCP tool source.")
         }
         
-        // --- LAUNCH AND CONNECT ---
-        let commandPath = try findExecutable(named: serverDef.command)
+        let transport: any Transport
+        var process: Process? = nil
+
+        if let urlString = serverDef.url {
+            transport = try self.setupRemoteTransport(urlString: urlString, config: serverDef)
+        } else {
+            let (localTransport, localProcess) = try await self.setupProcessTransport(config: serverDef)
+            transport = localTransport
+            process = localProcess
+        }
+        
+        let client = MCP.Client(name: "DevgenticAppClient", version: "1.0.0")
+        try await client.connect(transport: transport)
+        
+        activeConnections[source.id] = (client, process)
+        logger.info("-> Successfully connected to and cached new connection for '\(source.serverName)'.")
+        
+        return client
+    }
+
+    private func setupRemoteTransport(urlString: String, config: ServerDefinition) throws -> any Transport {
+        guard let url = URL(string: urlString) else {
+            throw MCPManagerError.invalidJSONConfiguration("The provided server URL is not valid: \(urlString)")
+        }
+        let transport = HTTPClientTransport(endpoint: url, requestModifier: { request in
+            var modifiedRequest = request
+            if let authToken = config.authentication?["token"] {
+                modifiedRequest.addValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+            }
+            return modifiedRequest
+        })
+        return transport
+    }
+    
+    private func setupProcessTransport(config: ServerDefinition) async throws -> (transport: any Transport, process: Process) {
+        guard let command = config.command else {
+            throw MCPManagerError.invalidJSONConfiguration("Process-based server is missing the 'command' field.")
+        }
+        let commandPath = try findExecutable(named: command)
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: commandPath)
-        process.arguments = serverDef.args ?? []
+        process.arguments = config.args ?? []
 
         let shellPath = getShellPath()
         let shellEnvironment = try await getShellEnvironment(shellPath: shellPath)
-        process.environment = shellEnvironment.merging(serverDef.env ?? [:]) { (_, new) in new }
+        process.environment = shellEnvironment.merging(config.env ?? [:]) { (_, new) in new }
+        
+        logger.info("-> Launching process: \(commandPath) with args: \(process.arguments ?? [])")
 
         let stdInPipe = Pipe(), stdOutPipe = Pipe()
         process.standardInput = stdInPipe
@@ -107,18 +137,8 @@ class MCPConnectionManager {
             output: .init(rawValue: stdInPipe.fileHandleForWriting.fileDescriptor)
         )
         
-        let client = MCP.Client(name: "DevgenticAppClient", version: "1.0.0")
-        try await client.connect(transport: transport)
-        
-        // Cache the new connection and process for future use.
-        activeConnections[source.id] = (client, process)
-        
-        print("MCPConnectionManager: Activated and cached new connection for \(source.serverName).")
-        
-        return client
+        return (transport, process)
     }
-    
-    // MARK: - Process & Shell Helpers (Adapted from MCPManager)
     
     private func findExecutable(named command: String) throws -> String {
         if command.starts(with: "/") || command.starts(with: ".") { return command }
@@ -146,8 +166,7 @@ class MCPConnectionManager {
     private func shell(_ shellPath: String, _ args: String...) throws -> String {
         let process = Process()
         process.launchPath = shellPath
-        let richPath = "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH;"
-        let command = richPath + " " + args.joined(separator: " ")
+        let command = args.joined(separator: " ")
         process.arguments = ["-c", command]
         
         let stdOutPipe = Pipe(), stdErrPipe = Pipe()
@@ -160,6 +179,12 @@ class MCPConnectionManager {
         if process.terminationStatus != 0 {
             let errorData = stdErrPipe.fileHandleForReading.readDataToEndOfFile()
             let errorOutput = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            logger.error("""
+            Shell command failed:
+            - Command: \(command)
+            - Exit Code: \(process.terminationStatus)
+            - Stderr: \(errorOutput)
+            """)
             throw MCPManagerError.shellCommandFailed(command: args.joined(separator: " "), output: errorOutput)
         }
         
@@ -167,4 +192,3 @@ class MCPConnectionManager {
         return String(data: outputData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }
-

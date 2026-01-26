@@ -176,9 +176,11 @@ struct BotConfigDetailView: View {
             TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
                 .disableAutocorrection(true)
 
+            // UPDATED: Standard Bot view does NOT filter models. Any model is fine.
             OllamaModelPickerView(
                 selectedModel: providerConfig.modelName,
-                baseURL: providerConfig.wrappedValue.baseURL ?? ""
+                baseURL: providerConfig.wrappedValue.baseURL ?? "",
+                filterForTools: false
             )
         }
     }

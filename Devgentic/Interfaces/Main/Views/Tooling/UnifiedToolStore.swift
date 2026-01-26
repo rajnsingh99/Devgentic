@@ -4,6 +4,8 @@
 //
 //  Created by Raj Singh on 28/09/25.
 //
+//  Refactored on 10/10/25 to fix local tool parameter mapping.
+//
 
 import Foundation
 import Combine
@@ -45,8 +47,10 @@ class UnifiedToolStore: ObservableObject {
         let mcpSources = mcpStore.sources
         
         // 2. Get all available built-in tools and map them to ToolDefinition.
+        // FIXED: This now correctly includes the 'parameters' from the local ExecutableTool,
+        // ensuring local tools have their argument schemas available to the agent.
         let localTools = localManager.availableTools().map {
-            ToolDefinition(name: $0.name, description: $0.description)
+            ToolDefinition(name: $0.name, description: $0.description, parameters: $0.parameters)
         }
         
         // 3. Create a single, static ToolSource to represent all built-in tools.
@@ -74,3 +78,4 @@ class UnifiedToolStore: ObservableObject {
         mcpStore.deleteTool(toolSource: toolSource)
     }
 }
+

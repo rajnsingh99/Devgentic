@@ -20,7 +20,8 @@ class BackendOrchestrationService: ObservableObject {
     private let remoteOrchestrationService: RemoteOrchestrationService
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
-    private let agentConnect: AgentConnect
+    
+    private let agentConnect: AgentConnectNew
     
     // RAG Services
     private let embeddingService = EmbeddingService.shared
@@ -37,11 +38,10 @@ class BackendOrchestrationService: ObservableObject {
         self.remoteOrchestrationService = RemoteOrchestrationService()
         self.persistenceService = CoreDataPersistenceService.shared
         
-        // Initialize AgentConnect with the server URL
-        // In a real app, this URL should come from a configuration file.
-        self.agentConnect = AgentConnect(baseURL: URL(string: "http://127.0.0.1:8000")!)
+        // Initialize AgentConnectNew with the legacy server URL for fallback support.
+        self.agentConnect = AgentConnectNew(legacyBaseURL: URL(string: "http://127.0.0.1:8000")!)
         
-        logger.info("BackendOrchestrationService initialized.")
+        logger.info("BackendOrchestrationService initialized with AgentConnectNew.")
     }
     
     // MARK: - Streaming Message Logic
@@ -63,10 +63,9 @@ class BackendOrchestrationService: ObservableObject {
                     return true
                 }
 
-                // **FIX:** Moved query augmentation to be conditional.
-                // It will now only run for .bot profiles.
-                
                 var queryForRequest = userQuery
+                
+                // 1. File Context Assembly (Manual Attachments)
                 if !files.isEmpty {
                     logger.info("Assembling content for \(files.count) attached files.")
                     let fileContext = self.assembleTextFileContent(for: files)
@@ -75,26 +74,39 @@ class BackendOrchestrationService: ObservableObject {
                     }
                 }
                 
+                // 2. RAG Retrieval
+                // We retrieve context *separately* from modifying the query string initially.
+                var ragContextString: String? = nil
+                
+                if config.profile.profileType == .bot || config.profile.profileType == .agent {
+                    ragContextString = await self.retrieveRAGContext(for: userQuery, conversationID: conversationID)
+                }
+                
                 do {
-                    
                     switch config.profile.profileType {
                     
                     case .bot:
-                        // **FIX:** Augment the query with RAG context ONLY for bot profiles.
-                        let augmentedQuery = await self.augmentQueryWithContext(userQuery: queryForRequest, conversationID: conversationID)
+                        // --- BOT PIPELINE (Passive Context Injection) ---
+                        // For Bots, we inject the RAG context directly into the effective query string.
+                        
+                        var effectiveQuery = queryForRequest
+                        if let context = ragContextString, !context.isEmpty {
+                             let contextHeader = "### CONTEXT FROM KNOWLEDGE BASE ###\n"
+                             let contextFooter = "\n### END CONTEXT ###\n(Please use the context above if relevant to answer the following question)\n\n"
+                             effectiveQuery = "\(contextHeader)\(context)\(contextFooter)\(queryForRequest)"
+                        }
                         
                         guard case .bot(let llmConfig) = config.profile.details else {
                             throw NSError(domain: "ProfileError", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not extract bot configuration from profile."])
                         }
                         
-                        // Nested switch for the API provider
                         switch llmConfig.apiProvider {
-                        
                         case .ollama:
                             guard let baseURL = llmConfig.baseURL else {
                                 throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Ollama base URL is missing in the profile."])
                             }
                             
+                            // For Ollama (Bot Mode), we construct the history manually here.
                             var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
                                 let role: String
                                 switch message.sender {
@@ -103,9 +115,10 @@ class BackendOrchestrationService: ObservableObject {
                                 }
                                 return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
                             }
-                            ollamaHistory.append(OllamaChatMessage(role: "user", content: augmentedQuery))
+                            // Append the augmented query (with RAG context)
+                            ollamaHistory.append(OllamaChatMessage(role: "user", content: effectiveQuery))
                             
-                            logger.info("Initiating stream to Ollama with model \(llmConfig.modelName). History count: \(ollamaHistory.count).")
+                            logger.info("Initiating stream to Ollama (Bot Mode) with model \(llmConfig.modelName). History count: \(ollamaHistory.count).")
 
                             let stream = OllamaConnect.streamChatRequest(
                                 baseURL: baseURL,
@@ -119,10 +132,10 @@ class BackendOrchestrationService: ObservableObject {
                             continuation.finish()
 
                         case .openAI, .google, .anthropic:
-                            // Defer to the remote orchestration service for other cloud bots
+                            // Remote APIs usually handle larger contexts well.
                             let stream = self.remoteOrchestrationService.streamMessage(
                                 conversationID: conversationID,
-                                userQuery: augmentedQuery,
+                                userQuery: effectiveQuery, // RAG is baked in here
                                 history: conversationHistory,
                                 profile: config.profile,
                                 context: context
@@ -135,17 +148,21 @@ class BackendOrchestrationService: ObservableObject {
                         }
 
                     case .agent:
-                        // **FIX:** Pass the original, non-augmented query directly to the agent.
-                        logger.info("Routing to AgentConnect for profile: \(config.profile.displayName)")
+                        // --- AGENT PIPELINE (Active Tool Usage) ---
+                        // We route to AgentConnectNew, passing the tools and context separately.
+                        
+                        logger.info("Routing to AgentConnectNew for profile: \(config.profile.displayName).")
+                        
                         let stream = agentConnect.streamAgentResponse(
                             for: config.profile,
                             userInput: queryForRequest,
-                            chatHistory: conversationHistory
+                            chatHistory: conversationHistory,
+                            conversationID: conversationID,
+                            ragContext: ragContextString
                         )
                         
                         var tokensReceived = 0
                         for try await eventData in stream {
-                            logger.debug("AGENT_CONNECT_DATA: Received token: \(eventData)")
                             tokensReceived += 1
                             continuation.yield(eventData)
                         }
@@ -167,13 +184,14 @@ class BackendOrchestrationService: ObservableObject {
         }
     }
 
-   private func augmentQueryWithContext(userQuery: String, conversationID: UUID) async -> String {
-        logger.info("RAG: Attempting to augment query with context for conversation: \(conversationID.uuidString)")
+   /// Retrieves relevant RAG context without modifying the user query directly.
+   private func retrieveRAGContext(for userQuery: String, conversationID: UUID) async -> String? {
+        logger.info("RAG: Attempting to retrieve context for conversation: \(conversationID.uuidString)")
         
         // 1. Generate a vector embedding for the user's query.
         guard let queryEmbedding = await embeddingService.generateEmbedding(for: userQuery) else {
             logger.warning("RAG: Could not generate embedding for query. Proceeding without context.")
-            return userQuery
+            return nil
         }
         
         // 2. Find the most relevant chunks from the vector store for this specific conversation.
@@ -181,17 +199,14 @@ class BackendOrchestrationService: ObservableObject {
         
         guard !relevantChunks.isEmpty else {
             logger.info("RAG: No relevant context found for this conversation.")
-            return userQuery
+            return nil
         }
         
-        // 3. Assemble the retrieved context into a string to prepend to the user's query.
-        logger.info("RAG: Found and prepended \(relevantChunks.count) relevant chunks for context.")
-        let contextHeader = "--- Relevant Context ---\n"
+        // 3. Assemble the retrieved context
+        logger.info("RAG: Found \(relevantChunks.count) relevant chunks.")
         let contextString = relevantChunks.map { $0.content }.joined(separator: "\n\n")
-        let contextFooter = "\n--- End of Context ---"
-        let assembledContext = contextHeader + contextString + contextFooter
         
-        return "\(assembledContext)\n\nQuestion: \(userQuery)"
+        return contextString
     }
     
     // MARK: - File Content Assembly

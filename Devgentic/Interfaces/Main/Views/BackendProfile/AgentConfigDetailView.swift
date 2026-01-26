@@ -354,9 +354,11 @@ struct AgentConfigDetailView: View {
             TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
                 .disableAutocorrection(true)
 
+            // UPDATED: Now passing filterForTools: true to ensure only capable models are shown
             OllamaModelPickerView(
                 selectedModel: providerConfig.modelName,
-                baseURL: providerConfig.wrappedValue.baseURL ?? ""
+                baseURL: providerConfig.wrappedValue.baseURL ?? "",
+                filterForTools: true
             )
         }
     }
@@ -393,4 +395,3 @@ struct AgentConfigDetailView: View {
         }
     }
 }
-

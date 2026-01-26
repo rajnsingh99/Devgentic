@@ -53,6 +53,14 @@ class MCPToolStore: ObservableObject {
             let newMCPToolEntity = MCPToolEntity(context: context)
             newMCPToolEntity.name = tool.name
             newMCPToolEntity.toolDescription = tool.description
+            
+            // MODIFIED: Encode the parameters struct into Data for persistence.
+            do {
+                newMCPToolEntity.parametersData = try JSONEncoder().encode(tool.parameters)
+            } catch {
+                print("Failed to encode tool parameters for \(tool.name): \(error)")
+            }
+            
             newToolItemEntity.addToTools(newMCPToolEntity)
         }
         
@@ -111,8 +119,27 @@ extension ToolItemEntity {
     func toToolSourceStruct() -> ToolSource {
         // Safely unwrap the related MCPToolEntity set and convert each to a ToolDefinition struct
         let toolSet = self.tools as? Set<MCPToolEntity> ?? []
-        let mappedTools = toolSet.map {
-            ToolDefinition(name: $0.name ?? "Unknown", description: $0.toolDescription ?? "")
+        let mappedTools = toolSet.map { mcpToolEntity -> ToolDefinition in
+            // MODIFIED: Decode the parameters from Data, providing a default if it fails or is nil.
+            var parameters: ToolParameters
+            if let data = mcpToolEntity.parametersData {
+                do {
+                    parameters = try JSONDecoder().decode(ToolParameters.self, from: data)
+                } catch {
+                    print("Failed to decode parameters for tool \(mcpToolEntity.name ?? "Unknown"): \(error). Using default.")
+                    // Provide a default empty schema if decoding fails to prevent crashes.
+                    parameters = ToolParameters(type: "object", properties: [:], required: [])
+                }
+            } else {
+                // Provide a default for older data that doesn't have the parametersData attribute.
+                parameters = ToolParameters(type: "object", properties: [:], required: [])
+            }
+            
+            return ToolDefinition(
+                name: mcpToolEntity.name ?? "Unknown",
+                description: mcpToolEntity.toolDescription ?? "",
+                parameters: parameters // Use the decoded (or default) parameters
+            )
         }.sorted { $0.name < $1.name } // Sort tools alphabetically
         
         // Decode the ServerDefinition from the stored Data.

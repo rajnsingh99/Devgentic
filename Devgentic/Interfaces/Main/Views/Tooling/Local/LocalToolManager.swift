@@ -1,101 +1,156 @@
 //
-//  ToolManager.swift
+//  LocalToolManager.swift
 //  LocalServer
 //
 //  Created by Raj Singh on 20/09/25.
+//  Updated on 26/01/26 to support swiftAgents Native Tools.
 //
 
 import Foundation
+import os
+import OpenFoundationModels
+import OpenFoundationModelsCore
 
-/// A singleton class that manages the registration and execution of all client-side tools.
-///
-/// This manager acts as a central registry, allowing other parts of the application to
-/// discover available tools and execute them with a consistent interface.
+// Define a specific logger for this subsystem.
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LocalToolManager")
+
+// MARK: - Native Tool Adapter
+
+/// A wrapper that adapts the new `OpenFoundationModels.Tool` protocol to the legacy `ExecutableTool` protocol
+/// used by the rest of the application (UI, Store, etc.).
+struct NativeToolWrapper<T: OpenFoundationModels.Tool>: ExecutableTool where T.Output == String, T.Arguments: Codable {
+    
+    let nativeTool: T
+    
+    // MARK: - ExecutableTool Conformance
+    
+    var name: String {
+        return nativeTool.name
+    }
+    
+    var description: String {
+        return nativeTool.description
+    }
+    
+    /// Converts the `GenerationSchema` from the native tool into the `ToolParameters` expected by the UI.
+    var parameters: ToolParameters {
+        let schema = nativeTool.parameters
+        
+        do {
+            // Attempt to bridge via JSON serialization since we cannot access internal properties (like .root) of GenerationSchema directly.
+            // This assumes GenerationSchema conforms to Encodable, which is standard for AI tool schemas.
+            let encoder = JSONEncoder()
+            let jsonData = try encoder.encode(schema)
+            
+            // Try decoding directly into ToolParameters if the structure matches exactly
+            if let directParams = try? JSONDecoder().decode(ToolParameters.self, from: jsonData) {
+                return directParams
+            }
+            
+            // Fallback: Manually map from dictionary to handle potential structure mismatches
+            guard let json = try JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any] else {
+                logger.error("Could not deserialize schema JSON for \(nativeTool.name)")
+                return ToolParameters(type: "object", properties: [:], required: [])
+            }
+            
+            let type = json["type"] as? String ?? "object"
+            let required = json["required"] as? [String] ?? []
+            
+            var properties: [String: ToolParameterProperty] = [:]
+            if let propsDict = json["properties"] as? [String: [String: Any]] {
+                for (key, val) in propsDict {
+                    let pType = val["type"] as? String ?? "string"
+                    let pDesc = val["description"] as? String
+                    properties[key] = ToolParameterProperty(type: pType, description: pDesc)
+                }
+            }
+            
+            return ToolParameters(type: type, properties: properties, required: required)
+            
+        } catch {
+            logger.error("Failed to convert parameters for tool \(nativeTool.name): \(error.localizedDescription)")
+            // Return empty parameters on failure to prevent crash
+            return ToolParameters(type: "object", properties: [:], required: [])
+        }
+    }
+    
+    /// Bridges the untyped execution call to the strongly-typed native tool call.
+    func execute(arguments: [String: Any]) async throws -> String {
+        do {
+            // 1. Serialize the dictionary arguments to JSON Data
+            let jsonData = try JSONSerialization.data(withJSONObject: arguments, options: [])
+            
+            // 2. Decode the JSON Data into the Native Tool's Argument struct
+            let decodedArgs = try JSONDecoder().decode(T.Arguments.self, from: jsonData)
+            
+            // 3. Call the native tool
+            return try await nativeTool.call(arguments: decodedArgs)
+            
+        } catch {
+            let errorMsg = "Argument conversion failed for tool '\(name)': \(error.localizedDescription)"
+            logger.error("\(errorMsg)")
+            throw NSError(domain: "LocalToolManager", code: 400, userInfo: [NSLocalizedDescriptionKey: errorMsg])
+        }
+    }
+}
+
+// MARK: - Manager
+
 @MainActor
 final class LocalToolManager {
     
-    /// The shared singleton instance of the `ToolManager`.
     static let shared = LocalToolManager()
     
-    /// A private registry to store tool instances, keyed by their unique `name`.
+    // The registry holds types that conform to ExecutableTool (our wrappers)
     private var toolRegistry: [String: ExecutableTool] = [:]
 
-    /// Private initializer to enforce the singleton pattern.
-    ///
-    /// When the manager is initialized, it automatically registers all available
-    /// inbuilt tools. This is the single place where new tools should be added.
     private init() {
-        // Register the original shell tool
-        register(tool: TerminalTool())
-
-        // Register File System Tools
-        register(tool: ListDirectoryTool())
-        register(tool: ReadFileTool())
-        register(tool: WriteFileTool())
-        register(tool: DeleteFileTool())
+        // Register Native File System Tools
+        registerNative(ListDirectoryTool())
+        registerNative(ReadFileTool())
+        registerNative(WriteFileTool())
+        registerNative(DeleteFileTool())
         
-        // Register System Interaction & Information Tools
-        register(tool: GetClipboardContentTool())
-        register(tool: SetClipboardContentTool())
-        register(tool: GetSystemStatsTool())
+        // Register Native System Tools
+        registerNative(TerminalTool())
+        registerNative(OpenApplicationTool())
+        registerNative(RunAppleScriptTool())
+        registerNative(GetSystemStatsTool())
         
-        // Register Application Control Tools
-        register(tool: OpenApplicationTool())
-        register(tool: RunAppleScriptTool())
+        // Note: Clipboard tools are omitted as they were not present in the native toolset update.
+        
+        logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")
     }
 
-    /// Registers a tool instance, making it available for execution.
-    /// - Parameter tool: An instance of a class or struct that conforms to `ExecutableTool`.
-    private func register(tool: ExecutableTool) {
-        toolRegistry[tool.name] = tool
+    /// Helper to wrap and register a native tool.
+    private func registerNative<T: OpenFoundationModels.Tool>(_ tool: T) where T.Output == String, T.Arguments: Codable {
+        let wrapper = NativeToolWrapper(nativeTool: tool)
+        toolRegistry[wrapper.name] = wrapper
     }
 
-    /// Provides a list of all currently registered tools.
-    ///
-    /// This is useful for UI components that need to display available tools to the user,
-    /// for example, in the agent configuration screen.
-    /// - Returns: An array of objects conforming to `ExecutableTool`.
     func availableTools() -> [ExecutableTool] {
         return Array(toolRegistry.values)
     }
 
-    /// Finds and executes a tool by its name with a given set of arguments.
-    ///
-    // This method provides a safe way to run tools, with error handling for cases
-    /// where a tool is not found or fails during execution.
-    /// - Parameters:
-    ///   - name: The unique name of the tool to execute (e.g., "execute_shell").
-    ///   - arguments: A dictionary of arguments to pass to the tool's `execute` method.
-    /// - Returns: A `String` containing the tool's output or an error message.
     func execute(name: String, arguments: [String: Any]) async -> String {
+        logger.info("--- executing local tool (native) ---")
+        logger.info("Tool: '\(name)'")
+        logger.info("Arguments: \(String(describing: arguments))")
+        
         guard let tool = toolRegistry[name] else {
-            return "Error: Tool '\(name)' not found in the client-side registry."
+            let errorMsg = "Error: Tool '\(name)' not found in the client-side registry."
+            logger.error("\(errorMsg)")
+            return errorMsg
         }
         
-        // Some tools need to run on the main thread
-        if let tool = tool as? any MainActorExecutableTool {
-             return await tool.run(arguments: arguments)
-        } else {
-            do {
-                return try await tool.execute(arguments: arguments)
-            } catch {
-                return "Error executing tool '\(name)': \(error.localizedDescription)"
-            }
-        }
-    }
-}
-
-/// A helper protocol for tools that must be run on the main actor.
-@MainActor protocol MainActorExecutableTool: ExecutableTool {}
-
-extension MainActorExecutableTool {
-    /// A wrapper function to handle execution and error catching on the main actor.
-    func run(arguments: [String: Any]) async -> String {
         do {
-            return try await execute(arguments: arguments)
+            let result = try await tool.execute(arguments: arguments)
+            logger.info("-> Local tool '\(name)' executed successfully.")
+            return result
         } catch {
-            return "Error executing tool '\(name)': \(error.localizedDescription)"
+            let errorMsg = "Error executing local tool '\(name)': \(error.localizedDescription)"
+            logger.error("\(errorMsg)")
+            return errorMsg
         }
     }
 }
-

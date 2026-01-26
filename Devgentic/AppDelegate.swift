@@ -5,7 +5,6 @@
 //  Created by Raj Singh on 07/05/25.
 //
 
-// AppDelegate.swift
 import SwiftUI
 import os
 import HotKey
@@ -13,10 +12,6 @@ import HotKey
 class AppDelegate: NSObject, NSApplicationDelegate {
     
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AppDelegate")
-    
-    private let serverManager = BackendServerManager()
-//    private(set) var agentManager: AgentManager?
-    
     
     static var shared: AppDelegate {
         return NSApplication.shared.delegate as! AppDelegate
@@ -27,51 +22,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var isTogglingWindow = false
     private let sessionTimeoutDuration: TimeInterval = 1800
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        Self.logger.info("Application did finish launching. Handing off to Server Manager to start services...")
-        
-        // The Server Manager now handles the logic of starting the ToolServer
-        // followed by the Python backend process.
-        Task {
-            await serverManager.start()
-        }
-        
-//        Self.logger.info("Application did finish launching.")
-//        agentManager = AgentManager()
-//        Self.logger.info("AgentManager initialized in AppDelegate.")
-//
-//        if UserDefaults.standard.bool(forKey: GlobalConstants.isOnboardingComplete) {
-//            Self.logger.info("Onboarding is complete. Attempting to start agent if not already running via AgentManager.")
-//            agentManager?.startAgentIfNeeded()
-//        } else {
-//            Self.logger.info("Onboarding not yet complete. Agent will not be started automatically by AppDelegate.")
-//        }
-//
-//        setupHotkey()
-//        setupNotificationObserver()
-    }
 
     func applicationWillTerminate(_ notification: Notification) {
-        Self.logger.info("Application will terminate. Handing off to Server Manager to stop services...")
-        
-        // The Server Manager now handles the logic of stopping all backend processes gracefully.
-        // This is done in a new Task because applicationWillTerminate is a synchronous function.
-        Task {
-            await serverManager.stop()
-        }
-        
-//        Self.logger.info("Application will terminate. Stopping agent via AgentManager.")
-//        agentManager?.stopAgent(reason: "Application shutting down")
-//
-//        NotificationCenter.default.removeObserver(
-//            self,
-//            name: GlobalConstants.showQuickAccessPanelNotification,
-//            object: nil
-//        )
-//        hotKey = nil
-//        Self.logger.info("AppDelegate cleaned up hotkey and observers.")
-        
-        // Save any pending Core Data changes on exit.
+        Self.logger.info("Application will terminate. Saving core data.")
         CoreDataPersistenceService.shared.saveContext()
     }
 

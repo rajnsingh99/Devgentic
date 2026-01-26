@@ -7,7 +7,7 @@
 
 import SwiftUI
 
- struct GeminiModelPickerView: View {
+struct GeminiModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
     
@@ -76,6 +76,9 @@ import SwiftUI
 struct OllamaModelPickerView: View {
     @Binding var selectedModel: String
     let baseURL: String
+    
+    /// If true, only models that support Tool Calling (Agents) will be displayed.
+    var filterForTools: Bool = false
 
     @State private var models: [String] = []
     @State private var isLoading: Bool = false
@@ -86,7 +89,7 @@ struct OllamaModelPickerView: View {
             if isLoading {
                 ProgressView()
                     .controlSize(.small)
-                Text("Loading models...")
+                Text(filterForTools ? "Finding agent-ready models..." : "Loading models...")
                     .foregroundColor(.secondary)
             } else if let errorMessage = errorMessage {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -95,7 +98,7 @@ struct OllamaModelPickerView: View {
                     .foregroundColor(.secondary)
                     .font(.caption)
             } else if models.isEmpty {
-                 Text("No models found at this address.")
+                 Text(filterForTools ? "No agent-capable models found." : "No models found.")
                     .foregroundColor(.secondary)
                     .font(.caption)
             } else {
@@ -121,8 +124,8 @@ struct OllamaModelPickerView: View {
     }
 
     private func fetchModels() {
-        guard !baseURL.isEmpty, let _ = URL(string: baseURL) else {
-            self.errorMessage = "Invalid URL format."
+        guard !baseURL.isEmpty, let url = URL(string: baseURL) else {
+            self.errorMessage = "Invalid Base URL."
             self.models = []
             return
         }
@@ -131,29 +134,44 @@ struct OllamaModelPickerView: View {
         errorMessage = nil
         
         Task {
-            do {
-                // This assumes a helper struct `OllamaConnect` exists to perform the network call.
-                // let fetchedModels = try await OllamaConnect.fetchLocalOllamaModels(baseURL: baseURL)
-                
-                // --- Placeholder for network call ---
-                try? await Task.sleep(nanoseconds: 1_000_000_000) // Simulate network delay
-                let fetchedModels = ["llama3:latest", "gemma:7b", "mistral:latest"]
-                // --- End Placeholder ---
-
-                await MainActor.run {
-                    self.models = fetchedModels
-                    if !fetchedModels.contains(selectedModel), let firstModel = fetchedModels.first {
-                        self.selectedModel = firstModel
+            // Determine which fetch strategy to use
+            let fetchedModels: [String]
+            
+            if filterForTools {
+                // Use the Capability Service to filter
+                fetchedModels = await OllamaCapabilityService.shared.getAgentReadyModels(baseURL: url)
+            } else {
+                // Use the standard connector for raw list
+                do {
+                    fetchedModels = try await OllamaConnect.fetchLocalOllamaModels(baseURL: baseURL)
+                } catch {
+                    fetchedModels = []
+                    await MainActor.run {
+                         self.errorMessage = "Connection failed. Is Ollama running?"
                     }
                 }
-            } catch {
-                await MainActor.run {
-                    self.models = []
-                    self.errorMessage = "Connection failed. Check Base URL."
-                }
             }
+
             await MainActor.run {
-                isLoading = false
+                // Update UI State
+                self.models = fetchedModels
+                
+                // Smart Selection Logic
+                if !fetchedModels.isEmpty {
+                    // If current selection is invalid, pick the first one
+                    if !fetchedModels.contains(selectedModel) {
+                        self.selectedModel = fetchedModels.first!
+                    } else if selectedModel.isEmpty {
+                        self.selectedModel = fetchedModels.first!
+                    }
+                } else if self.errorMessage == nil {
+                    // Only show specific error if connection didn't fail earlier
+                    if filterForTools {
+                        self.errorMessage = "No models support Tools. Try Llama 3.1 or Qwen 2.5."
+                    }
+                }
+                
+                self.isLoading = false
             }
         }
     }

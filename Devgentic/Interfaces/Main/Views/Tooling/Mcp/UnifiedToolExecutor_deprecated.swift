@@ -21,9 +21,15 @@ class UnifiedToolExecutor {
     /// The shared singleton instance.
     static let shared = UnifiedToolExecutor()
     
-    /// A private dictionary mapping a tool's unique name (e.g., "brave_search")
-    /// to the `ToolSource` that provides it.
-    private var toolRegistry: [String: ToolSource] = [:]
+    /// A new struct to hold the resolved identity of a tool after parsing its prefixed name.
+    struct ResolvedTool {
+        let source: ToolSource
+        let originalName: String
+    }
+    
+    /// The registry now maps the unique prefixed name (e.g., "BuiltinTools_execute_shell")
+    /// to the resolved tool object, which contains the source and original name.
+    private var toolRegistry: [String: ResolvedTool] = [:]
     
     private var cancellables = Set<AnyCancellable>()
 
@@ -41,16 +47,19 @@ class UnifiedToolExecutor {
     }
 
     /// Rebuilds the internal tool-to-source mapping from the latest list of sources.
-    /// - Parameter sources: The complete list of `ToolSource` from the `UnifiedToolStore`.
+    /// This now uses the prefixed names as keys.
     private func buildRegistry(from sources: [ToolSource]) {
-        var newRegistry: [String: ToolSource] = [:]
+        var newRegistry: [String: ResolvedTool] = [:]
         
         // Iterate over each source (e.g., "Built-in Tools", "Brave Search Server")
         for source in sources {
             // Iterate over each tool within that source
             for tool in source.tools {
-                // Create a mapping from the tool's name to its parent source.
-                newRegistry[tool.name] = source
+                // Create the unique, prefixed name (e.g., "WebSearch_search")
+                let prefixedName = ToolNamer.prefixedName(for: tool.name, from: source.serverName)
+                
+                // Store the mapping from the prefixed name to the resolved tool details.
+                newRegistry[prefixedName] = ResolvedTool(source: source, originalName: tool.name)
             }
         }
         
@@ -58,34 +67,34 @@ class UnifiedToolExecutor {
         self.toolRegistry = newRegistry
         
         // Optional: Add a log for debugging to confirm the registry is updated.
-        print("UnifiedToolExecutor: Registry rebuilt. Contains \(self.toolRegistry.count) unique tools.")
+        print("UnifiedToolExecutor: Registry rebuilt. Contains \(self.toolRegistry.count) unique, namespaced tools.")
     }
     
     /// The main public entry point for executing any tool, local or remote.
     /// - Parameters:
-    ///   - name: The unique name of the tool to execute.
+    ///   - name: The unique, prefixed name of the tool to execute (e.g., "BuiltinTools_execute_shell").
     ///   - arguments: A dictionary of arguments for the tool.
     /// - Returns: A string containing the tool's output or an error message.
     func execute(name: String, arguments: [String: Any]) async -> String {
-        // Step 1: Look up the tool in our central registry.
-        guard let source = toolRegistry[name] else {
+        // Step 1: Look up the tool in our central registry using the prefixed name.
+        guard let resolvedTool = toolRegistry[name] else {
             return "Error: Tool '\(name)' not found in the unified tool registry."
         }
         
-        // Step 2: Route the execution based on the source type.
-        switch source.type {
+        // Step 2: Route the execution based on the resolved source's type.
+        switch resolvedTool.source.type {
         case .local:
-            // If it's a local tool, delegate to the LocalToolManager.
-            return await LocalToolManager.shared.execute(name: name, arguments: arguments)
+            // If it's a local tool, delegate to the LocalToolManager using the original tool name.
+            return await LocalToolManager.shared.execute(name: resolvedTool.originalName, arguments: arguments)
             
         case .mcp:
             // If it's an MCP tool, delegate to the on-demand MCPConnectionManager.
+            // Pass the original tool name and the fully resolved source object.
             return await MCPConnectionManager.shared.execute(
-                toolName: name,
+                toolName: resolvedTool.originalName,
                 arguments: arguments,
-                source: source
+                source: resolvedTool.source
             )
         }
     }
 }
-
