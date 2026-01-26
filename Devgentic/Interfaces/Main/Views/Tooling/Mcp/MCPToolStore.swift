@@ -50,22 +50,51 @@ class MCPToolStore: ObservableObject {
         
         // Create and associate each MCPToolEntity
         for tool in newTools {
-            let newMCPToolEntity = MCPToolEntity(context: context)
-            newMCPToolEntity.name = tool.name
-            newMCPToolEntity.toolDescription = tool.description
-            
-            // MODIFIED: Encode the parameters struct into Data for persistence.
-            do {
-                newMCPToolEntity.parametersData = try JSONEncoder().encode(tool.parameters)
-            } catch {
-                print("Failed to encode tool parameters for \(tool.name): \(error)")
-            }
-            
-            newToolItemEntity.addToTools(newMCPToolEntity)
+            createAndAttachToolEntity(tool, to: newToolItemEntity, context: context)
         }
         
         persistenceService.saveContext()
         fetchTools() // Refresh the published list
+    }
+    
+    /// Updates an existing tool source configuration and its tools.
+    /// - Parameters:
+    ///   - id: The UUID of the existing tool source to update.
+    ///   - serverName: The new name of the server.
+    ///   - serverDefinition: The new configuration details.
+    ///   - newTools: The fresh list of tools discovered from the server.
+    func updateTool(id: UUID, serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
+        let context = (persistenceService as! CoreDataPersistenceService).viewContext
+        let fetchRequest: NSFetchRequest<ToolItemEntity> = ToolItemEntity.fetchRequest()
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        
+        do {
+            if let entityToUpdate = try context.fetch(fetchRequest).first {
+                // 1. Update basic properties
+                entityToUpdate.serverName = serverName
+                entityToUpdate.mcpConfig = try? JSONEncoder().encode(serverDefinition)
+                
+                // 2. Clear existing tools to ensure synchronization
+                // (e.g., if the server removed a tool or renamed it)
+                if let existingTools = entityToUpdate.tools as? Set<MCPToolEntity> {
+                    for tool in existingTools {
+                        context.delete(tool)
+                    }
+                }
+                
+                // 3. Add the fresh set of tools
+                for tool in newTools {
+                    createAndAttachToolEntity(tool, to: entityToUpdate, context: context)
+                }
+                
+                persistenceService.saveContext()
+                fetchTools() // Refresh the published list
+            } else {
+                print("MCPToolStore: Tool source with ID \(id) not found for update.")
+            }
+        } catch {
+            print("MCPToolStore: Failed to fetch tool item for update: \(error.localizedDescription)")
+        }
     }
 
     /// Deletes a specific tool source from Core Data.
@@ -87,6 +116,20 @@ class MCPToolStore: ObservableObject {
     }
     
     // MARK: - Private Helper Methods
+    
+    private func createAndAttachToolEntity(_ tool: ToolDefinition, to parent: ToolItemEntity, context: NSManagedObjectContext) {
+        let newMCPToolEntity = MCPToolEntity(context: context)
+        newMCPToolEntity.name = tool.name
+        newMCPToolEntity.toolDescription = tool.description
+        
+        do {
+            newMCPToolEntity.parametersData = try JSONEncoder().encode(tool.parameters)
+        } catch {
+            print("Failed to encode tool parameters for \(tool.name): \(error)")
+        }
+        
+        parent.addToTools(newMCPToolEntity)
+    }
 
     /// Fetches all tool items from Core Data and updates the published `sources` array.
     private func fetchTools() {
@@ -120,7 +163,7 @@ extension ToolItemEntity {
         // Safely unwrap the related MCPToolEntity set and convert each to a ToolDefinition struct
         let toolSet = self.tools as? Set<MCPToolEntity> ?? []
         let mappedTools = toolSet.map { mcpToolEntity -> ToolDefinition in
-            // MODIFIED: Decode the parameters from Data, providing a default if it fails or is nil.
+            // Decode the parameters from Data, providing a default if it fails or is nil.
             var parameters: ToolParameters
             if let data = mcpToolEntity.parametersData {
                 do {

@@ -69,7 +69,7 @@ class AgentConnect: NSObject, URLSessionDataDelegate {
                     // part of the 'enabledTool' object.
                     
                     // 2. Create the unique, prefixed name (e.g., "BuiltinTools_execute_shell")
-                    let namespacedName = ToolNamer.prefixedName(for: enabledTool.name, from: source.serverName)
+                    let namespacedName = "ToolNamer.prefixedName(for: enabledTool.name, from: source.serverName)"
 
                     // 3. Create the final config for the Python agent using the data directly from the tool.
                     return AgentToolConfig(

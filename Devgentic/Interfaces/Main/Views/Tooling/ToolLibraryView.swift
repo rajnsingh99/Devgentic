@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 25/09/25.
 //
 //  Refactored on 28/09/25 to unify Local and MCP tool management.
+//  Updated on 26/01/26 to integrate the V2 MCP Architecture (AddMCPServerView).
 //
 
 import SwiftUI
@@ -19,8 +20,16 @@ struct ToolLibraryView: View {
     
     // The view now observes the unified store for all its data.
     @StateObject private var toolStore = UnifiedToolStore.shared
-    @StateObject private var mcpManager = MCPManager()
+    
+    // REMOVED: @StateObject private var mcpManager = MCPManager()
+    // The new V2 architecture handles connection state internally within the Add View
+    // using the MCPClientService singleton.
+    
     @State private var isPresentingAddView = false
+    
+    // NEW: State for editing an existing source
+    @State private var sourceToEdit: ToolSource? = nil
+    
     @State private var expandedToolIDs: Set<UUID> = []
 
     /// Filters the unified list of tool sources based on search text.
@@ -46,8 +55,8 @@ struct ToolLibraryView: View {
         .frame(minWidth: 450, idealWidth: 500, minHeight: 450, idealHeight: 600)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $isPresentingAddView) {
-            AddMcpConnectionView(
-                manager: mcpManager,
+            // UPDATED: Now presenting the V2 Add View
+            AddMCPServerView(
                 // Adding a tool communicates directly with the MCP store.
                 // The UnifiedToolStore will update automatically via Combine.
                 onToolAdded: { serverName, serverDefinition, tools -> Bool in
@@ -57,6 +66,23 @@ struct ToolLibraryView: View {
                     
                     MCPToolStore.shared.addTool(serverName: serverName, serverDefinition: serverDefinition, newTools: tools)
                     return true // Successfully added
+                }
+            )
+        }
+        // NEW: Sheet for editing an existing MCP Server
+        .sheet(item: $sourceToEdit) { source in
+            AddMCPServerView(
+                existingSource: source,
+                onToolUpdated: { id, serverName, serverDefinition, tools in
+                    // Update the store
+                    UnifiedToolStore.shared.updateTool(id: id, serverName: serverName, serverDefinition: serverDefinition, newTools: tools)
+                    
+                    // Disconnect any active session to force a reconnect with new settings on next use
+                    Task {
+                        await MCPClientService.shared.disconnect(sourceId: id)
+                    }
+                    
+                    sourceToEdit = nil
                 }
             )
         }
@@ -152,6 +178,19 @@ struct ToolLibraryView: View {
                     .background(Color.secondary.opacity(0.1))
                     .cornerRadius(6)
 
+                // NEW: Select All / Deselect All Button
+                let selectionState = getSelectionState(for: source)
+                Button {
+                    toggleSelection(for: source)
+                } label: {
+                    Image(systemName: selectionStateIcon(for: selectionState))
+                        .foregroundColor(selectionState == .none ? .secondary : .blue)
+                        .font(.system(size: 18))
+                }
+                .buttonStyle(.plain)
+                .help(selectionState == .all ? "Deselect All" : "Select All")
+                .padding(.leading, 4)
+
                 // Expand/Collapse Button
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -193,12 +232,81 @@ struct ToolLibraryView: View {
         }
         .padding(.horizontal, 4)
         .contextMenu {
-            // Deleting is only allowed for MCP sources.
+            // Actions are only allowed for MCP sources.
             if source.type == .mcp {
+                // NEW: Edit Server Action
+                Button {
+                    sourceToEdit = source
+                } label: {
+                    Label("Edit Server", systemImage: "pencil")
+                }
+                
+                Divider()
+                
                 Button(role: .destructive) {
                     toolStore.deleteTool(toolSource: source)
                 } label: {
                     Label("Delete Server", systemImage: "trash")
+                }
+            }
+        }
+    }
+    
+    // MARK: - Selection Logic Helpers
+    
+    private enum SelectionState {
+        case all, none, mixed
+    }
+    
+    private func getSelectionState(for source: ToolSource) -> SelectionState {
+        // Count how many tools from this specific source are currently configured/enabled
+        let selectedCount = configuredTools.filter { tool in
+            tool.sourceId == source.id && source.tools.contains { $0.name == tool.name }
+        }.count
+        
+        if selectedCount == 0 {
+            return .none
+        } else if selectedCount == source.tools.count {
+            return .all
+        } else {
+            return .mixed
+        }
+    }
+    
+    private func selectionStateIcon(for state: SelectionState) -> String {
+        switch state {
+        case .all: return "checkmark.circle.fill"
+        case .mixed: return "minus.circle.fill"
+        case .none: return "circle"
+        }
+    }
+    
+    private func toggleSelection(for source: ToolSource) {
+        let state = getSelectionState(for: source)
+        
+        withAnimation {
+            if state == .all {
+                // Deselect All: Remove all tools belonging to this source
+                configuredTools.removeAll { tool in
+                    tool.sourceId == source.id && source.tools.contains { $0.name == tool.name }
+                }
+            } else {
+                // Select All (or fill Mixed): Add any tools that aren't already selected
+                for toolDef in source.tools {
+                    let isAlreadySelected = configuredTools.contains {
+                        $0.sourceId == source.id && $0.name == toolDef.name
+                    }
+                    
+                    if !isAlreadySelected {
+                        let newTool = Tool(
+                            name: toolDef.name,
+                            description: toolDef.description,
+                            isEnabled: true,
+                            sourceId: source.id,
+                            parameters: toolDef.parameters
+                        )
+                        configuredTools.append(newTool)
+                    }
                 }
             }
         }
@@ -221,7 +329,7 @@ private struct ToolSelectionRowView: View {
     private var isEnabled: Binding<Bool> {
         Binding<Bool>(
             get: {
-                // A tool is considered "enabled" if a tool with the same name and from the
+                // A tool is considered "enabled" if a tool with the same name and and from the
                 // same source exists in the agent's configuration. This handles potential
                 // duplicate tool names from different sources.
                 configuredTools.contains { $0.name == toolDefinition.name && $0.sourceId == source.id }
@@ -273,4 +381,3 @@ private struct ToolSelectionRowView: View {
         }
     }
 }
-

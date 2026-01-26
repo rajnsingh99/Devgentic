@@ -8,7 +8,6 @@
 //
 
 import Foundation
-import Hummingbird
 
 // MARK: - API Data Models
 
@@ -17,12 +16,6 @@ struct ExecuteToolRequest: Decodable {
     let name: String
     let arguments: [String: AnyCodable]
 }
-
-/// The JSON response body sent back with the tool's output.
-struct ExecuteToolResponse: ResponseEncodable {
-    let result: String
-}
-
 
 // MARK: - Client-Side Tooling Foundation & Models
 
@@ -83,4 +76,71 @@ protocol ExecutableTool {
     /// - Returns: A `String` representing the output or result of the tool's execution.
     /// - Throws: An error if the tool execution fails.
     func execute(arguments: [String: Any]) async throws -> String
+}
+
+// MARK: - MCP Configuration Data Models
+
+/// The top-level configuration structure that holds a dictionary of server definitions.
+struct MCPConfiguration: Codable {
+    let mcpServers: [String: ServerDefinition]
+}
+
+/// A unified server definition that works for both local and remote servers.
+struct ServerDefinition: Codable, Hashable {
+    // Properties for Local Process
+    let command: String?
+    let args: [String]?
+    let env: [String: String]?
+    
+    // Properties for Remote URL
+    let url: String?
+    let authentication: [String: String]?
+
+    /// A single, flexible initializer that provides default nil values for all optional properties.
+    /// This allows us to create a ServerDefinition for either a local or remote type without causing compiler errors.
+    init(command: String? = nil, args: [String]? = nil, env: [String: String]? = nil, url: String? = nil, authentication: [String: String]? = nil) {
+        self.command = command
+        self.args = args
+        self.env = env
+        self.url = url
+        self.authentication = authentication
+    }
+}
+
+// MARK: - Custom Error Type
+
+// Provides detailed, user-friendly error descriptions for different failure scenarios.
+enum MCPManagerError: LocalizedError {
+    case invalidJSONConfiguration(String)
+    case noServersDefined
+    case commandNotFound(String)
+    case shellCommandFailed(command: String, output: String)
+    case connectionTimedOut(TimeInterval)
+    case connectionFailed(Error)
+    case authenticationFailed(String)
+    case processFailedToStart(String)
+    case unknown
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidJSONConfiguration(let details):
+            return "The provided JSON is not valid. Details: \(details)"
+        case .noServersDefined:
+            return "No servers are defined in the JSON configuration."
+        case .commandNotFound(let command):
+            return "Command '\(command)' could not be found in any standard locations. Please ensure it is installed or provide the absolute path to the executable."
+        case .shellCommandFailed(let command, let output):
+            return "A shell command failed.\nCommand: \(command)\nOutput: \(output)"
+        case .connectionTimedOut(let seconds):
+            return "Connection timed out after \(seconds) seconds. The server might not be running or is unreachable."
+        case .connectionFailed(let underlyingError):
+            return "Failed to connect to the server. Details: \(underlyingError.localizedDescription)"
+        case .authenticationFailed(let reason):
+            return "Authentication failed: \(reason)"
+        case .processFailedToStart(let details):
+            return "The server process failed to start. Details:\n\(details)"
+        case .unknown:
+            return "An unexpected error occurred."
+        }
+    }
 }

@@ -68,6 +68,18 @@ class UnifiedToolStore: ObservableObject {
         self.sources = [localSource] + mcpSources
     }
     
+    // MARK: - CRUD Pass-through Methods
+    
+    /// A pass-through method to add a new MCP tool.
+    func addTool(serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
+        mcpStore.addTool(serverName: serverName, serverDefinition: serverDefinition, newTools: newTools)
+    }
+    
+    /// A pass-through method to update an existing MCP tool.
+    func updateTool(id: UUID, serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
+        mcpStore.updateTool(id: id, serverName: serverName, serverDefinition: serverDefinition, newTools: newTools)
+    }
+    
     /// A pass-through method to delete an MCP tool source.
     /// This ensures that the built-in tools cannot be deleted.
     func deleteTool(toolSource: ToolSource) {
@@ -78,4 +90,3 @@ class UnifiedToolStore: ObservableObject {
         mcpStore.deleteTool(toolSource: toolSource)
     }
 }
-
