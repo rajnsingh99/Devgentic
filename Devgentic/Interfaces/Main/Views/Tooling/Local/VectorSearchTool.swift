@@ -2,7 +2,7 @@
 //  VectorSearchTool.swift
 //  Devgentic
 //
-//  Created by Devgentic AI on 23/01/26.
+//  Created by Raj Singh on 23/01/26.
 //
 
 import Foundation

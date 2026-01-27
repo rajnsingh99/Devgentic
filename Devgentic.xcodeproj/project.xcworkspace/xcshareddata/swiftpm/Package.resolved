@@ -1,5 +1,5 @@
 {
-  "originHash" : "2adf257e85f36baa3bf1545ec5ade2abaa08a6b7fd5325e7e6961cd9f854f3e9",
+  "originHash" : "47457aa2747049bf388d35f59815d6b4a4d571cc379f4b2569643633fd77ba45",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -116,6 +116,15 @@
       "state" : {
         "revision" : "8a1ff8d50548890cdb621a032be8119af554a427",
         "version" : "0.2.0"
+      }
+    },
+    {
+      "identity" : "openfoundationmodels-openai",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/OpenFoundationModels-OpenAI.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "5b0997c0790022067a1ce44381f27cee506014e1"
       }
     },
     {

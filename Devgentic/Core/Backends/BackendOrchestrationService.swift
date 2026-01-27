@@ -21,7 +21,7 @@ class BackendOrchestrationService: ObservableObject {
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     
-    private let agentConnect: AgentConnectNew
+    private let agentConnect: AgentConnect
     
     // RAG Services
     private let embeddingService = EmbeddingService.shared
@@ -38,10 +38,10 @@ class BackendOrchestrationService: ObservableObject {
         self.remoteOrchestrationService = RemoteOrchestrationService()
         self.persistenceService = CoreDataPersistenceService.shared
         
-        // Initialize AgentConnectNew with the legacy server URL for fallback support.
-        self.agentConnect = AgentConnectNew(legacyBaseURL: URL(string: "http://127.0.0.1:8000")!)
+        // Initialize AgentConnect (Native implementation)
+        self.agentConnect = AgentConnect()
         
-        logger.info("BackendOrchestrationService initialized with AgentConnectNew.")
+        logger.info("BackendOrchestrationService initialized with AgentConnect.")
     }
     
     // MARK: - Streaming Message Logic
@@ -149,9 +149,9 @@ class BackendOrchestrationService: ObservableObject {
 
                     case .agent:
                         // --- AGENT PIPELINE (Active Tool Usage) ---
-                        // We route to AgentConnectNew, passing the tools and context separately.
+                        // We route to AgentConnect, passing the tools and context separately.
                         
-                        logger.info("Routing to AgentConnectNew for profile: \(config.profile.displayName).")
+                        logger.info("Routing to AgentConnect for profile: \(config.profile.displayName).")
                         
                         let stream = agentConnect.streamAgentResponse(
                             for: config.profile,
