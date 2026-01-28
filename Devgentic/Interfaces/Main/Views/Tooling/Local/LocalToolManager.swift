@@ -117,6 +117,12 @@ final class LocalToolManager {
         registerNative(RunAppleScriptTool())
         registerNative(GetSystemStatsTool())
         
+        // Register Advanced File System Tools
+        registerNative(WatchFolderTool())
+        registerNative(SmartSearchTool())
+        registerNative(ReadMetadataTool())
+        registerNative(OrganizeBatchTool())
+        
         // Note: Clipboard tools are omitted as they were not present in the native toolset update.
         
         logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")

@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 05/09/25.
+//  Updated on 28/01/26 to support Agent Architecture selection.
 //
 
 import SwiftUI
@@ -35,7 +36,7 @@ struct AgentConfigDetailView: View {
                 case .bot(let llmConfig):
                     // This case should not happen if the view is used correctly for Agents.
                     return llmConfig
-                case .agent(let llmConfig, _, _, _, _):
+                case .agent(let llmConfig, _, _, _, _, _):
                     return llmConfig
                 case .workflow:
                     // This case should not happen.
@@ -47,9 +48,10 @@ struct AgentConfigDetailView: View {
                 case .bot:
                     // This case should not happen.
                     break
-                case .agent(_, let tools, let description, let instructions, let knowledgeSources): // Preserve existing agent data
+                case .agent(_, let architecture, let tools, let description, let instructions, let knowledgeSources): // Preserve existing agent data
                     profile.details = .agent(
                         llmConfig: newConfig,
+                        architecture: architecture,
                         tools: tools,
                         description: description,
                         instructions: instructions,
@@ -62,10 +64,33 @@ struct AgentConfigDetailView: View {
         )
     }
     
+    private var architectureBinding: Binding<AgentArchitecture> {
+        Binding<AgentArchitecture>(
+            get: {
+                if case .agent(_, let architecture, _, _, _, _) = profile.details {
+                    return architecture
+                }
+                return .reAct // Default
+            },
+            set: { newValue in
+                if case .agent(let llmConfig, _, let tools, let description, let instructions, let knowledgeSources) = profile.details {
+                    profile.details = .agent(
+                        llmConfig: llmConfig,
+                        architecture: newValue,
+                        tools: tools,
+                        description: description,
+                        instructions: instructions,
+                        knowledgeSources: knowledgeSources
+                    )
+                }
+            }
+        )
+    }
+    
     private var descriptionBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .agent(_, _, let description, _, _) = profile.details {
+                if case .agent(_, _, _, let description, _, _) = profile.details {
                     return description ?? ""
                 }
                 return ""
@@ -73,9 +98,10 @@ struct AgentConfigDetailView: View {
             set: { newValue in
                 // Enforce a 250-character limit
                 let truncatedValue = String(newValue.prefix(250))
-                if case .agent(let llmConfig, let tools, _, let instructions, let knowledgeSources) = profile.details {
+                if case .agent(let llmConfig, let architecture, let tools, _, let instructions, let knowledgeSources) = profile.details {
                     profile.details = .agent(
                         llmConfig: llmConfig,
+                        architecture: architecture,
                         tools: tools,
                         description: truncatedValue.isEmpty ? nil : truncatedValue,
                         instructions: instructions,
@@ -89,7 +115,7 @@ struct AgentConfigDetailView: View {
     private var instructionsBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .agent(_, _, _, let instructions, _) = profile.details {
+                if case .agent(_, _, _, _, let instructions, _) = profile.details {
                     return instructions ?? ""
                 }
                 return ""
@@ -97,9 +123,10 @@ struct AgentConfigDetailView: View {
             set: { newValue in
                 // Enforce a 5000-character limit
                 let truncatedValue = String(newValue.prefix(5000))
-                if case .agent(let llmConfig, let tools, let description, _, let knowledgeSources) = profile.details {
+                if case .agent(let llmConfig, let architecture, let tools, let description, _, let knowledgeSources) = profile.details {
                     profile.details = .agent(
                         llmConfig: llmConfig,
+                        architecture: architecture,
                         tools: tools,
                         description: description,
                         instructions: truncatedValue.isEmpty ? nil : truncatedValue,
@@ -113,15 +140,16 @@ struct AgentConfigDetailView: View {
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
         Binding<[KnowledgeSource]>(
             get: {
-                if case .agent(_, _, _, _, let sources) = profile.details {
+                if case .agent(_, _, _, _, _, let sources) = profile.details {
                     return sources ?? []
                 }
                 return []
             },
             set: { newValue in
-                 if case .agent(let llmConfig, let tools, let description, let instructions, _) = profile.details {
+                 if case .agent(let llmConfig, let architecture, let tools, let description, let instructions, _) = profile.details {
                     profile.details = .agent(
                         llmConfig: llmConfig,
+                        architecture: architecture,
                         tools: tools,
                         description: description,
                         instructions: instructions,
@@ -136,15 +164,16 @@ struct AgentConfigDetailView: View {
     private var toolsBinding: Binding<[Tool]> {
         Binding<[Tool]>(
             get: {
-                if case .agent(_, let tools, _, _, _) = profile.details {
+                if case .agent(_, _, let tools, _, _, _) = profile.details {
                     return tools
                 }
                 return [] // Should not happen if view is used correctly
             },
             set: { newTools in
-                if case .agent(let llmConfig, _, let description, let instructions, let knowledgeSources) = profile.details {
+                if case .agent(let llmConfig, let architecture, _, let description, let instructions, let knowledgeSources) = profile.details {
                     profile.details = .agent(
                         llmConfig: llmConfig,
+                        architecture: architecture,
                         tools: newTools,
                         description: description,
                         instructions: instructions,
@@ -165,6 +194,16 @@ struct AgentConfigDetailView: View {
                 }
                 
                 Section(header: Text("Agent Details").font(.headline)) {
+                    // Agent Architecture Picker
+                    Picker("Architecture", selection: architectureBinding) {
+                        ForEach(AgentArchitecture.allCases) { arch in
+                            Text(arch.rawValue).tag(arch)
+                        }
+                    }
+                    Text(architectureBinding.wrappedValue.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Description")
                             .font(.caption)

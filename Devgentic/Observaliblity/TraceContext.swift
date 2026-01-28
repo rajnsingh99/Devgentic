@@ -26,7 +26,8 @@ struct ProfileInfo {
         switch profile.details {
         case .bot(let llmConfig):
             self.provider = llmConfig.apiProvider
-        case .agent(let llmConfig, _, _, _, _):
+        // FIXED: Added an extra wildcard `_` to account for 'architecture'
+        case .agent(let llmConfig, _, _, _, _, _):
             self.provider = llmConfig.apiProvider
         case .workflow:
             self.provider = nil
@@ -66,4 +67,3 @@ struct TraceContext {
         return newContext
     }
 }
-

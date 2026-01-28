@@ -31,7 +31,8 @@ struct BotConfigDetailView: View {
                 switch profile.details {
                 case .bot(let llmConfig):
                     return llmConfig
-                case .agent(let llmConfig, _, _, _, _):
+                // FIXED: Updated pattern match for 6 arguments
+                case .agent(let llmConfig, _, _, _, _, _):
                     return llmConfig
                 case .workflow:
                     // This case should not happen if the view is used correctly.
@@ -42,9 +43,11 @@ struct BotConfigDetailView: View {
                 switch profile.details {
                 case .bot:
                     profile.details = .bot(llmConfig: newConfig)
-                case .agent(_, let tools, let description, let instructions, let knowledgeSources): // Preserve existing tools
+                // FIXED: Capture 'architecture' to preserve it
+                case .agent(_, let architecture, let tools, let description, let instructions, let knowledgeSources):
                     profile.details = .agent(
                         llmConfig: newConfig,
+                        architecture: architecture, // Preserve architecture
                         tools: tools,
                         description: description,
                         instructions: instructions,

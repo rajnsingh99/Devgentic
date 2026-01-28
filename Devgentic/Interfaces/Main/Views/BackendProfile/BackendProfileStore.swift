@@ -6,6 +6,7 @@
 //
 //  Refactored on 26/08/25 to support unified BackendProfileModel.
 //  Updated on 10/09/25 to persist new Agent properties.
+//  Updated on 28/01/26 to persist AgentArchitecture safely.
 //
 
 import Foundation
@@ -118,14 +119,25 @@ class BackendProfileStore: BackendProfileStoreProtocol {
             entity.agentConfig = nil
             entity.workflowConfig = nil
             
-        case .agent(let llmConfig, let tools, let description, let instructions, let knowledgeSources):
+        case .agent(let llmConfig, let architecture, let tools, let description, let instructions, let knowledgeSources):
             let agentEntity = entity.agentConfig ?? AgentConfigEntity(context: context)
             agentEntity.llmConfig = encode(llmConfig)
             agentEntity.tools = encode(tools)
-            // Persist the newly added agent properties
+            
+            // Persist the agent properties
             agentEntity.agentDescription = description
             agentEntity.instructions = instructions
             agentEntity.knowledgeSources = encode(knowledgeSources)
+            
+            // IMPORTANT: Crash Prevention
+            // We check if the entity description actually has the key "agentArchitecture" before setting it.
+            // This prevents NSUnknownKeyException if the Core Data model hasn't been updated yet.
+            if agentEntity.entity.attributesByName.keys.contains("agentArchitecture") {
+                agentEntity.setValue(architecture.rawValue, forKey: "agentArchitecture")
+            } else {
+                logger.warning("AgentConfigEntity missing 'agentArchitecture' attribute. Skipping save for this property.")
+            }
+            
             entity.agentConfig = agentEntity
             // Clean up other potential relationships
             entity.botConfig = nil
@@ -207,8 +219,19 @@ extension BackendProfileEntity {
         let instructions = configEntity.instructions
         let knowledgeSources: [KnowledgeSource]? = decode(from: configEntity.knowledgeSources)
         
+        // Load architecture SAFELY
+        var architecture: AgentArchitecture = .reAct
+        
+        // Check if the attribute exists in the model to avoid NSUnknownKeyException
+        if configEntity.entity.attributesByName.keys.contains("agentArchitecture") {
+            if let archString = configEntity.value(forKey: "agentArchitecture") as? String {
+                architecture = AgentArchitecture(rawValue: archString) ?? .reAct
+            }
+        }
+        
         return .agent(
             llmConfig: llmConfig,
+            architecture: architecture,
             tools: tools,
             description: description,
             instructions: instructions,

@@ -58,7 +58,7 @@ final class BackendProfileService: ObservableObject {
         switch profile.details {
         case .bot(let llmConfig):
             providerConfig = llmConfig
-        case .agent(let llmConfig, _, _, _, _):
+        case .agent(let llmConfig, _, _, _, _, _):
             providerConfig = llmConfig
         case .workflow:
             // Workflows do not have a single provider config.

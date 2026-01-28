@@ -9,6 +9,7 @@
 //  Fixed on 27/08/25 to correct AnyCodable encoding order to prevent precision loss.
 //  Updated on 05/09/25 to expand Agent configuration.
 //  Updated on 17/09/25 to add executable tool protocols.
+//  Updated on 28/01/26 to add AgentArchitecture.
 //
 
 import Foundation
@@ -49,13 +50,14 @@ struct BackendProfileModel: Codable, Identifiable, Hashable {
 
 enum ProfileDetails: Codable, Hashable {
     case bot(llmConfig: ProviderConfig)
-    case agent(llmConfig: ProviderConfig, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
+    // Updated to include architecture
+    case agent(llmConfig: ProviderConfig, architecture: AgentArchitecture, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
     case workflow(agents: [BackendProfileModel])
 
     // MARK: - Manual Codable Implementation
     
     private enum CodingKeys: String, CodingKey {
-        case profileType, llmConfig, tools, agents, description, instructions, knowledgeSources
+        case profileType, llmConfig, architecture, tools, agents, description, instructions, knowledgeSources
     }
 
     // Custom decoder to handle the different cases based on the `profileType` key.
@@ -70,11 +72,13 @@ enum ProfileDetails: Codable, Hashable {
             self = .bot(llmConfig: llmConfig)
         case .agent:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
+            // Decode architecture, default to .reAct for backward compatibility
+            let architecture = try container.decodeIfPresent(AgentArchitecture.self, forKey: .architecture) ?? .reAct
             let tools = try container.decode([Tool].self, forKey: .tools)
             let description = try container.decodeIfPresent(String.self, forKey: .description)
             let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
             let knowledgeSources = try container.decodeIfPresent([KnowledgeSource].self, forKey: .knowledgeSources)
-            self = .agent(llmConfig: llmConfig, tools: tools, description: description, instructions: instructions, knowledgeSources: knowledgeSources)
+            self = .agent(llmConfig: llmConfig, architecture: architecture, tools: tools, description: description, instructions: instructions, knowledgeSources: knowledgeSources)
         case .workflow:
             let agents = try container.decode([BackendProfileModel].self, forKey: .agents)
             self = .workflow(agents: agents)
@@ -90,9 +94,10 @@ enum ProfileDetails: Codable, Hashable {
         case .bot(let llmConfig):
             try container.encode(ProfileType.bot, forKey: .profileType)
             try container.encode(llmConfig, forKey: .llmConfig)
-        case .agent(let llmConfig, let tools, let description, let instructions, let knowledgeSources):
+        case .agent(let llmConfig, let architecture, let tools, let description, let instructions, let knowledgeSources):
             try container.encode(ProfileType.agent, forKey: .profileType)
             try container.encode(llmConfig, forKey: .llmConfig)
+            try container.encode(architecture, forKey: .architecture) // Encode architecture
             try container.encode(tools, forKey: .tools)
             try container.encodeIfPresent(description, forKey: .description)
             try container.encodeIfPresent(instructions, forKey: .instructions)
@@ -104,6 +109,26 @@ enum ProfileDetails: Codable, Hashable {
     }
 }
 
+// MARK: - Agent Architecture Enum
+
+/// Defines the cognitive architecture used by the agent to process tasks.
+enum AgentArchitecture: String, Codable, CaseIterable, Identifiable, Hashable {
+    case reAct = "ReAct"
+    case planAndExecute = "Plan & Execute"
+    case reflexion = "Reflexion"
+    case supervisor = "Supervisor"
+    
+    var id: String { rawValue }
+    
+    var description: String {
+        switch self {
+        case .reAct: return "Reason & Action loop."
+        case .planAndExecute: return "formulates a plan first, then executes it."
+        case .reflexion: return "Self-reflects on past actions to improve."
+        case .supervisor: return "Delegates tasks to sub-workers."
+        }
+    }
+}
 
 // MARK: - Supporting Structures (Largely Unchanged)
 

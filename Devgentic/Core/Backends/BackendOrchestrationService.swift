@@ -58,14 +58,29 @@ class BackendOrchestrationService: ObservableObject {
             Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
-                let conversationHistory = history.filter { message in
+                // 1. Sanitize History
+                // Filter out error messages
+                var conversationHistory = history.filter { message in
                     if case .error = message.content { return false }
                     return true
+                }
+                
+                // BUG FIX: Prevent duplication of the current query.
+                // If the UI has already appended the current message to 'history', we must remove it
+                // because we are about to inject 'userQuery' as the fresh prompt/user-turn.
+                // We check if the last message is from the user and matches the current query text.
+                if let lastMsg = conversationHistory.last,
+                   lastMsg.sender == .user,
+                   let lastContent = lastMsg.content.textContent,
+                   lastContent.trimmingCharacters(in: .whitespacesAndNewlines) == userQuery.trimmingCharacters(in: .whitespacesAndNewlines) {
+                    
+                    logger.debug("Removing duplicated current message from history to prevent double-prompting.")
+                    conversationHistory.removeLast()
                 }
 
                 var queryForRequest = userQuery
                 
-                // 1. File Context Assembly (Manual Attachments)
+                // 2. File Context Assembly (Manual Attachments)
                 if !files.isEmpty {
                     logger.info("Assembling content for \(files.count) attached files.")
                     let fileContext = self.assembleTextFileContent(for: files)
@@ -74,12 +89,13 @@ class BackendOrchestrationService: ObservableObject {
                     }
                 }
                 
-                // 2. RAG Retrieval
+                // 3. RAG Retrieval
                 // We retrieve context *separately* from modifying the query string initially.
                 var ragContextString: String? = nil
                 
                 if config.profile.profileType == .bot || config.profile.profileType == .agent {
-                    ragContextString = await self.retrieveRAGContext(for: userQuery, conversationID: conversationID)
+                    // BUG FIX: Pass history to filter out self-referential context
+                    ragContextString = await self.retrieveRAGContext(for: userQuery, conversationID: conversationID, history: conversationHistory)
                 }
                 
                 do {
@@ -185,7 +201,9 @@ class BackendOrchestrationService: ObservableObject {
     }
 
    /// Retrieves relevant RAG context without modifying the user query directly.
-   private func retrieveRAGContext(for userQuery: String, conversationID: UUID) async -> String? {
+   /// - Parameters:
+   ///   - history: The current chat history. Used to filter out self-referential context (loops).
+   private func retrieveRAGContext(for userQuery: String, conversationID: UUID, history: [ChatMessage] = []) async -> String? {
         logger.info("RAG: Attempting to retrieve context for conversation: \(conversationID.uuidString)")
         
         // 1. Generate a vector embedding for the user's query.
@@ -197,14 +215,30 @@ class BackendOrchestrationService: ObservableObject {
         // 2. Find the most relevant chunks from the vector store for this specific conversation.
         let relevantChunks = vectorStoreService.findNearest(to: queryEmbedding, limit: 3, conversationID: conversationID)
         
-        guard !relevantChunks.isEmpty else {
-            logger.info("RAG: No relevant context found for this conversation.")
+        // 3. Filter Chunks
+        // BUG FIX: Don't include chunks that are just the user's previous messages in this same session.
+        // This prevents the "Echo Chamber" where the agent reads its own history as new "Relevant Context"
+        // and thinks it needs to re-execute previous commands.
+        let filteredChunks = relevantChunks.filter { chunk in
+            // Check if this chunk's content is present in the recent history
+            !history.contains { message in
+                guard let text = message.content.textContent else { return false }
+                let chunkClean = chunk.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                let msgClean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // If the chunk is identical to or substantially contained within a recent message, skip it.
+                return msgClean.contains(chunkClean) || chunkClean.contains(msgClean)
+            }
+        }
+        
+        guard !filteredChunks.isEmpty else {
+            logger.info("RAG: No relevant context found (or all matches were filtered due to history redundancy).")
             return nil
         }
         
-        // 3. Assemble the retrieved context
-        logger.info("RAG: Found \(relevantChunks.count) relevant chunks.")
-        let contextString = relevantChunks.map { $0.content }.joined(separator: "\n\n")
+        // 4. Assemble the retrieved context
+        logger.info("RAG: Found \(filteredChunks.count) relevant chunks (after filtering).")
+        let contextString = filteredChunks.map { $0.content }.joined(separator: "\n\n")
         
         return contextString
     }

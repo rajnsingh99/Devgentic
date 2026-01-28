@@ -72,7 +72,8 @@ class AgentConnect: ObservableObject {
             Task {
                 do {
                     // 1. Extract Configuration & Tools
-                    guard case .agent(let llmConfig, let profileTools, _, let instructions, _) = profile.details else {
+                    // FIXED: Added wildcard '_' at 2nd position for 'architecture'
+                    guard case .agent(let llmConfig, _, let profileTools, _, let instructions, _) = profile.details else {
                         throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid profile type for agent execution."])
                     }
                     
@@ -239,7 +240,7 @@ class AgentConnect: ObservableObject {
     // MARK: - Helpers
     
     private func isNativeSupported(profile: BackendProfileModel) -> Bool {
-        guard case .agent(let llmConfig, _, _, _, _) = profile.details else { return false }
+        guard case .agent(let llmConfig, _, _, _, _, _) = profile.details else { return false }
         
         switch llmConfig.apiProvider {
         case .ollama, .openAI, .google:
@@ -279,6 +280,12 @@ class AgentConnect: ObservableObject {
         case "open_application": return OpenApplicationTool()
         case "run_applescript": return RunAppleScriptTool()
         case "get_system_stats": return GetSystemStatsTool()
+            
+        // AdvancedFileSystemTools
+        case "fs_watch_folder": return WatchFolderTool()
+        case "fs_smart_search": return SmartSearchTool()
+        case "fs_read_metadata": return ReadMetadataTool()
+        case "fs_organize_batch": return OrganizeBatchTool()
             
         default:
             return nil
