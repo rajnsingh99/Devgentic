@@ -169,12 +169,23 @@ class BackendOrchestrationService: ObservableObject {
                         
                         logger.info("Routing to AgentConnect for profile: \(config.profile.displayName).")
                         
+                        // Define a handler for Agent Thoughts/Actions
+                        let traceHandler: (AgentTraceLog) -> Void = { log in
+                            // Log the trace to the system console
+                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.rawValue)): \(log.content)")
+                            
+                            // FUTURE INTEGRATION:
+                            // context.appendAgentTrace(log)
+                            // This will allow the UI to display "Thinking..." bubbles or a debug drawer.
+                        }
+                        
                         let stream = agentConnect.streamAgentResponse(
                             for: config.profile,
                             userInput: queryForRequest,
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
-                            ragContext: ragContextString
+                            ragContext: ragContextString,
+                            onTraceUpdate: traceHandler
                         )
                         
                         var tokensReceived = 0

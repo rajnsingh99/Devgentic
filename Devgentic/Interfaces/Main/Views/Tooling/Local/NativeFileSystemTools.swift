@@ -14,7 +14,8 @@ import OpenFoundationModelsCore
 
 struct ListDirectoryTool: OpenFoundationModels.Tool {
     let name = "list_directory"
-    let description = "Lists all files and folders in a specified directory path."
+    // IMPROVEMENT: Explicitly stating limitations helps the agent choose the right tool
+    let description = "Lists the filenames of all files and folders in a specified directory path. Does not provide file size or metadata."
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -48,7 +49,6 @@ struct ListDirectoryTool: OpenFoundationModels.Tool {
     
     func call(arguments: Arguments) async throws -> String {
         let fileManager = FileManager.default
-        // Basic safety check: prevent accessing root directly if needed, or handle errors gracefully
         do {
             let contents = try fileManager.contentsOfDirectory(atPath: arguments.path)
             return contents.isEmpty ? "Directory is empty." : contents.joined(separator: "\n")

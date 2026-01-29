@@ -48,22 +48,24 @@ final class SpotlightSearcher: NSObject, NSMetadataQueryDelegate {
     private let query = NSMetadataQuery()
     
     func search(queryStr: String, scope: [String]? = nil) async throws -> [String] {
-        // Prevent concurrent searches on the same instance
         if query.isGathering { query.stop() }
         
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation
             
-            // Configure Query
-            // Fix: Map strings to URLs correctly and cast to [Any] to handle the default fallback which is [String]
             let searchRoots: [Any] = scope?.map { URL(fileURLWithPath: $0) } ?? [NSMetadataQueryUserHomeScope]
             query.searchScopes = searchRoots
             
-            // Create a predicate that searches text content or file names
-            query.predicate = NSPredicate(format: "%K LIKE[cd] %@", NSMetadataItemFSNameKey, "*\(queryStr)*")
+            // IMPROVEMENT: Search both Filename AND Content
+            // kMDItemFSName = Filename
+            // kMDItemTextContent = File Content
+            // FIX: Cast kMDItemTextContent to String/CVarArg because it's a CFString
+            query.predicate = NSPredicate(format: "(%K LIKE[cd] %@) OR (%K LIKE[cd] %@)",
+                                          NSMetadataItemFSNameKey, "*\(queryStr)*",
+                                          kMDItemTextContent as String, "*\(queryStr)*")
+            
             query.notificationBatchingInterval = 1.0
             
-            // Listen for finish
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(queryDidFinishGathering(_:)),

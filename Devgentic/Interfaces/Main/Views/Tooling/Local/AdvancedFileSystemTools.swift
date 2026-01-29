@@ -13,11 +13,12 @@ import OpenFoundationModelsCore
 
 struct SmartSearchTool: OpenFoundationModels.Tool {
     let name = "fs_smart_search"
-    let description = "Instantly finds files using macOS Spotlight metadata. Much faster than crawling directories."
+    // OPTIMIZATION: Anchored to `mdfind` to trigger the model's knowledge of indexed search vs. traversal.
+    let description = "Deep system search using macOS Spotlight (NSMetadataQuery). Functionally similar to the `mdfind` CLI command. Instantly finds files by matching Filenames OR Text Content. Use this as the PRIMARY tool for locating lost files or digging up documents by topic."
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let search_term: String
-        let search_scope: String? // Optional path to limit search
+        let search_scope: String?
         
         init(_ content: GeneratedContent) throws {
             let props = try content.properties()
@@ -36,8 +37,8 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
         let root = DynamicGenerationSchema(
             name: "Arguments",
             properties: [
-                DynamicGenerationSchema.Property(name: "search_term", description: "The filename or content to search for.", schema: DynamicGenerationSchema(type: String.self)),
-                DynamicGenerationSchema.Property(name: "search_scope", description: "Optional folder path to limit the search.", schema: DynamicGenerationSchema(type: String.self), isOptional: true)
+                DynamicGenerationSchema.Property(name: "search_term", description: "The keyword or phrase to search for (substring match on name or content).", schema: DynamicGenerationSchema(type: String.self)),
+                DynamicGenerationSchema.Property(name: "search_scope", description: "Optional folder path to restrict the search.", schema: DynamicGenerationSchema(type: String.self), isOptional: true)
             ]
         )
         return try! GenerationSchema(root: root, dependencies: [])
@@ -49,16 +50,12 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
         let scopes = arguments.search_scope != nil ? [arguments.search_scope!] : nil
         
         do {
-            // Fix: NSMetadataQuery and SpotlightSearcher are bound to the MainActor.
-            // MainActor.run requires a synchronous closure, so we use Task { @MainActor ... }.value
-            // to execute the async search method on the main thread and await the result.
             let paths = try await Task { @MainActor in
                 let searcher = SpotlightSearcher()
                 return try await searcher.search(queryStr: arguments.search_term, scope: scopes)
             }.value
             
             if paths.isEmpty { return "No results found matching '\(arguments.search_term)'." }
-            // Limit results to avoid context overflow
             let limitedPaths = paths.prefix(20)
             return "Found \(paths.count) items (showing top 20):\n" + limitedPaths.joined(separator: "\n")
         } catch {
@@ -71,7 +68,8 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
 
 struct ReadMetadataTool: OpenFoundationModels.Tool {
     let name = "fs_read_metadata"
-    let description = "Gets detailed macOS info: Tags, Origin URL (where downloaded), and Last Opened Date."
+    // OPTIMIZATION: Anchored to `mdls` and `stat` for detailed attributes.
+    let description = "Retrieves detailed file metadata. Combines the capabilities of `mdls` (Spotlight attributes) and `stat` (system info). Returns File Size, Content Type (UTI), Creation/Mod Dates, Tags, and Origin URL (`kMDItemWhereFroms`)."
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -86,7 +84,7 @@ struct ReadMetadataTool: OpenFoundationModels.Tool {
         let root = DynamicGenerationSchema(
             name: "Arguments",
             properties: [
-                DynamicGenerationSchema.Property(name: "path", description: "File path to analyze.", schema: DynamicGenerationSchema(type: String.self))
+                DynamicGenerationSchema.Property(name: "path", description: "The absolute path of the file.", schema: DynamicGenerationSchema(type: String.self))
             ]
         )
         return try! GenerationSchema(root: root, dependencies: [])
@@ -98,13 +96,21 @@ struct ReadMetadataTool: OpenFoundationModels.Tool {
         let url = URL(fileURLWithPath: arguments.path)
         
         do {
-            // Fix: Use correct URLResourceKeys. `.contentCreationDateKey` does not exist; use `.creationDateKey`.
-            let resourceKeys: Set<URLResourceKey> = [.tagNamesKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey]
+            // CRITICAL FIX: Added .fileSizeKey
+            let resourceKeys: Set<URLResourceKey> = [.tagNamesKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey, .fileSizeKey]
             let values = try url.resourceValues(forKeys: resourceKeys)
             
             var info = "Metadata for: \(url.lastPathComponent)\n"
+            
+            // CRITICAL FIX: Formatted file size output
+            if let fileSize = values.fileSize {
+                let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
+                info += "Size: \(sizeStr) (\(fileSize) bytes)\n"
+            } else {
+                info += "Size: Unknown\n"
+            }
+            
             info += "Type: \(values.typeIdentifier ?? "Unknown")\n"
-            // Fix: Use correct property `.creationDate`
             info += "Created: \(values.creationDate?.description ?? "N/A")\n"
             info += "Modified: \(values.contentModificationDate?.description ?? "N/A")\n"
             
@@ -114,7 +120,6 @@ struct ReadMetadataTool: OpenFoundationModels.Tool {
                 info += "Tags: None\n"
             }
             
-            // 2. Extended Attributes (Origin URL)
             if let origin = ExtendedAttributeHelper.getWhereFroms(at: url) {
                 info += "Origin URL: \(origin.first ?? "Unknown")\n"
             }
@@ -130,7 +135,8 @@ struct ReadMetadataTool: OpenFoundationModels.Tool {
 
 struct OrganizeBatchTool: OpenFoundationModels.Tool {
     let name = "fs_organize_batch"
-    let description = "Moves or renames a file. Handles conflicts automatically by appending numbers (e.g., 'File 1.txt')."
+    // OPTIMIZATION: Anchored to a "Safe Move" concept similar to `mv -n`.
+    let description = "Smart file mover. Acts like the `mv` command but with built-in safety: if the destination file exists, it automatically resolves conflicts by renaming the source (e.g., 'File 2.txt') instead of overwriting."
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let source_path: String
@@ -150,8 +156,8 @@ struct OrganizeBatchTool: OpenFoundationModels.Tool {
         let root = DynamicGenerationSchema(
             name: "Arguments",
             properties: [
-                DynamicGenerationSchema.Property(name: "source_path", description: "File to move.", schema: DynamicGenerationSchema(type: String.self)),
-                DynamicGenerationSchema.Property(name: "destination_folder", description: "Target folder.", schema: DynamicGenerationSchema(type: String.self))
+                DynamicGenerationSchema.Property(name: "source_path", description: "The full path of the file to move.", schema: DynamicGenerationSchema(type: String.self)),
+                DynamicGenerationSchema.Property(name: "destination_folder", description: "The target folder path.", schema: DynamicGenerationSchema(type: String.self))
             ]
         )
         return try! GenerationSchema(root: root, dependencies: [])
@@ -164,14 +170,13 @@ struct OrganizeBatchTool: OpenFoundationModels.Tool {
         let srcURL = URL(fileURLWithPath: arguments.source_path)
         let dstFolderURL = URL(fileURLWithPath: arguments.destination_folder)
         
-        // Ensure destination folder exists
         if !fm.fileExists(atPath: dstFolderURL.path) {
             try fm.createDirectory(at: dstFolderURL, withIntermediateDirectories: true)
         }
         
         var finalDstURL = dstFolderURL.appendingPathComponent(srcURL.lastPathComponent)
         
-        // Conflict Resolution: Append counter if file exists
+        // Conflict Resolution
         var counter = 1
         while fm.fileExists(atPath: finalDstURL.path) {
             let name = srcURL.deletingPathExtension().lastPathComponent
@@ -192,7 +197,6 @@ struct OrganizeBatchTool: OpenFoundationModels.Tool {
 
 // MARK: - FS Watch Folder
 
-/// A simple singleton service to keep track of watchers so they don't get deallocated.
 class WatcherService {
     static let shared = WatcherService()
     private var activeMonitors: [UUID: DispatchSourceFileSystemObject] = [:]
@@ -207,8 +211,6 @@ class WatcherService {
         let id = UUID()
         
         source.setEventHandler {
-            // In a real agent system, this is where you would push a message to the chat stream.
-            // For now, we just log it. You might want to implement a NotificationCenter post here.
             print("FS EVENT: Change detected in \(path)")
             NotificationCenter.default.post(name: Notification.Name("DevgenticFSEvent"), object: nil, userInfo: ["path": path])
         }
@@ -219,13 +221,14 @@ class WatcherService {
         
         source.resume()
         activeMonitors[id] = source
-        return "Started watching \(path). Monitor ID: \(id.uuidString). Changes will be logged to system events."
+        return "Started watching \(path). Monitor ID: \(id.uuidString). Changes will be logged via Notifications."
     }
 }
 
 struct WatchFolderTool: OpenFoundationModels.Tool {
     let name = "fs_watch_folder"
-    let description = "Starts a background monitor on a specific path. Returns changes."
+    // OPTIMIZATION: Anchored to `fswatch` for real-time monitoring.
+    let description = "Starts a background monitor on a folder, behaving like `fswatch` or `inotify`. Tracks file system events (Create, Delete, Rename) in real-time."
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -240,7 +243,7 @@ struct WatchFolderTool: OpenFoundationModels.Tool {
         let root = DynamicGenerationSchema(
             name: "Arguments",
             properties: [
-                DynamicGenerationSchema.Property(name: "path", description: "Folder to watch.", schema: DynamicGenerationSchema(type: String.self))
+                DynamicGenerationSchema.Property(name: "path", description: "The folder path to watch.", schema: DynamicGenerationSchema(type: String.self))
             ]
         )
         return try! GenerationSchema(root: root, dependencies: [])
