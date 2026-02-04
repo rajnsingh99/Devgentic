@@ -166,11 +166,14 @@ struct KnowledgeSource: Codable, Hashable, Identifiable {
 
 
 /// A single, unified list of all supported provider types.
+/// A single, unified list of all supported provider types.
 enum ApiProvider: String, Codable, CaseIterable, Identifiable {
    case ollama = "Ollama (Local)"
+   case mlx = "MLX (Apple Silicon)" // <--- NEW CASE
    case openAI = "OpenAI"
    case anthropic = "Anthropic"
    case google = "Google"
+   
    var id: String { self.rawValue }
     
     var providerString: String {
@@ -183,6 +186,8 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable {
             return "ollama"
         case .anthropic:
             return "anthropic"
+        case .mlx:               // <--- NEW CASE
+            return "mlx"
         }
     }
 }

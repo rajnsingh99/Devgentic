@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 05/09/25.
+//  Updated on 04/02/26 for Modern Dashboard UI.
 //
 
 import SwiftUI
@@ -17,37 +18,29 @@ struct BotConfigDetailView: View {
         profile != initialProfileState
     }
     
-    // Local state for editing advanced configurations. This prevents the UI from reverting.
+    // Local state for editing advanced configurations
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
     
     // MARK: - Computed Bindings
     
-    /// Creates a binding to the `ProviderConfig` inside the `profile.details` enum.
-    /// This is essential for allowing the form to modify the nested configuration.
     private var providerConfig: Binding<ProviderConfig> {
         Binding<ProviderConfig>(
             get: {
                 switch profile.details {
-                case .bot(let llmConfig):
-                    return llmConfig
-                // FIXED: Updated pattern match for 6 arguments
-                case .agent(let llmConfig, _, _, _, _, _):
-                    return llmConfig
-                case .workflow:
-                    // This case should not happen if the view is used correctly.
-                    return ProviderConfig(apiProvider: .ollama, modelName: "")
+                case .bot(let llmConfig): return llmConfig
+                case .agent(let llmConfig, _, _, _, _, _): return llmConfig
+                case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
             },
             set: { newConfig in
                 switch profile.details {
                 case .bot:
                     profile.details = .bot(llmConfig: newConfig)
-                // FIXED: Capture 'architecture' to preserve it
                 case .agent(_, let architecture, let tools, let description, let instructions, let knowledgeSources):
                     profile.details = .agent(
                         llmConfig: newConfig,
-                        architecture: architecture, // Preserve architecture
+                        architecture: architecture,
                         tools: tools,
                         description: description,
                         instructions: instructions,
@@ -62,65 +55,202 @@ struct BotConfigDetailView: View {
 
     // MARK: - Body
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section(header: Text("General").font(.headline)) {
-                    TextField("Display Name", text: $profile.displayName)
+        ScrollView {
+            VStack(spacing: 24) {
+                
+                // 1. Identity Header
+                HStack(alignment: .center, spacing: 16) {
+                    Image(systemName: "cpu.fill")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
+                        .foregroundColor(.blue) // Bot specific color
+                        
+                    VStack(alignment: .leading) {
+                        TextField("Bot Name", text: $profile.displayName)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .textFieldStyle(.plain)
+                        
+                        Text("A straightforward LLM interface without agentic capabilities.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
                 }
-
-                Section(header: Text("Provider Configuration").font(.headline)) {
-                    providerPicker
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                
+                // 2. Inference Engine (Provider)
+                ModernSection(title: "Inference Engine", icon: "server.rack") {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("LLM Provider")
+                                .fontWeight(.medium)
+                            Text("The underlying model powering this bot.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        providerPicker
+                            .labelsHidden()
+                            .frame(width: 200)
+                    }
                     
-                    if providerConfig.wrappedValue.apiProvider == .ollama {
-                        ollamaFields
-                    } else {
-                        remoteFields
+                    Divider()
+                    
+                    // Dynamic Fields
+                    VStack(alignment: .leading, spacing: 12) {
+                        switch providerConfig.wrappedValue.apiProvider {
+                        case .ollama:
+                            ollamaFields
+                        case .mlx:
+                            Text("Model Selection")
+                                .fontWeight(.medium)
+                                .font(.subheadline)
+                            MLXModelPickerView(selectedModel: providerConfig.modelName)
+                        default:
+                            remoteFields
+                        }
                     }
                 }
                 
-                // The advanced settings are now displayed inline.
-                advancedSettingsView
-                
-                // TODO: Add a section for managing an Agent's tools when profileType is .agent
+                // 3. Advanced Configuration
+                ModernSection(title: "Advanced Configuration", icon: "gearshape.2.fill") {
+                   advancedSettingsView
+                }
             }
-            .formStyle(.grouped)
-            
-            Spacer()
-            
+            .padding()
+            .padding(.bottom, 80) // Space for action bar
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .safeAreaInset(edge: .bottom) {
             actionButtons
                 .padding()
+                .background(.regularMaterial)
+                .overlay(Rectangle().frame(height: 1).foregroundColor(Color.secondary.opacity(0.1)), alignment: .top)
         }
         .onAppear {
-            // Store the initial state and load advanced settings when the view appears
             initialProfileState = profile
             loadAdvancedConfigs()
         }
         .onChange(of: profile.id) {
-            // Update the state if the selected profile changes
             initialProfileState = profile
             loadAdvancedConfigs()
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) {
-             // When the provider is switched, reload the default config for the new provider
             loadAdvancedConfigs()
         }
         .onChange(of: localOllamaConfig) {
-            // When local state changes, write it back to the main profile model
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
             }
         }
         .onChange(of: localGeminiConfig) {
-            // When local state changes, write it back to the main profile model
             if providerConfig.wrappedValue.apiProvider == .google {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }
         }
     }
     
-    // MARK: - Helper Methods
+    // MARK: - Subviews & Helpers
     
-    /// Decodes the generic dictionary from the profile model into the specific local state variables.
+    private var actionButtons: some View {
+        HStack {
+            Button(role: .destructive) {
+                profileService.deleteProfile(withId: profile.id)
+            } label: {
+                Label("Delete Bot", systemImage: "trash")
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(.red)
+            
+            Spacer()
+            
+            if hasChanges {
+                HStack(spacing: 12) {
+                    Button("Revert") {
+                        if let initialState = initialProfileState {
+                            profile = initialState
+                            loadAdvancedConfigs()
+                        }
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    
+                    Button("Save Changes") {
+                        profileService.saveProfile(profile)
+                        initialProfileState = profile
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else {
+                Text("All changes saved")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+    
+    private var providerPicker: some View {
+        Picker("Provider", selection: providerConfig.apiProvider) {
+            ForEach(ApiProvider.allCases) { provider in
+                Text(provider.rawValue).tag(provider)
+            }
+        }
+    }
+    
+    private var ollamaFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+
+            // Standard Bot view does NOT filter models.
+            OllamaModelPickerView(
+                selectedModel: providerConfig.modelName,
+                baseURL: providerConfig.wrappedValue.baseURL ?? "",
+                filterForTools: false
+            )
+        }
+    }
+    
+    @ViewBuilder
+    private var remoteFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                .textFieldStyle(.roundedBorder)
+
+            if providerConfig.wrappedValue.apiProvider == .google {
+                GeminiModelPickerView(
+                    selectedModel: providerConfig.modelName,
+                    apiKey: providerConfig.wrappedValue.apiKey ?? ""
+                )
+            } else {
+                TextField("Model Name", text: providerConfig.modelName)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var advancedSettingsView: some View {
+        switch providerConfig.wrappedValue.apiProvider {
+        case .ollama:
+            OllamaSettingsView(config: $localOllamaConfig)
+        case .google:
+            GeminiSettingsView(config: $localGeminiConfig)
+        case .openAI, .anthropic, .mlx:
+            Text("No advanced settings available for \(providerConfig.wrappedValue.apiProvider.rawValue).")
+                .foregroundColor(.secondary)
+                .italic()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    
     private func loadAdvancedConfigs() {
         switch providerConfig.wrappedValue.apiProvider {
         case .ollama:
@@ -137,86 +267,39 @@ struct BotConfigDetailView: View {
             break
         }
     }
-        
-    // MARK: - UI Components
-    
-    private var actionButtons: some View {
-        HStack {
-            Button("Delete", role: .destructive) {
-                profileService.deleteProfile(withId: profile.id)
-            }
-            
-            Spacer()
-            
-            if hasChanges {
-                Button("Revert") {
-                    if let initialState = initialProfileState {
-                        profile = initialState
-                        // After reverting the profile, also revert the local advanced config state
-                        loadAdvancedConfigs()
-                    }
-                }
-                Button("Save") {
-                    profileService.saveProfile(profile)
-                    // Update the initial state to the new saved state
-                    initialProfileState = profile
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-    }
-    
-    private var providerPicker: some View {
-        Picker("Provider", selection: providerConfig.apiProvider) {
-            ForEach(ApiProvider.allCases) { provider in
-                Text(provider.rawValue).tag(provider)
-            }
-        }
-    }
-    
-    private var ollamaFields: some View {
-        Group {
-            TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
-                .disableAutocorrection(true)
+}
 
-            // UPDATED: Standard Bot view does NOT filter models. Any model is fine.
-            OllamaModelPickerView(
-                selectedModel: providerConfig.modelName,
-                baseURL: providerConfig.wrappedValue.baseURL ?? "",
-                filterForTools: false
-            )
-        }
+// MARK: - Reusable Card Component
+// (Duplicated here to ensure file self-containment if AgentConfigDetailView is not visible)
+fileprivate struct ModernSection<Content: View>: View {
+    let title: String
+    let icon: String
+    let content: Content
+    
+    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.icon = icon
+        self.content = content()
     }
     
-    @ViewBuilder
-    private var remoteFields: some View {
-        SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-
-        switch providerConfig.wrappedValue.apiProvider {
-        case .google:
-            GeminiModelPickerView(
-                selectedModel: providerConfig.modelName,
-                apiKey: providerConfig.wrappedValue.apiKey ?? ""
-            )
-        default:
-            TextField("Model Name", text: providerConfig.modelName)
-        }
-    }
-    
-    @ViewBuilder
-    private var advancedSettingsView: some View {
-        switch providerConfig.wrappedValue.apiProvider {
-        case .ollama:
-            OllamaSettingsView(config: $localOllamaConfig)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+                .foregroundColor(.primary)
+                .padding(.horizontal, 4)
             
-        case .google:
-            GeminiSettingsView(config: $localGeminiConfig)
-            
-        case .openAI, .anthropic:
-            Section(header: Text("Advanced Settings").font(.headline)) {
-                Text("Advanced settings for \(providerConfig.wrappedValue.apiProvider.rawValue) are not yet available.")
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 16) {
+                content
             }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.03), radius: 2, x: 0, y: 1)
         }
     }
 }

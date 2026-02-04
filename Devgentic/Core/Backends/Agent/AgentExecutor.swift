@@ -73,16 +73,18 @@ struct AgentTool: Sendable {
 // MARK: - Execution Input
 
 /// The standard payload required to initialize any Agent Executor.
+// In AgentExecutor.swift
+
 struct AgentInput: Sendable {
     let userInput: String
     let chatHistory: [ChatMessage]
     let conversationID: UUID
-    
-    /// The list of executable tools available to the agent.
     let tools: [AgentTool]
-    
     let ragContext: String?
     let instructions: String?
+    
+    // NEW: The "Checklist" from the Manager
+    let approvedPlan: ExecutionPlan?
     
     init(
         userInput: String,
@@ -90,7 +92,8 @@ struct AgentInput: Sendable {
         conversationID: UUID,
         tools: [AgentTool],
         ragContext: String? = nil,
-        instructions: String? = nil
+        instructions: String? = nil,
+        approvedPlan: ExecutionPlan? = nil // Default to nil for backward compatibility
     ) {
         self.userInput = userInput
         self.chatHistory = chatHistory
@@ -98,6 +101,7 @@ struct AgentInput: Sendable {
         self.tools = tools
         self.ragContext = ragContext
         self.instructions = instructions
+        self.approvedPlan = approvedPlan
     }
 }
 

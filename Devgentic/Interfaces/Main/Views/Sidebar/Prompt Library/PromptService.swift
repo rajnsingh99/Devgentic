@@ -20,7 +20,7 @@ class PromptService: ObservableObject {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptService")
 
     /// The collection of all prompts, published for UI updates.
-    @Published var prompts: [Prompt] = []
+    @Published var prompts: [DevPrompt] = []
 
     // Update the initializer to accept a PromptStoreProtocol
     private init(promptStore: PromptStoreProtocol = PromptStore()) {
@@ -45,7 +45,7 @@ class PromptService: ObservableObject {
     
     /// Adds the default set of prompts to the store.
     private func addDefaultPrompts() {
-        for prompt in Prompt.examplePrompts {
+        for prompt in DevPrompt.examplePrompts {
             promptStore.addPrompt(from: prompt)
         }
         // Reload from persistence to ensure the UI has the latest data.
@@ -56,7 +56,7 @@ class PromptService: ObservableObject {
 
     /// Adds a new prompt to the store and saves changes via the prompt store.
     /// - Parameter prompt: The `Prompt` to add.
-    func addPrompt(_ prompt: Prompt) {
+    func addPrompt(_ prompt: DevPrompt) {
         promptStore.addPrompt(from: prompt)
         loadPrompts() // Reload to update the @Published array
         logger.info("Added new prompt: '\(prompt.title)'")
@@ -64,7 +64,7 @@ class PromptService: ObservableObject {
 
     /// Updates an existing prompt in the store and saves changes via the prompt store.
     /// - Parameter prompt: The `Prompt` to update.
-    func updatePrompt(_ prompt: Prompt) {
+    func updatePrompt(_ prompt: DevPrompt) {
         promptStore.updatePrompt(from: prompt)
         loadPrompts() // Reload to update the @Published array
         logger.info("Updated prompt: '\(prompt.title)'")
@@ -92,11 +92,11 @@ class PromptService: ObservableObject {
     /// Retrieves a prompt by its ID from the local array.
     /// - Parameter id: The `UUID` of the prompt to retrieve.
     /// - Returns: An optional `Prompt` if found, otherwise `nil`.
-    func getPrompt(withId id: UUID) -> Prompt? {
+    func getPrompt(withId id: UUID) -> DevPrompt? {
         return prompts.first { $0.id == id }
     }
     
-    func getAllPrompts() -> [Prompt] {
+    func getAllPrompts() -> [DevPrompt] {
         return prompts
     }
 }

@@ -33,6 +33,7 @@ class AgentConnect: ObservableObject {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String? = nil,
+        approvedPlan: ExecutionPlan? = nil,
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<String, Error> {
         
@@ -44,6 +45,7 @@ class AgentConnect: ObservableObject {
                 chatHistory: chatHistory,
                 conversationID: conversationID,
                 ragContext: ragContext,
+                approvedPlan: approvedPlan,
                 onTraceUpdate: onTraceUpdate
             )
         } else {
@@ -66,6 +68,7 @@ class AgentConnect: ObservableObject {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String?,
+        approvedPlan: ExecutionPlan?,
         onTraceUpdate: ((AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
@@ -131,13 +134,20 @@ class AgentConnect: ObservableObject {
                     logger.info("Starting execution using architecture: \(architecture.rawValue)")
                     
                     // 4. Prepare Input
+                    // CLEAN ROOM IMPLEMENTATION:
+                    // If we have an Approved Plan, we force an empty chat history.
+                    // This prevents "Context Bleed" where the Executor hallucinates constraints from previous tasks.
+                    // The Executor relies solely on 'approvedPlan.contextBrief' for necessary context.
+                    let historyForExecution: [ChatMessage] = (approvedPlan != nil) ? [] : chatHistory
+                    
                     let input = AgentInput(
                         userInput: userInput,
-                        chatHistory: chatHistory,
+                        chatHistory: historyForExecution, // <--- MODIFIED: Uses empty array if plan exists
                         conversationID: conversationID,
                         tools: activeTools,
                         ragContext: ragContext,
-                        instructions: instructions
+                        instructions: instructions,
+                        approvedPlan: approvedPlan
                     )
                     
                     // 5. Execute

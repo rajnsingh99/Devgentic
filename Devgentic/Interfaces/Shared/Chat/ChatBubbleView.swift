@@ -18,7 +18,7 @@ struct ChatBubbleView: View {
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
     @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
 
-    // MARK: - FIX: State to control the animation
+    // MARK: - State to control the animation
     // This state will be false initially and toggled to true on appear to animate the height change.
     @State private var applyMinHeight: Bool = false
 
@@ -41,8 +41,10 @@ struct ChatBubbleView: View {
                             .textSelection(.enabled)
 
                     case .markdownText(let text):
+                        // MARK: - Dynamic Thinking Headline Update
+                        // If streaming and no text yet, show the dynamic headline (e.g. "Scanning database...")
                         if message.isStreaming && text.isEmpty {
-                            AgentThinkingView()
+                            AgentThinkingView(headline: message.thinkingHeadline)
                         } else if !text.isEmpty {
                             if message.isStreaming {
                                 FadeInTypewriterView(markdown: text, message: message)
@@ -87,7 +89,7 @@ struct ChatBubbleView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // MARK: - FIX: Use the state property for minHeight
+                // MARK: - Animation Logic
                 // The height is now conditional on our `applyMinHeight` state property.
                 .frame(minHeight: applyMinHeight ? STREAMING_BUBBLE_MIN_HEIGHT : nil, alignment: .topLeading)
                 .padding(.horizontal, 50)
@@ -126,13 +128,19 @@ struct ChatBubbleView: View {
         .padding(.vertical, 30)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
         .animation(.easeInOut, value: message.agentResponse?.selectedVariantIndex)
-        // MARK: - FIX: Add the .onAppear modifier
-        // When the view appears, we check if it's a streaming message and then
-        // trigger the animation.
+        // MARK: - Animation Trigger
+        // When the view appears, we check if it's a streaming message and then trigger the animation.
         .onAppear {
             if message.isStreaming && !applyMinHeight {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     applyMinHeight = true
+                }
+            }
+        }
+        .onChange(of: message.isStreaming) { _, isStreaming in
+            if !isStreaming {
+                withAnimation(.easeIn(duration: 0.5)) {
+                    applyMinHeight = false
                 }
             }
         }
@@ -301,8 +309,11 @@ fileprivate struct VariantsSelectionView: View {
 }
 
 
-// MARK: - Agent Thinking Placeholder View
+// MARK: - Agent Thinking Placeholder View (Updated)
 fileprivate struct AgentThinkingView: View {
+    // Optional headline passed from the ChatMessage transient state
+    var headline: String?
+    
     @State private var isAnimating = false
 
     var body: some View {
@@ -313,9 +324,15 @@ fileprivate struct AgentThinkingView: View {
                 .opacity(isAnimating ? 1.0 : 0.5)
                 .animation(Animation.easeInOut(duration: 1).repeatForever(), value: isAnimating)
 
-            Text("Thinking...")
+            // Dynamic Text Update with Animation
+            // Uses the passed headline, or falls back to "Thinking..."
+            Text(headline ?? "Thinking...")
                 .font(UITheme.Fonts.callout)
                 .foregroundColor(UITheme.Colors.secondaryText)
+                // Smooth transition when text changes (e.g. from "Thinking..." to "Scanning files...")
+                .id(headline)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .animation(.snappy, value: headline)
         }
         .onAppear {
             self.isAnimating = true
@@ -347,3 +364,4 @@ struct FadeInTypewriterView: View {
         }
     }
 }
+

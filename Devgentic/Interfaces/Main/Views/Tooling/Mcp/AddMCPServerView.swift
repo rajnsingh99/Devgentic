@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 26/01/26.
+//  Updated on 04/02/26 for Modern Dashboard UI.
 //
 
 import SwiftUI
@@ -13,6 +14,13 @@ private enum ConnectionType: String, CaseIterable, Identifiable {
     case localProcess = "Local Process"
     case remoteURL = "Remote URL"
     var id: Self { self }
+    
+    var icon: String {
+        switch self {
+        case .localProcess: return "terminal.fill"
+        case .remoteURL: return "network"
+        }
+    }
 }
 
 private struct KeyValueItem: Identifiable, Hashable {
@@ -35,27 +43,31 @@ private struct ServerConfigFormData: Hashable {
     var authenticationToken: String = ""
 }
 
+private enum ConfigMode: String, CaseIterable {
+    case wizard = "Visual Config"
+    case json = "JSON"
+}
+
 // MARK: - Main View
 
 struct AddMCPServerView: View {
     @Environment(\.dismiss) var dismiss
     
-    // NEW: Edit Mode Properties with default nil to maintain backward compatibility
+    // Edit Mode Properties
     var existingSource: ToolSource? = nil
     
     var onToolAdded: ((String, ServerDefinition, [ToolDefinition]) -> Bool)?
-    // NEW: Callback for updates
     var onToolUpdated: ((UUID, String, ServerDefinition, [ToolDefinition]) -> Void)? = nil
     
     // MARK: - State
     
     @State private var formData = ServerConfigFormData()
     @State private var configInput: String = ""
-    @State private var selectedTab: Int = 0
+    @State private var configMode: ConfigMode = .wizard
     
     // Connection State
     @State private var isConnecting = false
-    @State private var activeError: MCPUserError? = nil // UPDATED: Using structured error
+    @State private var activeError: MCPUserError? = nil
     @State private var discoveredTools: [ToolDefinition]? = nil
     @State private var verifiedConfig: ServerDefinition? = nil
     @State private var tempSourceId: UUID = UUID()
@@ -66,40 +78,51 @@ struct AddMCPServerView: View {
     // MARK: - Body
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            
-            // MODIFIED: Dynamic Title
-            Text(existingSource == nil ? "Add MCP Server (V2)" : "Edit MCP Server")
-                .font(.title)
-                .fontWeight(.bold)
-            
-            TabView(selection: $selectedTab) {
-                formView
-                    .tabItem { Label("Form", systemImage: "list.bullet.clipboard") }
-                    .tag(0)
-                
-                jsonEditorView
-                    .tabItem { Label("JSON", systemImage: "curlybraces.square") }
-                    .tag(1)
-            }
-            .frame(height: 300)
+        VStack(spacing: 0) {
+            // 1. Header
+            headerView
             
             Divider()
             
-            statusSection
+            // 2. Main Scrollable Content
+            ScrollView {
+                VStack(spacing: 24) {
+                    
+                    // Mode Switcher
+                    Picker("", selection: $configMode) {
+                        ForEach(ConfigMode.allCases, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    
+                    if configMode == .wizard {
+                        wizardContent
+                    } else {
+                        jsonEditorContent
+                    }
+                    
+                    // Status / Diagnostics Area
+                    statusSection
+                }
+                .padding()
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
             
-            Spacer()
+            Divider()
             
+            // 3. Footer
             bottomControls
+                .padding()
+                .background(.regularMaterial)
         }
-        .padding()
-        .frame(minWidth: 600, minHeight: 700) // Increased height for error view
+        .frame(minWidth: 600, minHeight: 700)
         .alert("Duplicate Server", isPresented: $isShowingDuplicateAlert) {
             Button("OK") { }
         } message: {
             Text("A tool with this server name already exists in your library.")
         }
-        // MODIFIED: Changed from generateJSON to setupView to handle pre-filling data
         .onAppear(perform: setupView)
         .onDisappear {
             Task {
@@ -108,190 +131,300 @@ struct AddMCPServerView: View {
         }
     }
     
-    // MARK: - Subviews
+    // MARK: - Subviews: Header
     
-    private var formView: some View {
-        Form {
-            TextField("Server Name", text: $formData.serverName)
-            
-            Picker("Connection Type", selection: $formData.connectionType) {
-                ForEach(ConnectionType.allCases) { type in
-                    Text(type.rawValue).tag(type)
-                }
+    private var headerView: some View {
+        HStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.accentColor.opacity(0.1))
+                    .frame(width: 48, height: 48)
+                Image(systemName: existingSource == nil ? "server.rack" : "pencil.and.outline")
+                    .font(.title2)
+                    .foregroundColor(.accentColor)
             }
-            .pickerStyle(.segmented)
             
-            if formData.connectionType == .localProcess {
-                localProcessSection
-            } else {
-                remoteURLSection
+            VStack(alignment: .leading, spacing: 2) {
+                Text(existingSource == nil ? "Connect MCP Server" : "Edit Server Configuration")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                Text("Model Context Protocol Integration")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
+            
+            Spacer()
         }
-        .padding(.top, 10)
-        .onChange(of: formData) { _, _ in
-            if selectedTab != 1 { generateJSON() }
-        }
+        .padding()
+        .background(Color(nsColor: .windowBackgroundColor))
     }
     
-    private var localProcessSection: some View {
-        Section(header: Text("Local Process Details").font(.headline)) {
-            TextField("Command", text: $formData.command)
-                .help("The executable (e.g., 'npx', 'uvx', 'python3').")
-            
-            TextField("Arguments", text: $formData.arguments)
-                .help("Arguments separated by spaces.")
-            
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Environment Variables")
-                    Spacer()
-                    Button {
-                        formData.environmentVariables.append(KeyValueItem())
-                    } label: {
-                        Image(systemName: "plus.circle.fill")
-                    }
-                    .buttonStyle(.plain)
+    // MARK: - Subviews: Wizard Content
+    
+    private var wizardContent: some View {
+        VStack(spacing: 20) {
+            // Card 1: Identity
+            ModernSection(title: "Server Identity", icon: "tag.fill") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Server Name").font(.caption).fontWeight(.medium)
+                    TextField("e.g. 'Brave Search', 'Filesystem'...", text: $formData.serverName)
+                        .textFieldStyle(.roundedBorder)
                 }
                 
-                ForEach($formData.environmentVariables) { $item in
-                    HStack {
-                        TextField("Key", text: $item.key)
-                        TextField("Value", text: $item.value)
-                        Button {
-                            formData.environmentVariables.removeAll { $0.id == item.id }
-                        } label: {
-                            Image(systemName: "minus.circle")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Transport Type").font(.caption).fontWeight(.medium)
+                    Picker("", selection: $formData.connectionType) {
+                        ForEach(ConnectionType.allCases) { type in
+                            Label(type.rawValue, systemImage: type.icon).tag(type)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundColor(.red)
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            
+            // Card 2: Connection Details
+            if formData.connectionType == .localProcess {
+                ModernSection(title: "Local Process", icon: "terminal.fill") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Executable Command").font(.caption).fontWeight(.medium)
+                        HStack {
+                            TextField("e.g. 'npx', 'uvx', 'python3'...", text: $formData.command)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        Text("The command must be in your system PATH or an absolute path.")
+                            .font(.caption2).foregroundColor(.secondary)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Arguments").font(.caption).fontWeight(.medium)
+                        TextField("-y @modelcontextprotocol/server-filesystem /Users/...", text: $formData.arguments)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                
+                // Card 3: Environment Variables
+                ModernSection(title: "Environment Variables", icon: "list.bullet.rectangle.portrait.fill") {
+                    VStack(spacing: 8) {
+                        ForEach($formData.environmentVariables) { $item in
+                            HStack {
+                                TextField("KEY", text: $item.key)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 150)
+                                
+                                Text("=")
+                                    .foregroundColor(.secondary)
+                                
+                                TextField("VALUE", text: $item.value)
+                                    .textFieldStyle(.roundedBorder)
+                                
+                                Button {
+                                    formData.environmentVariables.removeAll { $0.id == item.id }
+                                } label: {
+                                    Image(systemName: "trash.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        
+                        Button {
+                            formData.environmentVariables.append(KeyValueItem())
+                        } label: {
+                            Label("Add Variable", systemImage: "plus")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .padding(.top, 4)
+                    }
+                }
+                
+            } else {
+                ModernSection(title: "Remote Connection", icon: "network") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Server URL").font(.caption).fontWeight(.medium)
+                        TextField("sse://... or http://...", text: $formData.url)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Auth Token (Optional)").font(.caption).fontWeight(.medium)
+                        SecureField("Bearer token...", text: $formData.authenticationToken)
+                            .textFieldStyle(.roundedBorder)
                     }
                 }
             }
-            .padding(.top, 5)
+        }
+        .onChange(of: formData) { _, _ in
+            generateJSON()
         }
     }
     
-    private var remoteURLSection: some View {
-        Section(header: Text("Remote Server Details").font(.headline)) {
-            TextField("Server URL", text: $formData.url)
-                .help("ws:// or http:// URL")
-            SecureField("Authentication Token", text: $formData.authenticationToken)
-        }
-    }
+    // MARK: - Subviews: JSON Editor
     
-    private var jsonEditorView: some View {
-        VStack(alignment: .leading) {
+    private var jsonEditorContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
             Text("Configuration JSON")
                 .font(.headline)
             TextEditor(text: $configInput)
                 .font(.system(.body, design: .monospaced))
-                .padding(5)
-                .background(Color(NSColor.textBackgroundColor))
+                .padding(8)
+                .background(Color(nsColor: .textBackgroundColor))
                 .cornerRadius(8)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(isJSONValid ? Color.gray.opacity(0.5) : Color.red, lineWidth: 1)
+                        .stroke(isJSONValid ? Color.secondary.opacity(0.2) : Color.red, lineWidth: 1)
                 )
+                .frame(minHeight: 300)
                 .onChange(of: configInput) { _, _ in
                     parseJSONAndUpdateForm()
                 }
+            
+            if !isJSONValid {
+                Text("Invalid JSON syntax")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
         }
-        .padding(.vertical)
     }
     
+    // MARK: - Subviews: Status & Controls
+    
+    @ViewBuilder
     private var statusSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Status")
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Diagnostics", systemImage: "stethoscope")
                 .font(.headline)
+                .foregroundColor(.secondary)
             
             if isConnecting {
-                HStack {
+                HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
-                    Text("Testing connection via Login Shell...")
-                        .foregroundColor(.secondary)
+                    Text("Attempting handshake with server...")
+                        .foregroundColor(.primary)
                 }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(8)
                 
             } else if let error = activeError {
-                // NEW: Rich Error Troubleshooting View
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "xmark.octagon.fill")
-                            .foregroundColor(.red)
-                            .font(.title3)
-                        Text(error.title)
-                            .fontWeight(.bold)
-                            .foregroundColor(.red)
-                    }
+                // Error Card
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.title2)
+                        .foregroundColor(.orange)
                     
-                    Text(error.message)
-                        .font(.body)
-                    
-                    HStack(alignment: .top) {
-                        Image(systemName: "lightbulb.fill")
-                            .foregroundColor(.orange)
-                        Text(error.suggestion)
-                            .font(.callout)
-                            .foregroundColor(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(8)
-                    .background(Color.orange.opacity(0.1))
-                    .cornerRadius(8)
-                    
-                    if let raw = error.rawLog {
-                        DisclosureGroup("Show Raw Logs") {
-                            ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(error.title).fontWeight(.bold)
+                        Text(error.message).font(.body)
+                        
+                        Divider().padding(.vertical, 4)
+                        
+                        HStack(alignment: .top) {
+                            Text("Fix:").fontWeight(.medium)
+                            Text(error.suggestion)
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        
+                        if let raw = error.rawLog {
+                            DisclosureGroup("Show Raw Log") {
                                 Text(raw)
-                                    .font(.caption.monospaced())
-                                    .padding(5)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .font(.caption2.monospaced())
+                                    .padding(8)
+                                    .background(Color.black.opacity(0.8))
+                                    .foregroundColor(.green)
+                                    .cornerRadius(4)
                             }
-                            .frame(height: 60)
-                            .background(Color(NSColor.textBackgroundColor))
-                            .cornerRadius(4)
+                            .font(.caption)
+                            .padding(.top, 4)
                         }
                     }
                 }
                 .padding()
-                .background(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+                .background(Color.orange.opacity(0.05))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.3)))
+                .cornerRadius(12)
                 
             } else if let tools = discoveredTools {
-                Text("✅ Connected! Found \(tools.count) tools.")
-                    .foregroundColor(.green)
-                
-                List(tools, id: \.name) { tool in
-                    VStack(alignment: .leading) {
-                        Text(tool.name).fontWeight(.semibold)
-                        Text(tool.description).font(.caption).foregroundColor(.secondary)
+                // Success Card
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.title2)
+                        Text("Connection Successful")
+                            .fontWeight(.bold)
+                            .foregroundColor(.green)
+                        Spacer()
+                        Text("\(tools.count) tools found")
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.1))
+                            .cornerRadius(12)
+                    }
+                    
+                    Divider()
+                    
+                    Text("Available Capabilities:")
+                        .font(.caption).fontWeight(.medium).foregroundColor(.secondary)
+                    
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 8) {
+                        ForEach(tools.prefix(6), id: \.name) { tool in
+                            Text(tool.name)
+                                .font(.caption2)
+                                .padding(6)
+                                .frame(maxWidth: .infinity)
+                                .background(Color(nsColor: .controlBackgroundColor))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.1)))
+                        }
+                        if tools.count > 6 {
+                            Text("+ \(tools.count - 6) more...")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
-                .listStyle(.bordered(alternatesRowBackgrounds: true))
+                .padding()
+                .background(Color.green.opacity(0.05))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.3)))
+                .cornerRadius(12)
+                
             } else {
-                Text("Ready to connect.")
+                // Idle State
+                Text("Configure settings above and click 'Test Connection' to verify.")
+                    .font(.caption)
                     .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.1), style: StrokeStyle(lineWidth: 1, dash: [4])))
             }
         }
     }
     
     private var bottomControls: some View {
         HStack {
-            Button("Cancel") {
-                dismiss()
-            }
-            .keyboardShortcut(.cancelAction)
+            Button("Cancel") { dismiss() }
+                .keyboardShortcut(.cancelAction)
             
             Spacer()
             
             if discoveredTools != nil {
-                // MODIFIED: Dynamic Button Label
                 Button(existingSource == nil ? "Add to Library" : "Save Changes") {
                     saveAndDismiss()
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             } else {
-                Button("Test Connection") {
+                Button {
                     testConnection()
+                } label: {
+                    HStack {
+                        Image(systemName: "play.fill")
+                        Text("Test Connection")
+                    }
                 }
                 .disabled(isConnecting || formData.serverName.isEmpty)
                 .keyboardShortcut(.return)
@@ -299,14 +432,11 @@ struct AddMCPServerView: View {
         }
     }
     
-    // MARK: - Logic
+    // MARK: - Logic Implementation
     
-    // NEW: Setup Logic for Edit Mode
     private func setupView() {
         if let source = existingSource, let def = source.serverDefinition {
-            // Populate form from existing definition
             formData.serverName = source.serverName
-            
             if let cmd = def.command {
                 formData.connectionType = .localProcess
                 formData.command = cmd
@@ -317,22 +447,18 @@ struct AddMCPServerView: View {
                 formData.url = url
                 formData.authenticationToken = def.authentication?["token"] ?? ""
             }
-            
-            // Generate initial JSON from the populated form
             generateJSON()
         } else {
-            // Default setup for Add Mode
             generateJSON()
         }
     }
     
     private func testConnection() {
         guard let config = buildServerDefinition() else {
-            // Manually create a simple config error
             activeError = MCPUserError(
                 title: "Invalid Configuration",
                 message: "The server definition is incomplete.",
-                suggestion: "Please check that all required fields (Command/URL) are filled out.",
+                suggestion: "Please check that all required fields are filled out.",
                 rawLog: nil
             )
             return
@@ -346,7 +472,6 @@ struct AddMCPServerView: View {
         Task {
             do {
                 let result = try await MCPClientService.shared.connect(sourceId: tempSourceId, config: config)
-                
                 await MainActor.run {
                     self.discoveredTools = result.tools
                     self.verifiedConfig = config
@@ -354,7 +479,6 @@ struct AddMCPServerView: View {
                 }
             } catch {
                 await MainActor.run {
-                    // Analyze the error to produce user-friendly output
                     self.activeError = MCPErrorAnalyzer.analyze(error: error)
                     self.isConnecting = false
                 }
@@ -364,15 +488,11 @@ struct AddMCPServerView: View {
     
     private func saveAndDismiss() {
         guard let config = verifiedConfig, let tools = discoveredTools else { return }
-        
-        // MODIFIED: Handle both Edit and Add scenarios
         if let existing = existingSource, let onToolUpdated = onToolUpdated {
-            // Update Mode
             onToolUpdated(existing.id, formData.serverName, config, tools)
             Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }
             dismiss()
         } else if let onToolAdded = onToolAdded {
-            // Add Mode
             let success = onToolAdded(formData.serverName, config, tools)
             if success {
                 Task { await MCPClientService.shared.disconnect(sourceId: tempSourceId) }
@@ -383,15 +503,11 @@ struct AddMCPServerView: View {
         }
     }
     
-    // MARK: - JSON Sync Logic
-    
     private func buildServerDefinition() -> ServerDefinition? {
         if formData.connectionType == .localProcess {
             let args = formData.arguments.split(whereSeparator: \.isWhitespace).map(String.init)
             let env = Dictionary(
-                uniqueKeysWithValues: formData.environmentVariables
-                    .filter { !$0.key.isEmpty }
-                    .map { ($0.key, $0.value) }
+                uniqueKeysWithValues: formData.environmentVariables.filter { !$0.key.isEmpty }.map { ($0.key, $0.value) }
             )
             return ServerDefinition(command: formData.command, args: args, env: env)
         } else {
@@ -403,9 +519,7 @@ struct AddMCPServerView: View {
     private func generateJSON() {
         let serverKey = formData.serverName.isEmpty ? "new-server" : formData.serverName
         guard let def = buildServerDefinition() else { return }
-        
         let config = MCPConfiguration(mcpServers: [serverKey: def])
-        
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
         if let data = try? encoder.encode(config) {
@@ -416,14 +530,11 @@ struct AddMCPServerView: View {
     
     private func parseJSONAndUpdateForm() {
         guard let data = configInput.data(using: .utf8) else { isJSONValid = false; return }
-        
         do {
             let config = try JSONDecoder().decode(MCPConfiguration.self, from: data)
             guard let (name, def) = config.mcpServers.first else { return }
-            
             var newForm = ServerConfigFormData()
             newForm.serverName = name
-            
             if let cmd = def.command {
                 newForm.connectionType = .localProcess
                 newForm.command = cmd
@@ -434,11 +545,43 @@ struct AddMCPServerView: View {
                 newForm.url = url
                 newForm.authenticationToken = def.authentication?["token"] ?? ""
             }
-            
             self.formData = newForm
             isJSONValid = true
         } catch {
             isJSONValid = false
+        }
+    }
+}
+
+// MARK: - Reusable Card Component
+fileprivate struct ModernSection<Content: View>: View {
+    let title: String
+    let icon: String
+    let content: Content
+    
+    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.icon = icon
+        self.content = content()
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+                .foregroundColor(.primary)
+                .padding(.horizontal, 4)
+            
+            VStack(alignment: .leading, spacing: 16) {
+                content
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+            )
         }
     }
 }

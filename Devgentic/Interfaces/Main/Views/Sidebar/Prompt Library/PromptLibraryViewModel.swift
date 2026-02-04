@@ -18,14 +18,14 @@ class PromptLibraryViewModel: ObservableObject {
 
     // MARK: - Published State Properties for UI
     @Published var searchText: String = ""
-    @Published var filteredPrompts: [Prompt] = []
-    @Published var selectedPrompt: Prompt? = nil
+    @Published var filteredPrompts: [DevPrompt] = []
+    @Published var selectedPrompt: DevPrompt? = nil
     @Published var showingCreateOrEditPromptSheet: Bool = false
     
     @Published var selectedCategory: String = "All"
     
     // Properties for the create/edit sheet
-    @Published var promptToEdit: Prompt?
+    @Published var promptToEdit: DevPrompt?
     @Published var editablePromptTitle: String = ""
     @Published var editablePromptText: String = ""
     @Published var editablePromptCategory: String = "General"
@@ -63,7 +63,7 @@ class PromptLibraryViewModel: ObservableObject {
         logger.trace("Fetched \(allPrompts.count) total prompts from store.")
 
         // 1. Apply the category filter using the 'category' parameter.
-        let categoryFiltered: [Prompt]
+        let categoryFiltered: [DevPrompt]
         if category == "All" {
             categoryFiltered = allPrompts
             logger.trace("Category is 'All', skipping category filter.")
@@ -74,7 +74,7 @@ class PromptLibraryViewModel: ObservableObject {
         }
 
         // 2. Then, apply the search text filter on the result of the category filter.
-        let searchFiltered: [Prompt]
+        let searchFiltered: [DevPrompt]
         if searchText.isEmpty {
             searchFiltered = categoryFiltered
             logger.trace("Search text is empty, skipping search filter.")
@@ -97,7 +97,7 @@ class PromptLibraryViewModel: ObservableObject {
 
 
     // MARK: - Prompt Selection
-    func selectPrompt(_ prompt: Prompt?) {
+    func selectPrompt(_ prompt: DevPrompt?) {
         selectedPrompt = prompt
         if let prompt {
             logger.debug("Selected prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
@@ -118,7 +118,7 @@ class PromptLibraryViewModel: ObservableObject {
         logger.info("Preparing to create a new prompt.")
     }
 
-    func prepareToEditPrompt(_ prompt: Prompt) {
+    func prepareToEditPrompt(_ prompt: DevPrompt) {
         promptToEdit = prompt
         editablePromptTitle = prompt.title
         editablePromptText = prompt.text
@@ -150,7 +150,7 @@ class PromptLibraryViewModel: ObservableObject {
         } else {
             // Log details before creating
             logger.info("Creating a new prompt with title: '\(self.editablePromptTitle)'")
-            let newPrompt = Prompt(
+            let newPrompt = DevPrompt(
                 title: editablePromptTitle,
                 text: editablePromptText,
                 category: editablePromptCategory,
@@ -169,7 +169,7 @@ class PromptLibraryViewModel: ObservableObject {
         editablePromptTagsString = ""
     }
     
-    func deletePrompt(_ prompt: Prompt) {
+    func deletePrompt(_ prompt: DevPrompt) {
         logger.info("Attempting to delete prompt: '\(prompt.title)' (ID: \(prompt.id.uuidString))")
         promptService.deletePrompt(withId: prompt.id)
         
@@ -183,7 +183,7 @@ class PromptLibraryViewModel: ObservableObject {
 
     // MARK: - Prompt Usage
     
-    func updatePromptUsage(prompt: Prompt) {
+    func updatePromptUsage(prompt: DevPrompt) {
         var mutablePrompt = prompt
         mutablePrompt.lastUsedAt = Date()
         promptService.updatePrompt(mutablePrompt)

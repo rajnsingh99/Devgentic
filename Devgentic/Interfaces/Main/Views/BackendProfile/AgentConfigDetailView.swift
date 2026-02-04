@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 05/09/25.
 //  Updated on 28/01/26 to support Agent Architecture selection.
+//  Updated on 04/02/26 for Modern Dashboard UI.
 //
 
 import SwiftUI
@@ -18,47 +19,34 @@ struct AgentConfigDetailView: View {
         profile != initialProfileState
     }
     
-    // Local state for editing advanced configurations. This prevents the UI from reverting.
+    // Local state for editing advanced configurations
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
     
-    // A single state variable to present the unified tool library.
+    // Tool Library Sheet
     @State private var showingToolLibrary = false
     
     // MARK: - Computed Bindings
     
-    /// Creates a binding to the `ProviderConfig` inside the `profile.details` enum.
-    /// This is essential for allowing the form to modify the nested configuration.
     private var providerConfig: Binding<ProviderConfig> {
         Binding<ProviderConfig>(
             get: {
                 switch profile.details {
-                case .bot(let llmConfig):
-                    // This case should not happen if the view is used correctly for Agents.
-                    return llmConfig
-                case .agent(let llmConfig, _, _, _, _, _):
-                    return llmConfig
-                case .workflow:
-                    // This case should not happen.
-                    return ProviderConfig(apiProvider: .ollama, modelName: "")
+                case .bot(let llmConfig): return llmConfig
+                case .agent(let llmConfig, _, _, _, _, _): return llmConfig
+                case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
             },
             set: { newConfig in
-                switch profile.details {
-                case .bot:
-                    // This case should not happen.
-                    break
-                case .agent(_, let architecture, let tools, let description, let instructions, let knowledgeSources): // Preserve existing agent data
+                if case .agent(_, let arch, let tools, let desc, let instr, let sources) = profile.details {
                     profile.details = .agent(
                         llmConfig: newConfig,
-                        architecture: architecture,
+                        architecture: arch,
                         tools: tools,
-                        description: description,
-                        instructions: instructions,
-                        knowledgeSources: knowledgeSources
+                        description: desc,
+                        instructions: instr,
+                        knowledgeSources: sources
                     )
-                case .workflow:
-                    break
                 }
             }
         )
@@ -67,20 +55,18 @@ struct AgentConfigDetailView: View {
     private var architectureBinding: Binding<AgentArchitecture> {
         Binding<AgentArchitecture>(
             get: {
-                if case .agent(_, let architecture, _, _, _, _) = profile.details {
-                    return architecture
-                }
-                return .reAct // Default
+                if case .agent(_, let architecture, _, _, _, _) = profile.details { return architecture }
+                return .reAct
             },
             set: { newValue in
-                if case .agent(let llmConfig, _, let tools, let description, let instructions, let knowledgeSources) = profile.details {
+                if case .agent(let config, _, let tools, let desc, let instr, let sources) = profile.details {
                     profile.details = .agent(
-                        llmConfig: llmConfig,
+                        llmConfig: config,
                         architecture: newValue,
                         tools: tools,
-                        description: description,
-                        instructions: instructions,
-                        knowledgeSources: knowledgeSources
+                        description: desc,
+                        instructions: instr,
+                        knowledgeSources: sources
                     )
                 }
             }
@@ -90,22 +76,15 @@ struct AgentConfigDetailView: View {
     private var descriptionBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .agent(_, _, _, let description, _, _) = profile.details {
-                    return description ?? ""
-                }
+                if case .agent(_, _, _, let description, _, _) = profile.details { return description ?? "" }
                 return ""
             },
             set: { newValue in
-                // Enforce a 250-character limit
-                let truncatedValue = String(newValue.prefix(250))
-                if case .agent(let llmConfig, let architecture, let tools, _, let instructions, let knowledgeSources) = profile.details {
+                let val = String(newValue.prefix(250))
+                if case .agent(let c, let a, let t, _, let i, let k) = profile.details {
                     profile.details = .agent(
-                        llmConfig: llmConfig,
-                        architecture: architecture,
-                        tools: tools,
-                        description: truncatedValue.isEmpty ? nil : truncatedValue,
-                        instructions: instructions,
-                        knowledgeSources: knowledgeSources
+                        llmConfig: c, architecture: a, tools: t,
+                        description: val.isEmpty ? nil : val, instructions: i, knowledgeSources: k
                     )
                 }
             }
@@ -115,22 +94,15 @@ struct AgentConfigDetailView: View {
     private var instructionsBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .agent(_, _, _, _, let instructions, _) = profile.details {
-                    return instructions ?? ""
-                }
+                if case .agent(_, _, _, _, let instructions, _) = profile.details { return instructions ?? "" }
                 return ""
             },
             set: { newValue in
-                // Enforce a 5000-character limit
-                let truncatedValue = String(newValue.prefix(5000))
-                if case .agent(let llmConfig, let architecture, let tools, let description, _, let knowledgeSources) = profile.details {
+                let val = String(newValue.prefix(5000))
+                if case .agent(let c, let a, let t, let d, _, let k) = profile.details {
                     profile.details = .agent(
-                        llmConfig: llmConfig,
-                        architecture: architecture,
-                        tools: tools,
-                        description: description,
-                        instructions: truncatedValue.isEmpty ? nil : truncatedValue,
-                        knowledgeSources: knowledgeSources
+                        llmConfig: c, architecture: a, tools: t,
+                        description: d, instructions: val.isEmpty ? nil : val, knowledgeSources: k
                     )
                 }
             }
@@ -140,44 +112,31 @@ struct AgentConfigDetailView: View {
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
         Binding<[KnowledgeSource]>(
             get: {
-                if case .agent(_, _, _, _, _, let sources) = profile.details {
-                    return sources ?? []
-                }
+                if case .agent(_, _, _, _, _, let sources) = profile.details { return sources ?? [] }
                 return []
             },
             set: { newValue in
-                 if case .agent(let llmConfig, let architecture, let tools, let description, let instructions, _) = profile.details {
+                 if case .agent(let c, let a, let t, let d, let i, _) = profile.details {
                     profile.details = .agent(
-                        llmConfig: llmConfig,
-                        architecture: architecture,
-                        tools: tools,
-                        description: description,
-                        instructions: instructions,
-                        knowledgeSources: newValue.isEmpty ? nil : newValue
+                        llmConfig: c, architecture: a, tools: t,
+                        description: d, instructions: i, knowledgeSources: newValue.isEmpty ? nil : newValue
                     )
                 }
             }
         )
     }
     
-    /// Creates a binding to the `tools` array within the `profile.details` enum.
     private var toolsBinding: Binding<[Tool]> {
         Binding<[Tool]>(
             get: {
-                if case .agent(_, _, let tools, _, _, _) = profile.details {
-                    return tools
-                }
-                return [] // Should not happen if view is used correctly
+                if case .agent(_, _, let tools, _, _, _) = profile.details { return tools }
+                return []
             },
             set: { newTools in
-                if case .agent(let llmConfig, let architecture, _, let description, let instructions, let knowledgeSources) = profile.details {
+                if case .agent(let c, let a, _, let d, let i, let k) = profile.details {
                     profile.details = .agent(
-                        llmConfig: llmConfig,
-                        architecture: architecture,
-                        tools: newTools,
-                        description: description,
-                        instructions: instructions,
-                        knowledgeSources: knowledgeSources
+                        llmConfig: c, architecture: a, tools: newTools,
+                        description: d, instructions: i, knowledgeSources: k
                     )
                 }
             }
@@ -187,154 +146,364 @@ struct AgentConfigDetailView: View {
 
     // MARK: - Body
     var body: some View {
-        VStack(spacing: 0) {
-            Form {
-                Section(header: Text("General").font(.headline)) {
-                    TextField("Display Name", text: $profile.displayName)
+        ScrollView {
+            VStack(spacing: 24) {
+                
+                // 1. Identity Header
+                HStack(alignment: .center, spacing: 16) {
+                    Image(systemName: "person.crop.square.fill.and.at.rectangle")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
+                        .foregroundColor(.accentColor)
+                        
+                    VStack(alignment: .leading) {
+                        TextField("Agent Name", text: $profile.displayName)
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .textFieldStyle(.plain)
+                        
+                        Text("Define your agent's personality, logic, and tools.")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                
+                // 2. Cognitive Architecture (The Brain)
+                ModernSection(title: "Cognitive Architecture", icon: "brain.head.profile") {
+                    // Strategy Picker
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("Reasoning Strategy")
+                                .fontWeight(.medium)
+                            Text(architectureBinding.wrappedValue.description)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Picker("", selection: architectureBinding) {
+                            ForEach(AgentArchitecture.allCases) { arch in
+                                Text(arch.rawValue).tag(arch)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(width: 180)
+                    }
+                    
+                    Divider()
+                    
+                    // Instructions Editor
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("System Instructions", systemImage: "text.quote")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundColor(.secondary)
+                        
+                        TextEditor(text: instructionsBinding)
+                            .font(.body.monospaced())
+                            .frame(minHeight: 120)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                    }
+                    
+                    // Description
+                     VStack(alignment: .leading, spacing: 8) {
+                        Label("Internal Description", systemImage: "info.circle")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundColor(.secondary)
+                        
+                        TextField("Brief description of this agent's purpose...", text: descriptionBinding)
+                            .textFieldStyle(.roundedBorder)
+                    }
                 }
                 
-                Section(header: Text("Agent Details").font(.headline)) {
-                    // Agent Architecture Picker
-                    Picker("Architecture", selection: architectureBinding) {
-                        ForEach(AgentArchitecture.allCases) { arch in
-                            Text(arch.rawValue).tag(arch)
+                // 3. Inference Engine (Provider)
+                ModernSection(title: "Inference Engine", icon: "cpu") {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("LLM Provider")
+                                .fontWeight(.medium)
+                            Text("The underlying model powering this agent.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        providerPicker
+                            .labelsHidden()
+                            .frame(width: 200)
+                    }
+                    
+                    Divider()
+                    
+                    // Dynamic Fields
+                    VStack(alignment: .leading, spacing: 12) {
+                        switch providerConfig.wrappedValue.apiProvider {
+                        case .ollama:
+                            ollamaFields
+                        case .mlx:
+                            Text("Model Selection")
+                                .fontWeight(.medium)
+                                .font(.subheadline)
+                            MLXModelPickerView(selectedModel: providerConfig.modelName)
+                        default:
+                            remoteFields
                         }
                     }
-                    Text(architectureBinding.wrappedValue.description)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Description")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        TextEditor(text: descriptionBinding)
-                            .frame(minHeight: 60, maxHeight: 250)
-                            .padding(4)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Instructions")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        TextEditor(text: instructionsBinding)
-                            .frame(minHeight: 100, maxHeight: 400)
-                            .padding(4)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
-                    }
-                }
-
-                Section(header: Text("Provider Configuration").font(.headline)) {
-                    providerPicker
-                    
-                    if providerConfig.wrappedValue.apiProvider == .ollama {
-                        ollamaFields
-                    } else {
-                        remoteFields
-                    }
                 }
                 
-                // The advanced settings are now displayed inline.
-                advancedSettingsView
-                
-                // UNIFIED TOOL MANAGEMENT SECTION
-                Section {
-                     HStack {
-                         Text("Enabled Tools")
-                         Spacer()
-                         let enabledToolsCount = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
-                         Text("\(enabledToolsCount) enabled")
-                             .foregroundColor(.secondary)
-                     }
-                     
-                     HStack {
-                         Spacer()
-                         Button("Manage Tools...") {
-                             showingToolLibrary = true
-                         }
-                         Spacer()
-                     }
-                } header: {
+                // 4. Capabilities (Tools & Knowledge)
+                ModernSection(title: "Capabilities", icon: "hammer.fill") {
+                    // Tools Header
                     HStack {
-                        Text("Tools")
-                        Image(systemName: "wrench.and.screwdriver.fill")
+                        VStack(alignment: .leading) {
+                            Text("Tools")
+                                .fontWeight(.medium)
+                            let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
+                            Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Manage Library...") {
+                            showingToolLibrary = true
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
-                    .font(.headline)
-                    .foregroundColor(.primary)
+                    
+                    // Tool Chips
+                    if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack {
+                                ForEach(toolsBinding.wrappedValue.filter { $0.isEnabled }) { tool in
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "wrench.fill")
+                                            .font(.caption2)
+                                        Text(tool.name)
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                    }
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 10)
+                                    .background(Color.blue.opacity(0.1))
+                                    .foregroundColor(.blue)
+                                    .cornerRadius(8)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2), lineWidth: 1))
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    } else {
+                        Text("Enable tools to give your agent agency.")
+                            .font(.caption)
+                            .italic()
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Divider()
+                    
+                    // Knowledge Header
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text("Knowledge Base")
+                                .fontWeight(.medium)
+                            Text("RAG sources for context awareness")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Menu {
+                            Button("Add File") { /* Not implemented */ }
+                            Button("Add URL") { /* Not implemented */ }
+                        } label: {
+                            Label("Add Source", systemImage: "plus")
+                        }
+                        .fixedSize()
+                        .menuStyle(.borderedButton)
+                    }
+                    
+                    // Knowledge List
+                    if !knowledgeSourcesBinding.wrappedValue.isEmpty {
+                        VStack(spacing: 8) {
+                            ForEach(knowledgeSourcesBinding.wrappedValue) { source in
+                                HStack {
+                                    Image(systemName: source.type == .file ? "doc.text.fill" : "link")
+                                        .foregroundColor(source.type == .file ? .orange : .blue)
+                                    Text(source.location)
+                                        .font(.callout)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Spacer()
+                                    Button {
+                                        knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.secondary.opacity(0.7))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(10)
+                                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                                .cornerRadius(8)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                            }
+                        }
+                    } else {
+                         Text("No documents or URLs added.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .italic()
+                    }
                 }
-
-                 Section(header: Text("Knowledge Sources").font(.headline)) {
-                     ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                         HStack {
-                             Image(systemName: source.type == .file ? "doc.text.fill" : "link")
-                             Text(source.location)
-                                 .lineLimit(1)
-                                 .truncationMode(.middle)
-                             Spacer()
-                             Button(role: .destructive) {
-                                 knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
-                             } label: {
-                                 Image(systemName: "xmark.circle.fill")
-                             }
-                             .buttonStyle(.plain)
-                             .foregroundColor(.gray)
-                         }
-                     }
-                     .onDelete { offsets in
-                         knowledgeSourcesBinding.wrappedValue.remove(atOffsets: offsets)
-                     }
-                     
-                     HStack {
-                         Spacer()
-                         Button("Add File...") { /* Not implemented */ }
-                         Button("Add URL...") { /* Not implemented */ }
-                         Spacer()
-                     }
-                     .padding(.vertical, 4)
-                 }
+                
+                // 5. Advanced Configuration
+                ModernSection(title: "Advanced Configuration", icon: "gearshape.2.fill") {
+                   advancedSettingsView
+                }
             }
-            .formStyle(.grouped)
-            
-            Spacer()
-            
-            actionButtons
-                .padding()
+            .padding()
+            .padding(.bottom, 80) // Space for action bar
         }
+        .background(Color(nsColor: .windowBackgroundColor)) // Main background
         .sheet(isPresented: $showingToolLibrary) {
             ToolLibraryView(configuredTools: toolsBinding)
         }
+        .safeAreaInset(edge: .bottom) {
+            actionButtons
+                .padding()
+                .background(.regularMaterial)
+                .overlay(Rectangle().frame(height: 1).foregroundColor(Color.secondary.opacity(0.1)), alignment: .top)
+        }
         .onAppear {
-            // Store the initial state and load advanced settings when the view appears
             initialProfileState = profile
             loadAdvancedConfigs()
         }
         .onChange(of: profile.id) {
-            // Update the state if the selected profile changes
             initialProfileState = profile
             loadAdvancedConfigs()
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) {
-             // When the provider is switched, reload the default config for the new provider
             loadAdvancedConfigs()
         }
         .onChange(of: localOllamaConfig) {
-            // When local state changes, write it back to the main profile model
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
             }
         }
         .onChange(of: localGeminiConfig) {
-            // When local state changes, write it back to the main profile model
             if providerConfig.wrappedValue.apiProvider == .google {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }
         }
     }
     
-    // MARK: - Helper Methods
+    // MARK: - Subviews & Helpers
     
-    /// Decodes the generic dictionary from the profile model into the specific local state variables.
+    private var actionButtons: some View {
+        HStack {
+            Button(role: .destructive) {
+                profileService.deleteProfile(withId: profile.id)
+            } label: {
+                Label("Delete Agent", systemImage: "trash")
+            }
+            .buttonStyle(.borderless)
+            .foregroundColor(.red)
+            
+            Spacer()
+            
+            if hasChanges {
+                HStack(spacing: 12) {
+                    Button("Revert") {
+                        if let initialState = initialProfileState {
+                            profile = initialState
+                            loadAdvancedConfigs()
+                        }
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    
+                    Button("Save Changes") {
+                        profileService.saveProfile(profile)
+                        initialProfileState = profile
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            } else {
+                Text("All changes saved")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+    
+    private var providerPicker: some View {
+        Picker("Provider", selection: providerConfig.apiProvider) {
+            ForEach(ApiProvider.allCases) { provider in
+                Text(provider.rawValue).tag(provider)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var ollamaFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+
+            OllamaModelPickerView(
+                selectedModel: providerConfig.modelName,
+                baseURL: providerConfig.wrappedValue.baseURL ?? "",
+                filterForTools: true
+            )
+        }
+    }
+    
+    @ViewBuilder
+    private var remoteFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                .textFieldStyle(.roundedBorder)
+
+            if providerConfig.wrappedValue.apiProvider == .google {
+                GeminiModelPickerView(
+                    selectedModel: providerConfig.modelName,
+                    apiKey: providerConfig.wrappedValue.apiKey ?? ""
+                )
+            } else {
+                TextField("Model Name", text: providerConfig.modelName)
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var advancedSettingsView: some View {
+        switch providerConfig.wrappedValue.apiProvider {
+        case .ollama:
+            OllamaSettingsView(config: $localOllamaConfig)
+        case .google:
+            GeminiSettingsView(config: $localGeminiConfig)
+        case .openAI, .anthropic, .mlx:
+            Text("No advanced settings available for \(providerConfig.wrappedValue.apiProvider.rawValue).")
+                .foregroundColor(.secondary)
+                .italic()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+    
     private func loadAdvancedConfigs() {
         switch providerConfig.wrappedValue.apiProvider {
         case .ollama:
@@ -351,86 +520,38 @@ struct AgentConfigDetailView: View {
             break
         }
     }
-        
-    // MARK: - UI Components
-    
-    private var actionButtons: some View {
-        HStack {
-            Button("Delete", role: .destructive) {
-                profileService.deleteProfile(withId: profile.id)
-            }
-            
-            Spacer()
-            
-            if hasChanges {
-                Button("Revert") {
-                    if let initialState = initialProfileState {
-                        profile = initialState
-                        // After reverting the profile, also revert the local advanced config state
-                        loadAdvancedConfigs()
-                    }
-                }
-                Button("Save") {
-                    profileService.saveProfile(profile)
-                    // Update the initial state to the new saved state
-                    initialProfileState = profile
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-    }
-    
-    private var providerPicker: some View {
-        Picker("Provider", selection: providerConfig.apiProvider) {
-            ForEach(ApiProvider.allCases) { provider in
-                Text(provider.rawValue).tag(provider)
-            }
-        }
-    }
-    
-    private var ollamaFields: some View {
-        Group {
-            TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
-                .disableAutocorrection(true)
+}
 
-            // UPDATED: Now passing filterForTools: true to ensure only capable models are shown
-            OllamaModelPickerView(
-                selectedModel: providerConfig.modelName,
-                baseURL: providerConfig.wrappedValue.baseURL ?? "",
-                filterForTools: true
-            )
-        }
+// MARK: - Reusable Card Component
+fileprivate struct ModernSection<Content: View>: View {
+    let title: String
+    let icon: String
+    let content: Content
+    
+    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.icon = icon
+        self.content = content()
     }
     
-    @ViewBuilder
-    private var remoteFields: some View {
-        SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-
-        switch providerConfig.wrappedValue.apiProvider {
-        case .google:
-            GeminiModelPickerView(
-                selectedModel: providerConfig.modelName,
-                apiKey: providerConfig.wrappedValue.apiKey ?? ""
-            )
-        default:
-            TextField("Model Name", text: providerConfig.modelName)
-        }
-    }
-    
-    @ViewBuilder
-    private var advancedSettingsView: some View {
-        switch providerConfig.wrappedValue.apiProvider {
-        case .ollama:
-            OllamaSettingsView(config: $localOllamaConfig)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+                .foregroundColor(.primary)
+                .padding(.horizontal, 4)
             
-        case .google:
-            GeminiSettingsView(config: $localGeminiConfig)
-            
-        case .openAI, .anthropic:
-            Section(header: Text("Advanced Settings").font(.headline)) {
-                Text("Advanced settings for \(providerConfig.wrappedValue.apiProvider.rawValue) are not yet available.")
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 16) {
+                content
             }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.03), radius: 2, x: 0, y: 1)
         }
     }
 }

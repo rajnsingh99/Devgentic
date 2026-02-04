@@ -8,6 +8,9 @@
 import Foundation
 import Combine
 import os
+import OpenFoundationModels
+import OpenFoundationModelsOllama
+import OpenFoundationModelsOpenAI
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendOrchestrationService")
 
@@ -26,6 +29,11 @@ class BackendOrchestrationService: ObservableObject {
     // RAG Services
     private let embeddingService = EmbeddingService.shared
     private let vectorStoreService = VectorStoreService.shared
+    
+    // MARK: - 🧠 Active Plan Memory (State Management)
+    // Stores plans that are currently PAUSED/BLOCKED waiting for user clarification.
+    // Key: ConversationID, Value: The blocked ExecutionPlan
+    private var activePlans: [UUID: ExecutionPlan] = [:]
     
     private var cancellables = Set<AnyCancellable>()
 
@@ -52,23 +60,22 @@ class BackendOrchestrationService: ObservableObject {
         userQuery: String,
         history: [ChatMessage],
         files: [FileSystemItem],
-        context: TraceContext
+        context: TraceContext,
+        // --- NEW: Trace Callback for UI Updates ---
+        onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
+        // ------------------------------------------
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
                 // 1. Sanitize History
-                // Filter out error messages
                 var conversationHistory = history.filter { message in
                     if case .error = message.content { return false }
                     return true
                 }
                 
                 // BUG FIX: Prevent duplication of the current query.
-                // If the UI has already appended the current message to 'history', we must remove it
-                // because we are about to inject 'userQuery' as the fresh prompt/user-turn.
-                // We check if the last message is from the user and matches the current query text.
                 if let lastMsg = conversationHistory.last,
                    lastMsg.sender == .user,
                    let lastContent = lastMsg.content.textContent,
@@ -90,11 +97,9 @@ class BackendOrchestrationService: ObservableObject {
                 }
                 
                 // 3. RAG Retrieval
-                // We retrieve context *separately* from modifying the query string initially.
                 var ragContextString: String? = nil
                 
                 if config.profile.profileType == .bot || config.profile.profileType == .agent {
-                    // BUG FIX: Pass history to filter out self-referential context
                     ragContextString = await self.retrieveRAGContext(for: userQuery, conversationID: conversationID, history: conversationHistory)
                 }
                 
@@ -103,8 +108,6 @@ class BackendOrchestrationService: ObservableObject {
                     
                     case .bot:
                         // --- BOT PIPELINE (Passive Context Injection) ---
-                        // For Bots, we inject the RAG context directly into the effective query string.
-                        
                         var effectiveQuery = queryForRequest
                         if let context = ragContextString, !context.isEmpty {
                              let contextHeader = "### CONTEXT FROM KNOWLEDGE BASE ###\n"
@@ -122,20 +125,12 @@ class BackendOrchestrationService: ObservableObject {
                                 throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Ollama base URL is missing in the profile."])
                             }
                             
-                            // For Ollama (Bot Mode), we construct the history manually here.
                             var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
-                                let role: String
-                                switch message.sender {
-                                case .user: role = "user"
-                                case .agent: role = "assistant"
-                                }
+                                let role = (message.sender == .user) ? "user" : "assistant"
                                 return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
                             }
-                            // Append the augmented query (with RAG context)
                             ollamaHistory.append(OllamaChatMessage(role: "user", content: effectiveQuery))
                             
-                            logger.info("Initiating stream to Ollama (Bot Mode) with model \(llmConfig.modelName). History count: \(ollamaHistory.count).")
-
                             let stream = OllamaConnect.streamChatRequest(
                                 baseURL: baseURL,
                                 model: llmConfig.modelName,
@@ -148,13 +143,32 @@ class BackendOrchestrationService: ObservableObject {
                             continuation.finish()
 
                         case .openAI, .google, .anthropic:
-                            // Remote APIs usually handle larger contexts well.
                             let stream = self.remoteOrchestrationService.streamMessage(
                                 conversationID: conversationID,
-                                userQuery: effectiveQuery, // RAG is baked in here
+                                userQuery: effectiveQuery,
                                 history: conversationHistory,
                                 profile: config.profile,
                                 context: context
+                            )
+                            for try await token in stream {
+                                continuation.yield(token)
+                            }
+                            continuation.finish()
+                        case .mlx:
+                            guard let baseURL = llmConfig.baseURL else {
+                                throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Ollama base URL is missing in the profile."])
+                            }
+                            
+                            var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
+                                let role = (message.sender == .user) ? "user" : "assistant"
+                                return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
+                            }
+                            ollamaHistory.append(OllamaChatMessage(role: "user", content: effectiveQuery))
+                            
+                            let stream = OllamaConnect.streamChatRequest(
+                                baseURL: baseURL,
+                                model: llmConfig.modelName,
+                                history: ollamaHistory
                             )
                             
                             for try await token in stream {
@@ -164,19 +178,98 @@ class BackendOrchestrationService: ObservableObject {
                         }
 
                     case .agent:
-                        // --- AGENT PIPELINE (Active Tool Usage) ---
-                        // We route to AgentConnect, passing the tools and context separately.
-                        
+                        // --- AGENT PIPELINE (Active Tool Usage + Planning) ---
                         logger.info("Routing to AgentConnect for profile: \(config.profile.displayName).")
                         
-                        // Define a handler for Agent Thoughts/Actions
-                        let traceHandler: (AgentTraceLog) -> Void = { log in
-                            // Log the trace to the system console
-                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.rawValue)): \(log.content)")
+                        guard case .agent(let llmConfig, _, _, _, _, _) = config.profile.details else {
+                             throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid profile type for agent execution."])
+                        }
+                        
+                        // =========================================================================
+                        // A. ARCHITECT PHASE: Create or Repair Plan
+                        // =========================================================================
+                        var approvedPlan: ExecutionPlan? = nil
+                        
+                        // We must initialize a model specifically for the ManagerAgent.
+                        if let plannerModel = self.createModelInstance(from: llmConfig) {
+                            let manager = ManagerAgent(model: plannerModel)
                             
-                            // FUTURE INTEGRATION:
-                            // context.appendAgentTrace(log)
-                            // This will allow the UI to display "Thinking..." bubbles or a debug drawer.
+                            // 1. CHECK FOR BLOCKED PLAN (Repair Phase)
+                            if let blockedPlan = self.activePlans[conversationID] {
+                                // REMOVED STATIC YIELD: "🔧 **Patching Previous Plan...**\n\n"
+                                // Instead, send a status update for the UI to display in the "Thinking" header.
+                                onTraceUpdate?(AgentTraceLog(stepNumber: 0, state: .thinking, content: "Patching Previous Plan..."))
+                                
+                                logger.info("[PLANNER] Found blocked plan. Attempting to PATCH with input: '\(userQuery)'")
+                                
+                                do {
+                                    // Call the Patching API on Manager
+                                    let patchedPlan = try await manager.patchPlan(currentPlan: blockedPlan, userCorrection: userQuery)
+                                    self.logPlanPayload(patchedPlan, source: "PATCHED PLAN")
+                                    
+                                    if patchedPlan.requiresUserConfirmation {
+                                        // Still broken? Update storage and ask again.
+                                        self.activePlans[conversationID] = patchedPlan
+                                        self.handleSafetyStop(plan: patchedPlan, continuation: continuation)
+                                        return
+                                    } else {
+                                        // Fixed! Clear storage and proceed.
+                                        self.activePlans.removeValue(forKey: conversationID)
+                                        approvedPlan = patchedPlan
+                                        logger.info("[PLANNER] Plan successfully repaired.")
+                                    }
+                                } catch {
+                                    logger.error("[PLANNER] Patch failed: \(error.localizedDescription). Clearing memory and falling back to new plan.")
+                                    self.activePlans.removeValue(forKey: conversationID)
+                                }
+                            }
+                            
+                            // 2. FRESH PLANNING (If no plan exists or patch failed)
+                            if approvedPlan == nil {
+                                // REMOVED STATIC YIELD: "🧠 **Architecting Plan...**\n\n"
+                                // Instead, send status update.
+                                onTraceUpdate?(AgentTraceLog(stepNumber: 0, state: .thinking, content: "Architecting new plan..."))
+                                
+                                logger.info("[PLANNER] Creating FRESH plan for query.")
+                                
+                                do {
+                                    let newPlan = try await manager.generatePlan(
+                                        userRequest: queryForRequest,
+                                        chatHistory: conversationHistory,
+                                        conversationID: conversationID
+                                    )
+                                    self.logPlanPayload(newPlan, source: "FRESH PLAN")
+                                    
+                                    if newPlan.requiresUserConfirmation {
+                                        // Store for next turn
+                                        self.activePlans[conversationID] = newPlan
+                                        self.handleSafetyStop(plan: newPlan, continuation: continuation)
+                                        return
+                                    } else {
+                                        approvedPlan = newPlan
+                                        logger.info("[PLANNER] 🛡️ Safety Check: PASSED.")
+                                    }
+                                } catch {
+                                    logger.warning("[PLANNER] ⚠️ Planning Failed. Falling back to ReAct. Error: \(error.localizedDescription)")
+                                    // Removed static yield for failure notice to keep UI clean
+                                }
+                            }
+                        }
+                        
+                        // =========================================================================
+                        // B. EXECUTION PHASE (Only reached if Plan is Safe)
+                        // =========================================================================
+                        
+                        if approvedPlan != nil {
+                            logger.info("[ORCHESTRATOR] 🚀 Handoff: Passing Approved Plan to Executor.")
+                        } else {
+                            logger.info("[ORCHESTRATOR] ⚠️ Handoff: Starting Executor WITHOUT Plan (Generalist Mode).")
+                        }
+                        
+                        let traceHandler: (AgentTraceLog) -> Void = { log in
+                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.rawValue)): \(log.content)")
+                            // Bridge the log to the ViewModel/UI
+                            onTraceUpdate?(log)
                         }
                         
                         let stream = agentConnect.streamAgentResponse(
@@ -185,6 +278,7 @@ class BackendOrchestrationService: ObservableObject {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            approvedPlan: approvedPlan, // <--- INJECTING THE PLAN
                             onTraceUpdate: traceHandler
                         )
                         
@@ -210,6 +304,55 @@ class BackendOrchestrationService: ObservableObject {
             }
         }
     }
+    
+    // MARK: - Helper Methods
+    
+    private func logPlanPayload(_ plan: ExecutionPlan, source: String) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        if let data = try? encoder.encode(plan), let json = String(data: data, encoding: .utf8) {
+            logger.info("\n========== [PLANNER] \(source) ==========\n\(json)\n=========================================")
+        }
+    }
+    
+    private func handleSafetyStop(plan: ExecutionPlan, continuation: AsyncThrowingStream<String, Error>.Continuation) {
+        logger.notice("[PLANNER] 🛡️ Safety Check: BLOCKED.")
+        let ambiguousStep = plan.steps.first(where: { $0.isAmbiguous })
+        let question = ambiguousStep?.clarificationQuestion ?? "This plan looks risky. Do you want to proceed?"
+        
+        logger.info("[PLANNER] Asking User: \(question)")
+        continuation.yield("🛑 **Safety Stop**: \(question)\n")
+        continuation.finish()
+    }
+    
+    // MARK: - Helper: Model Factory
+    
+    /// Creates a LanguageModel instance for the Planner (ManagerAgent).
+    private func createModelInstance(from config: ProviderConfig) -> (any OpenFoundationModels.LanguageModel)? {
+        switch config.apiProvider {
+        case .ollama:
+            let baseURLString = config.baseURL ?? "http://127.0.0.1:11434"
+            guard let baseURL = URL(string: baseURLString) else { return nil }
+            // Use a shorter timeout for planning than full execution
+            let conf = OllamaConfiguration(baseURL: baseURL, timeout: 60.0)
+            return OllamaLanguageModel(configuration: conf, modelName: config.modelName)
+            
+        case .openAI:
+            guard let apiKey = config.apiKey, !apiKey.isEmpty else { return nil }
+            let baseURL = (config.baseURL != nil) ? URL(string: config.baseURL!)! : URL(string: "https://api.openai.com/v1")!
+            let conf = OpenAIConfiguration(apiKey: apiKey, baseURL: baseURL)
+            return OpenAILanguageModel(configuration: conf, model: config.modelName)
+            
+        case .google:
+            guard let apiKey = config.apiKey, !apiKey.isEmpty else { return nil }
+            let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/")!
+            let conf = OpenAIConfiguration(apiKey: apiKey, baseURL: googleBaseURL)
+            return OpenAILanguageModel(configuration: conf, model: config.modelName)
+            
+        default:
+            return nil
+        }
+    }
 
    /// Retrieves relevant RAG context without modifying the user query directly.
    /// - Parameters:
@@ -228,8 +371,6 @@ class BackendOrchestrationService: ObservableObject {
         
         // 3. Filter Chunks
         // BUG FIX: Don't include chunks that are just the user's previous messages in this same session.
-        // This prevents the "Echo Chamber" where the agent reads its own history as new "Relevant Context"
-        // and thinks it needs to re-execute previous commands.
         let filteredChunks = relevantChunks.filter { chunk in
             // Check if this chunk's content is present in the recent history
             !history.contains { message in
@@ -237,7 +378,6 @@ class BackendOrchestrationService: ObservableObject {
                 let chunkClean = chunk.content.trimmingCharacters(in: .whitespacesAndNewlines)
                 let msgClean = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 
-                // If the chunk is identical to or substantially contained within a recent message, skip it.
                 return msgClean.contains(chunkClean) || chunkClean.contains(msgClean)
             }
         }

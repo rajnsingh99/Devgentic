@@ -82,6 +82,11 @@ class RemoteOrchestrationService {
                 let error = NSError(domain: "RoutingError", code: 500, userInfo: [NSLocalizedDescriptionKey: "RemoteOrchestrationService should not be called for Ollama profiles."])
                 continuation.finish(throwing: error)
             }
+        case .mlx:
+            return AsyncThrowingStream { continuation in
+                let error = NSError(domain: "RoutingError", code: 500, userInfo: [NSLocalizedDescriptionKey: "RemoteOrchestrationService should not be called for MLX profiles."])
+                continuation.finish(throwing: error)
+            }
         }
     }
 }

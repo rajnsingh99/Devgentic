@@ -66,6 +66,34 @@ class ActiveStreamManager: ObservableObject {
         
         activeStreams[agentMessage.id] = agentMessage
         
+        // --- NEW: Trace Handler Bridge ---
+        // This closure captures the live updates from the Executor and updates the ChatMessage UI state.
+        let traceUpdateHandler: (AgentTraceLog) -> Void = { [weak agentMessage] log in
+            guard let message = agentMessage else { return }
+            
+            // Ensure UI updates happen on the Main Actor
+            Task { @MainActor in
+                // Update the state enum (e.g., .thinking, .acting)
+                message.agentState = log.state
+                
+                // Update the headline text based on the state
+                // The Executor sends the "Gemini-style" headline in log.content when state is .thinking
+                switch log.state {
+                case .thinking:
+                    message.thinkingHeadline = log.content
+                case .acting:
+                    // For acting, we might want to show what tool is running
+                    // log.content usually contains "Executing [tool]..." from the Executor
+                    message.thinkingHeadline = log.content
+                case .finalizing:
+                    message.thinkingHeadline = "Finishing up..."
+                default:
+                    break
+                }
+            }
+        }
+        // ---------------------------------
+        
         let streamTask = Task { [weak self] in
             do {
                 let stream = self?.backendOrchestrationService.streamMessage(
@@ -74,7 +102,8 @@ class ActiveStreamManager: ObservableObject {
                     userQuery: userQuery,
                     history: history,
                     files: files,
-                    context: TraceContext(profile: config.profile)
+                    context: TraceContext(profile: config.profile),
+                    onTraceUpdate: traceUpdateHandler // <--- PASS THE HANDLER HERE
                 )
                 
                 logger.info("👂 [STREAM_LISTEN] Now listening for tokens for message \(agentMessage.id.uuidString)...")
@@ -144,6 +173,8 @@ class ActiveStreamManager: ObservableObject {
     
     private func finalizeMessage(_ message: ChatMessage, conversationID: UUID, error: Error?) async {
         message.isStreaming = false
+        message.thinkingHeadline = nil // Clear the headline when done
+        message.agentState = .idle     // Reset state
         
         if let error = error {
             let errorContent = MessageContent.error(title: "Response Error", details: error.localizedDescription)
@@ -180,4 +211,3 @@ class ActiveStreamManager: ObservableObject {
         }
     }
 }
-

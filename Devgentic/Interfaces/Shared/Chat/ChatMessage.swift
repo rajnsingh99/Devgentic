@@ -8,7 +8,6 @@
 import Foundation
 import Combine
 
-
 enum GenerationType: String, Codable, CaseIterable, Identifiable {
     case text
     case imageData
@@ -39,6 +38,11 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     @Published var content: MessageContent
     @Published var agentResponse: AgentResponse?
     @Published var isStreaming: Bool = false
+    
+    // MARK: - New Transient UI State (Phase 4)
+    // These properties drive the "Gemini-style" status updates but are NOT persisted.
+    @Published var thinkingHeadline: String? = nil
+    @Published var agentState: AgentStep = .idle
     
     var attachedTextFiles: [AttachedTextFile]?
     var attachedImageFiles: [AttachedImageFile]?
@@ -76,10 +80,13 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id &&
-        lhs.content == rhs.content &&
-        lhs.isStreaming == rhs.isStreaming &&
-        lhs.agentResponse == rhs.agentResponse
+        return lhs.id == rhs.id &&
+               lhs.content == rhs.content &&
+               lhs.isStreaming == rhs.isStreaming &&
+               lhs.agentResponse == rhs.agentResponse &&
+               // Include transient state in equality check so Views update when headline changes
+               lhs.thinkingHeadline == rhs.thinkingHeadline &&
+               lhs.agentState == rhs.agentState
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {
@@ -88,6 +95,8 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
+        // NOTE: 'thinkingHeadline' and 'agentState' are intentionally excluded
+        // so they are not saved to Core Data / JSON.
     }
 
     // Manual Decodable conformance
@@ -103,6 +112,10 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.isStreaming = try container.decode(Bool.self, forKey: .isStreaming)
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
+        
+        // Transient properties initialize to default
+        self.thinkingHeadline = nil
+        self.agentState = .idle
     }
     
     func encode(to encoder: Encoder) throws {
@@ -119,7 +132,6 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
     }
 }
-
 
 struct AttachedTextFile: Codable, Equatable, Identifiable {
     var id = UUID()

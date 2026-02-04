@@ -113,7 +113,7 @@ struct PromptLibrarySidebarView: View {
 
 /// A card view for displaying a single prompt in the list.
 struct PromptCardView: View {
-    let prompt: Prompt
+    let prompt: DevPrompt
     @EnvironmentObject var viewModel: PromptLibraryViewModel
     
     @State private var isHovering: Bool = false
@@ -213,7 +213,7 @@ struct PromptLibrarySidebarView_Previews: PreviewProvider {
             .frame(width: 350, height: 700)
             .onAppear {
                 if PromptService.shared.prompts.isEmpty {
-                    Prompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
+                    DevPrompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
                 }
             }
             .previewDisplayName("Prompt Library Sidebar")

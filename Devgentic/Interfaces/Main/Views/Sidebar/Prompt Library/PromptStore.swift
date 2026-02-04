@@ -10,9 +10,9 @@ import CoreData
 import os
 
 protocol PromptStoreProtocol {
-    func fetchPrompts() -> [Prompt]
-    func addPrompt(from model: Prompt)
-    func updatePrompt(from model: Prompt)
+    func fetchPrompts() -> [DevPrompt]
+    func addPrompt(from model: DevPrompt)
+    func updatePrompt(from model: DevPrompt)
     func deletePrompt(withId id: UUID)
 }
 
@@ -29,7 +29,7 @@ class PromptStore: PromptStoreProtocol {
         coreDataService.viewContext
     }
 
-    func fetchPrompts() -> [Prompt] {
+    func fetchPrompts() -> [DevPrompt] {
         let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
         
@@ -44,14 +44,14 @@ class PromptStore: PromptStoreProtocol {
         }
     }
     
-    func addPrompt(from model: Prompt) {
+    func addPrompt(from model: DevPrompt) {
         let newPromptEntity = PromptEntity(context: viewContext)
         configure(entity: newPromptEntity, with: model)
         logger.info("Adding new prompt '\(model.title)' to Core Data.")
         coreDataService.saveContext()
     }
     
-    func updatePrompt(from model: Prompt) {
+    func updatePrompt(from model: DevPrompt) {
         guard let promptToUpdate = getPromptEntity(withId: model.id) else {
             logger.warning("Attempted to update a prompt that does not exist in Core Data (ID: \(model.id.uuidString)). Adding it instead.")
             addPrompt(from: model)
@@ -85,7 +85,7 @@ class PromptStore: PromptStoreProtocol {
         }
     }
     
-    private func configure(entity: PromptEntity, with model: Prompt) {
+    private func configure(entity: PromptEntity, with model: DevPrompt) {
         entity.id = model.id
         entity.title = model.title
         entity.text = model.text

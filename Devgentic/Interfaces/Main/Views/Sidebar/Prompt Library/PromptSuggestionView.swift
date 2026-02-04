@@ -9,13 +9,13 @@ import SwiftUI
 
 struct PromptSuggestionView: View {
     // MARK: - Properties
-    let prompts: [Prompt]
+    let prompts: [DevPrompt]
     let suggestionQuery: String
-    let onSelectPrompt: (Prompt) -> Void
-    @Binding var selectedItemID: Prompt.ID? // The ID of the item selected via keyboard
+    let onSelectPrompt: (DevPrompt) -> Void
+    @Binding var selectedItemID: DevPrompt.ID? // The ID of the item selected via keyboard
 
     // MARK: - State
-    @State private var hoveredItemID: Prompt.ID?
+    @State private var hoveredItemID: DevPrompt.ID?
 
     // MARK: - Constants
     private let rowHeight: CGFloat = 44
@@ -93,7 +93,7 @@ struct PromptSuggestionView: View {
 
     // MARK: - View Builders
     @ViewBuilder
-    private func rowContent(for prompt: Prompt) -> some View {
+    private func rowContent(for prompt: DevPrompt) -> some View {
         let isSelected = selectedItemID == prompt.id
         let isHovered = hoveredItemID == prompt.id
 
@@ -147,9 +147,9 @@ struct PromptSuggestionView: View {
 // MARK: - Preview
 struct PromptSuggestionView_Previews: PreviewProvider {
     static let samplePrompts = [
-        Prompt(title: "Summarize Text", text: "Please summarize the following text, focusing on the key points and main arguments.", category: "Productivity", isUserDefined: true),
-        Prompt(title: "Explain Code Snippet", text: "Explain the following code snippet, including its purpose, how it works, and potential improvements.", category: "Development", isUserDefined: true),
-        Prompt(title: "Brainstorm Ideas for Project X", text: "Brainstorm five innovative ideas for a new marketing campaign for 'Project X'.", category: "Creativity", isUserDefined: false)
+        DevPrompt(title: "Summarize Text", text: "Please summarize the following text, focusing on the key points and main arguments.", category: "Productivity", isUserDefined: true),
+        DevPrompt(title: "Explain Code Snippet", text: "Explain the following code snippet, including its purpose, how it works, and potential improvements.", category: "Development", isUserDefined: true),
+        DevPrompt(title: "Brainstorm Ideas for Project X", text: "Brainstorm five innovative ideas for a new marketing campaign for 'Project X'.", category: "Creativity", isUserDefined: false)
     ]
 
     static var previews: some View {

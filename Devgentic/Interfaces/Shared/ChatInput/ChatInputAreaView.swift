@@ -35,9 +35,9 @@ struct ChatInputAreaView: View {
     // MARK: - State for Suggestions & Popups
     @State private var showPromptSuggestions: Bool = false
     @State private var suggestionQuery: String = ""
-    @State private var filteredPrompts: [Prompt] = []
+    @State private var filteredPrompts: [DevPrompt] = []
     @State private var activePromptTriggerRange: NSRange? = nil
-    @State private var selectedPromptSuggestionID: Prompt.ID? = nil
+    @State private var selectedPromptSuggestionID: DevPrompt.ID? = nil
     
     @State private var showFileSuggestions: Bool = false
     @State private var fileSuggestionQuery: String = ""
@@ -619,7 +619,7 @@ struct ChatInputAreaView: View {
         }
     }
     
-    private func handlePromptSelection(_ prompt: Prompt) {
+    private func handlePromptSelection(_ prompt: DevPrompt) {
         guard let range = activePromptTriggerRange else {
             logger.warning("Attempted to select a prompt, but activePromptTriggerRange was nil.")
             return

@@ -464,8 +464,8 @@ extension AttachedImageFileEntity {
 }
 
 extension PromptEntity {
-    func toPromptStruct() -> Prompt {
-        return Prompt(
+    func toPromptStruct() -> DevPrompt {
+        return DevPrompt(
             id: self.id ?? UUID(),
             title: self.title ?? "Untitled Prompt",
             text: self.text ?? "",

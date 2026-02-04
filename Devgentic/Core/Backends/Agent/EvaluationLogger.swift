@@ -1,5 +1,34 @@
 import Foundation
 
+// MARK: - Planner Metrics
+
+/// Captures execution details specifically for the ManagerAgent (Architect) phase.
+struct PlannerMetrics {
+    let traceID: String
+    let modelName: String
+    let startTime: Date
+    var endTime: Date?
+    
+    // Outcome
+    var wasSuccessful: Bool = false
+    var stepCount: Int = 0
+    var safetyCheckStatus: SafetyStatus = .unknown
+    var errorDescription: String?
+    
+    enum SafetyStatus: String {
+        case unknown = "Unknown"
+        case passed = "PASSED ✅"
+        case blocked = "BLOCKED 🛑"
+    }
+    
+    var duration: TimeInterval {
+        guard let end = endTime else { return 0 }
+        return end.timeIntervalSince(startTime)
+    }
+}
+
+// MARK: - Agent Metrics
+
 struct AgentSessionMetrics {
     let sessionID: UUID
     var totalSteps: Int = 0
@@ -27,6 +56,60 @@ class EvaluationLogger {
     
     private var activeSessions: [UUID: AgentSessionMetrics] = [:]
     private let queue = DispatchQueue(label: "com.devgentic.evals")
+    
+    // MARK: - Time Formatting Helper
+    
+    /// Converts a time interval into a human-readable string (e.g., "2m 15.5s" or "0.45s").
+    private func formatDuration(_ interval: TimeInterval) -> String {
+        if interval >= 60 {
+            let minutes = Int(interval) / 60
+            let seconds = interval.truncatingRemainder(dividingBy: 60)
+            return String(format: "%dm %.2fs", minutes, seconds)
+        } else {
+            return String(format: "%.3fs", interval)
+        }
+    }
+    
+    // MARK: - Planner Logging
+    
+    /// Logs a completed execution of the ManagerAgent.
+    /// Call this from BackendOrchestrationService after generatePlan() returns or throws.
+    func logPlannerExecution(
+        traceID: String,
+        model: String,
+        duration: TimeInterval,
+        plan: ExecutionPlan?, // Optional: Requires importing AgentDataModels or checking nil
+        error: Error?
+    ) {
+        let timeString = formatDuration(duration)
+        
+        queue.async {
+            print("\n========== 🧠 ARCHITECT SPAN [\(traceID)] ==========")
+            print("Model:       \(model)")
+            print("Latency:     \(timeString)")
+            
+            if let err = error {
+                print("Status:      FAILED ❌")
+                print("Error:       \(err.localizedDescription)")
+            } else if let plan = plan {
+                let safetyStatus = plan.requiresUserConfirmation ? "BLOCKED (Requires Confirmation) ⚠️" : "PASSED ✅"
+                
+                print("Status:      SUCCESS")
+                print("Plan Size:   \(plan.steps.count) steps")
+                print("Safety:      \(safetyStatus)")
+                
+                if plan.requiresUserConfirmation {
+                    let ambiguousSteps = plan.steps.filter { $0.isAmbiguous }.count
+                    print("Ambiguity:   \(ambiguousSteps) step(s) flagged")
+                }
+            } else {
+                print("Status:      NO PLAN GENERATED (Unknown State)")
+            }
+            print("==================================================\n")
+        }
+    }
+    
+    // MARK: - Agent Session Management
     
     func startSession(id: UUID, availableTools: [AgentTool]) {
         queue.async {
@@ -79,14 +162,19 @@ class EvaluationLogger {
             // Remove from active sessions
             activeSessions.removeValue(forKey: id)
             
-            let durationStr = String(format: "%.2fs", metrics.duration)
+            let durationStr = self.formatDuration(metrics.duration)
             
-            print("--- EVAL REPORT [\(metrics.sessionID)] ---")
-            print("Time Taken: \(durationStr)")
-            print("Steps: \(metrics.totalSteps) | Tools: \(metrics.toolCalls)")
-            print("Parse Errors: \(metrics.parseErrors) | Hallucinations: \(metrics.hallucinatedTools)")
-            print("Result: \(metrics.didFinishSuccessfully ? "SUCCESS" : "FAIL")")
-            print("-----------------------------------------")
+            print("\n========== 🤖 EXECUTOR SPAN [\(metrics.sessionID)] ==========")
+            print("Latency:     \(durationStr)")
+            print("Steps Taken: \(metrics.totalSteps)")
+            print("Tool Calls:  \(metrics.toolCalls)")
+            
+            if metrics.parseErrors > 0 || metrics.hallucinatedTools > 0 {
+                print("Errors:      JSON Parse (\(metrics.parseErrors)) | Hallucinations (\(metrics.hallucinatedTools))")
+            }
+            
+            print("Outcome:     \(metrics.didFinishSuccessfully ? "SUCCESS ✅" : "FAIL ❌")")
+            print("========================================================\n")
             
             return metrics
         }

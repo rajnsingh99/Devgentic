@@ -123,7 +123,7 @@ struct CreateEditPromptView_Previews: PreviewProvider {
     static func configuredViewModel(isEditing: Bool) -> PromptLibraryViewModel {
         let vm = PromptLibraryViewModel()
         if isEditing {
-            let examplePrompt = Prompt.examplePrompts.first ?? Prompt(title: "Test Edit", text: "Editing this prompt.", category: "Testing", isUserDefined: true, tags: ["edit", "test"])
+            let examplePrompt = DevPrompt.examplePrompts.first ?? DevPrompt(title: "Test Edit", text: "Editing this prompt.", category: "Testing", isUserDefined: true, tags: ["edit", "test"])
             if PromptService.shared.getPrompt(withId: examplePrompt.id) == nil {
                  PromptService.shared.addPrompt(examplePrompt)
             }
@@ -148,7 +148,7 @@ struct CreateEditPromptView_Previews: PreviewProvider {
         }
         .onAppear {
              if PromptService.shared.prompts.isEmpty {
-                 Prompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
+                 DevPrompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
              }
         }
     }
