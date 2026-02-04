@@ -22,7 +22,7 @@ class AgentConnect: ObservableObject {
     // MARK: - Initialization
     
     init() {
-        logger.info("AgentConnect initialized. Ready for Native (Ollama, OpenAI, Gemini).")
+        logger.info("AgentConnect initialized. Ready for Native (Ollama, OpenAI, Gemini, MLX).")
     }
     
     // MARK: - Stream Handling
@@ -123,6 +123,27 @@ class AgentConnect: ObservableObject {
                         let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/")!
                         let config = OpenAIConfiguration(apiKey: apiKey, baseURL: googleBaseURL, timeout: 120.0)
                         model = OpenAILanguageModel(configuration: config, model: llmConfig.modelName)
+                        
+                    case .mlx:
+                        // MLX Setup: Resolve Path -> Load Model -> Create Wrapper
+                        let modelName = llmConfig.modelName
+                        
+                        let modelPath: URL? = await MainActor.run {
+                            if MLXModelService.shared.installedModels.isEmpty {
+                                MLXModelService.shared.refreshInstalledModels()
+                            }
+                            return MLXModelService.shared.installedModels.first(where: { $0.displayName == modelName })?.localPath
+                        }
+                        
+                        guard let path = modelPath else {
+                            throw NSError(domain: "AgentConnect", code: 404, userInfo: [NSLocalizedDescriptionKey: "Local MLX model '\(modelName)' not found. Please check 'Manage Models'."])
+                        }
+                        
+                        // Load model into memory (if not already)
+                        try await MLXService.shared.loadModel(from: path)
+                        
+                        // Initialize adapter
+                        model = MLXLanguageModel(modelName: modelName)
                         
                     default:
                         throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Provider \(llmConfig.apiProvider) is not supported natively."])
@@ -261,7 +282,7 @@ class AgentConnect: ObservableObject {
     private func isNativeSupported(profile: BackendProfileModel) -> Bool {
         guard case .agent(let llmConfig, _, _, _, _, _) = profile.details else { return false }
         switch llmConfig.apiProvider {
-        case .ollama, .openAI, .google: return true
+        case .ollama, .openAI, .google, .mlx: return true
         default: return false
         }
     }

@@ -69,6 +69,12 @@ class BackendOrchestrationService: ObservableObject {
             Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
+                // RAM OPTIMIZATION:
+                // If the user is NOT using an MLX profile, unload any MLX models to free up Unified Memory.
+                if !self.isMLXProfile(config.profile) {
+                    await MLXService.shared.unloadModel()
+                }
+                
                 // 1. Sanitize History
                 var conversationHistory = history.filter { message in
                     if case .error = message.content { return false }
@@ -154,22 +160,33 @@ class BackendOrchestrationService: ObservableObject {
                                 continuation.yield(token)
                             }
                             continuation.finish()
+                            
                         case .mlx:
-                            guard let baseURL = llmConfig.baseURL else {
-                                throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Ollama base URL is missing in the profile."])
+                            // 1. Resolve Local Path (Must happen on MainActor)
+                            let modelName = llmConfig.modelName
+                            let modelPath: URL? = await MainActor.run {
+                                if MLXModelService.shared.installedModels.isEmpty {
+                                    MLXModelService.shared.refreshInstalledModels()
+                                }
+                                return MLXModelService.shared.installedModels.first(where: { $0.displayName == modelName })?.localPath
                             }
                             
-                            var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
+                            guard let path = modelPath else {
+                                throw NSError(domain: "MLXError", code: 404, userInfo: [NSLocalizedDescriptionKey: "MLX model '\(modelName)' not found locally. Please download it from the manager."])
+                            }
+                            
+                            // 2. Load Model into Engine
+                            try await MLXService.shared.loadModel(from: path)
+                            
+                            // 3. Construct Messages
+                            var mlxHistory = conversationHistory.map { message -> [String: String] in
                                 let role = (message.sender == .user) ? "user" : "assistant"
-                                return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
+                                return ["role": role, "content": message.content.textContent ?? ""]
                             }
-                            ollamaHistory.append(OllamaChatMessage(role: "user", content: effectiveQuery))
+                            mlxHistory.append(["role": "user", "content": effectiveQuery])
                             
-                            let stream = OllamaConnect.streamChatRequest(
-                                baseURL: baseURL,
-                                model: llmConfig.modelName,
-                                history: ollamaHistory
-                            )
+                            // 4. Stream Response
+                            let stream = await MLXService.shared.streamChat(messages: mlxHistory)
                             
                             for try await token in stream {
                                 continuation.yield(token)
@@ -191,13 +208,11 @@ class BackendOrchestrationService: ObservableObject {
                         var approvedPlan: ExecutionPlan? = nil
                         
                         // We must initialize a model specifically for the ManagerAgent.
-                        if let plannerModel = self.createModelInstance(from: llmConfig) {
+                        if let plannerModel = await self.createModelInstance(from: llmConfig) {
                             let manager = ManagerAgent(model: plannerModel)
                             
                             // 1. CHECK FOR BLOCKED PLAN (Repair Phase)
                             if let blockedPlan = self.activePlans[conversationID] {
-                                // REMOVED STATIC YIELD: "🔧 **Patching Previous Plan...**\n\n"
-                                // Instead, send a status update for the UI to display in the "Thinking" header.
                                 onTraceUpdate?(AgentTraceLog(stepNumber: 0, state: .thinking, content: "Patching Previous Plan..."))
                                 
                                 logger.info("[PLANNER] Found blocked plan. Attempting to PATCH with input: '\(userQuery)'")
@@ -226,8 +241,6 @@ class BackendOrchestrationService: ObservableObject {
                             
                             // 2. FRESH PLANNING (If no plan exists or patch failed)
                             if approvedPlan == nil {
-                                // REMOVED STATIC YIELD: "🧠 **Architecting Plan...**\n\n"
-                                // Instead, send status update.
                                 onTraceUpdate?(AgentTraceLog(stepNumber: 0, state: .thinking, content: "Architecting new plan..."))
                                 
                                 logger.info("[PLANNER] Creating FRESH plan for query.")
@@ -307,6 +320,19 @@ class BackendOrchestrationService: ObservableObject {
     
     // MARK: - Helper Methods
     
+    /// Checks if the current profile is using MLX.
+    private func isMLXProfile(_ profile: BackendProfileModel) -> Bool {
+        switch profile.details {
+        case .bot(let config):
+            return config.apiProvider == .mlx
+        case .agent(let config, _, _, _, _, _):
+            return config.apiProvider == .mlx
+        case .workflow:
+            // Assuming workflows might mix models, but we don't have MLX workflow logic yet.
+            return false
+        }
+    }
+    
     private func logPlanPayload(_ plan: ExecutionPlan, source: String) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .prettyPrinted
@@ -328,7 +354,7 @@ class BackendOrchestrationService: ObservableObject {
     // MARK: - Helper: Model Factory
     
     /// Creates a LanguageModel instance for the Planner (ManagerAgent).
-    private func createModelInstance(from config: ProviderConfig) -> (any OpenFoundationModels.LanguageModel)? {
+    private func createModelInstance(from config: ProviderConfig) async -> (any OpenFoundationModels.LanguageModel)? {
         switch config.apiProvider {
         case .ollama:
             let baseURLString = config.baseURL ?? "http://127.0.0.1:11434"
@@ -348,6 +374,22 @@ class BackendOrchestrationService: ObservableObject {
             let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/")!
             let conf = OpenAIConfiguration(apiKey: apiKey, baseURL: googleBaseURL)
             return OpenAILanguageModel(configuration: conf, model: config.modelName)
+            
+        case .mlx:
+            // For MLX, we must ensure the model is loaded first.
+            let modelName = config.modelName
+            let modelPath: URL? = await MainActor.run {
+                if MLXModelService.shared.installedModels.isEmpty {
+                    MLXModelService.shared.refreshInstalledModels()
+                }
+                return MLXModelService.shared.installedModels.first(where: { $0.displayName == modelName })?.localPath
+            }
+            
+            if let path = modelPath {
+                try? await MLXService.shared.loadModel(from: path)
+                return MLXLanguageModel(modelName: modelName)
+            }
+            return nil
             
         default:
             return nil

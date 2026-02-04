@@ -79,12 +79,13 @@ class RemoteOrchestrationService {
         case .ollama:
             // This case should not be reached if routing is correct in BackendOrchestrationService.
             return AsyncThrowingStream { continuation in
-                let error = NSError(domain: "RoutingError", code: 500, userInfo: [NSLocalizedDescriptionKey: "RemoteOrchestrationService should not be called for Ollama profiles."])
+                let error = NSError(domain: "RoutingError", code: 500, userInfo: [NSLocalizedDescriptionKey: "RemoteOrchestrationService should not be called for Ollama profiles (Local execution only)."])
                 continuation.finish(throwing: error)
             }
         case .mlx:
+            // Explicit guard for MLX to prevent accidental remote routing
             return AsyncThrowingStream { continuation in
-                let error = NSError(domain: "RoutingError", code: 500, userInfo: [NSLocalizedDescriptionKey: "RemoteOrchestrationService should not be called for MLX profiles."])
+                let error = NSError(domain: "RoutingError", code: 500, userInfo: [NSLocalizedDescriptionKey: "RemoteOrchestrationService cannot handle MLX profiles. MLX models run locally on device."])
                 continuation.finish(throwing: error)
             }
         }
