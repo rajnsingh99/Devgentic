@@ -32,79 +32,56 @@ struct ChatInputAreaView: View {
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
 
-    // MARK: - State for Suggestions & Popups
-    @State private var showPromptSuggestions: Bool = false
-    @State private var suggestionQuery: String = ""
-    @State private var filteredPrompts: [DevPrompt] = []
-    @State private var activePromptTriggerRange: NSRange? = nil
-    @State private var selectedPromptSuggestionID: DevPrompt.ID? = nil
-    
-    @State private var showFileSuggestions: Bool = false
-    @State private var fileSuggestionQuery: String = ""
-    @State private var filteredFiles: [FileSystemItem] = []
-    @State private var activeFileMentionTriggerRange: NSRange? = nil
-    @State private var selectedFileSuggestionID: FileSystemItem.ID? = nil // Keyboard focus
-    @State private var fileSuggestion_multiSelectedIDs: Set<FileSystemItem.ID> = [] // Checkbox selections
-
+    // MARK: - UI State (Cleaned of Business Logic)
     @State private var showingBackendSelectorPopup: Bool = false
-    @State private var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
-    
-    // NEW: Local state for the selected profile to drive the UI
     @State private var selectedProfile: BackendProfileModel?
 
-    // MARK: - Hover States for Buttons
+    // MARK: - Hover States
     @State private var isPlusButtonHovering: Bool = false
     @State private var isBackendPickerHovering: Bool = false
     @State private var isDynamicButtonHovering: Bool = false
 
-
-    private let promptService = PromptService.shared
-
     // MARK: - Layout Constants
-    private let iconSize: CGFloat = 18
-    private let dynamicButtonSize: CGFloat = 28
-    private let cornerRadiusValue: CGFloat = 20
-    private let textEditorMinHeight: CGFloat = 30
+    private let iconSize: CGFloat = 16
+    private let dynamicButtonSize: CGFloat = 30
+    private let textEditorMinHeight: CGFloat = 32
     private let textEditorMaxHeight: CGFloat = 200
 
     private var isInputEnabled: Bool {
-        // Input is enabled only when no message is being sent or streamed, and settings are not shown.
         let isQueryInProgress = isSending || mainViewModel.streamingMessageID != nil
         return !isQueryInProgress && !showSettings
     }
 
+    // MARK: - Typography
     private var defaultTypingAttributes: [NSAttributedString.Key: Any] {
-        [
-            .font: NSFont.systemFont(ofSize: NSFont.systemFontSize + 2),
-            .foregroundColor: NSColor.labelColor
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 4
+        return [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraphStyle
         ]
     }
 
-    // MARK: - Dynamic UI Properties (Refactored for BackendProfileModel)
-
+    // MARK: - Dynamic UI Properties
     private var profileButtonIconName: String {
         guard let profile = selectedProfile else { return "questionmark.circle" }
         switch profile.profileType {
-        case .agent:
-            return "person.2.fill"
+        case .agent: return "person.2.fill"
         case .bot:
-            // Differentiate between local and remote bots
-            if case .bot(let config) = profile.details, config.apiProvider == .ollama {
-                return "cpu"
-            }
+            if case .bot(let config) = profile.details, config.apiProvider == .ollama { return "cpu" }
             return "cloud.fill"
-        case .workflow:
-            return "square.stack.3d.up.fill"
+        case .workflow: return "square.stack.3d.up.fill"
         }
     }
 
-    private var profileButtonBorderColor: Color {
-        guard let profile = selectedProfile else { return .gray.opacity(0.5) }
+    private var profileThemeColor: Color {
+        guard let profile = selectedProfile else { return .secondary }
         switch profile.profileType {
-        case .agent: return .red
-        case .bot: return .green
-        case .workflow: return .blue
+        case .bot: return .blue
+        case .agent: return .green
+        case .workflow: return .purple
         }
     }
 
@@ -118,7 +95,6 @@ struct ChatInputAreaView: View {
 
     enum DynamicButtonMode: CustomStringConvertible {
         case mic, stopVoice, send, stopStreaming
-
         var description: String {
             switch self {
             case .mic: return "Mic"
@@ -130,40 +106,42 @@ struct ChatInputAreaView: View {
     }
 
     private var currentDynamicButtonMode: DynamicButtonMode {
-        if mainViewModel.streamingMessageID != nil {
-            return .stopStreaming
-        }
-        if inputViewModel.voiceInputState == .recording {
-            return .stopVoice
-        }
-        if hasInputText {
-            return .send
-        }
+        if mainViewModel.streamingMessageID != nil { return .stopStreaming }
+        if inputViewModel.voiceInputState == .recording { return .stopVoice }
+        if hasInputText { return .send }
         return .mic
     }
+    
+    // MARK: - Suggestion Enums
+    enum SuggestionNavigationDirection { case up, down }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if showPromptSuggestions {
+            
+            // PROMPT SUGGESTIONS (Driven by VM State)
+            if inputViewModel.promptSuggestionState.isShowing {
                 PromptSuggestionView(
-                    prompts: filteredPrompts,
-                    suggestionQuery: suggestionQuery,
-                    onSelectPrompt: handlePromptSelection,
-                    selectedItemID: $selectedPromptSuggestionID
+                    prompts: inputViewModel.promptSuggestionState.filteredItems,
+                    suggestionQuery: inputViewModel.promptSuggestionState.query,
+                    onSelectPrompt: { prompt in
+                        inputViewModel.selectPrompt(prompt)
+                    },
+                    selectedItemID: $inputViewModel.promptSuggestionState.selectedID
                 )
                 .padding(.horizontal, 15)
-                .padding(.bottom, 4)
+                .padding(.bottom, 6)
             }
             
-            if showFileSuggestions {
+            // FILE SUGGESTIONS (Driven by VM State)
+            if inputViewModel.fileSuggestionState.isShowing {
                 FileSuggestionView(
-                    files: filteredFiles,
-                    suggestionQuery: fileSuggestionQuery,
-                    selectedItemID: $selectedFileSuggestionID,
-                    multiSelectedFileIDs: $fileSuggestion_multiSelectedIDs
+                    files: inputViewModel.fileSuggestionState.filteredItems,
+                    suggestionQuery: inputViewModel.fileSuggestionState.query,
+                    selectedItemID: $inputViewModel.fileSuggestionState.selectedID,
+                    multiSelectedFileIDs: $inputViewModel.fileSuggestionState.multiSelectedIDs
                 )
                 .padding(.horizontal, 15)
-                .padding(.bottom, 4)
+                .padding(.bottom, 6)
             }
 
             AttachedFilesDisplayView(
@@ -172,18 +150,15 @@ struct ChatInputAreaView: View {
                     mainViewModel.removeAttachedFile(fileItem: fileItem)
                 }
             )
+            .padding(.horizontal, 4)
             
             ZStack {
                 if inputViewModel.voiceInputState == .recording {
                     RecordingOverlayView(
                         recordingTime: $inputViewModel.recordingTime,
                         powerLevels: $inputViewModel.audioPowerLevels,
-                        onCancel: {
-                            inputViewModel.cancelRecording()
-                        },
-                        onConfirm: {
-                            inputViewModel.toggleVoiceInput()
-                        }
+                        onCancel: { inputViewModel.cancelRecording() },
+                        onConfirm: { inputViewModel.toggleVoiceInput() }
                     )
                 } else {
                     mainInputArea
@@ -192,57 +167,32 @@ struct ChatInputAreaView: View {
         }
         .frame(maxWidth: 1000)
         .frame(maxWidth: .infinity, alignment: .center)
+        
+        // MARK: - Wiring
         .onAppear {
             updateSelectedProfile(profileID: backendConfiguration.selectedProfileID)
-        }
-        .onChange(of: backendConfiguration.selectedProfileID) { newID in
-            updateSelectedProfile(profileID: newID)
-        }
-        .onChange(of: showPromptSuggestions) { isShowing in
-            if isShowing {
-                self.filteredPrompts = promptService.getAllPrompts().filter {
-                    suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
-                }
-                self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
-            } else {
-                self.selectedPromptSuggestionID = nil
+            
+            // CONNECT DATA SOURCE TO VM (This fixes the missing file suggestions)
+            inputViewModel.onFileSearchRequest = { [weak explorerViewModel, weak mainViewModel] query in
+                let candidates = explorerViewModel?.suggestableFiles(query: query) ?? []
+                let attached = mainViewModel?.attachedFiles ?? []
+                return (candidates, attached)
             }
         }
-        .onChange(of: suggestionQuery) { newQuery in
-            self.filteredPrompts = promptService.getAllPrompts().filter {
-                newQuery.isEmpty || $0.title.lowercased().contains(newQuery.lowercased())
-            }
-            self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
-        }
-        .onReceive(promptService.$prompts) { _ in
-            self.filteredPrompts = promptService.getAllPrompts().filter {
-                suggestionQuery.isEmpty || $0.title.lowercased().contains(suggestionQuery.lowercased())
-            }
-            if selectedPromptSuggestionID == nil {
-                self.selectedPromptSuggestionID = self.filteredPrompts.first?.id
-            }
-        }
-        .onChange(of: showFileSuggestions) { isShowing in
-            if isShowing {
-                updateFilteredFiles(query: self.fileSuggestionQuery)
-            } else {
-                self.selectedFileSuggestionID = nil
-                self.fileSuggestion_multiSelectedIDs = []
-            }
-        }
-        .onChange(of: fileSuggestionQuery) { newQuery in
-            updateFilteredFiles(query: newQuery)
-        }
+        .onChange(of: backendConfiguration.selectedProfileID) { newID in updateSelectedProfile(profileID: newID) }
+        
+        // Refresh files if Explorer/Context changes (Lazy refresh)
         .onReceive(explorerViewModel.objectWillChange) { _ in
-            if showFileSuggestions {
-                updateFilteredFiles(query: self.fileSuggestionQuery)
+            if inputViewModel.fileSuggestionState.isShowing {
+                refreshFileSuggestions(query: inputViewModel.fileSuggestionState.query)
             }
         }
         .onReceive(mainViewModel.objectWillChange) { _ in
-            if showFileSuggestions {
-                updateFilteredFiles(query: self.fileSuggestionQuery)
+            if inputViewModel.fileSuggestionState.isShowing {
+                refreshFileSuggestions(query: inputViewModel.fileSuggestionState.query)
             }
         }
+        
         .sheet(isPresented: $inputViewModel.showAPIKeyInputPopup, onDismiss: {
             inputViewModel.resetAPIKeyPopupState()
         }) {
@@ -255,27 +205,36 @@ struct ChatInputAreaView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
     
+    private func refreshFileSuggestions(query: String) {
+        // Trigger VM's logic manually for external data changes
+        let candidates = explorerViewModel.suggestableFiles(query: query)
+        inputViewModel.processFileCandidates(candidates, attachedFiles: mainViewModel.attachedFiles)
+    }
+    
     private func updateSelectedProfile(profileID: UUID?) {
         if let id = profileID {
-            // Fetch the profile from the store. This could be optimized by passing profiles down.
             self.selectedProfile = BackendProfileStore.shared.fetchProfiles().first { $0.id == id }
         } else {
             self.selectedProfile = nil
         }
     }
 
+    // MARK: - Main Input Area
     private var mainInputArea: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 6) {
             editorAndPlaceholderArea
             toolbarArea
         }
-        .background(ChatGPTBackgroundView())
-        .cornerRadius(cornerRadiusValue)
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadiusValue)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
         )
-        .transition(.opacity.combined(with: .scale(scale: 0.95)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .transition(.opacity)
     }
 
     private var editorAndPlaceholderArea: some View {
@@ -292,23 +251,35 @@ struct ChatInputAreaView: View {
                 },
                 minHeight: textEditorMinHeight,
                 maxHeight: textEditorMaxHeight,
-                showPromptSuggestions: $showPromptSuggestions,
-                suggestionQuery: $suggestionQuery,
-                activePromptTriggerRange: $activePromptTriggerRange,
-                showFileSuggestions: $showFileSuggestions,
-                fileSuggestionQuery: $fileSuggestionQuery,
-                activeFileMentionTriggerRange: $activeFileMentionTriggerRange,
-                attributedTextInsertion: $attributedTextInsertionRequest,
+                
+                // CRITICAL: Bind to VM State, NOT local state
+                showPromptSuggestions: $inputViewModel.promptSuggestionState.isShowing,
+                suggestionQuery: $inputViewModel.promptSuggestionState.query,
+                activePromptTriggerRange: $inputViewModel.promptSuggestionState.triggerRange,
+                
+                showFileSuggestions: $inputViewModel.fileSuggestionState.isShowing,
+                fileSuggestionQuery: $inputViewModel.fileSuggestionState.query,
+                activeFileMentionTriggerRange: $inputViewModel.fileSuggestionState.triggerRange,
+                
+                attributedTextInsertion: $inputViewModel.attributedTextInsertionRequest,
+                
                 textViewRef: { nsTextViewInstance in
                     self.editorTextView = nsTextViewInstance
                 },
-                onNavigateSuggestions: navigateSuggestions,
+                
+                // Delegated Logic
+                onNavigateSuggestions: { direction in
+                    if inputViewModel.promptSuggestionState.isShowing {
+                        inputViewModel.navigateSuggestions(direction: direction, type: .prompt)
+                    } else if inputViewModel.fileSuggestionState.isShowing {
+                        inputViewModel.navigateSuggestions(direction: direction, type: .file)
+                    }
+                },
                 onConfirmSuggestion: confirmSuggestionSelection,
+                
                 onNavigateQueryHistory: { direction in
                     if let historicalQuery = mainViewModel.getQueryFromHistory(direction: direction) {
                         inputViewModel.userInput = historicalQuery
-                        
-                        // Move cursor to the end of the text
                         DispatchQueue.main.async {
                             editorTextView?.setSelectedRange(NSRange(location: historicalQuery.count, length: 0))
                         }
@@ -330,45 +301,42 @@ struct ChatInputAreaView: View {
                     .allowsHitTesting(false)
             }
         }
-        .padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
+        .padding(EdgeInsets(top: 10, leading: 12, bottom: 4, trailing: 12))
         .focused(isInputFocused)
         .disabled(!isInputEnabled)
-        .opacity(isInputEnabled ? 1.0 : 0.5)
+        .opacity(isInputEnabled ? 1.0 : 0.6)
     }
 
     private var placeholderText: String {
-        if backendConfiguration.selectedProfileID == nil { return "Please select a backend to begin..." }
-        if !mainViewModel.attachedFiles.isEmpty { return "Add a message or ask about the files..." }
+        if backendConfiguration.selectedProfileID == nil { return "Select a backend..." }
+        if !mainViewModel.attachedFiles.isEmpty { return "Ask about context..." }
         if inputViewModel.userInput.isEmpty {
             switch inputViewModel.voiceInputState {
                 case .recording: return "Listening..."
-                case .processing: return "Processing audio..."
-                case .error(let message): return "Voice error: \(message.prefix(30))..."
-                default: return "Type or click mic to talk..."
+                case .processing: return "Processing..."
+                case .error: return "Voice error..."
+                default: return "Type a message..."
             }
         }
-        return "Type or click mic to talk..."
+        return ""
     }
 
     private var toolbarArea: some View {
         HStack(spacing: 12) {
             Button(action: openFilePicker) {
                 Image(systemName: "plus")
-                    .resizable().scaledToFit().frame(width: iconSize, height: iconSize)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
                     .foregroundColor(.secondary)
-                    .padding(5)
+                    .padding(6)
                     .background(
                         Circle()
-                            .fill(isPlusButtonHovering ? Color.white.opacity(0.15) : Color.clear)
+                            .fill(isPlusButtonHovering ? Color.secondary.opacity(0.15) : Color.clear)
                     )
-                    .clipShape(Circle())
-                    .scaleEffect(isPlusButtonHovering ? 1.1 : 1.0)
-                    .animation(.easeOut(duration: 0.1), value: isPlusButtonHovering)
             }
             .buttonStyle(.plain)
-            .onHover { hover in
-                isPlusButtonHovering = hover
-            }
+            .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isPlusButtonHovering = hover } }
             .help("Attach files")
             .disabled(!isInputEnabled)
             .opacity(isInputEnabled ? 1.0 : 0.5)
@@ -381,44 +349,48 @@ struct ChatInputAreaView: View {
 
             dynamicActionButton
         }
-        .padding(.horizontal, 15)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
     }
 
     @ViewBuilder
     private func backendPickerButton() -> some View {
         Button(action: { self.showingBackendSelectorPopup = true }) {
-            HStack(spacing: 5) {
-                Image(systemName: profileButtonIconName)
-                    .font(.system(size: 12))
-                    .foregroundColor(profileButtonBorderColor)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(profileThemeColor)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: profileThemeColor.opacity(0.4), radius: 2, x: 0, y: 0)
 
                 Text(profileButtonText)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.primary)
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary.opacity(0.8))
             }
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.gray.opacity(isBackendPickerHovering ? 0.25 : 0.15))
-            .cornerRadius(6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(profileButtonBorderColor.opacity(isBackendPickerHovering ? 1.0 : 0.7), lineWidth: 0.75)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(isBackendPickerHovering ? Color.primary.opacity(0.04) : Color.clear)
             )
-            .animation(.easeOut(duration: 0.1), value: isBackendPickerHovering)
+            .overlay(
+                Capsule()
+                    .stroke(Color.secondary.opacity(isBackendPickerHovering ? 0.3 : 0.15), lineWidth: 1)
+            )
+            .scaleEffect(isBackendPickerHovering ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingBackendSelectorPopup, arrowEdge: .bottom) {
-            // NOTE: llmIntegrationStore is no longer needed here
             BackendSelectorPopup(
                 configuration: backendConfiguration,
                 isPresented: $showingBackendSelectorPopup
             )
         }
-        .onHover { hover in
-            isBackendPickerHovering = hover
-        }
+        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isBackendPickerHovering = hover } }
         .help("Select a backend (Bot, Agent, or Workflow)")
     }
 
@@ -430,11 +402,9 @@ struct ChatInputAreaView: View {
             switch mode {
             case .send:
                 guard let config = backendConfiguration.getRequestConfig() else {
-                    logger.error("Send button: Could not get backend config. Is a profile selected?");
-                    return
+                    logger.error("Send button: Could not get backend config."); return
                 }
                 guard let textView = editorTextView else {
-                    logger.error("Send button: editorTextView is nil.");
                     if !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         onSendMessage(NSAttributedString(string: inputViewModel.userInput, attributes: defaultTypingAttributes), config)
                         inputViewModel.userInput = ""
@@ -462,7 +432,7 @@ struct ChatInputAreaView: View {
 
                     Circle()
                         .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem))
-                        .animation(.easeOut(duration: 0.2), value: mode)
+                        .shadow(color: buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem).opacity(0.3), radius: 3, x: 0, y: 2)
 
                     ZStack {
                         if mode == .mic || mode == .stopVoice {
@@ -492,32 +462,24 @@ struct ChatInputAreaView: View {
                                 .transition(.scale(scale: 0.5).combined(with: .opacity))
                         }
                     }
-                    .animation(.interpolatingSpring(stiffness: 300, damping: 15), value: mode)
                 }
                 .frame(width: dynamicButtonSize, height: dynamicButtonSize)
-                .scaleEffect(isDynamicButtonHovering ? 1.1 : 1.0)
-                .animation(.easeOut(duration: 0.1), value: isDynamicButtonHovering)
+                .scaleEffect(isDynamicButtonHovering ? 1.05 : 1.0)
             }
         }
         .buttonStyle(PlainButtonStyle())
-        .onHover { hover in
-            isDynamicButtonHovering = hover
-        }
+        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isDynamicButtonHovering = hover } }
         .disabled(isDynamicButtonDisabled(for: mode))
         .help(buttonHelpText(for: mode))
     }
 
-    // MARK: - Helper Methods for Dynamic Button
     private func dynamicActionButtonIconName(for mode: DynamicButtonMode) -> String {
         switch mode {
-        case .send, .stopStreaming:
-            return ""
-        
-        case .stopVoice:
-            return "stop.circle.fill"
+        case .send, .stopStreaming: return ""
+        case .stopVoice: return "stop.circle.fill"
         case .mic:
             switch inputViewModel.voiceInputState {
-            case .processing: return "hourglass.circle"
+            case .processing: return "hourglass"
             case .permissionsDeniedMic, .error: return "mic.slash.fill"
             case .requestingPermissions: return "mic.badge.plus"
             default: return "mic.fill"
@@ -527,29 +489,26 @@ struct ChatInputAreaView: View {
 
     private func buttonIconScale(for mode: DynamicButtonMode) -> CGFloat {
         switch mode {
-        case .stopVoice: return 0.65
-        case .mic: return 0.6
+        case .stopVoice: return 0.55
+        case .mic: return 0.5
         default: return 0.5
         }
     }
 
     private func buttonIconWeight(for mode: DynamicButtonMode) -> Font.Weight {
-        switch mode {
-        case .send, .stopStreaming: return .regular
-        default: return .regular
-        }
+        return .medium
     }
 
     private func buttonBackgroundColor(for mode: DynamicButtonMode, canSend: Bool, isDisabledBySystem: Bool) -> Color {
         switch mode {
         case .send:
-            return (canSend && !isDisabledBySystem) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
+            return (canSend && !isDisabledBySystem) ? Color(NSColor.controlAccentColor) : Color.secondary.opacity(0.2)
         case .stopVoice:
-            return Color.red.opacity(0.8)
+            return Color.red.opacity(0.9)
         case .stopStreaming:
-            return Color.blue
+            return Color.primary
         case .mic:
-            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color(NSColor.controlAccentColor) : Color.gray.opacity(0.3)
+            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color(NSColor.controlAccentColor) : Color.secondary.opacity(0.2)
         }
     }
 
@@ -561,10 +520,9 @@ struct ChatInputAreaView: View {
             switch inputViewModel.voiceInputState {
             case .recording: return .white
             case .processing: return .orange
-            case .permissionsDeniedMic, .error: return .red.opacity(0.7)
+            case .permissionsDeniedMic, .error: return .red.opacity(0.8)
             case .requestingPermissions: return .orange
-            default:
-                return .white
+            default: return .primary
             }
         }
     }
@@ -575,10 +533,8 @@ struct ChatInputAreaView: View {
         case .send:
             let isEmptyText = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             return isEmptyText || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing
-        case .stopVoice:
-            return isSending || showSettings
-        case .stopStreaming:
-            return false
+        case .stopVoice: return isSending || showSettings
+        case .stopStreaming: return false
         case .mic:
             return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording
         }
@@ -589,53 +545,12 @@ struct ChatInputAreaView: View {
         case .send: return "Send message (Enter)"
         case .stopVoice: return "Stop Voice Input"
         case .stopStreaming: return "Stop generating response"
-        case .mic:
-            switch inputViewModel.voiceInputState {
-            case .idle, .available: return "Start Voice Input (Mic button)"
-            case .processing: return "Processing Voice Input..."
-            case .requestingPermissions: return "Requesting Voice Permissions..."
-            case .permissionsDeniedMic: return "Microphone permission denied. Click to re-check."
-            case .error(let specificError): return "Voice input error: \(specificError.prefix(30))... Click to re-check."
-            default: return "Voice Input"
-            }
+        case .mic: return "Voice Input"
         }
     }
     
-    // MARK: - File & Prompt Handling
-
-    private func updateFilteredFiles(query: String) {
-        let allSuggestions = explorerViewModel.suggestableFiles(query: query)
-        let attachedFileIDs = Set(mainViewModel.attachedFiles.map { $0.id })
-        let newFilteredFiles = allSuggestions.filter { !attachedFileIDs.contains($0.id) }
-        
-        if self.filteredFiles != newFilteredFiles {
-            self.filteredFiles = newFilteredFiles
-        }
-        
-        if let selectedID = selectedFileSuggestionID, !self.filteredFiles.contains(where: { $0.id == selectedID }) {
-            self.selectedFileSuggestionID = self.filteredFiles.first?.id
-        } else if selectedFileSuggestionID == nil {
-            self.selectedFileSuggestionID = self.filteredFiles.first?.id
-        }
-    }
+    // MARK: - Handlers
     
-    private func handlePromptSelection(_ prompt: DevPrompt) {
-        guard let range = activePromptTriggerRange else {
-            logger.warning("Attempted to select a prompt, but activePromptTriggerRange was nil.")
-            return
-        }
-
-        logger.log("Prompt selected: '\(prompt.title)'. Replacing text in range \(NSStringFromRange(range)).")
-
-        let insertionText = NSAttributedString(string: prompt.text + " ", attributes: defaultTypingAttributes)
-        self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
-
-        self.showPromptSuggestions = false
-        self.suggestionQuery = ""
-        self.activePromptTriggerRange = nil
-        self.filteredPrompts = []
-    }
-
     private func openFilePicker() {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = true
@@ -651,10 +566,8 @@ struct ChatInputAreaView: View {
                 for url in selectedURLs {
                     if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
                        type.conforms(to: .video) || type.conforms(to: .movie) {
-                        logger.log("Skipping video file as it's not supported: \(url.lastPathComponent)")
                         continue
                     }
-
                     var isDirectory: ObjCBool = false
                     if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
                         let newItem = FileSystemItem(
@@ -666,7 +579,6 @@ struct ChatInputAreaView: View {
                         fileItems.append(newItem)
                     }
                 }
-
                 if !fileItems.isEmpty {
                     mainViewModel.addAttachedFiles(fileItems: fileItems)
                 }
@@ -674,114 +586,34 @@ struct ChatInputAreaView: View {
         }
     }
     
-    // MARK: - Keyboard Navigation for Suggestions
-    
-    enum SuggestionNavigationDirection {
-        case up, down
-    }
-
-    private func navigateSuggestions(direction: SuggestionNavigationDirection) {
-        if showFileSuggestions {
-            navigateFileSuggestions(direction: direction)
-        } else if showPromptSuggestions {
-            navigatePromptSuggestions(direction: direction)
-        }
-    }
-
     private func confirmSuggestionSelection() {
-        if showFileSuggestions {
-            confirmFileSuggestionSelection()
-        } else if showPromptSuggestions {
-            confirmPromptSuggestionSelection()
-        }
-    }
-
-    private func navigateFileSuggestions(direction: SuggestionNavigationDirection) {
-        guard !filteredFiles.isEmpty else { return }
-
-        guard let currentSelectedID = selectedFileSuggestionID,
-              let currentIndex = filteredFiles.firstIndex(where: { $0.id == currentSelectedID }) else {
-            selectedFileSuggestionID = filteredFiles.first?.id
-            return
-        }
-
-        var nextIndex: Int
-        switch direction {
-        case .up:
-            nextIndex = currentIndex - 1
-            if nextIndex < 0 {
-                nextIndex = filteredFiles.count - 1
+        if inputViewModel.fileSuggestionState.isShowing {
+            var filesWereAttached = false
+            let multiSelected = inputViewModel.fileSuggestionState.multiSelectedIDs
+            
+            if !multiSelected.isEmpty {
+                let filesToAttach = inputViewModel.fileSuggestionState.filteredItems.filter { multiSelected.contains($0.id) }
+                if !filesToAttach.isEmpty {
+                    logger.log("Attaching \(filesToAttach.count) files from multi-selection.")
+                    mainViewModel.addAttachedFiles(fileItems: filesToAttach)
+                    filesWereAttached = true
+                    
+                    inputViewModel.selectMultipleFiles(filesToAttach)
+                }
             }
-        case .down:
-            nextIndex = currentIndex + 1
-            if nextIndex >= filteredFiles.count {
-                nextIndex = 0
-            }
-        }
-        
-        selectedFileSuggestionID = filteredFiles[nextIndex].id
-    }
-
-    private func confirmFileSuggestionSelection() {
-        var filesWereAttached = false
-
-        if !fileSuggestion_multiSelectedIDs.isEmpty {
-            let filesToAttach = filteredFiles.filter { fileSuggestion_multiSelectedIDs.contains($0.id) }
-            if !filesToAttach.isEmpty {
-                logger.log("Attaching \(filesToAttach.count) files from multi-selection.")
-                mainViewModel.addAttachedFiles(fileItems: filesToAttach)
+            else if let selectedID = inputViewModel.fileSuggestionState.selectedID,
+                    let selectedFile = inputViewModel.fileSuggestionState.filteredItems.first(where: { $0.id == selectedID }) {
+                logger.log("Attaching single focused file: \(selectedFile.name)")
+                mainViewModel.addAttachedFile(fileItem: selectedFile)
                 filesWereAttached = true
+                
+                _ = inputViewModel.selectFile(selectedFile)
             }
         }
-        else if let selectedID = selectedFileSuggestionID,
-                let selectedFile = filteredFiles.first(where: { $0.id == selectedID }) {
-            logger.log("Attaching single focused file: \(selectedFile.name)")
-            mainViewModel.addAttachedFile(fileItem: selectedFile)
-            filesWereAttached = true
+        else if inputViewModel.promptSuggestionState.isShowing {
+            guard let selectedID = inputViewModel.promptSuggestionState.selectedID,
+                  let selectedPrompt = inputViewModel.promptSuggestionState.filteredItems.first(where: { $0.id == selectedID }) else { return }
+            inputViewModel.selectPrompt(selectedPrompt)
         }
-
-        if filesWereAttached, let range = activeFileMentionTriggerRange {
-            let insertionText = NSAttributedString(string: "", attributes: defaultTypingAttributes)
-            self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
-        }
-        
-        self.showFileSuggestions = false
-        self.fileSuggestionQuery = ""
-        self.activeFileMentionTriggerRange = nil
-        self.filteredFiles = []
-    }
-
-    private func navigatePromptSuggestions(direction: SuggestionNavigationDirection) {
-        guard !filteredPrompts.isEmpty else { return }
-
-        guard let currentSelectedID = selectedPromptSuggestionID,
-              let currentIndex = filteredPrompts.firstIndex(where: { $0.id == currentSelectedID }) else {
-            selectedPromptSuggestionID = filteredPrompts.first?.id
-            return
-        }
-
-        var nextIndex: Int
-        switch direction {
-        case .up:
-            nextIndex = currentIndex - 1
-            if nextIndex < 0 {
-                nextIndex = filteredPrompts.count - 1
-            }
-        case .down:
-            nextIndex = currentIndex + 1
-            if nextIndex >= filteredPrompts.count {
-                nextIndex = 0
-            }
-        }
-
-        selectedPromptSuggestionID = filteredPrompts[nextIndex].id
-    }
-
-    private func confirmPromptSuggestionSelection() {
-        guard let selectedID = selectedPromptSuggestionID,
-              let selectedPrompt = filteredPrompts.first(where: { $0.id == selectedID }) else {
-            return
-        }
-        handlePromptSelection(selectedPrompt)
     }
 }

@@ -158,6 +158,15 @@ class MainApplicationViewModel: ObservableObject {
                 self.conversationLoadTask?.cancel()
                 
                 self.conversationLoadTask = Task {
+                    // NEW: Unload MLX model whenever the user switches conversation.
+                    // This ensures memory is freed immediately upon navigation.
+                    let stats = await MLXService.shared.unloadModel()
+                    logger.debug("Conversation switch MLX unload stats: \(stats)")
+                    
+                    // NEW: Unload Ollama model to free VRAM.
+                    // This assumes OllamaService has an exposed unloadModel() method that sends keep_alive: 0.
+                    await self.ollamaService.unloadModel()
+                    
                     await self.chatHistoryViewModel.loadConversation(id: conversationID)
                     if let id = conversationID {
                         self.loadBackendStateForSelectedConversation(conversationID: id)
@@ -210,7 +219,7 @@ class MainApplicationViewModel: ObservableObject {
             files: filesForBackend
         )
         
-        chatHistoryViewModel.currentChatMessages.append(userMessage)
+        chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
         logger.debug("Appended user message into UI.")
         
         Task {
@@ -237,7 +246,7 @@ class MainApplicationViewModel: ObservableObject {
         )
 
         self.streamingMessageID = agentMessage.id
-        chatHistoryViewModel.currentChatMessages.append(agentMessage)
+        chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
         logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
 
         Task {

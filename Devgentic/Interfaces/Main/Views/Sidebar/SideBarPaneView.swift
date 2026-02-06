@@ -4,11 +4,6 @@
 //
 //  Created by Raj Singh.
 //
-//  Refactored on 27/08/25 to remove LLM Integration sidebar.
-//  Refactored on 27/08/25 to add Backend Profiles window tab.
-//  Refactored on 27/08/25 to remove redundant NewChatTabView.
-//  Refactored on 27/08/25 to fix text wrapping and standardize names.
-//
 
 import SwiftUI
 import os
@@ -27,35 +22,23 @@ enum SidebarTab: CaseIterable, Identifiable {
 
     var iconName: String {
         switch self {
-        case .conversations:
-            return "message"
-        case .promptLibrary:
-            return "square.stack.3d.up.fill"
-        case .backendProfiles:
-            return "cpu"
-        case .settings:
-            return "gearshape"
-        case .user:
-            return "person.crop.circle"
-        case .explorer:
-            return "folder"
+        case .conversations: return "message"
+        case .promptLibrary: return "square.stack.3d.up.fill"
+        case .backendProfiles: return "cpu"
+        case .settings: return "gearshape"
+        case .user: return "person.crop.circle"
+        case .explorer: return "folder"
         }
     }
 
     var title: String {
         switch self {
-        case .conversations:
-            return "Chats"
-        case .promptLibrary:
-            return "Prompts"
-        case .backendProfiles:
-            return "Profiles"
-        case .settings:
-            return "Settings"
-        case .user:
-            return "Account"
-        case .explorer:
-            return "Explorer"
+        case .conversations: return "Chats"
+        case .promptLibrary: return "Prompts"
+        case .backendProfiles: return "Profiles"
+        case .settings: return "Settings"
+        case .user: return "Account"
+        case .explorer: return "Explorer"
         }
     }
 }
@@ -66,49 +49,98 @@ struct SideBarPaneView: View {
     @Binding var sidebarWidth: CGFloat
 
     @EnvironmentObject var themeManager: ThemeManager
-    
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
 
-    // State for popovers and hover effects
-    @State private var isHoveringSettingsButton = false
-    @State private var isHoveringAddButton = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let tab = selectedTab {
-                if tab != .explorer && tab != .conversations && tab != .promptLibrary && tab != .settings {
-                     HStack {
-                         Text(tab.title)
-                             .font(.title3)
-                             .fontWeight(.semibold)
-                             .foregroundColor(themeManager.currentTheme.primaryText)
-                         
-                         Spacer()
-                     }
-                     .padding(.horizontal).padding(.top, 12).padding(.bottom, 8)
+            // Only show a generic header for tabs that don't have their own rich toolbar/search bar.
+            // Explorer, Conversations, and Prompts now handle their own top area.
+            if let tab = selectedTab, shouldShowGenericHeader(for: tab) {
+                 HStack {
+                     Text(tab.title)
+                         .font(.system(size: 11, weight: .bold))
+                         .foregroundColor(.secondary)
+                         .textCase(.uppercase)
+                         .tracking(0.5)
                      
-                     Divider()
-                         .background(themeManager.currentTheme.dividerColor)
-                }
+                     Spacer()
+                 }
+                 .padding(.horizontal, 16)
+                 .padding(.top, 14)
+                 .padding(.bottom, 8)
+                 
+                 Divider()
+                     .background(Color.white.opacity(0.1))
             }
 
-            
             VStack {
                 switch selectedTab {
-                case .explorer: ExplorerSidebarView()
-                case .conversations: ConversationSidebarView()
-                case .promptLibrary: PromptLibrarySidebarView()
-                case .settings, .user, .none, .backendProfiles:
+                case .explorer:
+                    ExplorerSidebarView()
+                case .conversations:
+                    ConversationSidebarView()
+                case .promptLibrary:
+                    PromptLibrarySidebarView()
+                case .backendProfiles:
+                    // Placeholder or actual view for Profiles
+                    PlaceholderSidebarView(icon: "cpu", title: "Backend Profiles", description: "Manage your AI models and agents here.")
+                case .settings:
+                    PlaceholderSidebarView(icon: "gearshape", title: "Settings", description: "Application preferences coming soon.")
+                case .user:
+                    PlaceholderSidebarView(icon: "person.crop.circle", title: "Account", description: "User profile management coming soon.")
+                case .none:
                     Spacer()
-                    Text(selectedTab?.title ?? "Nothing Selected")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .environmentObject(viewModel)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(.underPageBackgroundColor))
+        // Use clear background to allow the parent container's material/vibrancy to show through
+        .background(Color.clear)
         .frame(maxHeight: .infinity)
+    }
+    
+    private func shouldShowGenericHeader(for tab: SidebarTab) -> Bool {
+        switch tab {
+        case .explorer, .conversations, .promptLibrary:
+            return false // These views have their own search bars/headers
+        default:
+            return true
+        }
+    }
+}
+
+// MARK: - Placeholder View for Empty/Future Tabs
+struct PlaceholderSidebarView: View {
+    let icon: String
+    let title: String
+    let description: String
+    
+    var body: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            ZStack {
+                Circle()
+                    .fill(Color.secondary.opacity(0.1))
+                    .frame(width: 70, height: 70)
+                Image(systemName: icon)
+                    .font(.system(size: 30))
+                    .foregroundColor(.secondary)
+            }
+            
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(.primary)
+                Text(description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

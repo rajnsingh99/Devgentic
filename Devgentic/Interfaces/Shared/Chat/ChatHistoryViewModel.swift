@@ -24,7 +24,10 @@ class ChatHistoryViewModel: ObservableObject {
     @Published var originalCodeForDiff: String? = nil
 
     // MARK: - Published State Properties for Chat History
+    // OPTIMIZATION: Stores messages in Descending order (Newest -> Oldest).
+    // This allows O(1) appending of history pages instead of O(n) insertion at index 0.
     @Published var currentChatMessages: [ChatMessage] = []
+    
     @Published var isInitiallyLoadingConversation = false
 
     @Published var isLoadingPage = false
@@ -257,11 +260,12 @@ class ChatHistoryViewModel: ObservableObject {
                 combinedMessages.first { $0.id == id }
             }
             
-            // Sort the combined list descending to ensure order before reversing.
+            // Sort the combined list descending to ensure order.
             let sortedDescending = combinedMessages.sorted { $0.timestamp > $1.timestamp }
             
-            // **FIX**: Reverse the array to be ascending (oldest-to-newest) for the UI.
-            self.currentChatMessages = sortedDescending.reversed()
+            // OPTIMIZATION: Keep messages in Descending Order (Newest -> Oldest).
+            // We REMOVED .reversed() here. This aligns with the View's .reversed() loop.
+            self.currentChatMessages = sortedDescending
             
             self.canLoadMorePages = persistedMessages.count >= initialPageSize
             
@@ -294,8 +298,9 @@ class ChatHistoryViewModel: ObservableObject {
         if olderMessages.isEmpty {
             canLoadMorePages = false
         } else {
-            // **FIX**: Insert the reversed (now oldest-to-newest) chunk at the beginning of the array.
-            self.currentChatMessages.insert(contentsOf: olderMessages.reversed(), at: 0)
+            // OPTIMIZATION: Append to the end of the array (Newest...Oldest -> Append Older).
+            // Since we are storing Descending, older messages go to the end (Index N).
+            self.currentChatMessages.append(contentsOf: olderMessages)
             
             if isUserMessagesOnlyFilterActive {
                 applyUserMessagesFilter()

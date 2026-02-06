@@ -29,41 +29,80 @@ struct FileSuggestionView: View {
 
     // MARK: - Body
     var body: some View {
-        if !files.isEmpty {
-            ScrollViewReader { scrollViewProxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(files) { fileItem in
-                            Button(action: {
-                                toggleSelection(for: fileItem.id)
-                            }) {
-                                rowContent(for: fileItem)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .id(fileItem.id)
-                            .onHover { isHovering in
-                                withAnimation(.easeInOut(duration: 0.1)) {
-                                    hoveredItemID = isHovering ? fileItem.id : nil
-                                }
-                            }
+        Group {
+            if !files.isEmpty {
+                // CASE 1: Files found
+                fileListView
+            } else if !suggestionQuery.isEmpty {
+                // CASE 2: Query exists, but no files found
+                emptyStateView(text: "No matching files found.")
+            } else {
+                // CASE 3: Initial Trigger (@ typed, query is empty, results pending)
+                // This fixes the issue where the view didn't appear immediately on typing "@"
+                emptyStateView(text: "Type to search files...")
+            }
+        }
+    }
 
-                            if fileItem.id != files.last?.id {
-                                Divider()
-                                    .padding(.leading, 60)
+    // MARK: - Subviews
+    
+    private var fileListView: some View {
+        ScrollViewReader { scrollViewProxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(files) { fileItem in
+                        Button(action: {
+                            toggleSelection(for: fileItem.id)
+                        }) {
+                            rowContent(for: fileItem)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .id(fileItem.id)
+                        .onHover { isHovering in
+                            withAnimation(.easeInOut(duration: 0.1)) {
+                                hoveredItemID = isHovering ? fileItem.id : nil
                             }
+                        }
+
+                        if fileItem.id != files.last?.id {
+                            Divider()
+                                .padding(.leading, 60)
                         }
                     }
-                    .padding(4)
                 }
-                .onChange(of: selectedItemID) { newId in
-                    if let newId = newId {
-                        withAnimation {
-                            scrollViewProxy.scrollTo(newId, anchor: .center)
-                        }
+                .padding(4)
+            }
+            .onChange(of: selectedItemID) { newId in
+                if let newId = newId {
+                    withAnimation {
+                        scrollViewProxy.scrollTo(newId, anchor: .center)
                     }
                 }
             }
-            .frame(maxHeight: maxListHeight)
+        }
+        .frame(maxHeight: maxListHeight)
+        .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadiusValue)
+                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .onAppear {
+            logger.debug("FileSuggestionView appeared with \(files.count) files for query '\(suggestionQuery)'.")
+            if selectedItemID == nil, let firstId = files.first?.id {
+                selectedItemID = firstId
+            }
+        }
+    }
+    
+    private func emptyStateView(text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
             .overlay(
@@ -71,28 +110,7 @@ struct FileSuggestionView: View {
                     .stroke(Color.gray.opacity(0.3), lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
-            .transition(.opacity.combined(with: .move(edge: .bottom)))
-            .onAppear {
-                logger.debug("FileSuggestionView appeared with \(files.count) files for query '\(suggestionQuery)'.")
-                if selectedItemID == nil, let firstId = files.first?.id {
-                    selectedItemID = firstId
-                }
-            }
-        } else if !suggestionQuery.isEmpty {
-            Text("No matching files found.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadiusValue)
-                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
-                .transition(.opacity)
-        }
+            .transition(.opacity)
     }
 
     // MARK: - View Builders
@@ -136,7 +154,7 @@ struct FileSuggestionView: View {
             ZStack {
                 if isSelected {
                     Color.accentColor.opacity(0.2)
-                } else if isHovered || isFocused { 
+                } else if isHovered || isFocused {
                     Color.gray.opacity(0.15)
                 }
             }

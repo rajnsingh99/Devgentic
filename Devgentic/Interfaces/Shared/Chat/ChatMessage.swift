@@ -44,6 +44,11 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     @Published var thinkingHeadline: String? = nil
     @Published var agentState: AgentStep = .idle
     
+    // MARK: - Performance Caching
+    // Cache parsed markdown blocks to prevent re-parsing on every view render.
+    // This is transient and excluded from Codable.
+    var cachedMarkdownBlocks: [ContentBlock]? = nil
+    
     var attachedTextFiles: [AttachedTextFile]?
     var attachedImageFiles: [AttachedImageFile]?
     private var streamTask: Task<Void, Never>?
@@ -78,6 +83,23 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
             self.agentResponse = AgentResponse(variants: [initialVariant])
         }
     }
+    
+    /// Helper to get cached blocks or parse and cache them if missing.
+    /// This moves the heavy parsing work out of the View body.
+    func getOrCreateMarkdownBlocks(from text: String) -> [ContentBlock] {
+        if let cached = cachedMarkdownBlocks {
+            return cached
+        }
+        // Parsing is done once and cached.
+        let blocks = parseMarkdown(text)
+        self.cachedMarkdownBlocks = blocks
+        return blocks
+    }
+    
+    /// Invalidates the cache. Call this when content changes (e.g. during streaming or editing).
+    func invalidateMarkdownCache() {
+        self.cachedMarkdownBlocks = nil
+    }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
         return lhs.id == rhs.id &&
@@ -95,7 +117,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        // NOTE: 'thinkingHeadline' and 'agentState' are intentionally excluded
+        // NOTE: 'thinkingHeadline', 'agentState', and 'cachedMarkdownBlocks' are intentionally excluded
         // so they are not saved to Core Data / JSON.
     }
 
@@ -116,6 +138,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         // Transient properties initialize to default
         self.thinkingHeadline = nil
         self.agentState = .idle
+        self.cachedMarkdownBlocks = nil
     }
     
     func encode(to encoder: Encoder) throws {

@@ -24,7 +24,6 @@ extension ConversationEntity {
     }
 }
 
-
 struct ConversationSidebarView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.managedObjectContext) private var viewContext
@@ -75,38 +74,22 @@ struct ConversationSidebarView: View {
 
     private var sortedGroupKeys: [String] {
         let keys = groupedConversations.keys
-        
-        // Define the fixed order for recent groups
         let sortOrder = ["Pinned", "Today", "Yesterday", "Previous 7 Days", "Previous 30 Days"]
         
         return keys.sorted { key1, key2 in
             let index1 = sortOrder.firstIndex(of: key1)
             let index2 = sortOrder.firstIndex(of: key2)
 
-            // Case 1: Both keys are in the fixed sort order
-            if let i1 = index1, let i2 = index2 {
-                return i1 < i2
-            }
+            if let i1 = index1, let i2 = index2 { return i1 < i2 }
+            if index1 != nil { return true }
+            if index2 != nil { return false }
             
-            // Case 2: Only key1 is in the fixed sort order
-            if index1 != nil {
-                return true
-            }
-            
-            // Case 3: Only key2 is in the fixed sort order
-            if index2 != nil {
-                return false
-            }
-            
-            // Case 4: Neither key is in the fixed sort order (they are month strings)
-            // Sort by date descending (e.g., "August 2025" comes before "July 2025")
+            // Month sorting
             let dateFormatter = DateFormatter()
             dateFormatter.dateFormat = "MMMM yyyy"
             if let date1 = dateFormatter.date(from: key1), let date2 = dateFormatter.date(from: key2) {
                 return date1 > date2
             }
-            
-            // Fallback for safety
             return key1 > key2
         }
     }
@@ -116,33 +99,34 @@ struct ConversationSidebarView: View {
         VStack(spacing: 0) {
             // --- Top Bar with Search ---
             searchBar
-                .padding(.horizontal)
-                .padding(.top, 10)
-                .padding(.bottom, 8)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 10)
 
             // --- Conversation List ---
             ScrollView {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 16) { // Increased spacing between sections
                     ForEach(sortedGroupKeys, id: \.self) { groupKey in
                         if let conversationsInGroup = groupedConversations[groupKey], !conversationsInGroup.isEmpty {
-                            // --- Custom Disclosure Group Implementation ---
-                            VStack(alignment: .leading, spacing: 0) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 let isExpanded = bindingForGroup(groupKey)
                                 DisclosureGroupHeader(title: groupKey, isExpanded: isExpanded)
                                 
                                 if isExpanded.wrappedValue {
                                     disclosureGroupContent(for: conversationsInGroup)
-                                        .transition(.opacity.combined(with: .slide))
+                                        .transition(.opacity.combined(with: .move(edge: .top)).animation(.easeInOut(duration: 0.2)))
                                 }
                             }
                         }
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.top, 5)
+                .padding(.top, 4)
+                .padding(.bottom, 20)
             }
         }
-        .background(Color.black.opacity(0.4))
+        // Removed the dark overlay to allow native window/sidebar translucency
+        .background(Color.clear)
         .alert("Delete Conversation?", isPresented: $showingDeleteAlert, presenting: conversationToDelete) { conv in
             Button("Delete", role: .destructive) {
                 if let id = conv.id {
@@ -165,33 +149,41 @@ struct ConversationSidebarView: View {
     // MARK: - Sub Views
     
     private var searchBar: some View {
-        HStack {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundColor(.secondary)
+                .foregroundColor(.secondary.opacity(0.7))
+                .font(.system(size: 14))
             
-            TextField("Search Conversations", text: $searchText)
+            TextField("Search", text: $searchText)
                 .textFieldStyle(.plain)
+                .font(.system(size: 13))
                 .focused($isSearchFieldFocused)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color(.windowBackgroundColor))
+        .padding(.vertical, 7)
+        // Modern glass-morphism style background
+        .background(Color.white.opacity(0.08))
         .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+        )
     }
     
     @ViewBuilder
     private func disclosureGroupContent(for conversationsInGroup: [ConversationEntity]) -> some View {
-        // The ForEach now directly contains the row view
-        ForEach(conversationsInGroup) { conversation in
-            ConversationListRow(
-                conversation: conversation,
-                viewModel: viewModel,
-                renamingConversationID: $renamingConversationID,
-                editableConversationName: $editableConversationName,
-                isRenameFieldFocused: $isRenameFieldFocused,
-                conversationToDelete: $conversationToDelete,
-                showingDeleteAlert: $showingDeleteAlert
-            )
+        VStack(spacing: 2) { // Tighter spacing between rows
+            ForEach(conversationsInGroup) { conversation in
+                ConversationListRow(
+                    conversation: conversation,
+                    viewModel: viewModel,
+                    renamingConversationID: $renamingConversationID,
+                    editableConversationName: $editableConversationName,
+                    isRenameFieldFocused: $isRenameFieldFocused,
+                    conversationToDelete: $conversationToDelete,
+                    showingDeleteAlert: $showingDeleteAlert
+                )
+            }
         }
     }
     
@@ -213,7 +205,7 @@ struct ConversationSidebarView: View {
         }
 
         let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM yyyy" // e.g., "August 2025"
+        formatter.dateFormat = "MMMM yyyy"
         return formatter.string(from: date)
     }
     
@@ -241,13 +233,12 @@ struct ConversationSidebarView: View {
         }
     }
     
-    // --- Persistence Methods ---
+    // --- Persistence ---
     private func loadExpandedGroupsState() {
         let savedGroups = UserDefaults.standard.stringArray(forKey: expandedGroupsKey)
         if let savedGroups = savedGroups {
             self.expandedGroups = Set(savedGroups)
         } else {
-            // If nothing is saved, default to expanding "Today"
             self.expandedGroups = ["Today", "Previous 7 Days"]
         }
     }
@@ -266,22 +257,24 @@ private struct DisclosureGroupHeader: View {
     var body: some View {
         HStack {
             Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.secondary)
+                .font(.system(size: 11, weight: .bold)) // Smaller, punchier header
+                .tracking(0.5) // Slight letter spacing
+                .foregroundColor(.secondary.opacity(0.8))
                 .textCase(.uppercase)
-                .padding(.leading, 8)
+                .padding(.leading, 12) // Align with row text
             
             Spacer()
 
-            Image(systemName: "chevron.down")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.secondary)
-                .rotationEffect(.degrees(isExpanded ? 0 : -90))
+            Image(systemName: "chevron.right") // Use right chevron for standard macOS disclosure feel
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary.opacity(0.6))
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .padding(.trailing, 8)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isHovering ? Color.white.opacity(0.05) : Color.clear)
-        .cornerRadius(5)
+        .background(isHovering ? Color.white.opacity(0.04) : Color.clear)
+        .cornerRadius(4)
         .contentShape(Rectangle())
         .onTapGesture {
             isExpanded.toggle()

@@ -34,19 +34,6 @@ struct LocalModel: Identifiable, Hashable {
         let details = response.details
         let modelfileContent = response.modelfile?.lowercased() ?? ""
 
-        // REMOVED: Parameter size tag was removed to declutter the UI.
-        // if let size = details?.parameterSize, !size.isEmpty {
-        //     generatedTags.append(ModelTag(text: size, color: .gray, icon: "scalemass.fill"))
-        // }
-
-        // REMOVED: Family tags were removed to declutter the UI.
-        // if let families = details?.families, !families.isEmpty {
-        //     for family in families {
-        //          generatedTags.append(ModelTag(text: family, color: .blue, icon: "person.2.fill"))
-        //     }
-        // } else if let family = details?.family, !family.isEmpty {
-        //      generatedTags.append(ModelTag(text: family, color: .blue, icon: "person.2.fill"))
-        // }
         
         // Add quantization level tag
         if let quant = details?.quantizationLevel, !quant.isEmpty {
@@ -317,6 +304,65 @@ class OllamaService: ObservableObject {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         if modelRemoveError == nil {
              clearRemoveActionStatus()
+        }
+    }
+    
+    // MARK: - Resource Management
+    
+    /// Unloads any currently running models from VRAM by checking /api/ps and sending keep_alive: 0.
+    /// This ensures that when we switch conversations or close the app, the GPU is freed immediately.
+    func unloadModel() async {
+        guard let url = URL(string: "\(ollamaBaseURL)/api/ps") else { return }
+        
+        do {
+            // 1. Fetch running models
+            let (data, _) = try await URLSession.shared.data(from: url)
+            
+            // Minimal structure to parse /api/ps response
+            struct ProcessResponse: Decodable {
+                struct Model: Decodable {
+                    let name: String
+                }
+                let models: [ProcessResponse.Model]
+            }
+            
+            let response = try JSONDecoder().decode(ProcessResponse.self, from: data)
+            
+            if response.models.isEmpty {
+                logger.debug("No running models to unload.")
+                return
+            }
+            
+            // 2. Unload each found model
+            for model in response.models {
+                await unloadSpecificModel(name: model.name)
+            }
+            
+        } catch {
+            logger.error("Failed to check/unload models: \(error.localizedDescription)")
+        }
+    }
+    
+    /// Helper to unload a specific model by name
+    private func unloadSpecificModel(name: String) async {
+        guard let url = URL(string: "\(ollamaBaseURL)/api/chat") else { return }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body: [String: Any] = [
+            "model": name,
+            "keep_alive": 0
+        ]
+        
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        do {
+            let (_, _) = try await URLSession.shared.data(for: request)
+            logger.info("Model '\(name)' unloaded successfully.")
+        } catch {
+            logger.error("Failed to unload model '\(name)': \(error.localizedDescription)")
         }
     }
     

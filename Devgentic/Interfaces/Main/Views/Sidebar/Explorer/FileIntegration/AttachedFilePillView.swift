@@ -12,17 +12,28 @@ struct AttachedFilePillView: View {
     let fileItem: FileSystemItem
     var onRemove: () -> Void
 
-    // Pill styling constants
+    // Explicit initializer to resolve 'inaccessible due to private protection level' error
+    init(fileItem: FileSystemItem, onRemove: @escaping () -> Void) {
+        self.fileItem = fileItem
+        self.onRemove = onRemove
+    }
+
+    // MARK: - State
+    @State private var isHovering: Bool = false
+    @State private var isRemoveButtonHovering: Bool = false
+
+    // MARK: - Modern Styling Constants
     private var pillBackgroundColor: Color {
-        Color(red: 237/255, green: 134/255, blue: 80/255)
+        // Adapts to light/dark mode automatically
+        isHovering ? Color.primary.opacity(0.08) : Color.primary.opacity(0.05)
     }
     
-    private var pillForegroundColor: Color {
-        .white
+    private var pillBorderColor: Color {
+        isHovering ? Color.primary.opacity(0.15) : Color.primary.opacity(0.08)
     }
-    
-    private var pillCornerRadius: CGFloat = 7.0
-    private var iconSize: CGFloat = 18
+
+    private var pillCornerRadius: CGFloat = 10.0
+    private var iconSize: CGFloat = 16
 
     // Determine the icon displayed in the pill
     private var displayIconName: String {
@@ -49,52 +60,73 @@ struct AttachedFilePillView: View {
         }
     }
 
-    init(fileItem: FileSystemItem, onRemove: @escaping () -> Void) {
-        self.fileItem = fileItem
-        self.onRemove = onRemove
-    }
-
+    // MARK: - Body
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 10) {
             // File Icon
-            Image(systemName: displayIconName)
-                .font(.system(size: iconSize, weight: displayIconFontWeight))
-                .foregroundColor(pillForegroundColor)
-                .frame(width: iconSize + 4, alignment: .center)
+            // Modern twist: Use accent color for the icon instead of the background
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.1))
+                    .frame(width: 28, height: 28)
+                
+                Image(systemName: displayIconName)
+                    .font(.system(size: 11, weight: displayIconFontWeight))
+                    .foregroundColor(.accentColor)
+            }
 
             // File Name and Type
             VStack(alignment: .leading, spacing: 1) {
-                Text(displayName) // Use the name without the extension
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundColor(pillForegroundColor)
+                Text(displayName)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.primary)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                Text(fileItem.fileTypeDescription)
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundColor(pillForegroundColor.opacity(0.85))
+                Text(fileItem.fileTypeDescription.uppercased())
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.secondary)
                     .lineLimit(1)
             }
 
-            Spacer(minLength: 6)
+            Spacer(minLength: 4)
 
             // Remove Button
+            // Hidden by default, becomes prominent on pill hover, red on button hover
             Button(action: onRemove) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(pillForegroundColor.opacity(0.75))
-                    .padding(4)
-                    .background(pillForegroundColor.opacity(0.2))
-                    .clipShape(Circle())
+                    .foregroundColor(isRemoveButtonHovering ? .white : .secondary)
+                    .frame(width: 20, height: 20)
+                    .background(
+                        Circle()
+                            .fill(isRemoveButtonHovering ? Color.red.opacity(0.9) : Color.clear)
+                    )
             }
             .buttonStyle(.plain)
+            .contentShape(Circle()) // Increases hit area
+            .onHover { hover in
+                withAnimation(.easeInOut(duration: 0.15)) { isRemoveButtonHovering = hover }
+            }
             .accessibilityLabel("Remove \(fileItem.name)")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(pillBackgroundColor)
-        .cornerRadius(pillCornerRadius)
-        .frame(maxWidth: 250) // Constrain the maximum width of the pill
+        .padding(.leading, 6) // Less padding left because icon container has its own spacing
+        .padding(.trailing, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: pillCornerRadius)
+                .fill(pillBackgroundColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: pillCornerRadius)
+                .stroke(pillBorderColor, lineWidth: 1)
+        )
+        // Subtle scale effect on hover for "tactile" feel
+        .scaleEffect(isHovering ? 1.01 : 1.0)
+        .onHover { hover in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isHovering = hover }
+        }
+        .frame(maxWidth: 260)
     }
 }
 
@@ -110,15 +142,13 @@ struct AttachedFilePillView_Previews: PreviewProvider {
         
         if !isDir && !FileManager.default.fileExists(atPath: dummyURL.path) {
             try? "dummy content for \(actualName)".write(to: dummyURL, atomically: true, encoding: .utf8)
-        } else if isDir {
-            // For directories, ensure the name doesn't have an extension unless intended
         }
         return FileSystemItem(id: dummyURL, name: actualName, url: dummyURL, isDirectory: isDir)
     }
 
     static var previews: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Styled File Pills (No Extensions)")
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Modern File Pills")
                 .font(.headline)
                 .padding(.bottom, 5)
 
@@ -137,16 +167,18 @@ struct AttachedFilePillView_Previews: PreviewProvider {
                 onRemove: { print("Remove archive.zip") }
             )
             
-            Text("Example with longer names:")
+            Text("Long Filename Handling:")
                 .font(.caption)
+                .foregroundColor(.secondary)
+            
             AttachedFilePillView(
                 fileItem: createDummyFile(name: "VeryLongFileNameThatDefinitelyNeedsTruncationAndShouldBeHandledGracefully", ext: "js"),
                 onRemove: { print("Remove JS file") }
             )
         }
-        .padding()
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
+        .padding(30)
+        .background(Color(NSColor.textBackgroundColor)) // Simulating editor background
         .previewLayout(.sizeThatFits)
-        .frame(width: 300)
+        .frame(width: 350)
     }
 }

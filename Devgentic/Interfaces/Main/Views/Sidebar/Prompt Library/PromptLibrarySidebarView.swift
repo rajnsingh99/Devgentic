@@ -16,35 +16,44 @@ struct PromptLibrarySidebarView: View {
     @StateObject private var viewModel = PromptLibraryViewModel()
     @State private var showingAddPromptPopover: Bool = false
     
-    // A list of categories for the UI. This could be dynamic in the future.
+    // A list of categories for the UI.
     private let categories = ["All", "General", "Development", "Productivity", "Creativity", "Writing", "Education", "Research", "Marketing"]
     
     var body: some View {
         VStack(spacing: 0) {
             // MARK: - Search Bar & Add Button
             HStack(spacing: 8) {
-                // Custom Search Bar
-                HStack {
+                // Modern Glass Search Bar
+                HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("Search Prompts...", text: $viewModel.searchText)
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    TextField("Search", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
+                        .font(.system(size: 13))
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color(.windowBackgroundColor))
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.08))
                 .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+                )
                 
-                // Add Button
+                // Add Button (Subtle styling)
                 Button {
                     viewModel.prepareForCreateNewPrompt()
                     showingAddPromptPopover = true
                     logger.info("Add New Prompt button tapped.")
                 } label: {
                     Image(systemName: "plus")
-                        .font(.body.weight(.semibold))
+                        .font(.system(size: 14, weight: .medium))
+                        .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .background(Color.white.opacity(0.1))
+                .cornerRadius(6)
                 .help("Create New Prompt")
                 .popover(isPresented: $showingAddPromptPopover, arrowEdge: .bottom) {
                     CreateEditPromptView()
@@ -52,44 +61,39 @@ struct PromptLibrarySidebarView: View {
                         .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
                 }
             }
-            .padding([.horizontal, .top])
-            .padding(.bottom, 8)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
             
             // MARK: - Horizontal Category Bubbles
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack {
+                HStack(spacing: 8) {
                     ForEach(categories, id: \.self) { category in
-                        Button(action: {
-                            viewModel.selectedCategory = category
-                        }) {
-                            Text(category)
-                                .font(.caption)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 5)
-                                .background(viewModel.selectedCategory == category ? Color.accentColor : Color.secondary.opacity(0.2))
-                                .foregroundColor(viewModel.selectedCategory == category ? .white : .primary)
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(PlainButtonStyle())
+                        CategoryChip(
+                            title: category,
+                            isSelected: viewModel.selectedCategory == category,
+                            action: { viewModel.selectedCategory = category }
+                        )
                     }
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
             }
+            .frame(height: 44)
             
             Divider()
+                .background(Color.white.opacity(0.1))
             
-            // MARK: - Prompt List (Card View)
+            // MARK: - Prompt List
             if viewModel.filteredPrompts.isEmpty {
-                VStack {
+                VStack(spacing: 12) {
                     Spacer()
                     Image(systemName: "tray")
-                        .font(.largeTitle)
+                        .font(.system(size: 36))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text(viewModel.searchText.isEmpty ? "No Prompts" : "No results for \"\(viewModel.searchText)\"")
+                        .font(.callout)
                         .foregroundColor(.secondary)
-                        .padding(.bottom, 4)
-                    Text(viewModel.searchText.isEmpty ? "No Prompts Found" : "No prompts match \"\(viewModel.searchText)\".")
-                        .foregroundColor(.secondary)
-                        .font(.headline)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
@@ -101,17 +105,43 @@ struct PromptLibrarySidebarView: View {
                                 .environmentObject(viewModel)
                         }
                     }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, 20)
                 }
             }
         }
-        .background(Color(.underPageBackgroundColor))
-        .frame(minWidth: 320, idealWidth: 360)
+        // Transparent background for sidebar vibrancy
+        .background(Color.clear)
+        .frame(minWidth: 280, idealWidth: 320)
     }
 }
 
-/// A card view for displaying a single prompt in the list.
+// MARK: - Components
+
+struct CategoryChip: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.08))
+                .foregroundColor(isSelected ? .black : .secondary)
+                .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(isSelected ? Color.clear : Color.white.opacity(0.1), lineWidth: 0.5)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct PromptCardView: View {
     let prompt: DevPrompt
     @EnvironmentObject var viewModel: PromptLibraryViewModel
@@ -121,11 +151,14 @@ struct PromptCardView: View {
     @State private var showingDeleteAlert: Bool = false
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            // Header
+            HStack(alignment: .top) {
                 Text(prompt.title)
-                    .font(.headline)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.primary)
                     .lineLimit(1)
+                
                 Spacer()
                 
                 if isHovering {
@@ -134,61 +167,74 @@ struct PromptCardView: View {
                             viewModel.prepareToEditPrompt(prompt)
                             showingEditPopover = true
                         } label: {
-                            Label("Edit Prompt", systemImage: "pencil")
+                            Label("Edit", systemImage: "pencil")
                         }
                         
                         Button(role: .destructive) {
                             showingDeleteAlert = true
                         } label: {
-                            Label("Delete Prompt", systemImage: "trash")
+                            Label("Delete", systemImage: "trash")
                         }
                     } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.title3)
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
                     }
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
-                    .frame(width: 24)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
             }
             
+            // Content Preview
             Text(prompt.text)
-                .font(.subheadline)
+                .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .lineLimit(2)
+                .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
             
+            // Footer Tags
             HStack(spacing: 6) {
-                // FIX: Conditionally show the category only when "All" is selected.
+                // Category Tag (if All selected)
                 if viewModel.selectedCategory == "All" {
                     Text(prompt.category)
-                        .font(.caption2)
+                        .font(.system(size: 9, weight: .medium))
                         .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.accentColor.opacity(0.15))
-                        .foregroundColor(.accentColor)
-                        .cornerRadius(5)
+                        .padding(.vertical, 2)
+                        .background(Color.blue.opacity(0.15))
+                        .foregroundColor(.blue.opacity(0.9))
+                        .cornerRadius(4)
                 }
                 
+                // Custom Tags
                 if let tags = prompt.tags, !tags.isEmpty {
-                    ForEach(tags.prefix(3), id: \.self) { tag in
+                    ForEach(tags.prefix(2), id: \.self) { tag in
                         Text("#\(tag)")
-                            .font(.caption2)
+                            .font(.system(size: 9))
                             .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.secondary.opacity(0.15))
-                            .cornerRadius(5)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.secondary)
+                            .cornerRadius(4)
                     }
                 }
             }
-            .lineLimit(1)
         }
-        .padding(12)
-        .background(isHovering ? Color(.windowBackgroundColor) : Color(.clear))
-        .cornerRadius(8)
+        .padding(10)
+        // Card Background: "Plate" style on hover/default
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isHovering ? Color.white.opacity(0.08) : Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(isHovering ? Color.white.opacity(0.1) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
             }
         }
@@ -201,7 +247,7 @@ struct PromptCardView: View {
             Button("Delete", role: .destructive) { viewModel.deletePrompt(prompt) }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Are you sure you want to delete the prompt \"\(prompt.title)\"? This action cannot be undone.")
+            Text("Are you sure you want to delete \"\(prompt.title)\"?")
         }
     }
 }
@@ -210,12 +256,13 @@ struct PromptCardView: View {
 struct PromptLibrarySidebarView_Previews: PreviewProvider {
     static var previews: some View {
         PromptLibrarySidebarView()
-            .frame(width: 350, height: 700)
+            .frame(width: 320, height: 700)
+            .background(Color(NSColor.windowBackgroundColor))
             .onAppear {
                 if PromptService.shared.prompts.isEmpty {
                     DevPrompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
                 }
             }
-            .previewDisplayName("Prompt Library Sidebar")
+            .previewDisplayName("Prompt Library Modern")
     }
 }

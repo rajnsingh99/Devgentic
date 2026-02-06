@@ -42,17 +42,18 @@ struct ChatBubbleView: View {
 
                     case .markdownText(let text):
                         // MARK: - Dynamic Thinking Headline Update
-                        // If streaming and no text yet, show the dynamic headline (e.g. "Scanning database...")
                         if message.isStreaming && text.isEmpty {
                             AgentThinkingView(headline: message.thinkingHeadline)
                         } else if !text.isEmpty {
-                            if message.isStreaming {
-                                FadeInTypewriterView(markdown: text, message: message)
-                            } else {
-                                let blocks = parseMarkdown(text)
-                                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                                    ContentBlockView(block: block, message: message)
-                                }
+                            // OPTIMIZATION: Use cached blocks from the model.
+                            // We avoid calling `parseMarkdown(text)` repeatedly in the View body.
+                            // If it's streaming, we force a re-parse (or handle cache invalidation upstream).
+                            // For simplicity, we re-parse during active streaming to get the typewriter effect,
+                            // but use cached blocks once static.
+                            let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
+                            
+                            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                                ContentBlockView(block: block, message: message)
                             }
                         }
 
@@ -340,28 +341,3 @@ fileprivate struct AgentThinkingView: View {
         .frame(height: 22)
     }
 }
-
-
-// MARK: - Streaming FadeInTypewriter Animation View
-struct FadeInTypewriterView: View {
-    let markdown: String
-    @ObservedObject var message: ChatMessage
-    
-    var body: some View {
-        VStack(alignment: .leading) {
-            let blocks = parseMarkdown(markdown)
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                ContentBlockView(block: block, message: message)
-            }
-        }
-        .animation(.easeInOut(duration: 0.3), value: markdown)
-        .onAppear {
-            logger.info("SequentialTypewriterView appeared with initial markdown.")
-        }
-        .onChange(of: markdown) { oldValue, newValue in
-            let newChars = newValue.count - oldValue.count
-//            logger.debug("STREAM_TRACE: FadeInTypewriterView markdown content updated. Added \(newChars) characters.")
-        }
-    }
-}
-

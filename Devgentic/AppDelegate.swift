@@ -26,6 +26,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate. Saving core data.")
         CoreDataPersistenceService.shared.saveContext()
+        
+        // Ensure models are unloaded cleanly
+        Task {
+            // Unload local MLX model from App RAM
+            let stats = await MLXService.shared.unloadModel()
+            Self.logger.info("Application Termination MLX Cleanup Stats: \(stats)")
+            
+            // Unload Ollama model from VRAM (daemon)
+            await OllamaService.shared.unloadModel()
+        }
     }
 
     private func setupHotkey() {
@@ -150,4 +160,3 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Self.logger.info("AppDelegate deinit.")
     }
 }
-

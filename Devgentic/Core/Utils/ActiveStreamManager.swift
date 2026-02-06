@@ -67,23 +67,15 @@ class ActiveStreamManager: ObservableObject {
         activeStreams[agentMessage.id] = agentMessage
         
         // --- NEW: Trace Handler Bridge ---
-        // This closure captures the live updates from the Executor and updates the ChatMessage UI state.
         let traceUpdateHandler: (AgentTraceLog) -> Void = { [weak agentMessage] log in
             guard let message = agentMessage else { return }
             
-            // Ensure UI updates happen on the Main Actor
             Task { @MainActor in
-                // Update the state enum (e.g., .thinking, .acting)
                 message.agentState = log.state
-                
-                // Update the headline text based on the state
-                // The Executor sends the "Gemini-style" headline in log.content when state is .thinking
                 switch log.state {
                 case .thinking:
                     message.thinkingHeadline = log.content
                 case .acting:
-                    // For acting, we might want to show what tool is running
-                    // log.content usually contains "Executing [tool]..." from the Executor
                     message.thinkingHeadline = log.content
                 case .finalizing:
                     message.thinkingHeadline = "Finishing up..."
@@ -92,7 +84,6 @@ class ActiveStreamManager: ObservableObject {
                 }
             }
         }
-        // ---------------------------------
         
         let streamTask = Task { [weak self] in
             do {
@@ -103,39 +94,36 @@ class ActiveStreamManager: ObservableObject {
                     history: history,
                     files: files,
                     context: TraceContext(profile: config.profile),
-                    onTraceUpdate: traceUpdateHandler // <--- PASS THE HANDLER HERE
+                    onTraceUpdate: traceUpdateHandler
                 )
                 
                 logger.info("👂 [STREAM_LISTEN] Now listening for tokens for message \(agentMessage.id.uuidString)...")
                 var tokenCount = 0
+                
+                // MARK: - PERFORMANCE FIX: Buffering
+                // Instead of updating state on every token, we buffer and flush periodically.
+                var tokenBuffer = ""
+                var lastUpdateTime = Date()
+                let updateInterval: TimeInterval = 0.1 // 100ms throttle
 
                 if let stream = stream {
                     for try await token in stream {
                         try Task.checkCancellation()
                         
                         tokenCount += 1
+                        tokenBuffer += token
                         
-                        if isRegeneration {
-                            guard let agentResponse = agentMessage.agentResponse,
-                                  agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) else {
-                                logger.error("Logic error: Could not find variant to update during regeneration for message \(agentMessage.id.uuidString).")
-                                break
-                            }
-                            var targetVariant = agentResponse.variants[agentResponse.selectedVariantIndex]
-                            if var currentText = targetVariant.content.textContent {
-                                currentText += token
-                                targetVariant.content = .markdownText(currentText)
-                                agentMessage.agentResponse?.variants[agentResponse.selectedVariantIndex] = targetVariant
-                            }
-                        } else {
-                            // For new messages, update the legacy `content` and the first variant simultaneously.
-                            if var currentText = agentMessage.content.textContent {
-                                currentText += token
-                                let newContent = MessageContent.markdownText(currentText)
-                                agentMessage.content = newContent
-                                agentMessage.agentResponse?.variants[0].content = newContent
-                            }
+                        // Only update UI if interval passed or buffer is getting large
+                        if -lastUpdateTime.timeIntervalSinceNow >= updateInterval || tokenBuffer.count > 50 {
+                            self?.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
+                            tokenBuffer = ""
+                            lastUpdateTime = Date()
                         }
+                    }
+                    
+                    // Flush remaining tokens
+                    if !tokenBuffer.isEmpty {
+                        self?.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
                     }
                 }
                 
@@ -159,6 +147,28 @@ class ActiveStreamManager: ObservableObject {
         return agentMessage
     }
     
+    // Helper to keep the loop clean
+    private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
+        if isRegeneration {
+            guard let agentResponse = agentMessage.agentResponse,
+                  agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) else {
+                return
+            }
+            var targetVariant = agentResponse.variants[agentResponse.selectedVariantIndex]
+            if var currentText = targetVariant.content.textContent {
+                currentText += newTextChunk
+                targetVariant.content = .markdownText(currentText)
+                agentMessage.agentResponse?.variants[agentResponse.selectedVariantIndex] = targetVariant
+            }
+        } else {
+            if var currentText = agentMessage.content.textContent {
+                currentText += newTextChunk
+                let newContent = MessageContent.markdownText(currentText)
+                agentMessage.content = newContent
+                agentMessage.agentResponse?.variants[0].content = newContent
+            }
+        }
+    }
     
     public func cancelStream(for messageId: UUID) {
         guard let taskToCancel = activeTasks[messageId] else {
