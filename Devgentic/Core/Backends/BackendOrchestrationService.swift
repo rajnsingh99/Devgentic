@@ -65,6 +65,14 @@ class BackendOrchestrationService: ObservableObject {
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
         // ------------------------------------------
     ) -> AsyncThrowingStream<String, Error> {
+        
+        // BUG REPORT FEATURE:
+        // Wrap the UI callback to automatically record every step into the Aggregator.
+        let aggregatedTraceUpdate: (AgentTraceLog) -> Void = { log in
+            Task { await TraceLogAggregator.shared.append(log) }
+            onTraceUpdate?(log)
+        }
+        
         return AsyncThrowingStream { continuation in
             Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
@@ -87,7 +95,7 @@ class BackendOrchestrationService: ObservableObject {
                    let lastContent = lastMsg.content.textContent,
                    lastContent.trimmingCharacters(in: .whitespacesAndNewlines) == userQuery.trimmingCharacters(in: .whitespacesAndNewlines) {
                     
-                    logger.debug("Removing duplicated current message from history to prevent double-prompting.")
+                    logger.debug("Removing duplicated current message from history to prevent double-prompting. (Trace: \(context.traceID))")
                     conversationHistory.removeLast()
                 }
 
@@ -95,7 +103,7 @@ class BackendOrchestrationService: ObservableObject {
                 
                 // 2. File Context Assembly (Manual Attachments)
                 if !files.isEmpty {
-                    logger.info("Assembling content for \(files.count) attached files.")
+                    logger.info("Assembling content for \(files.count) attached files. (Trace: \(context.traceID))")
                     let fileContext = self.assembleTextFileContent(for: files)
                     if !fileContext.isEmpty {
                         queryForRequest = fileContext + "\n\n" + queryForRequest
@@ -196,7 +204,7 @@ class BackendOrchestrationService: ObservableObject {
 
                     case .agent:
                         // --- AGENT PIPELINE (Active Tool Usage + Planning) ---
-                        logger.info("Routing to AgentConnect for profile: \(config.profile.displayName).")
+                        logger.info("Routing to AgentConnect for profile: \(config.profile.displayName). Trace: \(context.traceID)")
                         
                         guard case .agent(let llmConfig, _, _, _, _, _) = config.profile.details else {
                              throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid profile type for agent execution."])
@@ -213,13 +221,25 @@ class BackendOrchestrationService: ObservableObject {
                             
                             // 1. CHECK FOR BLOCKED PLAN (Repair Phase)
                             if let blockedPlan = self.activePlans[conversationID] {
-                                onTraceUpdate?(AgentTraceLog(stepNumber: 0, state: .thinking, content: "Patching Previous Plan..."))
+                                // Note: Plan Trace is not fully linked yet, using root ID for now
+                                aggregatedTraceUpdate(AgentTraceLog(
+                                    traceID: context.traceID,
+                                    spanID: UUID().uuidString,
+                                    parentSpanID: context.spanID,
+                                    stepNumber: 0,
+                                    state: .thinking,
+                                    content: "Patching Previous Plan..."
+                                ))
                                 
                                 logger.info("[PLANNER] Found blocked plan. Attempting to PATCH with input: '\(userQuery)'")
                                 
                                 do {
                                     // Call the Patching API on Manager
-                                    let patchedPlan = try await manager.patchPlan(currentPlan: blockedPlan, userCorrection: userQuery)
+                                    let patchedPlan = try await manager.patchPlan(
+                                        currentPlan: blockedPlan,
+                                        userCorrection: userQuery,
+                                        traceContext: context
+                                    )
                                     self.logPlanPayload(patchedPlan, source: "PATCHED PLAN")
                                     
                                     if patchedPlan.requiresUserConfirmation {
@@ -241,7 +261,14 @@ class BackendOrchestrationService: ObservableObject {
                             
                             // 2. FRESH PLANNING (If no plan exists or patch failed)
                             if approvedPlan == nil {
-                                onTraceUpdate?(AgentTraceLog(stepNumber: 0, state: .thinking, content: "Architecting new plan..."))
+                                aggregatedTraceUpdate(AgentTraceLog(
+                                    traceID: context.traceID,
+                                    spanID: UUID().uuidString,
+                                    parentSpanID: context.spanID,
+                                    stepNumber: 0,
+                                    state: .thinking,
+                                    content: "Architecting new plan..."
+                                ))
                                 
                                 logger.info("[PLANNER] Creating FRESH plan for query.")
                                 
@@ -249,7 +276,8 @@ class BackendOrchestrationService: ObservableObject {
                                     let newPlan = try await manager.generatePlan(
                                         userRequest: queryForRequest,
                                         chatHistory: conversationHistory,
-                                        conversationID: conversationID
+                                        conversationID: conversationID,
+                                        traceContext: context
                                     )
                                     self.logPlanPayload(newPlan, source: "FRESH PLAN")
                                     
@@ -279,10 +307,10 @@ class BackendOrchestrationService: ObservableObject {
                             logger.info("[ORCHESTRATOR] ⚠️ Handoff: Starting Executor WITHOUT Plan (Generalist Mode).")
                         }
                         
+                        // The 'aggregatedTraceUpdate' wrapper handles logging to Aggregator automatically
                         let traceHandler: (AgentTraceLog) -> Void = { log in
-                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.rawValue)): \(log.content)")
-                            // Bridge the log to the ViewModel/UI
-                            onTraceUpdate?(log)
+                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.rawValue)): \(log.content) (span: \(log.spanID))")
+                            aggregatedTraceUpdate(log)
                         }
                         
                         let stream = agentConnect.streamAgentResponse(
@@ -291,7 +319,8 @@ class BackendOrchestrationService: ObservableObject {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
-                            approvedPlan: approvedPlan, // <--- INJECTING THE PLAN
+                            approvedPlan: approvedPlan,
+                            traceContext: context,
                             onTraceUpdate: traceHandler
                         )
                         
@@ -302,7 +331,7 @@ class BackendOrchestrationService: ObservableObject {
                         }
                         
                         if tokensReceived == 0 {
-                            logger.warning("AGENT_CONNECT_DATA: Stream finished without receiving any tokens.")
+                            logger.warning("AGENT_CONNECT_DATA: Stream finished without receiving any tokens. (Trace: \(context.traceID))")
                         }
                         
                         continuation.finish()
@@ -311,7 +340,7 @@ class BackendOrchestrationService: ObservableObject {
                         throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Workflow profiles."])
                     }
                 } catch {
-                    logger.error("AGENT_CONNECT_ERROR: The stream failed with an error: \(error.localizedDescription)")
+                    logger.error("AGENT_CONNECT_ERROR: The stream failed with an error: \(error.localizedDescription) (Trace: \(context.traceID))")
                     continuation.finish(throwing: error)
                 }
             }

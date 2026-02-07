@@ -9,53 +9,120 @@ import SwiftUI
 
 struct WelcomeView: View {
     var body: some View {
-        VStack(spacing: 40) {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 100, height: 100)
-                .foregroundColor(Color.secondary.opacity(0.4))
+        VStack(spacing: 32) {
+            // MARK: - Hero Section
+            VStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [.blue.opacity(0.15), .purple.opacity(0.15)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 120, height: 120)
+                        .blur(radius: 20)
+                    
+                    Image(systemName: "bubble.left.and.bubble.right.fill")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 60, height: 60)
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.blue, .purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .shadow(color: .purple.opacity(0.3), radius: 10, x: 0, y: 5)
+                }
 
-            VStack(alignment: .leading, spacing: 16) {
-                ShortcutView(keys: ["⌘", "B"], description: "Open/Close Sidebar")
-                ShortcutView(keys: ["⌘", "O"], description: "Add Context")
-                ShortcutView(keys: ["⇧", "⌘", "C"], description: "Open Conversation")
-                ShortcutView(keys: ["⇧", "⌘", "A"], description: "Open Configuration")
+                VStack(spacing: 6) {
+                    Text("Devgentic")
+                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    
+                    Text("Your AI Development Companion")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .frame(width: 400)
+
+            // MARK: - Shortcuts Card
+            VStack(alignment: .leading, spacing: 16) {
+                ShortcutRow(keys: ["⌘", "B"], description: "Toggle Sidebar")
+                Divider().opacity(0.5)
+                ShortcutRow(keys: ["⌘", "O"], description: "Add Context")
+                Divider().opacity(0.5)
+                ShortcutRow(keys: ["⇧", "⌘", "C"], description: "New Conversation")
+                Divider().opacity(0.5)
+                ShortcutRow(keys: ["⇧", "⌘", "A"], description: "Settings")
+            }
+            .padding(24)
+            .background {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(.ultraThinMaterial)
+                    .shadow(color: .black.opacity(0.05), radius: 15, x: 0, y: 8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(.white.opacity(0.2), lineWidth: 1)
+                    )
+            }
+            .frame(maxWidth: 400)
         }
+        .padding()
     }
 }
 
-struct ShortcutView: View {
+// MARK: - Helper Views
+
+struct ShortcutRow: View {
     let keys: [String]
     let description: String
 
     var body: some View {
         HStack {
             Text(description)
-                .font(.system(size: 16))
-                .foregroundColor(.secondary)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
 
             Spacer()
 
             HStack(spacing: 4) {
                 ForEach(keys, id: \.self) { key in
-                    Text(key)
-                        .font(.system(size: 14, weight: .medium, design: .monospaced))
-                        .frame(minWidth: 24, alignment: .center)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.05))
-                        .cornerRadius(6)
+                    KeyboardKeyView(symbol: key)
                 }
             }
         }
     }
 }
 
+struct KeyboardKeyView: View {
+    let symbol: String
+    
+    var body: some View {
+        Text(symbol)
+            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.primary)
+            .frame(minWidth: 24)
+            .padding(.horizontal, 6)
+            .background {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(.primary.opacity(0.1), lineWidth: 0.5)
+            )
+    }
+}
+
 #Preview {
-    WelcomeView()
-        .frame(width: 700, height: 700)
-        .background(Color(NSColor.windowBackgroundColor))
+    ZStack {
+        Color.gray.opacity(0.1).ignoresSafeArea()
+        WelcomeView()
+    }
+    .frame(width: 800, height: 600)
 }

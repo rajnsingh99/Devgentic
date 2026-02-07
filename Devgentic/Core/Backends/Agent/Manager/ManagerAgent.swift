@@ -25,11 +25,18 @@ actor ManagerAgent {
     // Updates:
     // 1. Accepts chatHistory/conversationID for Hybrid Context.
     // 2. Prompts the model to populate 'contextBrief'.
+    // 3. INSTRUMENTATION: Accepts TraceContext for observability.
     func generatePlan(
         userRequest: String,
         chatHistory: [ChatMessage],
-        conversationID: UUID
+        conversationID: UUID,
+        traceContext: TraceContext
     ) async throws -> ExecutionPlan {
+        
+        let start = Date()
+        // Create a child span for the Planning Phase
+        var plannerContext = traceContext.newSpan()
+        plannerContext.addMetadata("phase", value: "planning")
         
         let session = LanguageModelSession(model: model, tools: [], instructions: nil as String?)
         
@@ -94,12 +101,46 @@ actor ManagerAgent {
         """
         
         // --- STEP 4: GENERATION ---
-        let response = try await session.respond(to: promptText, generating: ExecutionPlan.self)
-        return response.content
+        do {
+            let response = try await session.respond(to: promptText, generating: ExecutionPlan.self)
+            let plan = response.content
+            
+            // METRICS: Success
+            await MetricsManager.shared.recordPlanOutcome(
+                success: true,
+                isAmbiguous: plan.requiresUserConfirmation,
+                context: plannerContext
+            )
+            await MetricsManager.shared.record(
+                duration: Date().timeIntervalSince(start),
+                for: "planning_latency",
+                context: plannerContext
+            )
+            
+            return plan
+            
+        } catch {
+            // METRICS: Failure
+            await MetricsManager.shared.recordPlanOutcome(
+                success: false,
+                isAmbiguous: false,
+                context: plannerContext
+            )
+            throw error
+        }
     }
     
     // MARK: - 2. Plan Patching (The Repairman)
-    func patchPlan(currentPlan: ExecutionPlan, userCorrection: String) async throws -> ExecutionPlan {
+    func patchPlan(
+        currentPlan: ExecutionPlan,
+        userCorrection: String,
+        traceContext: TraceContext
+    ) async throws -> ExecutionPlan {
+        
+        let start = Date()
+        var patchContext = traceContext.newSpan()
+        patchContext.addMetadata("phase", value: "planning_repair")
+        
         let session = LanguageModelSession(model: model, tools: [], instructions: nil as String?)
         
         // 1. Identify the SPECIFIC blocked step
@@ -113,7 +154,6 @@ actor ManagerAgent {
         let planString = String(data: planData, encoding: .utf8) ?? "{}"
         
         // 2. Dynamic Prompting
-        // We instruct the repairman to also update the contextBrief if the correction reveals new context.
         let promptText = """
         You are the **Plan Repair Architect**.
         
@@ -136,7 +176,18 @@ actor ManagerAgent {
         Return the fully updated ExecutionPlan JSON.
         """
         
-        let response = try await session.respond(to: promptText, generating: ExecutionPlan.self)
-        return response.content
+        do {
+            let response = try await session.respond(to: promptText, generating: ExecutionPlan.self)
+            
+            await MetricsManager.shared.record(
+                duration: Date().timeIntervalSince(start),
+                for: "plan_patch_latency",
+                context: patchContext
+            )
+            return response.content
+            
+        } catch {
+            throw error
+        }
     }
 }

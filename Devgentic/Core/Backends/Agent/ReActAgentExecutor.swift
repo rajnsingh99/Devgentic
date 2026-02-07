@@ -43,6 +43,10 @@ actor ReActAgentExecutor: AgentExecutor {
                     var currentIteration = 0
                     var scratchpad: [String] = [] // Stores tool outputs for the transcript
                     
+                    // Trace Context from Input
+                    // This is the "Execution" span created by AgentConnect
+                    let executionTrace = input.traceContext
+                    
                     // Convert AgentTools to Native Tools for the Session
                     let nativeTools = input.tools.map { ReActNativeToolWrapper(agentTool: $0) }
                     
@@ -60,6 +64,10 @@ actor ReActAgentExecutor: AgentExecutor {
                     cognitiveLoop: while currentIteration < self.maxIterations {
                         currentIteration += 1
                         
+                        // Create a specific span for this iteration step (Child of Execution Span)
+                        let iterationSpan = executionTrace.newSpan()
+                        var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
+                        
                         let systemPrompt = self.constructSystemPrompt(input: input, scratchpad: scratchpad)
                         let transcript = self.buildTranscript(systemPrompt: systemPrompt, chatHistory: historyForTranscript)
                         let session = LanguageModelSession(model: model, tools: nativeTools, transcript: transcript)
@@ -75,21 +83,46 @@ actor ReActAgentExecutor: AgentExecutor {
                             step = response.content
                             
                         } catch {
-                            logger.error("Cognitive Generation Failed: \(error.localizedDescription)")
+                            logger.error("Cognitive Generation Failed: \(error.localizedDescription) (traceID: \(iterationSpan.traceID))")
                             scratchpad.append("System Error: Your last response failed validation. You MUST return a valid JSON object matching the `CognitiveStep` schema.")
-                            onTraceUpdate(AgentTraceLog(stepNumber: currentIteration, state: .errorRecovery, content: "Invalid JSON Schema. Retrying..."))
+                            
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .errorRecovery,
+                                content: "Invalid JSON Schema. Retrying...",
+                                metadata: iterationMetadata
+                            ))
                             continue cognitiveLoop
                         }
                         
                         // 4. UI Feedback
-                        onTraceUpdate(AgentTraceLog(stepNumber: currentIteration, state: .thinking, content: step.displayHeadline))
-                        logger.debug("Internal Monologue: \(step.internalMonologue)")
+                        onTraceUpdate(AgentTraceLog(
+                            traceID: iterationSpan.traceID,
+                            spanID: iterationSpan.spanID,
+                            parentSpanID: iterationSpan.parentSpanID,
+                            stepNumber: currentIteration,
+                            state: .thinking,
+                            content: step.displayHeadline,
+                            metadata: iterationMetadata
+                        ))
+                        logger.debug("Internal Monologue (trace: \(iterationSpan.traceID)): \(step.internalMonologue)")
                         
                         // 5. Logic Branching
                         
                         // A. Final Answer
                         if let finalAnswer = step.finalAnswer {
-                            onTraceUpdate(AgentTraceLog(stepNumber: currentIteration, state: .finalizing, content: finalAnswer))
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .finalizing,
+                                content: finalAnswer,
+                                metadata: iterationMetadata
+                            ))
                             continuation.yield(finalAnswer)
                             continuation.finish()
                             return
@@ -97,9 +130,51 @@ actor ReActAgentExecutor: AgentExecutor {
                         
                         // B. Tool Action
                         if let action = step.action {
-                            onTraceUpdate(AgentTraceLog(stepNumber: currentIteration, state: .acting, content: "Executing \(action.toolName)..."))
+                            iterationMetadata["tool_name"] = action.toolName
+                            
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .acting,
+                                content: "Executing \(action.toolName)...",
+                                metadata: iterationMetadata
+                            ))
+                            
+                            // METRICS: Start Timer
+                            let toolStart = Date()
+                            
                             let observation = await self.executeTool(action: action, tools: input.tools)
-                            onTraceUpdate(AgentTraceLog(stepNumber: currentIteration, state: .observing, content: observation))
+                            
+                            // METRICS: End Timer & Record
+                            let duration = Date().timeIntervalSince(toolStart)
+                            let isError = observation.hasPrefix("Error:")
+                            
+                            Task { @MainActor in
+                                if isError && observation.contains("not found") {
+                                     MetricsManager.shared.recordHallucination(toolName: action.toolName, context: iterationSpan)
+                                } else {
+                                     MetricsManager.shared.recordToolReliability(
+                                         toolName: action.toolName,
+                                         isSuccess: !isError,
+                                         errorType: isError ? observation : nil,
+                                         context: iterationSpan
+                                     )
+                                }
+                                MetricsManager.shared.record(duration: duration, for: "tool_latency", context: iterationSpan)
+                            }
+                            
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .observing,
+                                content: observation,
+                                metadata: iterationMetadata
+                            ))
+                            
                             scratchpad.append("Observation (Step \(currentIteration)): Tool '\(action.toolName)' returned: \(observation)")
                             continue cognitiveLoop
                         }
@@ -113,7 +188,14 @@ actor ReActAgentExecutor: AgentExecutor {
                     // --- SMART EXIT STRATEGY (MAX ITERATIONS REACHED) ---
                     // Instead of a generic error, we ask the Agent to summarize what it accomplished.
                     
-                    onTraceUpdate(AgentTraceLog(stepNumber: currentIteration, state: .finalizing, content: "Generating partial summary..."))
+                    onTraceUpdate(AgentTraceLog(
+                        traceID: executionTrace.traceID,
+                        spanID: executionTrace.spanID,
+                        parentSpanID: executionTrace.parentSpanID,
+                        stepNumber: currentIteration,
+                        state: .finalizing,
+                        content: "Generating partial summary..."
+                    ))
                     
                     let summaryPrompt = """
                     ## SYSTEM NOTIFICATION

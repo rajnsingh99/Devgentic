@@ -30,6 +30,13 @@ enum AgentStep: String, Codable, Sendable {
 /// Captures the raw "Thought -> Action -> Observation" chain for debugging and transparency.
 struct AgentTraceLog: Identifiable, Codable, Sendable {
     let id: UUID
+    
+    // --- Distributed Tracing Fields ---
+    let traceID: String
+    let spanID: String
+    let parentSpanID: String?
+    // ----------------------------------
+    
     let stepNumber: Int
     let timestamp: Date
     let state: AgentStep
@@ -42,12 +49,18 @@ struct AgentTraceLog: Identifiable, Codable, Sendable {
     
     init(
         id: UUID = UUID(),
+        traceID: String,
+        spanID: String,
+        parentSpanID: String?,
         stepNumber: Int,
         state: AgentStep,
         content: String,
         metadata: [String: String]? = nil
     ) {
         self.id = id
+        self.traceID = traceID
+        self.spanID = spanID
+        self.parentSpanID = parentSpanID
         self.stepNumber = stepNumber
         self.timestamp = Date()
         self.state = state
@@ -73,8 +86,6 @@ struct AgentTool: Sendable {
 // MARK: - Execution Input
 
 /// The standard payload required to initialize any Agent Executor.
-// In AgentExecutor.swift
-
 struct AgentInput: Sendable {
     let userInput: String
     let chatHistory: [ChatMessage]
@@ -82,6 +93,9 @@ struct AgentInput: Sendable {
     let tools: [AgentTool]
     let ragContext: String?
     let instructions: String?
+    
+    // NEW: The Trace Context for distributed observability
+    let traceContext: TraceContext
     
     // NEW: The "Checklist" from the Manager
     let approvedPlan: ExecutionPlan?
@@ -93,7 +107,8 @@ struct AgentInput: Sendable {
         tools: [AgentTool],
         ragContext: String? = nil,
         instructions: String? = nil,
-        approvedPlan: ExecutionPlan? = nil // Default to nil for backward compatibility
+        traceContext: TraceContext,
+        approvedPlan: ExecutionPlan? = nil
     ) {
         self.userInput = userInput
         self.chatHistory = chatHistory
@@ -101,6 +116,7 @@ struct AgentInput: Sendable {
         self.tools = tools
         self.ragContext = ragContext
         self.instructions = instructions
+        self.traceContext = traceContext
         self.approvedPlan = approvedPlan
     }
 }

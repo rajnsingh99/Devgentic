@@ -33,9 +33,18 @@ class RemoteOrchestrationService {
                 continuation.finish(throwing: error)
             }
         }
+        
+        // --- TRACING START ---
+        // Create a dedicated child span for this remote interaction.
+        // This allows us to measure specifically how long the remote provider took, separate from local overhead.
+        var remoteSpan = context.newSpan()
+        remoteSpan.addMetadata("span_type", value: "remote_execution")
+        remoteSpan.addMetadata("provider", value: llmConfig.apiProvider.rawValue)
+        remoteSpan.addMetadata("model", value: llmConfig.modelName)
+        // ---------------------
 
         let provider = llmConfig.apiProvider
-        logger.info("Remote Orchestration: Routing to provider: \(provider.rawValue). traceID: \(context.traceID)")
+        logger.info("Remote Orchestration: Routing to provider: \(provider.rawValue). traceID: \(remoteSpan.traceID) spanID: \(remoteSpan.spanID)")
 
         // 2. Ensure an API key is present.
         guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
@@ -46,6 +55,7 @@ class RemoteOrchestrationService {
         }
         
         // 3. Route to the appropriate provider-specific connector.
+        // We pass 'remoteSpan' instead of 'context' so downstream connectors (HTTP calls) are children of this span.
         switch provider {
         case .google:
             let geminiService = GeminiConnect(apiKey: apiKey)
@@ -57,7 +67,7 @@ class RemoteOrchestrationService {
                 history: history,
                 modelName: llmConfig.modelName,
                 generationType: [.text], // Placeholder
-                context: context
+                context: remoteSpan
             )
         case .openAI:
             let openAIService = OpenAIConnect(apiKey: apiKey)
@@ -66,7 +76,7 @@ class RemoteOrchestrationService {
                 userQuery: userQuery,
                 history: history,
                 modelName: llmConfig.modelName,
-                context: context
+                context: remoteSpan
             )
         case .anthropic:
             let anthropicService = AnthropicConnect(apiKey: apiKey)
@@ -74,7 +84,7 @@ class RemoteOrchestrationService {
                 userQuery: userQuery,
                 history: history,
                 modelName: llmConfig.modelName,
-                context: context
+                context: remoteSpan
             )
         case .ollama:
             // This case should not be reached if routing is correct in BackendOrchestrationService.

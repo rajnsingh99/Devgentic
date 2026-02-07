@@ -34,6 +34,7 @@ class AgentConnect: ObservableObject {
         conversationID: UUID,
         ragContext: String? = nil,
         approvedPlan: ExecutionPlan? = nil,
+        traceContext: TraceContext, // <--- NEW: Propagate Trace
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<String, Error> {
         
@@ -46,6 +47,7 @@ class AgentConnect: ObservableObject {
                 conversationID: conversationID,
                 ragContext: ragContext,
                 approvedPlan: approvedPlan,
+                traceContext: traceContext,
                 onTraceUpdate: onTraceUpdate
             )
         } else {
@@ -69,6 +71,7 @@ class AgentConnect: ObservableObject {
         conversationID: UUID,
         ragContext: String?,
         approvedPlan: ExecutionPlan?,
+        traceContext: TraceContext, // <--- NEW
         onTraceUpdate: ((AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
@@ -163,17 +166,18 @@ class AgentConnect: ObservableObject {
                     
                     let input = AgentInput(
                         userInput: userInput,
-                        chatHistory: historyForExecution, // <--- MODIFIED: Uses empty array if plan exists
+                        chatHistory: historyForExecution,
                         conversationID: conversationID,
                         tools: activeTools,
                         ragContext: ragContext,
                         instructions: instructions,
+                        traceContext: traceContext, // <--- NEW: Passed into input
                         approvedPlan: approvedPlan
                     )
                     
                     // 5. Execute
                     let traceHandler: (AgentTraceLog) -> Void = { log in
-                        logger.debug("[\(log.state.rawValue)] \(log.content)")
+                        logger.debug("[\(log.state.rawValue)] \(log.content) (span: \(log.spanID))")
                         
                         // Log metrics for evaluation
                         EvaluationLogger.shared.logStep(id: evalSessionID, log: log)
