@@ -26,6 +26,21 @@ struct AgentConfigDetailView: View {
     // Tool Library Sheet
     @State private var showingToolLibrary = false
     
+    private let defaultSystemPersona = """
+    You are a Senior macOS DevOps Engineer.
+    
+    ## CORE BEHAVIORS
+    1. **Prudence**: Always verify file existence before modification. Use `ls` or `stat` first.
+    2. **Unix Philosophy**: Prefer chaining small, standard tools (grep, sed, awk) over complex, fragile scripts.
+    3. **Transparency**: Explain your plan briefly before executing destructive actions.
+    
+    ## ERROR HANDLING
+    - If a command fails, do NOT immediately retry the exact same command.
+    - Analyze the error code/message.
+    - Formulate a hypothesis (e.g., "Missing permissions", "Path incorrect").
+    - Try a corrective action (e.g., "Check permissions", "Find correct path").
+    """
+    
     // MARK: - Computed Bindings
     
     private var providerConfig: Binding<ProviderConfig> {
@@ -201,10 +216,20 @@ struct AgentConfigDetailView: View {
                     
                     // Instructions Editor
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("System Instructions", systemImage: "text.quote")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundColor(.secondary)
+                        HStack {
+                            Label("System Instructions", systemImage: "text.quote")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            Button("Use Default Persona") {
+                                instructionsBinding.wrappedValue = defaultSystemPersona
+                            }
+                            .font(.caption)
+                            .buttonStyle(.link)
+                        }
                         
                         TextEditor(text: instructionsBinding)
                             .font(.body.monospaced())
@@ -386,6 +411,14 @@ struct AgentConfigDetailView: View {
                 .overlay(Rectangle().frame(height: 1).foregroundColor(Color.secondary.opacity(0.1)), alignment: .top)
         }
         .onAppear {
+            // Auto-populate default instructions if nil (first time setup)
+            if case .agent(let c, let a, let t, let d, let i, let k) = profile.details, i == nil {
+                profile.details = .agent(
+                    llmConfig: c, architecture: a, tools: t,
+                    description: d, instructions: defaultSystemPersona, knowledgeSources: k
+                )
+            }
+            
             initialProfileState = profile
             loadAdvancedConfigs()
         }

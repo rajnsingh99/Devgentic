@@ -14,14 +14,33 @@ import OpenFoundationModelsCore
 
 struct TerminalTool: OpenFoundationModels.Tool {
     let name = "execute_shell"
-    let description = "Executes a shell command (zsh) and returns the output. Useful for checking file details (ls -lh), system state, or running scripts."
+    let description = "Executes a shell command (zsh) and returns the output. Useful for checking file details (ls -lh), system state, or running scripts. Non-interactive commands only."
+    
+    // NEW: Session Context injected by AgentConnect
+    let conversationID: UUID?
+    
+    init(conversationID: UUID? = nil) {
+        self.conversationID = conversationID
+    }
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let command: String
         init(_ content: GeneratedContent) throws {
             let props = try content.properties()
-            guard let cmd = props["command"] else { throw GeneratedContentError.missingProperty("command") }
-            self.command = try String(cmd)
+            
+            // ROBUST PARSING: Aliases
+            var foundCmd: String? = nil
+            let keys = ["command", "cmd", "script", "code", "exec"]
+            
+            for key in keys {
+                if let val = props[key], let str = try? String(val) {
+                    foundCmd = str
+                    break
+                }
+            }
+            
+            guard let cmd = foundCmd else { throw GeneratedContentError.missingProperty("command (checked aliases: \(keys.joined(separator: ", ")))") }
+            self.command = cmd
         }
     }
     
@@ -42,32 +61,30 @@ struct TerminalTool: OpenFoundationModels.Tool {
     typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
-        // Run blocking process in a detached task to avoid freezing the Swift Concurrency pool
-        return try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            let pipe = Pipe()
-            
-            process.standardOutput = pipe
-            process.standardError = pipe
-            process.arguments = ["-c", arguments.command]
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                
-                if process.terminationStatus == 0 {
-                    return output.isEmpty ? "Success (No Output)" : output
-                } else {
-                    return "Exit Code \(process.terminationStatus): \(output)"
-                }
-            } catch {
-                return "Command failed: \(error.localizedDescription)"
+        // --- LOGGING INSTRUMENTATION ---
+        let logID = LogManager.shared.logAction(
+            toolName: self.name,
+            summary: "Executed shell command",
+            operations: [
+                ["command": arguments.command, "status": "attempted"]
+            ]
+        )
+        // -------------------------------
+        
+        do {
+            if let id = conversationID {
+                // ✅ Stateful Execution via ShellSessionManager
+                // Uses the Conversation ID to persist 'cd' changes.
+                let output = try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: id)
+                return "\(output)\n(Audit Ref: \(logID))"
+            } else {
+                // Fallback: Stateless Execution (Legacy/Bot Mode)
+                let output = try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: UUID()) // Ephemeral ID
+                return "\(output)\n(Audit Ref: \(logID))"
             }
-        }.value
+        } catch {
+            return "Command failed: \(error.localizedDescription) (Audit Ref: \(logID))"
+        }
     }
 }
 
@@ -81,8 +98,20 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
         let bundle_identifier: String
         init(_ content: GeneratedContent) throws {
             let props = try content.properties()
-            guard let val = props["bundle_identifier"] else { throw GeneratedContentError.missingProperty("bundle_identifier") }
-            self.bundle_identifier = try String(val)
+            
+            // ROBUST PARSING: Aliases
+            var foundID: String? = nil
+            let keys = ["bundle_identifier", "app_id", "id", "bundleId", "identifier"]
+            
+            for key in keys {
+                if let val = props[key], let str = try? String(val) {
+                    foundID = str
+                    break
+                }
+            }
+            
+            guard let val = foundID else { throw GeneratedContentError.missingProperty("bundle_identifier (checked aliases: \(keys.joined(separator: ", ")))") }
+            self.bundle_identifier = val
         }
     }
     
@@ -103,11 +132,21 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
     typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
+        // --- LOGGING INSTRUMENTATION ---
+        let logID = LogManager.shared.logAction(
+            toolName: self.name,
+            summary: "Launched App: \(arguments.bundle_identifier)",
+            operations: [
+                ["app_id": arguments.bundle_identifier, "action": "launch"]
+            ]
+        )
+        // -------------------------------
+        
         // Wait for actual completion to report success/failure accurately
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.main.async {
                 guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: arguments.bundle_identifier) else {
-                    continuation.resume(returning: "Error: App with bundle ID '\(arguments.bundle_identifier)' not found.")
+                    continuation.resume(returning: "Error: App with bundle ID '\(arguments.bundle_identifier)' not found. (Audit Ref: \(logID))")
                     return
                 }
                 
@@ -116,9 +155,9 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
                 
                 NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
                     if let error = error {
-                        continuation.resume(returning: "Error launching app: \(error.localizedDescription)")
+                        continuation.resume(returning: "Error launching app: \(error.localizedDescription) (Audit Ref: \(logID))")
                     } else {
-                        continuation.resume(returning: "Successfully launched \(app?.localizedName ?? arguments.bundle_identifier)")
+                        continuation.resume(returning: "Successfully launched \(app?.localizedName ?? arguments.bundle_identifier) (Audit Ref: \(logID))")
                     }
                 }
             }
@@ -136,8 +175,20 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
         let script: String
         init(_ content: GeneratedContent) throws {
             let props = try content.properties()
-            guard let val = props["script"] else { throw GeneratedContentError.missingProperty("script") }
-            self.script = try String(val)
+            
+            // ROBUST PARSING: Aliases
+            var foundScript: String? = nil
+            let keys = ["script", "code", "source", "applescript"]
+            
+            for key in keys {
+                if let val = props[key], let str = try? String(val) {
+                    foundScript = str
+                    break
+                }
+            }
+            
+            guard let val = foundScript else { throw GeneratedContentError.missingProperty("script (checked aliases: \(keys.joined(separator: ", ")))") }
+            self.script = val
         }
     }
     
@@ -154,16 +205,26 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
     typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
-        await MainActor.run {
+        // --- LOGGING INSTRUMENTATION ---
+        let logID = LogManager.shared.logAction(
+            toolName: self.name,
+            summary: "Ran AppleScript",
+            operations: [
+                ["script_preview": String(arguments.script.prefix(200))]
+            ]
+        )
+        // -------------------------------
+        
+        return await MainActor.run {
             var errorInfo: NSDictionary?
             guard let scriptObject = NSAppleScript(source: arguments.script) else {
-                return "Failed to init script."
+                return "Failed to init script. (Audit Ref: \(logID))"
             }
             let descriptor = scriptObject.executeAndReturnError(&errorInfo)
             if let err = errorInfo {
-                return "AppleScript Error: \(err)"
+                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
             }
-            return descriptor.stringValue ?? descriptor.description
+            return (descriptor.stringValue ?? descriptor.description) + " (Audit Ref: \(logID))"
         }
     }
 }
@@ -186,6 +247,14 @@ struct GetSystemStatsTool: OpenFoundationModels.Tool {
     typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
+        // --- LOGGING INSTRUMENTATION ---
+        let logID = LogManager.shared.logAction(
+            toolName: self.name,
+            summary: "Retrieved System Stats",
+            operations: []
+        )
+        // -------------------------------
+        
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         let userName = ProcessInfo.processInfo.fullUserName
         
@@ -205,6 +274,6 @@ struct GetSystemStatsTool: OpenFoundationModels.Tool {
             memInfo = String(format: ", Free Memory: %.2f GB", free)
         }
         
-        return "OS: \(osVersion), User: \(userName)\(memInfo)"
+        return "OS: \(osVersion), User: \(userName)\(memInfo) (Audit Ref: \(logID))"
     }
 }

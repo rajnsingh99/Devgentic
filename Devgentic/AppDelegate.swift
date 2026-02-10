@@ -27,6 +27,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Self.logger.info("Application will terminate. Saving core data.")
         CoreDataPersistenceService.shared.saveContext()
         
+        // 1. Terminate any active shell processes to prevent zombies
+        ShellSessionManager.shared.cleanup()
+        
         // Ensure models are unloaded cleanly
         Task {
             // Unload local MLX model from App RAM

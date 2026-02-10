@@ -20,7 +20,7 @@ class BackendOrchestrationService: ObservableObject {
 
     // MARK: - Dependencies
     private let ollamaService: OllamaService
-    private let remoteOrchestrationService: RemoteOrchestrationService
+    // RemoteOrchestrationService removed in favor of AgentConnect Unified Pipeline
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     
@@ -43,7 +43,6 @@ class BackendOrchestrationService: ObservableObject {
     ) {
         self.fileProcessorService = fileProcessorService
         self.ollamaService = OllamaService.shared
-        self.remoteOrchestrationService = RemoteOrchestrationService()
         self.persistenceService = CoreDataPersistenceService.shared
         
         // Initialize AgentConnect (Native implementation)
@@ -121,90 +120,31 @@ class BackendOrchestrationService: ObservableObject {
                     switch config.profile.profileType {
                     
                     case .bot:
-                        // --- BOT PIPELINE (Passive Context Injection) ---
-                        var effectiveQuery = queryForRequest
-                        if let context = ragContextString, !context.isEmpty {
-                             let contextHeader = "### CONTEXT FROM KNOWLEDGE BASE ###\n"
-                             let contextFooter = "\n### END CONTEXT ###\n(Please use the context above if relevant to answer the following question)\n\n"
-                             effectiveQuery = "\(contextHeader)\(context)\(contextFooter)\(queryForRequest)"
-                        }
+                        // --- BOT PIPELINE (Unified) ---
+                        // Replaced manual routing with AgentConnect.
+                        // ChatExecutor will handle the response streaming and trace logging.
                         
-                        guard case .bot(let llmConfig) = config.profile.details else {
-                            throw NSError(domain: "ProfileError", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not extract bot configuration from profile."])
-                        }
+                        logger.info("Routing BOT profile '\(config.profile.displayName)' to Unified Pipeline.")
                         
-                        switch llmConfig.apiProvider {
-                        case .ollama:
-                            guard let baseURL = llmConfig.baseURL else {
-                                throw NSError(domain: "OllamaConfigError", code: 404, userInfo: [NSLocalizedDescriptionKey: "Ollama base URL is missing in the profile."])
-                            }
-                            
-                            var ollamaHistory = conversationHistory.map { message -> OllamaChatMessage in
-                                let role = (message.sender == .user) ? "user" : "assistant"
-                                return OllamaChatMessage(role: role, content: message.content.textContent ?? "")
-                            }
-                            ollamaHistory.append(OllamaChatMessage(role: "user", content: effectiveQuery))
-                            
-                            let stream = OllamaConnect.streamChatRequest(
-                                baseURL: baseURL,
-                                model: llmConfig.modelName,
-                                history: ollamaHistory
-                            )
-                            
-                            for try await token in stream {
-                                continuation.yield(token)
-                            }
-                            continuation.finish()
-
-                        case .openAI, .google, .anthropic:
-                            let stream = self.remoteOrchestrationService.streamMessage(
-                                conversationID: conversationID,
-                                userQuery: effectiveQuery,
-                                history: conversationHistory,
-                                profile: config.profile,
-                                context: context
-                            )
-                            for try await token in stream {
-                                continuation.yield(token)
-                            }
-                            continuation.finish()
-                            
-                        case .mlx:
-                            // 1. Resolve Local Path (Must happen on MainActor)
-                            let modelName = llmConfig.modelName
-                            let modelPath: URL? = await MainActor.run {
-                                if MLXModelService.shared.installedModels.isEmpty {
-                                    MLXModelService.shared.refreshInstalledModels()
-                                }
-                                return MLXModelService.shared.installedModels.first(where: { $0.displayName == modelName })?.localPath
-                            }
-                            
-                            guard let path = modelPath else {
-                                throw NSError(domain: "MLXError", code: 404, userInfo: [NSLocalizedDescriptionKey: "MLX model '\(modelName)' not found locally. Please download it from the manager."])
-                            }
-                            
-                            // 2. Load Model into Engine
-                            try await MLXService.shared.loadModel(from: path)
-                            
-                            // 3. Construct Messages
-                            var mlxHistory = conversationHistory.map { message -> [String: String] in
-                                let role = (message.sender == .user) ? "user" : "assistant"
-                                return ["role": role, "content": message.content.textContent ?? ""]
-                            }
-                            mlxHistory.append(["role": "user", "content": effectiveQuery])
-                            
-                            // 4. Stream Response
-                            let stream = await MLXService.shared.streamChat(messages: mlxHistory)
-                            
-                            for try await token in stream {
-                                continuation.yield(token)
-                            }
-                            continuation.finish()
+                        let stream = agentConnect.streamAgentResponse(
+                            for: config.profile,
+                            userInput: queryForRequest,
+                            chatHistory: conversationHistory,
+                            conversationID: conversationID,
+                            ragContext: ragContextString,
+                            approvedPlan: nil, // Bots don't plan
+                            traceContext: context,
+                            onTraceUpdate: aggregatedTraceUpdate
+                        )
+                        
+                        for try await token in stream {
+                            continuation.yield(token)
                         }
+                        continuation.finish()
 
                     case .agent:
                         // --- AGENT PIPELINE (Active Tool Usage + Planning) ---
-                        logger.info("Routing to AgentConnect for profile: \(config.profile.displayName). Trace: \(context.traceID)")
+                        logger.info("Routing AGENT profile '\(config.profile.displayName)' to AgentConnect. Trace: \(context.traceID)")
                         
                         guard case .agent(let llmConfig, _, _, _, _, _) = config.profile.details else {
                              throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid profile type for agent execution."])
@@ -215,6 +155,12 @@ class BackendOrchestrationService: ObservableObject {
                         // =========================================================================
                         var approvedPlan: ExecutionPlan? = nil
                         
+                        // [TEMPORARY MODIFICATION]
+                        // The ManagerAgent (Planner) is disabled. User input flows directly to the Executor.
+                        // This allows for faster testing of the Worker/Tools without the Architect overhead.
+                        logger.notice("[ORCHESTRATOR] 🚧 ManagerAgent (Planner) is DISABLED. Routing directly to Worker.")
+
+                        /*
                         // We must initialize a model specifically for the ManagerAgent.
                         if let plannerModel = await self.createModelInstance(from: llmConfig) {
                             let manager = ManagerAgent(model: plannerModel)
@@ -296,6 +242,7 @@ class BackendOrchestrationService: ObservableObject {
                                 }
                             }
                         }
+                        */
                         
                         // =========================================================================
                         // B. EXECUTION PHASE (Only reached if Plan is Safe)
@@ -357,7 +304,6 @@ class BackendOrchestrationService: ObservableObject {
         case .agent(let config, _, _, _, _, _):
             return config.apiProvider == .mlx
         case .workflow:
-            // Assuming workflows might mix models, but we don't have MLX workflow logic yet.
             return false
         }
     }

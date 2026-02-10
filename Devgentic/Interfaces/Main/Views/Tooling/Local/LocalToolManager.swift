@@ -111,6 +111,11 @@ final class LocalToolManager {
         registerNative(WriteFileTool())
         registerNative(DeleteFileTool())
         
+        // NEW: Register File Manipulation Primitives
+        registerNative(MoveFileTool())
+        registerNative(CopyFileTool())
+        registerNative(CreateFolderTool())
+        
         // Register Native System Tools
         registerNative(TerminalTool())
         registerNative(OpenApplicationTool())

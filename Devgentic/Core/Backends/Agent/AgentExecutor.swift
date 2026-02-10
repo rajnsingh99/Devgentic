@@ -92,6 +92,10 @@ struct AgentInput: Sendable {
     let conversationID: UUID
     let tools: [AgentTool]
     let ragContext: String?
+    
+    // NEW: Persistent Memory Context (Markdown)
+    let persistentMemory: String?
+    
     let instructions: String?
     
     // NEW: The Trace Context for distributed observability
@@ -106,6 +110,7 @@ struct AgentInput: Sendable {
         conversationID: UUID,
         tools: [AgentTool],
         ragContext: String? = nil,
+        persistentMemory: String? = nil, // Added parameter
         instructions: String? = nil,
         traceContext: TraceContext,
         approvedPlan: ExecutionPlan? = nil
@@ -115,6 +120,7 @@ struct AgentInput: Sendable {
         self.conversationID = conversationID
         self.tools = tools
         self.ragContext = ragContext
+        self.persistentMemory = persistentMemory
         self.instructions = instructions
         self.traceContext = traceContext
         self.approvedPlan = approvedPlan
@@ -133,21 +139,6 @@ protocol AgentExecutor: Sendable {
         input: AgentInput,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) -> AsyncThrowingStream<String, Error>
-}
-
-// MARK: - Factory
-
-enum AgentExecutorFactory {
-    
-    static func create(for architecture: AgentArchitecture) -> any AgentExecutor {
-        switch architecture {
-        case .reAct:
-            return ReActAgentExecutor()
-            
-        case .planAndExecute, .reflexion, .supervisor:
-            return ReActAgentExecutor()
-        }
-    }
 }
 
 // MARK: - Native Tool Wrapper

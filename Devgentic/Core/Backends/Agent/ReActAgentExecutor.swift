@@ -43,17 +43,20 @@ actor ReActAgentExecutor: AgentExecutor {
                     var currentIteration = 0
                     var scratchpad: [String] = [] // Stores tool outputs for the transcript
                     
+                    // State Tracking for Memory Guard
+                    // We treat memory as enabled if the Manager exists (implicit) or if we are in Agent mode.
+                    let isMemoryEnabled = true
+                    var hasUpdatedMemory = false
+                    
                     // Trace Context from Input
-                    // This is the "Execution" span created by AgentConnect
                     let executionTrace = input.traceContext
                     
                     // Convert AgentTools to Native Tools for the Session
                     let nativeTools = input.tools.map { ReActNativeToolWrapper(agentTool: $0) }
                     
-                    // Deduplicate History
+                    // Deduplicate History for Transcript
                     var historyForTranscript = input.chatHistory
                     if let lastMsg = historyForTranscript.last,
-                       lastMsg.sender == .user,
                        let lastContent = lastMsg.content.textContent?.trimmingCharacters(in: .whitespacesAndNewlines),
                        let inputContent = input.userInput.trimmingCharacters(in: .whitespacesAndNewlines) as String?,
                        (lastContent == inputContent || lastContent.contains(inputContent)) {
@@ -64,27 +67,28 @@ actor ReActAgentExecutor: AgentExecutor {
                     cognitiveLoop: while currentIteration < self.maxIterations {
                         currentIteration += 1
                         
-                        // Create a specific span for this iteration step (Child of Execution Span)
+                        // Create a specific span for this iteration step
                         let iterationSpan = executionTrace.newSpan()
                         var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
                         
-                        let systemPrompt = self.constructSystemPrompt(input: input, scratchpad: scratchpad)
+                        // --- PROMPT CONSTRUCTION (THE SANDWICH) ---
+                        let systemPrompt = self.constructSandwichPrompt(input: input, scratchpad: scratchpad)
                         let transcript = self.buildTranscript(systemPrompt: systemPrompt, chatHistory: historyForTranscript)
                         let session = LanguageModelSession(model: model, tools: nativeTools, transcript: transcript)
                         
                         // 3. Structured Generation
                         let step: CognitiveStep
                         do {
-                            let promptText = (currentIteration == 1)
-                                ? self.contextualizeUserInput(input: input)
-                                : "Review the previous observation and decide the next step."
+                            let promptTrigger = (currentIteration == 1)
+                                ? "Begin ReAct loop."
+                                : "Review OBSERVATION. Verify if the goal is met. Decide next step."
                                 
-                            let response = try await session.respond(to: promptText, generating: CognitiveStep.self)
+                            let response = try await session.respond(to: promptTrigger, generating: CognitiveStep.self)
                             step = response.content
                             
                         } catch {
-                            logger.error("Cognitive Generation Failed: \(error.localizedDescription) (traceID: \(iterationSpan.traceID))")
-                            scratchpad.append("System Error: Your last response failed validation. You MUST return a valid JSON object matching the `CognitiveStep` schema.")
+                            logger.error("Cognitive Generation Failed: \(error.localizedDescription)")
+                            scratchpad.append("System Error: Your last output failed JSON validation. Ensure 'parameters' is a valid JSON Object (not a string).")
                             
                             onTraceUpdate(AgentTraceLog(
                                 traceID: iterationSpan.traceID,
@@ -98,6 +102,27 @@ actor ReActAgentExecutor: AgentExecutor {
                             continue cognitiveLoop
                         }
                         
+                        // --- NEW: INTRINSIC MEMORY UPDATE (OPTIMIZATION) ---
+                        // We check for memory updates natively before actions or final answers.
+                        if let updateContent = step.memoryUpdate, !updateContent.isEmpty {
+                            // We execute this immediately, bypassing the tool system
+                            ContextMemoryManager.shared.updateSession(conversationID: input.conversationID, content: updateContent)
+                            hasUpdatedMemory = true
+                            
+                            logger.info("Intrinsic Memory Update processed.")
+                            
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .acting, // It's an internal action
+                                content: "💾 Saved Session Context (Intrinsic)",
+                                metadata: ["type": "memory_update"]
+                            ))
+                        }
+                        // ---------------------------------------------------
+                        
                         // 4. UI Feedback
                         onTraceUpdate(AgentTraceLog(
                             traceID: iterationSpan.traceID,
@@ -108,12 +133,74 @@ actor ReActAgentExecutor: AgentExecutor {
                             content: step.displayHeadline,
                             metadata: iterationMetadata
                         ))
-                        logger.debug("Internal Monologue (trace: \(iterationSpan.traceID)): \(step.internalMonologue)")
+                        logger.debug("Internal Monologue: \(step.internalMonologue)")
                         
                         // 5. Logic Branching
                         
-                        // A. Final Answer
+                        var actionWasExecuted = false
+                        
+                        // A. Tool Action
+                        if let action = step.action {
+                            actionWasExecuted = true
+                            iterationMetadata["tool_name"] = action.toolName
+                            
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .acting,
+                                content: "Executing \(action.toolName)...",
+                                metadata: iterationMetadata
+                            ))
+                            
+                            // Metrics & Execution (UPDATED: Now passes parent context and returns success status)
+                            let (observation, isSuccess) = await self.executeTool(
+                                action: action,
+                                tools: input.tools,
+                                parentContext: iterationSpan
+                            )
+                            
+                            // Inject success status into metadata for EvaluationLogger
+                            iterationMetadata["tool_success"] = String(isSuccess)
+                            
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .observing,
+                                content: observation,
+                                metadata: iterationMetadata
+                            ))
+                            
+                            scratchpad.append("Observation (Step \(currentIteration)): Tool '\(action.toolName)' returned: \(observation)")
+                        }
+                        
+                        // B. Final Answer
                         if let finalAnswer = step.finalAnswer {
+                            
+                            // --- MEMORY GUARD ---
+                            // Prevents the Agent from finishing without saving state.
+                            if isMemoryEnabled && !hasUpdatedMemory {
+                                logger.warning("Memory Guard Triggered: Agent attempted to exit without saving.")
+                                
+                                onTraceUpdate(AgentTraceLog(
+                                    traceID: iterationSpan.traceID,
+                                    spanID: iterationSpan.spanID,
+                                    parentSpanID: iterationSpan.parentSpanID,
+                                    stepNumber: currentIteration,
+                                    state: .errorRecovery,
+                                    content: "Enforcing Memory Update...",
+                                    metadata: ["reason": "unsaved_context"]
+                                ))
+                                
+                                // Improved Warning
+                                scratchpad.append("⚠️ SYSTEM INTERVENTION: Task appears complete, but session memory is not updated. \n\n1. DO NOT retry the task. \n2. You MUST fill the `memoryUpdate` field in your next response with the task outcome. \n3. Then provide the `finalAnswer` again.")
+                                continue cognitiveLoop
+                            }
+                            // --------------------
+                            
                             onTraceUpdate(AgentTraceLog(
                                 traceID: iterationSpan.traceID,
                                 spanID: iterationSpan.spanID,
@@ -128,101 +215,19 @@ actor ReActAgentExecutor: AgentExecutor {
                             return
                         }
                         
-                        // B. Tool Action
-                        if let action = step.action {
-                            iterationMetadata["tool_name"] = action.toolName
-                            
-                            onTraceUpdate(AgentTraceLog(
-                                traceID: iterationSpan.traceID,
-                                spanID: iterationSpan.spanID,
-                                parentSpanID: iterationSpan.parentSpanID,
-                                stepNumber: currentIteration,
-                                state: .acting,
-                                content: "Executing \(action.toolName)...",
-                                metadata: iterationMetadata
-                            ))
-                            
-                            // METRICS: Start Timer
-                            let toolStart = Date()
-                            
-                            let observation = await self.executeTool(action: action, tools: input.tools)
-                            
-                            // METRICS: End Timer & Record
-                            let duration = Date().timeIntervalSince(toolStart)
-                            let isError = observation.hasPrefix("Error:")
-                            
-                            Task { @MainActor in
-                                if isError && observation.contains("not found") {
-                                     MetricsManager.shared.recordHallucination(toolName: action.toolName, context: iterationSpan)
-                                } else {
-                                     MetricsManager.shared.recordToolReliability(
-                                         toolName: action.toolName,
-                                         isSuccess: !isError,
-                                         errorType: isError ? observation : nil,
-                                         context: iterationSpan
-                                     )
-                                }
-                                MetricsManager.shared.record(duration: duration, for: "tool_latency", context: iterationSpan)
-                            }
-                            
-                            onTraceUpdate(AgentTraceLog(
-                                traceID: iterationSpan.traceID,
-                                spanID: iterationSpan.spanID,
-                                parentSpanID: iterationSpan.parentSpanID,
-                                stepNumber: currentIteration,
-                                state: .observing,
-                                content: observation,
-                                metadata: iterationMetadata
-                            ))
-                            
-                            scratchpad.append("Observation (Step \(currentIteration)): Tool '\(action.toolName)' returned: \(observation)")
+                        // C. Continue if we acted but didn't finish
+                        if actionWasExecuted {
                             continue cognitiveLoop
                         }
                         
-                        // C. Pure Reasoning
+                        // D. Pure Reasoning (No Action, No Final Answer)
                         scratchpad.append("Observation (Step \(currentIteration)): You thought: \"\(step.internalMonologue)\". Proceed to the next step.")
                         continue cognitiveLoop
                         
                     } // End While
                     
-                    // --- SMART EXIT STRATEGY (MAX ITERATIONS REACHED) ---
-                    // Instead of a generic error, we ask the Agent to summarize what it accomplished.
-                    
-                    onTraceUpdate(AgentTraceLog(
-                        traceID: executionTrace.traceID,
-                        spanID: executionTrace.spanID,
-                        parentSpanID: executionTrace.parentSpanID,
-                        stepNumber: currentIteration,
-                        state: .finalizing,
-                        content: "Generating partial summary..."
-                    ))
-                    
-                    let summaryPrompt = """
-                    ## SYSTEM NOTIFICATION
-                    You reached the maximum iteration limit (\(self.maxIterations)) before declaring "Final Answer".
-                    
-                    ## TASK
-                    Analyze the "SYSTEM STATUS LOG" (scratchpad) below.
-                    1. Summarize what steps were **successfully completed** (e.g. files created, folders set up).
-                    2. Identify what was **left unfinished**.
-                    3. Provide a helpful response to the user explaining the partial success.
-                    
-                    ## STATUS LOG
-                    \(scratchpad.joined(separator: "\n\n"))
-                    """
-                    
-                    // Create a one-off session for the summary
-                    let summarySession = LanguageModelSession(model: model, tools: [], instructions: "You are a helpful assistant providing a status report.")
-                    
-                    do {
-                        let summaryResponse = try await summarySession.respond(to: summaryPrompt)
-                        let summary = summaryResponse.content
-                        continuation.yield("⚠️ **Task Limit Reached**\n\n" + summary)
-                    } catch {
-                        continuation.yield("I reached the maximum number of steps (\(self.maxIterations)) and could not generate a summary. Please check the logs.")
-                    }
-                    
-                    continuation.finish()
+                    // --- SMART EXIT STRATEGY ---
+                    self.handleMaxIterationsReached(model: model, scratchpad: scratchpad, traceContext: executionTrace, continuation: continuation)
                     
                 } catch {
                     logger.error("ReAct Fatal Error: \(error.localizedDescription)")
@@ -232,9 +237,167 @@ actor ReActAgentExecutor: AgentExecutor {
         }
     }
     
+    // MARK: - Prompt Engineering (The Sandwich Architecture)
+    
+    nonisolated private func constructSandwichPrompt(input: AgentInput, scratchpad: [String]) -> String {
+        return [
+            buildKernelLayer(),           // Layer 1: Immutable Physics
+            buildMemoryLayer(input),      // Layer 1.5: Persistent Memory
+            buildReActStrategyLayer(),    // Layer 2: Thinking Process
+            buildPersonaLayer(input),     // Layer 3: User Customization
+            buildContextLayer(input, scratchpad) // Layer 4: Context
+        ].joined(separator: "\n\n")
+    }
+    
+    nonisolated private func buildKernelLayer() -> String {
+        let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+        let userName = NSUserName()
+        let date = Date().formatted(date: .numeric, time: .shortened)
+        
+        return """
+        # LAYER 1: KERNEL CONTEXT
+        You are Devgentic, a specialized macOS System Agent.
+        
+        ## SYSTEM FACTS
+        - OS: macOS \(osVersion)
+        - Shell: Zsh (Non-Interactive Mode)
+        - User: \(userName)
+        - Date: \(date)
+        
+        ## SAFETY PROTOCOLS (NON-NEGOTIABLE)
+        1. **NON-INTERACTIVE ONLY**: You cannot run commands that require user input (e.g., `nano`, `vim`, `sudo` without -n, `top`). Use `cat`, `grep`, `sed`, `awk` instead.
+        2. **DESTRUCTIVE ACTIONS**: Do not use `rm -rf` on system directories. Verify paths exist before operating on them.
+        3. **PRIVACY**: Do not upload user data to external servers unless explicitly instructed.
+        """
+    }
+    
+    nonisolated private func buildMemoryLayer(_ input: AgentInput) -> String {
+        guard let memory = input.persistentMemory, !memory.isEmpty else { return "" }
+        return """
+        # LAYER 1.5: PERSISTENT MEMORY
+        \(memory)
+        
+        ## 🕵️‍♂️ AUDIT LOGS (EVIDENCE LOCKER)
+        You have access to a permanent record of past actions.
+        - To find *what* you did previously, use `search_action_logs`.
+        - To see *exactly* which files were moved/deleted, use `read_action_log`.
+        """
+    }
+    
+    nonisolated private func buildReActStrategyLayer() -> String {
+        return """
+        # LAYER 2: COGNITIVE STRATEGY (ReAct)
+        
+        ## THE LOOP
+        You must strictly follow the **Reasoning -> Acting -> Observing** loop.
+        1. **Thought**: Analyze the situation. What do I know? What is missing?
+        2. **Action**: Select the best tool to make progress.
+        3. **Observation**: Wait for the tool output.
+        
+        ## VERIFICATION PROTOCOL (CRITICAL)
+        Before deciding to take an action, you MUST verify if the goal is ALREADY met.
+        - If you think "I need to move the file", first check "Is the file already there?".
+        - If the previous tool call succeeded, assume the state has changed.
+        - Do not repeat actions blindly.
+
+        ## MANDATORY MEMORY PROTOCOL (INTRINSIC)
+        - **BEFORE** or **WITH** the "Final Answer", you **MUST** populate the `memoryUpdate` field.
+        - This field will **APPEND** to the session log. Do not rewrite the whole log.
+        - Record the outcome of your task (Success, Failure, or Partial) so you remember it in the future.
+        """
+    }
+    
+    nonisolated private func buildPersonaLayer(_ input: AgentInput) -> String {
+        guard let instructions = input.instructions, !instructions.isEmpty else { return "" }
+        return """
+        # LAYER 3: USER DEFINED INSTRUCTIONS
+        \"\"\"
+        \(instructions)
+        \"\"\"
+        """
+    }
+    
+    nonisolated private func buildContextLayer(_ input: AgentInput, _ scratchpad: [String]) -> String {
+        var context = "# LAYER 4: EXECUTION CONTEXT\n"
+        
+        if let plan = input.approvedPlan {
+            context += """
+            ## APPROVED PLAN (FROM MANAGER)
+            CONTEXT BRIEF: \(plan.contextBrief)
+            STEPS:
+            \(plan.steps.map { "\($0.id). \($0.goal)" }.joined(separator: "\n"))
+            
+            """
+        } else {
+            context += """
+            ## USER REQUEST
+            "\(input.userInput)"
+            
+            """
+        }
+        
+        context += "\n## AVAILABLE TOOLS\n"
+        for tool in input.tools {
+            context += "- **\(tool.name)**: \(tool.description)\n"
+            context += "  Schema: \(formatJSONSchema(tool.parameters))\n"
+        }
+        
+        if !scratchpad.isEmpty {
+            context += """
+            
+            ## SYSTEM STATUS LOG (PAST OBSERVATIONS)
+            \(scratchpad.joined(separator: "\n\n"))
+            """
+        } else {
+            context += "\n## SYSTEM STATUS LOG\n(No actions taken yet.)"
+        }
+        
+        // UPDATED: Native JSON Format Instructions
+        context += """
+        
+        ## RESPONSE FORMAT (STRICT JSON)
+        Return ONLY a JSON object matching this schema.
+        
+        **CRITICAL JSON RULES:**
+        1. The `parameters` field MUST be a standard JSON Object.
+        2. Do NOT use stringified JSON inside `parameters`.
+        
+        ✅ **CORRECT:**
+        {
+          "action": {
+            "toolName": "write_file",
+            "parameters": { "path": "/tmp/test.txt", "content": "Hello" }
+          }
+        }
+        
+        {
+          "internalMonologue": "Your reasoning here...",
+          "displayHeadline": "Short status for UI...",
+          "action": { "toolName": "...", "parameters": { ... } } OR null,
+          "memoryUpdate": "New entry to APPEND to the session log..." OR null,
+          "finalAnswer": "Text..." OR null
+        }
+        """
+        
+        return context
+    }
+    
     // MARK: - Tool Execution
     
-    nonisolated private func executeTool(action: ToolAction, tools: [AgentTool]) async -> String {
+    nonisolated private func executeTool(
+        action: ToolAction,
+        tools: [AgentTool],
+        parentContext: TraceContext
+    ) async -> (output: String, isSuccess: Bool) {
+        // 1. Instrumentation Setup
+        var toolSpan = parentContext.newSpan()
+        toolSpan.addMetadata("tool_name", value: action.toolName)
+        
+        let startTime = Date()
+        var isSuccess = true
+        var errorDescription: String? = nil
+        
+        // 2. Tool Resolution
         var sanitizedName = action.toolName
         if !tools.contains(where: { $0.name == sanitizedName }) {
             if let clean = sanitizedName.components(separatedBy: CharacterSet(charactersIn: "<| ")).first, !clean.isEmpty {
@@ -242,118 +405,65 @@ actor ReActAgentExecutor: AgentExecutor {
             }
         }
         
-        guard let tool = tools.first(where: { $0.name == sanitizedName }) else {
-            return "Error: Tool '\(action.toolName)' not found. Available tools: \(tools.map { $0.name }.joined(separator: ", "))"
-        }
+        // 3. Execution Block
+        var output: String
         
-        // Convert JSON string parameters to Data
-        guard let paramData = action.parameters.data(using: .utf8) else {
-            return "Error: Could not encode parameters to UTF-8 data."
-        }
-        
-        do {
-            // Validate JSON validity before running
-            if (try? JSONSerialization.jsonObject(with: paramData)) == nil {
-                 return "Error: Parameters string is not valid JSON: \(action.parameters)"
+        if let tool = tools.first(where: { $0.name == sanitizedName }) {
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                
+                // This assumes action.parameters is now [String: AnyCodable]
+                let paramData = try encoder.encode(action.parameters)
+                
+                output = try await tool.run(paramData)
+                
+                // HEURISTIC: Many tools return string errors that start with "Error:"
+                // We capture this for metrics even if the swift call didn't throw.
+                if output.hasPrefix("Error") {
+                    isSuccess = false
+                    errorDescription = output
+                }
+            } catch {
+                isSuccess = false
+                errorDescription = error.localizedDescription
+                output = "Error encoding/executing parameters for tool '\(sanitizedName)': \(error.localizedDescription)"
             }
-            let result = try await tool.run(paramData)
-            return result
-        } catch {
-            return "Error executing tool '\(sanitizedName)': \(error.localizedDescription)"
-        }
-    }
-    
-    // MARK: - Contextual Intelligence
-    
-    nonisolated private func contextualizeUserInput(input: AgentInput) -> String {
-        let text = input.userInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowerText = text.lowercased()
-        let confirmationPrefixes = ["yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "proceed"]
-        let isShortConfirmation = text.count < 100 && confirmationPrefixes.contains { lowerText.hasPrefix($0) }
-        
-        if isShortConfirmation {
-            if let lastAssistantMsg = input.chatHistory.last(where: { $0.sender != .user }) {
-                let contextContent = lastAssistantMsg.content.textContent ?? ""
-                let suffix = contextContent.suffix(500)
-                return """
-                User Input: "\(text)"
-                [SYSTEM NOTE: The user is confirming your previous suggestion: "...\(suffix)"]
-                [INSTRUCTION: Proceed with the action implied by your previous suggestion.]
-                """
-            }
-        }
-        return text
-    }
-    
-    // MARK: - Prompt Engineering (Structured)
-    
-    nonisolated private func constructSystemPrompt(input: AgentInput, scratchpad: [String]) -> String {
-        var promptParts: [String] = []
-        
-        // --- LAYER 1: IDENTITY ---
-        if let plan = input.approvedPlan {
-            promptParts.append("""
-            You are the **Executor Agent**. A Senior Planner has created a safety-approved plan for you.
-            
-            ## PRIME DIRECTIVE
-            Execute the plan step-by-step.
-            1. **DO NOT** deviate from the plan unless a tool error forces a retry.
-            2. **DO NOT** ask the user for clarification; the Planner has already done that.
-            3. **FOCUS** on the current step.
-            
-            ## RELEVANT CONTEXT (FROM ARCHITECT)
-            \(plan.contextBrief)
-            
-            ## APPROVED PLAN
-            \(plan.steps.map { "\($0.id). \($0.goal)" }.joined(separator: "\n"))
-            """)
         } else {
-            promptParts.append("""
-            You are Devgentic, a highly capable macOS System Agent.
-            Your goal is to change the system state to match the user's request.
-            """)
+            isSuccess = false
+            errorDescription = "Tool not found in registry"
+            output = "Error: Tool '\(action.toolName)' not found. Available tools: \(tools.map { $0.name }.joined(separator: ", "))"
+            
+            // Record hallucination specifically
+            Task { @MainActor in
+                MetricsManager.shared.recordHallucination(toolName: action.toolName, context: toolSpan)
+            }
         }
         
-        // --- LAYER 2: OUTPUT FORMAT ---
-        promptParts.append("""
-        ## OUTPUT FORMAT (STRICT JSON)
-        You are running in **Structured Mode**.
-        For every step, you must output a valid JSON object matching the `CognitiveStep` schema.
+        // 4. Telemetry Recording
+        let duration = Date().timeIntervalSince(startTime)
         
-        1. **internalMonologue**: Your private reasoning. Be detailed. Analyze failures here.
-        2. **displayHeadline**: A short status update for the user (e.g. "Scanning database...", "Running script...").
-        3. **action**: Define this ONLY if you need to run a tool.
-        4. **finalAnswer**: Define this ONLY if the task is done.
-        
-        DO NOT output markdown, 'Thought:', or raw text. Output ONLY the JSON.
-        """)
-        
-        // --- LAYER 3: TOOLS ---
-        var toolsPrompt = "## AVAILABLE TOOLS"
-        for tool in input.tools {
-            toolsPrompt += "\n- Name: \(tool.name)\n"
-            toolsPrompt += "  Description: \(tool.description)\n"
-            toolsPrompt += "  Parameters:\n```json\n\(formatJSONSchema(tool.parameters))\n```\n"
-        }
-        promptParts.append(toolsPrompt)
-        
-        // --- LAYER 4: MEMORY ---
-        if !scratchpad.isEmpty {
-            promptParts.append("""
-            ## SYSTEM STATUS LOG (PREVIOUS STEPS)
-            \(scratchpad.joined(separator: "\n\n"))
-            """)
+        Task { @MainActor in
+            // Record Reliability (Success/Fail rate)
+            MetricsManager.shared.recordToolReliability(
+                toolName: sanitizedName,
+                isSuccess: isSuccess,
+                errorType: errorDescription,
+                context: toolSpan
+            )
+            
+            // Record Latency
+            MetricsManager.shared.record(
+                duration: duration,
+                for: "tool_latency",
+                context: toolSpan
+            )
         }
         
-        // --- LAYER 5: MEMORY PROTOCOL ---
-        promptParts.append("""
-        ## MEMORY CHECK
-        - If the user asks to "summarize" or "recall" a past event, and it is NOT in the Context Brief or Status Log above, you **MUST** use the `search_knowledge_base` tool.
-        - Do not guess about past events.
-        """)
-        
-        return promptParts.joined(separator: "\n\n")
+        return (output, isSuccess)
     }
+
+    // MARK: - Helper: Transcript Builder
     
     nonisolated private func buildTranscript(systemPrompt: String, chatHistory: [ChatMessage]) -> OpenFoundationModels.Transcript {
         var entries: [OpenFoundationModels.Transcript.Entry] = []
@@ -361,6 +471,7 @@ actor ReActAgentExecutor: AgentExecutor {
             segments: [.text(OpenFoundationModels.Transcript.TextSegment(content: systemPrompt))],
             toolDefinitions: []
         )))
+        
         for msg in chatHistory {
             guard let text = msg.content.textContent else { continue }
             if msg.sender == .user {
@@ -377,5 +488,15 @@ actor ReActAgentExecutor: AgentExecutor {
         encoder.outputFormatting = [.sortedKeys]
         if let data = try? encoder.encode(schema), let str = String(data: data, encoding: .utf8) { return str }
         return "{}"
+    }
+    
+    nonisolated private func handleMaxIterationsReached(
+        model: any OpenFoundationModels.LanguageModel,
+        scratchpad: [String],
+        traceContext: TraceContext,
+        continuation: AsyncThrowingStream<String, Error>.Continuation
+    ) {
+         continuation.yield("⚠️ **Task Limit Reached**\n\nI've done my best, but hit the step limit.")
+         continuation.finish()
     }
 }

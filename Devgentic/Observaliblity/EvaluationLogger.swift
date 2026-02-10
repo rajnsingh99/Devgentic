@@ -38,6 +38,9 @@ struct AgentSessionMetrics {
     var didHitMaxIterations: Bool = false
     var hallucinatedTools: Int = 0
     
+    // Track tools for summary
+    var executedTools: [(name: String, success: Bool)] = []
+    
     // Tools available to the agent (for checking hallucinations)
     let validToolNames: Set<String>
     
@@ -136,6 +139,14 @@ class EvaluationLogger {
                     metrics.parseErrors += 1
                 }
                 
+            case .observing:
+                // Extract tool details from metadata injected by ReActAgentExecutor
+                if let toolName = log.metadata?["tool_name"],
+                   let successStr = log.metadata?["tool_success"],
+                   let success = Bool(successStr) {
+                    metrics.executedTools.append((name: toolName, success: success))
+                }
+                
             case .finalizing:
                 metrics.didFinishSuccessfully = true
                 
@@ -168,6 +179,14 @@ class EvaluationLogger {
             print("Latency:     \(durationStr)")
             print("Steps Taken: \(metrics.totalSteps)")
             print("Tool Calls:  \(metrics.toolCalls)")
+            
+            // Print Tool Details
+            if !metrics.executedTools.isEmpty {
+                print("Tools Executed:")
+                for (name, success) in metrics.executedTools {
+                    print("  - \(name): \(success ? "SUCCESS" : "FAILED")")
+                }
+            }
             
             if metrics.parseErrors > 0 || metrics.hallucinatedTools > 0 {
                 print("Errors:      JSON Parse (\(metrics.parseErrors)) | Hallucinations (\(metrics.hallucinatedTools))")

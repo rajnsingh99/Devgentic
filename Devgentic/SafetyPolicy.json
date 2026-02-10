@@ -1,0 +1,62 @@
+//
+//  SafetyPolicy.json
+//  Devgentic
+//
+//  Created by Raj Singh on 08/02/26.
+//
+
+{
+  "version": "1.0",
+  "policy_name": "MacOS_Hardened_Rules_v1",
+  "rules": [
+    {
+      "id": "SIP_PROTECTION",
+      "severity": "BLOCKED",
+      "trigger_type": "regex",
+      "pattern": "^(sudo\\s+)?(rm|mv|cp|touch|nano|vim).*?(/System|/usr/bin|/usr/sbin|/var/db)",
+      "risk_summary": "System Integrity Protection (SIP) Violation",
+      "agent_guidance": "Explain that macOS protects this directory to prevent OS corruption. Do not offer to bypass."
+    },
+    {
+      "id": "ROOT_DELETION",
+      "severity": "BLOCKED",
+      "trigger_type": "regex",
+      "pattern": "rm\\s+(-rf\\s+)?/$",
+      "risk_summary": "Root System Deletion Attempt",
+      "agent_guidance": "Refuse immediately. This destroys the OS."
+    },
+    {
+      "id": "DESTRUCTIVE_CMD",
+      "severity": "CONFIRM_REQUIRED",
+      "trigger_type": "regex",
+      "pattern": "(^|\\s)rm\\s",
+      "risk_summary": "Permanent File Deletion",
+      "agent_guidance": "Pinpoint the specific file. Ask: 'Are you sure you want to delete [filename]?'"
+    },
+    {
+      "id": "CHAINED_INJECTION",
+      "severity": "CONFIRM_REQUIRED",
+      "trigger_type": "regex",
+      "pattern": "[;&|]\\s*(whoami|cat /etc|nc|curl|wget)",
+      "risk_summary": "Potential Command Injection / Chaining",
+      "agent_guidance": "Warn the user about the chained command. Verify the filename is quoted properly."
+    },
+    {
+      "id": "ZIP_BOMB_PREVENTION",
+      "severity": "CONFIRM_REQUIRED",
+      "trigger_type": "regex",
+      "pattern": "^unzip\\s",
+      "risk_summary": "Unsafe Archive Extraction",
+      "agent_guidance": "Suggest using `zipinfo` or `unzip -l` first to inspect contents."
+    },
+    {
+      "id": "SCRIPT_EXECUTION",
+      "severity": "CONFIRM_REQUIRED",
+      "trigger_type": "regex",
+      "pattern": "\\.(sh|py|rb)$|python\\s-c|bash\\s-c",
+      "risk_summary": "Script Execution (Logic Loops Undetectable)",
+      "agent_guidance": "Warn that logic loops (infinite loops) cannot be detected by safety tools. Ask for user review."
+    }
+  ]
+}
+

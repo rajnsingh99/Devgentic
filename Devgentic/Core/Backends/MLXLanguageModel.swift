@@ -39,7 +39,6 @@ public struct MLXLanguageModel: LanguageModel {
         var fullText = ""
         // Use default parameters or extract from options if available (e.g. options?.temperature)
         let temperature = options?.temperature ?? 0.6
-        // FIX: Changed maxTokens to maximumResponseTokens to match GenerationOptions definition
         let maxTokens = options?.maximumResponseTokens ?? 2048
         
         // Await the actor method
@@ -53,7 +52,6 @@ public struct MLXLanguageModel: LanguageModel {
             fullText += token
         }
         
-        // FIX: Added assetIDs: [] to satisfy the Transcript.Response initializer
         return .response(Transcript.Response(
             assetIDs: [],
             segments: [.text(Transcript.TextSegment(content: fullText))]
@@ -64,13 +62,15 @@ public struct MLXLanguageModel: LanguageModel {
     public func stream(transcript: Transcript, options: GenerationOptions?) -> AsyncThrowingStream<Transcript.Entry, Error> {
         let messages = convertTranscriptToMLXMessages(transcript)
         let temperature = options?.temperature ?? 0.6
-        // FIX: Changed maxTokens to maximumResponseTokens to match GenerationOptions definition
         let maxTokens = options?.maximumResponseTokens ?? 2048
         
         return AsyncThrowingStream { continuation in
             Task {
                 do {
-                    var accumulatedText = ""
+                    // BUG FIX: Removed 'accumulatedText' variable.
+                    // We must stream DELTAS (chunks) only, as the consumer (ChatExecutor/UI)
+                    // is responsible for accumulation. Sending accumulated text here causes
+                    // exponential duplication (e.g. "T", "Te", "Tes", "Test").
                     
                     // Await the actor method inside the Task
                     let tokenStream = await MLXService.shared.streamChat(
@@ -80,13 +80,10 @@ public struct MLXLanguageModel: LanguageModel {
                     )
                     
                     for try await token in tokenStream {
-                        accumulatedText += token
-                        
-                        // Yield the updated entry with the accumulated text
-                        // FIX: Added assetIDs: []
+                        // Yield the NEW token only
                         let entry = Transcript.Entry.response(Transcript.Response(
                             assetIDs: [],
-                            segments: [.text(Transcript.TextSegment(content: accumulatedText))]
+                            segments: [.text(Transcript.TextSegment(content: token))]
                         ))
                         continuation.yield(entry)
                     }
