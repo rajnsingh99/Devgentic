@@ -71,6 +71,9 @@ struct ToolAction: Sendable, Codable {
 @Generable
 struct CognitiveStep: Sendable, Codable {
     
+    @Guide(description: "Analyze the previous step. Was it a 'Success' or 'Failure'? Be honest.")
+    let previousStepOutcome: String
+    
     @Guide(description: "Your internal reasoning process...")
     let internalMonologue: String
     

@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 10/02/26.
+//  PATCHED: Updated output footer to clearly distinguish Shell PWD from Command Output.
 //
 
 import Foundation
@@ -74,7 +75,8 @@ final class ShellSessionManager: @unchecked Sendable {
         let finalCWD = self.getCWD(for: conversationID)
         let displayOutput = cleanOutput.isEmpty ? "(Success)" : cleanOutput
         
-        return "\(displayOutput)\n\n[Current Directory: \(finalCWD)]"
+        // FIX: Renamed footer to 'Shell PWD' to prevent Agent hallucinating that this path is the result of the tool action
+        return "\(displayOutput)\n\n[Shell PWD: \(finalCWD)]"
     }
     
     /// Called by AppDelegate when the application terminates.

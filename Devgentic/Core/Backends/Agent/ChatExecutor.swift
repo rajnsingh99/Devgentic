@@ -30,7 +30,7 @@ actor ChatExecutor: AgentExecutor {
         model: any OpenFoundationModels.LanguageModel,
         input: AgentInput,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
-    ) -> AsyncThrowingStream<String, Error> {
+    ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
         return AsyncThrowingStream { continuation in
             Task {
@@ -48,6 +48,9 @@ actor ChatExecutor: AgentExecutor {
                         content: "Preparing response..."
                     ))
                     
+                    // Optional: Emit a thought event so the new UI can also show this state
+                    continuation.yield(.thought("Preparing response..."))
+                    
                     // 2. Construct Transcript
                     // We combine instructions, RAG context, history, and the user query.
                     let transcript = self.buildTranscript(input: input)
@@ -64,9 +67,11 @@ actor ChatExecutor: AgentExecutor {
                             for segment in response.segments {
                                 switch segment {
                                 case .text(let textSegment):
-                                    continuation.yield(textSegment.content)
+                                    // WRAPPER FIX: Wrap text in .content event
+                                    continuation.yield(.content(textSegment.content))
                                 case .structure(let structuredSegment):
-                                    continuation.yield(structuredSegment.content.text)
+                                    // WRAPPER FIX: Wrap structure text in .content event
+                                    continuation.yield(.content(structuredSegment.content.text))
                                 }
                             }
                         default:
@@ -89,6 +94,8 @@ actor ChatExecutor: AgentExecutor {
                     
                 } catch {
                     logger.error("ChatExecutor Error: \(error.localizedDescription)")
+                    // WRAPPER FIX: Emit error event before throwing
+                    continuation.yield(.error(error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
             }

@@ -39,14 +39,18 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     @Published var agentResponse: AgentResponse?
     @Published var isStreaming: Bool = false
     
-    // MARK: - New Transient UI State (Phase 4)
-    // These properties drive the "Gemini-style" status updates but are NOT persisted.
+    // MARK: - Glass Box UI State (Gemini-Style)
+    // These properties store the intermediate reasoning and tool outputs.
+    // They are now Codable so the "Thinking" history is persisted.
+    @Published var thoughts: [String] = []
+    @Published var artifacts: [ToolOutput] = []
+    
+    // Transient UI State
     @Published var thinkingHeadline: String? = nil
     @Published var agentState: AgentStep = .idle
+    @Published var isThinkingExpanded: Bool = false // UI toggle for the accordion
     
     // MARK: - Performance Caching
-    // Cache parsed markdown blocks to prevent re-parsing on every view render.
-    // This is transient and excluded from Codable.
     var cachedMarkdownBlocks: [ContentBlock]? = nil
     
     var attachedTextFiles: [AttachedTextFile]?
@@ -62,7 +66,6 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         return response.variants[response.selectedVariantIndex].content
     }
 
-    // Modify the initializer to create the initial `AgentResponse` for agent messages.
     init(id: UUID = UUID(), conversationId: UUID, timestamp: Date = Date(), sender: SenderRole, content: MessageContent, attachedTextFiles: [AttachedTextFile]? = nil, attachedImageFiles: [AttachedImageFile]? = nil, isStreaming: Bool = false, backendEntityId: UUID? = nil) {
         self.id = id
         self.conversationId = conversationId
@@ -74,8 +77,6 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.isStreaming = isStreaming
 
         if sender == .agent {
-            // NOTE: The initial backendEntityId will be passed from the
-            // BackendOrchestrationService when the message is first created.
             let initialVariant = ResponseMessageVariant(
                 content: content,
                 backendEntityId: backendEntityId
@@ -84,19 +85,13 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         }
     }
     
-    /// Helper to get cached blocks or parse and cache them if missing.
-    /// This moves the heavy parsing work out of the View body.
     func getOrCreateMarkdownBlocks(from text: String) -> [ContentBlock] {
-        if let cached = cachedMarkdownBlocks {
-            return cached
-        }
-        // Parsing is done once and cached.
+        if let cached = cachedMarkdownBlocks { return cached }
         let blocks = parseMarkdown(text)
         self.cachedMarkdownBlocks = blocks
         return blocks
     }
     
-    /// Invalidates the cache. Call this when content changes (e.g. during streaming or editing).
     func invalidateMarkdownCache() {
         self.cachedMarkdownBlocks = nil
     }
@@ -106,19 +101,18 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
                lhs.content == rhs.content &&
                lhs.isStreaming == rhs.isStreaming &&
                lhs.agentResponse == rhs.agentResponse &&
-               // Include transient state in equality check so Views update when headline changes
-               lhs.thinkingHeadline == rhs.thinkingHeadline &&
-               lhs.agentState == rhs.agentState
+               lhs.thoughts == rhs.thoughts &&
+               lhs.artifacts == rhs.artifacts
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {
-        print("Lifecycle management for ChatMessage \(self.id) would begin here.")
+        // Lifecycle management placeholder
     }
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        // NOTE: 'thinkingHeadline', 'agentState', and 'cachedMarkdownBlocks' are intentionally excluded
-        // so they are not saved to Core Data / JSON.
+        // NEW: Persist the glass box data
+        case thoughts, artifacts
     }
 
     // Manual Decodable conformance
@@ -135,10 +129,15 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
         
+        // Decode Glass Box Data (Default to empty if missing for backward compatibility)
+        self.thoughts = try container.decodeIfPresent([String].self, forKey: .thoughts) ?? []
+        self.artifacts = try container.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
+        
         // Transient properties initialize to default
         self.thinkingHeadline = nil
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
+        self.isThinkingExpanded = false
     }
     
     func encode(to encoder: Encoder) throws {
@@ -153,72 +152,35 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         try container.encode(isStreaming, forKey: .isStreaming)
         try container.encodeIfPresent(attachedTextFiles, forKey: .attachedTextFiles)
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
+        
+        // Encode Glass Box Data
+        try container.encode(thoughts, forKey: .thoughts)
+        try container.encode(artifacts, forKey: .artifacts)
     }
 }
 
+// (AttachedTextFile, AttachedImageFile, MessageContent structs remain unchanged)
 struct AttachedTextFile: Codable, Equatable, Identifiable {
-    var id = UUID()
-    let name: String
-    let url: URL
-    let fileExtension: String
-    let content: String
-    let size: Int64
-
-    static func == (lhs: AttachedTextFile, rhs: AttachedTextFile) -> Bool {
-        return lhs.id == rhs.id && lhs.url == rhs.url
-    }
+    var id = UUID(); let name: String; let url: URL; let fileExtension: String; let content: String; let size: Int64
+    static func == (lhs: AttachedTextFile, rhs: AttachedTextFile) -> Bool { return lhs.id == rhs.id && lhs.url == rhs.url }
 }
 
 struct AttachedImageFile: Codable, Equatable, Identifiable {
-    var id = UUID()
-    let name: String
-    let url: URL
-    let fileExtension: String
-    let binaryData: Data
-    let size: Int64
-
-    static func == (lhs: AttachedImageFile, rhs: AttachedImageFile) -> Bool {
-        return lhs.id == rhs.id && lhs.url == rhs.url
-    }
+    var id = UUID(); let name: String; let url: URL; let fileExtension: String; let binaryData: Data; let size: Int64
+    static func == (lhs: AttachedImageFile, rhs: AttachedImageFile) -> Bool { return lhs.id == rhs.id && lhs.url == rhs.url }
 }
 
-// Add the new image case
-enum MessageContent: Equatable {
+enum MessageContent: Equatable, Codable {
     case plainText(String)
     case markdownText(String)
     case codeBlock(language: String?, code: String)
     case error(title: String?, details: String)
     case image(url: URL?, alt: String?, imageData: Data?)
-
-    // Update Equatable conformance
-    static func == (lhs: MessageContent, rhs: MessageContent) -> Bool {
-        switch (lhs, rhs) {
-        case (.plainText(let lText), .plainText(let rText)): return lText == rText
-        case (.markdownText(let lText), .markdownText(let rText)): return lText == rText
-        case (.codeBlock(let lLang, let lCode), .codeBlock(let rLang, let rCode)): return lLang == rLang && lCode == rCode
-        case (.error(let lTitle, let lDetails), .error(let rTitle, let rDetails)): return lTitle == rTitle && lDetails == rDetails
-        case (.image(let lUrl, let lAlt, let lData), .image(let rUrl, let rAlt, let rData)): return lUrl == rUrl && lAlt == rAlt && lData == rData
-        default: return false
-        }
-    }
-}
-
-// --- Manual Codable Conformance for MessageContent ---
-extension MessageContent: Codable {
-
+    
     enum CodingKeys: String, CodingKey {
-        case type
-        case text
-        case language
-        case code
-        case title
-        case details
-        case imageUrl
-        case imageAlt
-        case imageData // New key
+        case type, text, language, code, title, details, imageUrl, imageAlt, imageData
     }
 
-    // Decoder implementation
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(String.self, forKey: .type)
@@ -241,7 +203,7 @@ extension MessageContent: Codable {
         case "image":
             let urlString = try container.decodeIfPresent(String.self, forKey: .imageUrl)
             let alt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
-            let imageData = try container.decodeIfPresent(Data.self, forKey: .imageData) // Decode Data
+            let imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
             let url = urlString.flatMap { URL(string: $0) }
             self = .image(url: url, alt: alt, imageData: imageData)
         default:
@@ -249,10 +211,8 @@ extension MessageContent: Codable {
         }
     }
 
-    // Encoder implementation
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-
         switch self {
         case .plainText(let text):
             try container.encode("plainText", forKey: .type)
@@ -272,24 +232,17 @@ extension MessageContent: Codable {
             try container.encode("image", forKey: .type)
             try container.encodeIfPresent(url?.absoluteString, forKey: .imageUrl)
             try container.encodeIfPresent(alt, forKey: .imageAlt)
-            try container.encodeIfPresent(imageData, forKey: .imageData) // Encode Data
+            try container.encodeIfPresent(imageData, forKey: .imageData)
         }
     }
-}
-
-extension MessageContent {
+    
     var textContent: String? {
         switch self {
-        case .plainText(let text):
-            return text
-        case .markdownText(let text):
-            return text
-        case .codeBlock(_, let code):
-            return code
-        case .error(let title, let details):
-            return "\(title ?? "Error"): \(details)"
-        case .image:
-            return nil
+        case .plainText(let text): return text
+        case .markdownText(let text): return text
+        case .codeBlock(_, let code): return code
+        case .error(let title, let details): return "\(title ?? "Error"): \(details)"
+        case .image: return nil
         }
     }
 }

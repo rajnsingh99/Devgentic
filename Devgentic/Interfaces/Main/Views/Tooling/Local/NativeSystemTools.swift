@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 26/01/26.
+//  Updated for Robust JSON Parsing & Schema Injection.
 //
 
 import Foundation
@@ -14,7 +15,7 @@ import OpenFoundationModelsCore
 
 struct TerminalTool: OpenFoundationModels.Tool {
     let name = "execute_shell"
-    let description = "Executes a shell command (zsh) and returns the output. Useful for checking file details (ls -lh), system state, or running scripts. Non-interactive commands only."
+    let description = "Executes a shell command (zsh). Non-interactive. Example: { \"command\": \"ls -lah /tmp\" }"
     
     // NEW: Session Context injected by AgentConnect
     let conversationID: UUID?
@@ -30,7 +31,10 @@ struct TerminalTool: OpenFoundationModels.Tool {
             
             // ROBUST PARSING: Aliases
             var foundCmd: String? = nil
-            let keys = ["command", "cmd", "script", "code", "exec"]
+            let keys = [
+                "command", "cmd", "script", "code", "exec",
+                "shell_command", "shellCommand", "bash" // CamelCase & Synonyms
+            ]
             
             for key in keys {
                 if let val = props[key], let str = try? String(val) {
@@ -85,14 +89,14 @@ struct TerminalTool: OpenFoundationModels.Tool {
         } catch {
             return "Command failed: \(error.localizedDescription) (Audit Ref: \(logID))"
         }
-    }
+    } 
 }
 
 // MARK: - Open Application Tool
 
 struct OpenApplicationTool: OpenFoundationModels.Tool {
     let name = "open_application"
-    let description = "Launches an app by Bundle ID (e.g., 'com.apple.Safari')."
+    let description = "Launches an app by Bundle ID. Example: { \"bundle_identifier\": \"com.apple.Safari\" }"
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let bundle_identifier: String
@@ -101,7 +105,10 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
             
             // ROBUST PARSING: Aliases
             var foundID: String? = nil
-            let keys = ["bundle_identifier", "app_id", "id", "bundleId", "identifier"]
+            let keys = [
+                "bundle_identifier", "app_id", "id", "bundleId",
+                "identifier", "bundleID", "appId" // CamelCase & Common Variations
+            ]
             
             for key in keys {
                 if let val = props[key], let str = try? String(val) {
@@ -169,7 +176,7 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
 
 struct RunAppleScriptTool: OpenFoundationModels.Tool {
     let name = "run_applescript"
-    let description = "Executes arbitrary AppleScript code."
+    let description = "Executes AppleScript. Example: { \"script\": \"tell application \\\"Finder\\\" to activate\" }"
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let script: String
@@ -178,7 +185,9 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
             
             // ROBUST PARSING: Aliases
             var foundScript: String? = nil
-            let keys = ["script", "code", "source", "applescript"]
+            let keys = [
+                "script", "code", "source", "applescript", "appleScript", "sourceCode"
+            ]
             
             for key in keys {
                 if let val = props[key], let str = try? String(val) {
@@ -233,7 +242,7 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
 
 struct GetSystemStatsTool: OpenFoundationModels.Tool {
     let name = "get_system_stats"
-    let description = "Returns basic macOS system info."
+    let description = "Returns basic macOS system info. Example: {}"
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         init(_ content: GeneratedContent) throws {}

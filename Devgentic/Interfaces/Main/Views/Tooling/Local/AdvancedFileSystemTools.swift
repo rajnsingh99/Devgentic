@@ -3,19 +3,197 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 27/01/26.
-//  Updated for Audit Consistency.
+//  Updated by Agent Engineer on 12/02/26.
+//  UPGRADE:
+//  1. Replaced Hybrid Engine with Production POC (Raw Query + Permission Scoping).
+//  2. Removed Deep Scan fallback for simplification.
+//  3. Added explicit permission checks to trigger TCC prompts for Documents/Downloads.
+//  4. FIX: Handle "null" string from LLM to correctly trigger Global Search.
+//  5. FIX: Added kMDItemFSName to query to ensure Folders are found.
+//  PATCHED: Updated Output to clarify search context.
 //
 
 import Foundation
 import OpenFoundationModels
 import OpenFoundationModelsCore
 
-// MARK: - FS Smart Search (Spotlight)
+// MARK: - Hybrid Search Service (Based on POC)
+
+/// A Production-Grade Search Engine wrapper for macOS.
+/// Implements Raw Spotlight Query Language to solve tokenization edge cases.
+@MainActor
+class HybridSearchService {
+    static let shared = HybridSearchService()
+    
+    // Pre-fetching attributes prevents disk I/O during result mapping
+    private let requiredAttributes = [
+        NSMetadataItemPathKey,
+        NSMetadataItemDisplayNameKey,
+        NSMetadataItemFSNameKey,
+        kMDItemKind as String
+    ]
+    
+    // Toggle this to true to explicitly hide system-heavy noise folders
+    private let filterSystemPaths = true
+    
+    /// Checks permission for all primary root-level user directories.
+    /// This acts as the "Manual Trigger" to prompt TCC if needed and gathers available scopes.
+    private func checkPermissionsAndGetScopes() -> [URL] {
+        let fileManager = FileManager.default
+        let foldersToCheck: [FileManager.SearchPathDirectory] = [
+            .documentDirectory,
+            .desktopDirectory,
+            .downloadsDirectory,
+            .moviesDirectory,
+            .musicDirectory,
+            .picturesDirectory
+        ]
+        
+        var availableScopes: [URL] = []
+        
+        for folder in foldersToCheck {
+            if let url = fileManager.urls(for: folder, in: .userDomainMask).first {
+                // Non-intrusive check: isReadableFile will return false if TCC block is active.
+                // Attempting to read it often triggers the OS permission prompt if not yet determined.
+                if fileManager.isReadableFile(atPath: url.path) {
+                    availableScopes.append(url)
+                }
+            }
+        }
+        return availableScopes
+    }
+    
+    /// Performs the search using the POC raw query logic.
+    func search(term: String, scope: String?) async throws -> [String] {
+        // 1. Scope Resolution & Permission Check
+        var searchScopes: [Any] = []
+        var permissionNote: String? = nil
+        
+        // Safety Check: If scope is the string "null" or empty, treat as Global
+        let cleanScope = (scope == "null" || scope == "") ? nil : scope
+        
+        if let specificScope = cleanScope {
+            // User requested specific scope
+            if FileManager.default.isReadableFile(atPath: specificScope) {
+                searchScopes = [URL(fileURLWithPath: specificScope)]
+            } else {
+                return ["Error: Permission denied or path does not exist for scope: \(specificScope). Please grant access."]
+            }
+        } else {
+            // Global Search: Use validated user directories from POC logic
+            let validUserScopes = checkPermissionsAndGetScopes()
+            
+            if !validUserScopes.isEmpty {
+                searchScopes = validUserScopes
+            } else {
+                // Fallback to Home if we are still waiting for initial user interaction/permissions
+                searchScopes = [NSMetadataQueryUserHomeScope]
+                permissionNote = "[Note: Limited access to user directories. Results might be incomplete until permissions are granted.]"
+            }
+        }
+        
+        return await withCheckedContinuation { continuation in
+            let query = NSMetadataQuery()
+            
+            // Logic from POC: Setup
+            query.sortDescriptors = [
+                NSSortDescriptor(key: NSMetadataItemLastUsedDateKey, ascending: false),
+                NSSortDescriptor(key: NSMetadataItemDisplayNameKey, ascending: true)
+            ]
+            query.valueListAttributes = requiredAttributes
+            
+            // Logic from POC: Raw Query Construction
+            let rawQueryString = buildRawQuery(from: term)
+            
+            if let predicate = NSPredicate(fromMetadataQueryString: rawQueryString) {
+                query.predicate = predicate
+            } else {
+                continuation.resume(returning: ["Error: Failed to compile search query."])
+                return
+            }
+            
+            query.searchScopes = searchScopes
+            
+            // Notification Observer
+            var observer: NSObjectProtocol?
+            
+            func finish(results: [String]) {
+                if let obs = observer { NotificationCenter.default.removeObserver(obs) }
+                query.stop()
+                
+                var finalOutput = results
+                if let note = permissionNote {
+                    finalOutput.append(note)
+                }
+                continuation.resume(returning: finalOutput)
+            }
+            
+            observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { notification in
+                query.disableUpdates()
+                
+                let foundItems = query.results as? [NSMetadataItem] ?? []
+                var paths: [String] = []
+                
+                for item in foundItems {
+                    if let path = item.value(forAttribute: NSMetadataItemPathKey) as? String {
+                        paths.append(path)
+                    }
+                }
+                
+                // Return all results (Tool wrapper handles truncation if needed)
+                finish(results: paths)
+            }
+            
+            // Start Search
+            query.start()
+            
+            // Timeout Safety: 4.0s max
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                if query.isGathering {
+                    // Force finish with whatever we have so far
+                    query.disableUpdates()
+                    let foundItems = query.results as? [NSMetadataItem] ?? []
+                    let paths = foundItems.compactMap { $0.value(forAttribute: NSMetadataItemPathKey) as? String }
+                    finish(results: paths)
+                }
+            }
+        }
+    }
+    
+    // Logic from POC: Raw Query Builder
+    private func buildRawQuery(from input: String) -> String {
+        let tokens = input.split(separator: " ")
+        guard !tokens.isEmpty else { return "" }
+        
+        let subQueries = tokens.map { token -> String in
+            let escaped = String(token).replacingOccurrences(of: "\"", with: "\\\"")
+            // Search DisplayName, FSName (Filename), and Content with 'cdw' modifiers (Case, Diacritic, Word-based)
+            // UPDATE: Added kMDItemFSName to ensure exact filename matches are found (e.g. Folders)
+            return "((kMDItemDisplayName == \"*\(escaped)*\"cdw) || (kMDItemFSName == \"*\(escaped)*\"cdw) || (kMDItemTextContent == \"\(escaped)\"cdw))"
+        }
+        
+        var finalQuery = subQueries.joined(separator: " && ")
+        
+        if filterSystemPaths {
+            let exclusions = [
+                "*/Library/*",
+                "*/.Trash/*"
+            ]
+            let exclusionQuery = exclusions.map { "kMDItemPath != \"\($0)\"" }.joined(separator: " && ")
+            finalQuery = "(\(finalQuery)) && (\(exclusionQuery))"
+        }
+        
+        return finalQuery
+    }
+}
+
+// MARK: - FS Smart Search (Spotlight + Hybrid)
 
 struct SmartSearchTool: OpenFoundationModels.Tool {
     let name = "fs_smart_search"
-    // OPTIMIZATION: Anchored to `mdfind` to trigger the model's knowledge of indexed search vs. traversal.
-    let description = "Deep system search using macOS Spotlight (NSMetadataQuery). Functionally similar to the `mdfind` CLI command. Instantly finds files by matching Filenames OR Text Content. Use this as the PRIMARY tool for locating lost files or digging up documents by topic."
+    
+    // OPTIMIZATION: Description updated to reflect POC logic (Indexed-only, permission sensitive)
+    let description = "Advanced system search using macOS Spotlight. Finds files by matching Filename or Content. STRATEGY: 1. Searches Documents, Downloads, Desktop, etc. 2. REQUIRES PERMISSIONS: If results are missing, ensure the app has access to user folders. 3. Supports global search (null scope) or specific folder scope."
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let search_term: String
@@ -26,7 +204,7 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
             
             // Robust alias checking for search term
             var term: String? = nil
-            let termKeys = ["search_term", "query", "term", "keyword", "text"]
+            let termKeys = ["search_term", "query", "term", "keyword", "text", "searchTerm"]
             
             for key in termKeys {
                 if let val = props[key], let str = try? String(val) {
@@ -40,11 +218,16 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
             
             // Robust alias checking for scope
             var scope: String? = nil
-            let scopeKeys = ["search_scope", "scope", "path", "folder", "directory"]
+            let scopeKeys = ["search_scope", "scope", "path", "folder", "directory", "searchScope"]
             
             for key in scopeKeys {
                 if let val = props[key], let str = try? String(val) {
-                    scope = str
+                    // FIX: Handle LLM passing the literal string "null" instead of actual null/nil
+                    if str.caseInsensitiveCompare("null") == .orderedSame {
+                        scope = nil
+                    } else {
+                        scope = str
+                    }
                     break
                 }
             }
@@ -56,8 +239,8 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
         let root = DynamicGenerationSchema(
             name: "Arguments",
             properties: [
-                DynamicGenerationSchema.Property(name: "search_term", description: "The keyword or phrase to search for.", schema: DynamicGenerationSchema(type: String.self)),
-                DynamicGenerationSchema.Property(name: "search_scope", description: "Optional folder path to restrict the search.", schema: DynamicGenerationSchema(type: String.self), isOptional: true)
+                DynamicGenerationSchema.Property(name: "search_term", description: "The keyword or phrase. Supports partial matches.", schema: DynamicGenerationSchema(type: String.self)),
+                DynamicGenerationSchema.Property(name: "search_scope", description: "Optional folder path. Leave NULL for global search.", schema: DynamicGenerationSchema(type: String.self), isOptional: true)
             ]
         )
         return try! GenerationSchema(root: root, dependencies: [])
@@ -76,19 +259,38 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
         )
         // -------------------------------
         
-        let scopes = arguments.search_scope != nil ? [arguments.search_scope!] : nil
-        
         do {
-            let paths = try await Task { @MainActor in
-                let searcher = SpotlightSearcher()
-                return try await searcher.search(queryStr: arguments.search_term, scope: scopes)
-            }.value
+            let paths = try await HybridSearchService.shared.search(
+                term: arguments.search_term,
+                scope: arguments.search_scope
+            )
+            
+            // Check for explicit error messages
+            if let first = paths.first, first.starts(with: "Error:") {
+                return "\(first) (Audit Ref: \(logID))"
+            }
             
             if paths.isEmpty {
                 return "No results found matching '\(arguments.search_term)'. (Audit Ref: \(logID))"
             }
-            let limitedPaths = paths.prefix(20)
-            return "Found \(paths.count) items (showing top 20):\n" + limitedPaths.joined(separator: "\n") + "\n(Audit Ref: \(logID))"
+            
+            // Check for permission warning
+            let warning = paths.first(where: { $0.starts(with: "[Note:") })
+            let filePaths = paths.filter { !$0.starts(with: "[Note:") }
+            
+            if filePaths.isEmpty {
+                 return "No files found matching '\(arguments.search_term)'. \(warning ?? "") (Audit Ref: \(logID))"
+            }
+            
+            let limitedPaths = filePaths.prefix(20)
+            var output = "Found \(filePaths.count) items (showing top 20):\n" + limitedPaths.joined(separator: "\n")
+            if let note = warning {
+                output += "\n\n\(note)"
+            }
+            
+            // FIX: Explicitly label the search action results
+            return "🔍 Search Results for '\(arguments.search_term)':\n\(output)\n(Audit Ref: \(logID))"
+            
         } catch {
             return "Search failed: \(error.localizedDescription) (Audit Ref: \(logID))"
         }

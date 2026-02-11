@@ -134,11 +134,12 @@ protocol AgentExecutor: Sendable {
     
     var architecture: AgentArchitecture { get }
     
+    // UPDATED: Now returns AgentStreamEvent instead of plain String
     func execute(
         model: any OpenFoundationModels.LanguageModel,
         input: AgentInput,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
-    ) -> AsyncThrowingStream<String, Error>
+    ) -> AsyncThrowingStream<AgentStreamEvent, Error>
 }
 
 // MARK: - Native Tool Wrapper

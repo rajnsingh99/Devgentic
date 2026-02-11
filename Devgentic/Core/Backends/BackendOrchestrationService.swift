@@ -63,7 +63,7 @@ class BackendOrchestrationService: ObservableObject {
         // --- NEW: Trace Callback for UI Updates ---
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
         // ------------------------------------------
-    ) -> AsyncThrowingStream<String, Error> {
+    ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
         // BUG REPORT FEATURE:
         // Wrap the UI callback to automatically record every step into the Aggregator.
@@ -137,8 +137,9 @@ class BackendOrchestrationService: ObservableObject {
                             onTraceUpdate: aggregatedTraceUpdate
                         )
                         
-                        for try await token in stream {
-                            continuation.yield(token)
+                        // Passthrough all events to UI
+                        for try await event in stream {
+                            continuation.yield(event)
                         }
                         continuation.finish()
 
@@ -272,9 +273,31 @@ class BackendOrchestrationService: ObservableObject {
                         )
                         
                         var tokensReceived = 0
-                        for try await eventData in stream {
-                            tokensReceived += 1
-                            continuation.yield(eventData)
+                        // Bridge: Passthrough the Structured Stream
+                        for try await event in stream {
+                            switch event {
+                            case .content:
+                                tokensReceived += 1
+                                continuation.yield(event)
+                                
+                            case .thought(let thought):
+                                // Log thoughts for debug, but pass them through to UI
+                                logger.debug("[THOUGHT] \(thought)")
+                                continuation.yield(event)
+                                
+                            case .toolOutput(let output):
+                                // Log artifacts
+                                logger.debug("[ARTIFACT] \(output.toolName) - \(output.output.prefix(50))...")
+                                continuation.yield(event)
+                                
+                            case .toolCall(let name, let params):
+                                logger.debug("[TOOL_CALL] \(name) params: \(params)")
+                                continuation.yield(event)
+                                
+                            case .error(let err):
+                                logger.debug("[ERROR] \(err)")
+                                continuation.yield(event)
+                            }
                         }
                         
                         if tokensReceived == 0 {
@@ -316,13 +339,13 @@ class BackendOrchestrationService: ObservableObject {
         }
     }
     
-    private func handleSafetyStop(plan: ExecutionPlan, continuation: AsyncThrowingStream<String, Error>.Continuation) {
+    private func handleSafetyStop(plan: ExecutionPlan, continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation) {
         logger.notice("[PLANNER] 🛡️ Safety Check: BLOCKED.")
         let ambiguousStep = plan.steps.first(where: { $0.isAmbiguous })
         let question = ambiguousStep?.clarificationQuestion ?? "This plan looks risky. Do you want to proceed?"
         
         logger.info("[PLANNER] Asking User: \(question)")
-        continuation.yield("🛑 **Safety Stop**: \(question)\n")
+        continuation.yield(.content("🛑 **Safety Stop**: \(question)\n"))
         continuation.finish()
     }
     

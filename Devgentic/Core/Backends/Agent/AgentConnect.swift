@@ -39,7 +39,7 @@ class AgentConnect: ObservableObject {
         approvedPlan: ExecutionPlan? = nil,
         traceContext: TraceContext,
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
-    ) -> AsyncThrowingStream<String, Error> {
+    ) -> AsyncThrowingStream<AgentStreamEvent, Error> { // <--- UPDATED RETURN TYPE
         
         logger.info("Routing request through AgentConnect Unified Pipeline for profile: \(profile.displayName)")
         
@@ -53,13 +53,11 @@ class AgentConnect: ObservableObject {
                     
                     switch profile.details {
                     case .bot(let config):
-                        // Bots are simple: Config only, no tools, default system prompt logic.
                         llmConfig = config
                         instructions = nil
                         rawTools = []
                         
                     case .agent(let config, _, let tools, _, let instr, _):
-                        // Agents are complex: Config, specific tools, specific instructions.
                         llmConfig = config
                         instructions = instr
                         rawTools = tools
@@ -69,15 +67,12 @@ class AgentConnect: ObservableObject {
                     }
                     
                     // 2. Resolve Tools
-                    // For Bots, this will typically return an empty list.
-                    // For Agents, it resolves enabled tools to their executable forms.
                     let activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
                         conversationID: conversationID
                     )
                     
                     // 3. Initialize Evaluation Session (Metrics)
-                    // We start a session to track token usage and latency, even for simple chats.
                     let evalSessionID = UUID()
                     if !activeTools.isEmpty {
                         EvaluationLogger.shared.startSession(id: evalSessionID, availableTools: activeTools)
@@ -98,17 +93,11 @@ class AgentConnect: ObservableObject {
                     logger.info("Starting execution using executor strategy: \(executor.architecture.rawValue)")
                     
                     // 6. Prepare Input
-                    
-                    // --- MEMORY FETCH (Step 3.2) ---
-                    // Fetch persistent memory (State + Global Profile)
-                    // We only fetch memory if this is an Agent execution (implying tools are involved)
                     var memoryContext: String? = nil
                     if !activeTools.isEmpty {
                         memoryContext = ContextMemoryManager.shared.getContext(for: conversationID)
                     }
-                    // ----------------------------------------
                     
-                    // CLEAN ROOM IMPLEMENTATION:
                     let historyForExecution: [ChatMessage] = (approvedPlan != nil) ? [] : chatHistory
                     
                     let input = AgentInput(
@@ -117,7 +106,7 @@ class AgentConnect: ObservableObject {
                         conversationID: conversationID,
                         tools: activeTools,
                         ragContext: ragContext,
-                        persistentMemory: memoryContext, // Pass explicit memory
+                        persistentMemory: memoryContext,
                         instructions: instructions,
                         traceContext: traceContext,
                         approvedPlan: approvedPlan
@@ -126,18 +115,17 @@ class AgentConnect: ObservableObject {
                     // 7. Execute & Stream
                     let traceHandler: (AgentTraceLog) -> Void = { log in
                         logger.debug("[\(log.state.rawValue)] \(log.content) (span: \(log.spanID))")
-                        
                         if !activeTools.isEmpty {
                             EvaluationLogger.shared.logStep(id: evalSessionID, log: log)
                         }
-                        
                         onTraceUpdate?(log)
                     }
                     
+                    // Now returns AgentStreamEvent
                     let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
                     
-                    for try await token in stream {
-                        continuation.yield(token)
+                    for try await event in stream {
+                        continuation.yield(event)
                     }
                     
                     continuation.finish()
@@ -207,12 +195,10 @@ class AgentConnect: ObservableObject {
         
         var activeTools: [AgentTool] = []
         
-        // 1. Vector Search
         if let vectorTool = self.convertToAgentTool(tool: VectorSearchTool(conversationID: conversationID)) {
             activeTools.append(vectorTool)
         }
         
-        // 2. MEMORY TOOLS (Phase 3.2: Registering New Tools)
         if let readLogTool = self.convertToAgentTool(tool: ReadActionLogTool()) {
             activeTools.append(readLogTool)
         }
@@ -220,13 +206,11 @@ class AgentConnect: ObservableObject {
             activeTools.append(searchLogTool)
         }
         
-        // 3. Profile Tools
         let allToolSources = await UnifiedToolStore.shared.sources
         
         for toolConfig in profileTools where toolConfig.isEnabled {
             var toolInstance: (any OpenFoundationModels.Tool)? = nil
             
-            // ✅ UPDATED: Pass conversationID to tool factory
             if let native = self.mapNativeToolToExecutable(toolName: toolConfig.name, conversationID: conversationID) {
                 toolInstance = native
             } else if let mcp = self.mapMCPToolToExecutable(toolConfig: toolConfig, availableSources: allToolSources) {
@@ -265,7 +249,6 @@ class AgentConnect: ObservableObject {
             let arguments = try T.Arguments(generatedContent)
             let output = try await tool.call(arguments: arguments)
             
-            // Extract content from Tool Output if needed
             let prompt = output.promptRepresentation
             let mirror = Mirror(reflecting: prompt)
             if let content = mirror.children.first(where: { $0.label == "content" })?.value as? String {
@@ -274,31 +257,21 @@ class AgentConnect: ObservableObject {
             return String(describing: prompt)
             
         } catch {
-             // Enhanced Error Reporting for Agents
-             // This captures the exact JSON that failed so the Agent can see it in the Observation.
              let errorMessage = "Tool Argument Error ('\(tool.name)'): \(error.localizedDescription)\n\nSystem Hint: Failed to parse input JSON. Check that your parameter keys match the schema.\nRaw Input Received: \(jsonString)"
-             
-             // We throw a custom error to be caught by the Executor
              throw NSError(domain: "AgentConnect", code: 422, userInfo: [NSLocalizedDescriptionKey: errorMessage])
         }
     }
     
-    // ✅ UPDATED SIGNATURE: Accepts conversationID
     private func mapNativeToolToExecutable(toolName: String, conversationID: UUID) -> (any OpenFoundationModels.Tool)? {
         switch toolName {
         case "list_directory": return ListDirectoryTool()
         case "read_file": return ReadFileTool()
         case "write_file": return WriteFileTool()
         case "delete_file": return DeleteFileTool()
-        
-        // NEW PRIMITIVES
         case "move_file": return MoveFileTool()
         case "copy_file": return CopyFileTool()
         case "create_folder": return CreateFolderTool()
-            
-        // ✅ INJECTED CONVERSATION ID
         case "execute_shell": return TerminalTool(conversationID: conversationID)
-            
         case "open_application": return OpenApplicationTool()
         case "run_applescript": return RunAppleScriptTool()
         case "get_system_stats": return GetSystemStatsTool()

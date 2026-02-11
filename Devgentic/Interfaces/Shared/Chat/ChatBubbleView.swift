@@ -19,7 +19,6 @@ struct ChatBubbleView: View {
     @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
 
     // MARK: - State to control the animation
-    // This state will be false initially and toggled to true on appear to animate the height change.
     @State private var applyMinHeight: Bool = false
 
     private var contentToDisplay: MessageContent {
@@ -33,6 +32,34 @@ struct ChatBubbleView: View {
         HStack(alignment: .bottom, spacing: UITheme.Spacing.medium) {
             if message.sender == .agent {
                 VStack(alignment: .leading, spacing: UITheme.Spacing.medium) {
+                    
+                    // ---------------------------------------------------------
+                    // 1. GLASS BOX: Thinking Process (Thoughts)
+                    // ---------------------------------------------------------
+                    if !message.thoughts.isEmpty || message.isStreaming {
+                        ThinkingAccordionView(
+                            thoughts: message.thoughts,
+                            currentHeadline: message.thinkingHeadline,
+                            isStreaming: message.isStreaming,
+                            isExpanded: $message.isThinkingExpanded
+                        )
+                    }
+                    
+                    // ---------------------------------------------------------
+                    // 2. GLASS BOX: Tool Artifacts (Data Cards)
+                    // ---------------------------------------------------------
+                    if !message.artifacts.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(message.artifacts) { artifact in
+                                ArtifactCardView(artifact: artifact)
+                            }
+                        }
+                        .padding(.bottom, 8)
+                    }
+
+                    // ---------------------------------------------------------
+                    // 3. FINAL ANSWER (Text Content)
+                    // ---------------------------------------------------------
                     switch contentToDisplay {
                     case .plainText(let text):
                         Text(text)
@@ -45,11 +72,6 @@ struct ChatBubbleView: View {
                         if message.isStreaming && text.isEmpty {
                             AgentThinkingView(headline: message.thinkingHeadline)
                         } else if !text.isEmpty {
-                            // OPTIMIZATION: Use cached blocks from the model.
-                            // We avoid calling `parseMarkdown(text)` repeatedly in the View body.
-                            // If it's streaming, we force a re-parse (or handle cache invalidation upstream).
-                            // For simplicity, we re-parse during active streaming to get the typewriter effect,
-                            // but use cached blocks once static.
                             let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
                             
                             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
@@ -90,8 +112,6 @@ struct ChatBubbleView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // MARK: - Animation Logic
-                // The height is now conditional on our `applyMinHeight` state property.
                 .frame(minHeight: applyMinHeight ? STREAMING_BUBBLE_MIN_HEIGHT : nil, alignment: .topLeading)
                 .padding(.horizontal, 50)
                 Spacer()
@@ -129,8 +149,6 @@ struct ChatBubbleView: View {
         .padding(.vertical, 30)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
         .animation(.easeInOut, value: message.agentResponse?.selectedVariantIndex)
-        // MARK: - Animation Trigger
-        // When the view appears, we check if it's a streaming message and then trigger the animation.
         .onAppear {
             if message.isStreaming && !applyMinHeight {
                 withAnimation(.easeInOut(duration: 0.3)) {
@@ -144,6 +162,156 @@ struct ChatBubbleView: View {
                     applyMinHeight = false
                 }
             }
+        }
+    }
+}
+
+// MARK: - Thinking Accordion (Gemini-Style)
+
+struct ThinkingAccordionView: View {
+    let thoughts: [String]
+    let currentHeadline: String?
+    let isStreaming: Bool
+    @Binding var isExpanded: Bool
+    
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(thoughts, id: \.self) { thought in
+                    HStack(alignment: .top, spacing: 8) {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.3))
+                            .frame(width: 2)
+                            .padding(.vertical, 2)
+                        
+                        Text(thought)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                
+                if isStreaming, let headline = currentHeadline {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                        Text(headline)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.accentColor)
+                            .italic()
+                    }
+                    .padding(.top, 4)
+                }
+            }
+            .padding(.leading, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
+            
+        } label: {
+            HStack {
+                Image(systemName: "sparkles")
+                    .foregroundColor(isStreaming ? .accentColor : .secondary)
+                
+                Text(isStreaming ? "Thinking..." : "Thought Process")
+                    .font(.callout)
+                    .fontWeight(.medium)
+                    .foregroundColor(isStreaming ? .primary : .secondary)
+                
+                if isStreaming {
+                    Text(currentHeadline ?? "")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+        .accentColor(.secondary)
+        .padding(10)
+        .background(Color.secondary.opacity(0.05))
+        .cornerRadius(8)
+    }
+}
+
+// MARK: - Artifact Card (Polymorphic Tool Output)
+
+struct ArtifactCardView: View {
+    let artifact: ToolOutput
+    @State private var isExpanded: Bool = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            Button(action: { withAnimation { isExpanded.toggle() } }) {
+                HStack {
+                    // DYNAMIC ICON based on tool name
+                    Image(systemName: iconForTool(artifact.toolName))
+                        .foregroundColor(.secondary)
+                    
+                    Text("Used tool: \(artifact.toolName)")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    if artifact.isSuccess {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.caption)
+                    } else {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                    }
+                    
+                    Image(systemName: "chevron.down")
+                        .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                }
+                .padding(10)
+                .background(Color.black.opacity(0.2))
+            }
+            .buttonStyle(.plain)
+            
+            // Content (Polymorphic)
+            if isExpanded {
+                Divider()
+                
+                // ARCHITECTURE NOTE:
+                // Here we can switch on `artifact.toolName` to provide specialized views.
+                // For now, we use a default ScrollView with text, but this structure allows
+                // us to easily add `case "fs_smart_search": SearchResultsView(...)` later.
+                
+                ScrollView(.vertical) {
+                    Text(artifact.output)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+        .background(Color.black.opacity(0.1))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        )
+    }
+    
+    private func iconForTool(_ name: String) -> String {
+        switch name {
+        case "list_directory": return "folder.fill"
+        case "read_file": return "doc.text.fill"
+        case "write_file": return "pencil.circle.fill"
+        case "delete_file": return "trash.fill"
+        case "execute_shell": return "terminal.fill"
+        case "web_search": return "globe"
+        case "fs_smart_search": return "magnifyingglass"
+        default: return "hammer.fill"
         }
     }
 }

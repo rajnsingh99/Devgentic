@@ -66,79 +66,84 @@ class ActiveStreamManager: ObservableObject {
         
         activeStreams[agentMessage.id] = agentMessage
         
-        // --- NEW: Trace Handler Bridge ---
-        let traceUpdateHandler: (AgentTraceLog) -> Void = { [weak agentMessage] log in
-            guard let message = agentMessage else { return }
-            
-            Task { @MainActor in
-                message.agentState = log.state
-                switch log.state {
-                case .thinking:
-                    message.thinkingHeadline = log.content
-                case .acting:
-                    message.thinkingHeadline = log.content
-                case .finalizing:
-                    message.thinkingHeadline = "Finishing up..."
-                default:
-                    break
-                }
-            }
-        }
+        // Ensure "Thinking" UI is visible at start
+        agentMessage.agentState = .thinking
+        agentMessage.thinkingHeadline = "Processing..."
         
         let streamTask = Task { [weak self] in
+            guard let self = self else { return }
+            
             do {
-                let stream = self?.backendOrchestrationService.streamMessage(
+                // Now that BackendOrchestrationService returns AgentStreamEvent, this assignment is valid.
+                let stream = self.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,
                     userQuery: userQuery,
                     history: history,
                     files: files,
                     context: TraceContext(profile: config.profile),
-                    onTraceUpdate: traceUpdateHandler
+                    onTraceUpdate: { _ in } // Trace logs are handled by events now
                 )
                 
-                logger.info("👂 [STREAM_LISTEN] Now listening for tokens for message \(agentMessage.id.uuidString)...")
-                var tokenCount = 0
+                logger.info("👂 [STREAM_LISTEN] Now listening for events for message \(agentMessage.id.uuidString)...")
                 
-                // MARK: - PERFORMANCE FIX: Buffering
-                // Instead of updating state on every token, we buffer and flush periodically.
                 var tokenBuffer = ""
                 var lastUpdateTime = Date()
-                let updateInterval: TimeInterval = 0.1 // 100ms throttle
+                let updateInterval: TimeInterval = 0.1
 
-                if let stream = stream {
-                    for try await token in stream {
-                        try Task.checkCancellation()
+                for try await event in stream {
+                    try Task.checkCancellation()
+                    
+                    switch event {
+                    case .thought(let thought):
+                        // 1. Handle Thoughts (Update Headline + Append to History)
+                        agentMessage.thinkingHeadline = thought
+                        agentMessage.agentState = .thinking
+                        agentMessage.thoughts.append(thought)
                         
-                        tokenCount += 1
-                        tokenBuffer += token
+                    case .toolCall(let name, _):
+                        agentMessage.thinkingHeadline = "Using tool: \(name)"
+                        agentMessage.agentState = .acting
                         
-                        // Only update UI if interval passed or buffer is getting large
+                    case .toolOutput(let output):
+                        // 2. Handle Artifacts (File lists, etc.)
+                        agentMessage.agentState = .observing
+                        agentMessage.artifacts.append(output)
+                        agentMessage.thinkingHeadline = "Processed \(output.toolName)"
+                        
+                    case .content(let textChunk):
+                        // 3. Handle Final Text (Buffered)
+                        agentMessage.agentState = .finalizing
+                        tokenBuffer += textChunk
+                        
                         if -lastUpdateTime.timeIntervalSinceNow >= updateInterval || tokenBuffer.count > 50 {
-                            self?.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
+                            self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
                             tokenBuffer = ""
                             lastUpdateTime = Date()
                         }
-                    }
-                    
-                    // Flush remaining tokens
-                    if !tokenBuffer.isEmpty {
-                        self?.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
+                        
+                    case .error(let errorMsg):
+                        logger.error("Stream Error Event: \(errorMsg)")
                     }
                 }
                 
-                logger.info("🏁 [STREAM_LOOP_END] Finished processing stream for message \(agentMessage.id.uuidString). Total tokens: \(tokenCount).")
-                await self?.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
+                // Flush remaining text tokens
+                if !tokenBuffer.isEmpty {
+                    self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
+                }
+                
+                logger.info("🏁 [STREAM_LOOP_END] Finished processing stream for message \(agentMessage.id.uuidString).")
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
                 
             } catch is CancellationError {
-                logger.info("🛑 [STREAM_CANCELLED] Stream for message \(agentMessage.id.uuidString) was cancelled by the user.")
-                await self?.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
+                logger.info("🛑 [STREAM_CANCELLED] Stream for message \(agentMessage.id.uuidString) was cancelled.")
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
             } catch {
                 logger.error("❌ [STREAM_ERROR] Streaming failed for message \(agentMessage.id.uuidString): \(error.localizedDescription)")
-                await self?.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
+                await self.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
             }
             
-            await self?.removeTask(for: agentMessage.id)
+            await self.removeTask(for: agentMessage.id)
             onComplete()
         }
         
@@ -147,7 +152,6 @@ class ActiveStreamManager: ObservableObject {
         return agentMessage
     }
     
-    // Helper to keep the loop clean
     private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
         if isRegeneration {
             guard let agentResponse = agentMessage.agentResponse,
@@ -183,8 +187,8 @@ class ActiveStreamManager: ObservableObject {
     
     private func finalizeMessage(_ message: ChatMessage, conversationID: UUID, error: Error?) async {
         message.isStreaming = false
-        message.thinkingHeadline = nil // Clear the headline when done
-        message.agentState = .idle     // Reset state
+        message.thinkingHeadline = nil // Clear the headline
+        message.agentState = .idle
         
         if let error = error {
             let errorContent = MessageContent.error(title: "Response Error", details: error.localizedDescription)
@@ -200,18 +204,12 @@ class ActiveStreamManager: ObservableObject {
             }
         }
         
-        let finalContent = message.content.textContent ?? "[EMPTY]"
-        logger.notice("💾 [STREAM_FINALIZE] Finalizing message \(message.id.uuidString). Final content length: \(finalContent.count).")
-        
+        // Persist final message
         if let targetEntity = persistenceService.getConversation(withId: conversationID) {
             await persistenceService.addMessage(message, to: targetEntity)
-            logger.info("...Persistence successful for message \(message.id.uuidString).")
-        } else {
-            logger.error("...Could not find conversation entity \(conversationID.uuidString) to persist final message.")
         }
         
         activeStreams.removeValue(forKey: message.id)
-        logger.info("...Stream for message \(message.id.uuidString) has finished. Removing from active manager.")
     }
     
     

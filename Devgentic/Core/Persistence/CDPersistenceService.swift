@@ -48,11 +48,14 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         AgentResponseTransformer.register()
         
-        // Register the transformer for the 'tags' attribute in PromptEntity
+        // Register the transformer for the 'tags' attribute in PromptEntity and 'thoughts' in ChatMessageEntity
         ValueTransformer.setValueTransformer(StringArrayTransformer(), forName: NSValueTransformerName("StringArrayTransformer"))
         
         // Register the transformer for the 'generationType' attributes
         ValueTransformer.setValueTransformer(GenerationTypeArrayTransformer(), forName: NSValueTransformerName("GenerationTypeArrayTransformer"))
+        
+        // Register the transformer for the 'artifacts' attribute
+        ValueTransformer.setValueTransformer(ToolOutputArrayTransformer(), forName: NSValueTransformerName("ToolOutputArrayTransformer"))
         
         container.loadPersistentStores { (storeDescription, error) in
             if let error = error as NSError? {
@@ -157,8 +160,12 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             newMessage.senderType = message.sender.rawValue
             newMessage.conversationId = message.conversationId
             mapMessageContent(from: message.content, to: newMessage)
-            // **FIX:** Use KVC to set the transformable attribute, bypassing compiler type checks.
+            
+            // **FIX:** Use KVC to set transformable attributes
             newMessage.setValue(message.agentResponse, forKey: "agentResponse")
+            newMessage.setValue(message.thoughts, forKey: "thoughts")
+            newMessage.setValue(message.artifacts, forKey: "artifacts")
+            
             newConversation.addToMessages(newMessage)
         }
         
@@ -202,9 +209,12 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                     self.mapMessageContent(from: message.content, to: entityToUpdate)
                 }
                 
-                // **FIX:** Use KVC to set the transformable attribute, bypassing compiler type checks.
+                // **FIX:** Use KVC to set transformable attributes
                 entityToUpdate.setValue(message.agentResponse, forKey: "agentResponse")
-                self.logger.info("Saving message \(message.id.uuidString) with \(message.agentResponse?.variants.count ?? 0) variants.")
+                entityToUpdate.setValue(message.thoughts, forKey: "thoughts")
+                entityToUpdate.setValue(message.artifacts, forKey: "artifacts")
+                
+                self.logger.info("Saving message \(message.id.uuidString) with \(message.thoughts.count) thoughts and \(message.artifacts.count) artifacts.")
                 
                 if let textFiles = message.attachedTextFiles {
                     let textFileEntities = textFiles.map { textFile -> AttachedTextFileEntity in
@@ -367,14 +377,12 @@ extension ChatMessageEntity {
 
     func toChatMessageStruct() -> ChatMessage {
         let messageId = self.id ?? UUID()
-//        Self.logger.debug("Decoding message \(messageId.uuidString)...")
         
         var finalContent: MessageContent
         var finalAgentResponse: AgentResponse?
 
         // **FIX:** Use KVC to retrieve the transformable attribute to bypass static type checks.
         if let agentResponse = self.value(forKey: "agentResponse") as? AgentResponse, !agentResponse.variants.isEmpty {
-//            Self.logger.info("✅ Successfully decoded AgentResponse for message \(messageId.uuidString) with \(agentResponse.variants.count) variants.")
             finalAgentResponse = agentResponse
             if agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
                 finalContent = agentResponse.variants[agentResponse.selectedVariantIndex].content
@@ -384,7 +392,6 @@ extension ChatMessageEntity {
             }
         } else {
             // Fallback for older messages or decoding failures.
-//            Self.logger.warning("⚠️ Could not decode AgentResponse for message \(messageId.uuidString). Using fallback content.")
             switch self.messageType {
             case "plainText": finalContent = .plainText(self.text_content ?? "")
             case "markdownText": finalContent = .markdownText(self.text_content ?? "")
@@ -420,6 +427,14 @@ extension ChatMessageEntity {
         )
         
         chatMessage.agentResponse = finalAgentResponse
+        
+        // **FIX:** Decode Glass Box Data
+        if let thoughts = self.value(forKey: "thoughts") as? [String] {
+            chatMessage.thoughts = thoughts
+        }
+        if let artifacts = self.value(forKey: "artifacts") as? [ToolOutput] {
+            chatMessage.artifacts = artifacts
+        }
         
         return chatMessage
     }
@@ -492,7 +507,6 @@ final class StringArrayTransformer: NSSecureUnarchiveFromDataTransformer {
     }
 }
 
-// MARK: - Value Transformer for [GenerationType]
 @objc(GenerationTypeArrayTransformer)
 final class GenerationTypeArrayTransformer: NSSecureUnarchiveFromDataTransformer {
     override static var allowedTopLevelClasses: [AnyClass] {
@@ -541,5 +555,40 @@ final class AgentResponseTransformer: ValueTransformer {
     static func register() {
         let transformer = AgentResponseTransformer()
         ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "AgentResponseTransformer"))
+    }
+}
+
+// NEW: Tool Output Transformer
+@objc(ToolOutputArrayTransformer)
+final class ToolOutputArrayTransformer: ValueTransformer {
+
+    override class func transformedValueClass() -> AnyClass {
+        return NSData.self
+    }
+
+    override class func allowsReverseTransformation() -> Bool {
+        return true
+    }
+
+    override func transformedValue(_ value: Any?) -> Any? {
+        guard let artifacts = value as? [ToolOutput] else { return nil }
+        do {
+            let data = try JSONEncoder().encode(artifacts)
+            return data as NSData
+        } catch {
+            print("Failed to encode [ToolOutput]: \(error)")
+            return nil
+        }
+    }
+
+    override func reverseTransformedValue(_ value: Any?) -> Any? {
+        guard let data = value as? Data else { return nil }
+        do {
+            let artifacts = try JSONDecoder().decode([ToolOutput].self, from: data)
+            return artifacts
+        } catch {
+            print("Failed to decode [ToolOutput]: \(error)")
+            return nil
+        }
     }
 }

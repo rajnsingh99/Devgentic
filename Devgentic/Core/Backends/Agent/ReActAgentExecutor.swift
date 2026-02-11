@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 28/01/26.
+//  PATCHED: Added Observation Interpretation Strategy
 //
 
 import Foundation
@@ -34,7 +35,7 @@ actor ReActAgentExecutor: AgentExecutor {
         model: any OpenFoundationModels.LanguageModel,
         input: AgentInput,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
-    ) -> AsyncThrowingStream<String, Error> {
+    ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
         return AsyncThrowingStream { continuation in
             Task {
@@ -42,6 +43,7 @@ actor ReActAgentExecutor: AgentExecutor {
                     // 1. Initialize Context
                     var currentIteration = 0
                     var scratchpad: [String] = [] // Stores tool outputs for the transcript
+                    var failedPaths: Set<String> = [] // Tracks paths that triggered errors
                     
                     // State Tracking for Memory Guard
                     // We treat memory as enabled if the Manager exists (implicit) or if we are in Agent mode.
@@ -72,7 +74,7 @@ actor ReActAgentExecutor: AgentExecutor {
                         var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
                         
                         // --- PROMPT CONSTRUCTION (THE SANDWICH) ---
-                        let systemPrompt = self.constructSandwichPrompt(input: input, scratchpad: scratchpad)
+                        let systemPrompt = self.constructSandwichPrompt(input: input, scratchpad: scratchpad, failedPaths: failedPaths)
                         let transcript = self.buildTranscript(systemPrompt: systemPrompt, chatHistory: historyForTranscript)
                         let session = LanguageModelSession(model: model, tools: nativeTools, transcript: transcript)
                         
@@ -90,6 +92,9 @@ actor ReActAgentExecutor: AgentExecutor {
                             logger.error("Cognitive Generation Failed: \(error.localizedDescription)")
                             scratchpad.append("System Error: Your last output failed JSON validation. Ensure 'parameters' is a valid JSON Object (not a string).")
                             
+                            // Emit error thought
+                            continuation.yield(.thought("Error: Invalid JSON output from model. Retrying..."))
+                            
                             onTraceUpdate(AgentTraceLog(
                                 traceID: iterationSpan.traceID,
                                 spanID: iterationSpan.spanID,
@@ -102,6 +107,10 @@ actor ReActAgentExecutor: AgentExecutor {
                             continue cognitiveLoop
                         }
                         
+                        // --- EMIT THOUGHT EVENT ---
+                        // This allows the UI to show the "Thinking..." accordion
+                        continuation.yield(.thought(step.internalMonologue))
+                        
                         // --- NEW: INTRINSIC MEMORY UPDATE (OPTIMIZATION) ---
                         // We check for memory updates natively before actions or final answers.
                         if let updateContent = step.memoryUpdate, !updateContent.isEmpty {
@@ -110,6 +119,8 @@ actor ReActAgentExecutor: AgentExecutor {
                             hasUpdatedMemory = true
                             
                             logger.info("Intrinsic Memory Update processed.")
+                            
+                            continuation.yield(.thought("💾 Consolidating session memory..."))
                             
                             onTraceUpdate(AgentTraceLog(
                                 traceID: iterationSpan.traceID,
@@ -123,7 +134,7 @@ actor ReActAgentExecutor: AgentExecutor {
                         }
                         // ---------------------------------------------------
                         
-                        // 4. UI Feedback
+                        // 4. UI Feedback (Trace)
                         onTraceUpdate(AgentTraceLog(
                             traceID: iterationSpan.traceID,
                             spanID: iterationSpan.spanID,
@@ -144,6 +155,11 @@ actor ReActAgentExecutor: AgentExecutor {
                             actionWasExecuted = true
                             iterationMetadata["tool_name"] = action.toolName
                             
+                            // --- EMIT TOOL CALL EVENT ---
+                            let paramsJSON = try? JSONEncoder().encode(action.parameters)
+                            let paramsString = paramsJSON.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                            continuation.yield(.toolCall(name: action.toolName, params: paramsString))
+                            
                             onTraceUpdate(AgentTraceLog(
                                 traceID: iterationSpan.traceID,
                                 spanID: iterationSpan.spanID,
@@ -160,6 +176,30 @@ actor ReActAgentExecutor: AgentExecutor {
                                 tools: input.tools,
                                 parentContext: iterationSpan
                             )
+                            
+                            // --- ERROR TRACKING LOGIC ---
+                            if !isSuccess {
+                                // Extract any "path" argument from the parameters to block it in future turns
+                                if let anyValue = action.parameters["path"] {
+                                    // Try to decode AnyCodable to String (simplified logic)
+                                    // Assuming AnyCodable stores the value internally, we rely on the fact that
+                                    // string values usually encode to straightforward JSON strings.
+                                    let encoder = JSONEncoder()
+                                    if let data = try? encoder.encode(anyValue),
+                                       let str = String(data: data, encoding: .utf8)?.replacingOccurrences(of: "\"", with: "") {
+                                        failedPaths.insert(str)
+                                    }
+                                }
+                            }
+                            // ----------------------------
+                            
+                            // --- EMIT TOOL OUTPUT EVENT (Artifact) ---
+                            let outputEvent = ToolOutput(
+                                toolName: action.toolName,
+                                output: observation,
+                                isSuccess: isSuccess
+                            )
+                            continuation.yield(.toolOutput(outputEvent))
                             
                             // Inject success status into metadata for EvaluationLogger
                             iterationMetadata["tool_success"] = String(isSuccess)
@@ -184,6 +224,8 @@ actor ReActAgentExecutor: AgentExecutor {
                             // Prevents the Agent from finishing without saving state.
                             if isMemoryEnabled && !hasUpdatedMemory {
                                 logger.warning("Memory Guard Triggered: Agent attempted to exit without saving.")
+                                
+                                continuation.yield(.thought("⚠️ Memory Guard Triggered: Enforcing save..."))
                                 
                                 onTraceUpdate(AgentTraceLog(
                                     traceID: iterationSpan.traceID,
@@ -210,7 +252,9 @@ actor ReActAgentExecutor: AgentExecutor {
                                 content: finalAnswer,
                                 metadata: iterationMetadata
                             ))
-                            continuation.yield(finalAnswer)
+                            
+                            // --- EMIT CONTENT EVENT (The Chat Bubble) ---
+                            continuation.yield(.content(finalAnswer))
                             continuation.finish()
                             return
                         }
@@ -239,13 +283,13 @@ actor ReActAgentExecutor: AgentExecutor {
     
     // MARK: - Prompt Engineering (The Sandwich Architecture)
     
-    nonisolated private func constructSandwichPrompt(input: AgentInput, scratchpad: [String]) -> String {
+    nonisolated private func constructSandwichPrompt(input: AgentInput, scratchpad: [String], failedPaths: Set<String>) -> String {
         return [
             buildKernelLayer(),           // Layer 1: Immutable Physics
             buildMemoryLayer(input),      // Layer 1.5: Persistent Memory
             buildReActStrategyLayer(),    // Layer 2: Thinking Process
             buildPersonaLayer(input),     // Layer 3: User Customization
-            buildContextLayer(input, scratchpad) // Layer 4: Context
+            buildContextLayer(input, scratchpad, failedPaths) // Layer 4: Context
         ].joined(separator: "\n\n")
     }
     
@@ -286,20 +330,51 @@ actor ReActAgentExecutor: AgentExecutor {
     
     nonisolated private func buildReActStrategyLayer() -> String {
         return """
-        # LAYER 2: COGNITIVE STRATEGY (ReAct)
+        # LAYER 2: COGNITIVE STRATEGY (ReAct + Reflexion)
         
         ## THE LOOP
-        You must strictly follow the **Reasoning -> Acting -> Observing** loop.
-        1. **Thought**: Analyze the situation. What do I know? What is missing?
-        2. **Action**: Select the best tool to make progress.
-        3. **Observation**: Wait for the tool output.
+        1. **Analyze**: Look at the last OBSERVATION. Did it fail?
+        2. **Reflect**: If it failed, WHY? (Wrong path? Missing tool? Permission error?)
+        3. **Plan**: Decide a NEW approach. DO NOT RETRY the exact same parameters.
+        4. **Act**: Execute the tool.
         
-        ## VERIFICATION PROTOCOL (CRITICAL)
-        Before deciding to take an action, you MUST verify if the goal is ALREADY met.
-        - If you think "I need to move the file", first check "Is the file already there?".
-        - If the previous tool call succeeded, assume the state has changed.
-        - Do not repeat actions blindly.
-
+        ## OBSERVATION INTERPRETATION
+        - **Trust your ACTION parameters**: If you executed `list_directory(path="/A/B")` and the tool returned a list of files without error, assume those ARE the files in `/A/B`.
+        - **Ignore conflicting "Current Directory" footers**: Shell PWD footers only indicate where the shell session is sitting, NOT what folder you just listed.
+        
+        ## 🛡️ ERROR HANDLING PROTOCOL (STRICT)
+        - If a tool returns "Error" or "doesn't exist":
+          - You MUST acknowledge this in your `internalMonologue` and mark `previousStepOutcome` as "Failure".
+          - You MUST NOT call the same tool with the same path again.
+          - You MUST try a completely different strategy (e.g., use `fs_smart_search` to find the real path).
+          
+        ## FEW-SHOT EXAMPLES (Follow this reasoning style)
+        
+        [EXAMPLE 1: Handling a Missing File]
+        User: "List files in /Projects/Beta"
+        Action: list_directory(path="/Projects/Beta")
+        Observation: Error: Directory not found.
+        (CORRECT RESPONSE):
+        {
+          "previousStepOutcome": "Failure",
+          "internalMonologue": "The path /Projects/Beta does not exist. I should not retry it. I need to find where 'Beta' actually is. I will use Spotlight to find it.",
+          "displayHeadline": "Locating Beta folder...",
+          "action": { "toolName": "fs_smart_search", "parameters": { "search_term": "Beta" } }
+        }
+        
+        [EXAMPLE 2: Hallucination Check]
+        User: "Read config.json"
+        Action: read_file(path="/tmp/config.json")
+        Observation: Error: File does not exist.
+        (INCORRECT RESPONSE - DO NOT DO THIS):
+        "I have read the file and it contains..." -> ❌ WRONG. DO NOT HALLUCINATE SUCCESS.
+        
+        ## DATA PRESENTATION PROTOCOL (CRITICAL)
+        If the user asks to "List", "Show", "Read", or "Get" data (e.g., files, stats, logs):
+        1. **DO NOT** summarize by saying "The files are listed" or "I have read the file".
+        2. **YOU MUST** include the ACTUAL CONTENT of the Observation in your `finalAnswer`.
+        3. Format the data nicely (e.g., use Markdown lists or code blocks).
+        
         ## MANDATORY MEMORY PROTOCOL (INTRINSIC)
         - **BEFORE** or **WITH** the "Final Answer", you **MUST** populate the `memoryUpdate` field.
         - This field will **APPEND** to the session log. Do not rewrite the whole log.
@@ -317,7 +392,7 @@ actor ReActAgentExecutor: AgentExecutor {
         """
     }
     
-    nonisolated private func buildContextLayer(_ input: AgentInput, _ scratchpad: [String]) -> String {
+    nonisolated private func buildContextLayer(_ input: AgentInput, _ scratchpad: [String], _ failedPaths: Set<String>) -> String {
         var context = "# LAYER 4: EXECUTION CONTEXT\n"
         
         if let plan = input.approvedPlan {
@@ -332,6 +407,16 @@ actor ReActAgentExecutor: AgentExecutor {
             context += """
             ## USER REQUEST
             "\(input.userInput)"
+            
+            """
+        }
+        
+        if !failedPaths.isEmpty {
+            context += """
+            
+            ## 🛑 PREVIOUSLY FAILED PATHS
+            The following paths have already been checked and DO NOT EXIST. Do not try them again:
+            \(failedPaths.map { "- \($0)" }.joined(separator: "\n"))
             
             """
         }
@@ -364,6 +449,7 @@ actor ReActAgentExecutor: AgentExecutor {
         
         ✅ **CORRECT:**
         {
+          "previousStepOutcome": "Success",
           "action": {
             "toolName": "write_file",
             "parameters": { "path": "/tmp/test.txt", "content": "Hello" }
@@ -371,6 +457,7 @@ actor ReActAgentExecutor: AgentExecutor {
         }
         
         {
+          "previousStepOutcome": "Success" OR "Failure",
           "internalMonologue": "Your reasoning here...",
           "displayHeadline": "Short status for UI...",
           "action": { "toolName": "...", "parameters": { ... } } OR null,
@@ -494,9 +581,9 @@ actor ReActAgentExecutor: AgentExecutor {
         model: any OpenFoundationModels.LanguageModel,
         scratchpad: [String],
         traceContext: TraceContext,
-        continuation: AsyncThrowingStream<String, Error>.Continuation
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
     ) {
-         continuation.yield("⚠️ **Task Limit Reached**\n\nI've done my best, but hit the step limit.")
+         continuation.yield(.content("⚠️ **Task Limit Reached**\n\nI've done my best, but hit the step limit."))
          continuation.finish()
     }
 }
