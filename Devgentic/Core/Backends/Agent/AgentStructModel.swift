@@ -9,132 +9,105 @@ import Foundation
 import OpenFoundationModels
 import OpenFoundationModelsCore
 
-// MARK: - Plan Definitions (The Architect's Output)
+// MARK: - Agent State Definitions
 
-/// Represents a single, atomic unit of work in the agent's plan.
-@Generable
-struct PlanStep: Sendable, Codable {
-    
-    @Guide(description: "A unique numeric identifier for this step, starting at 1.")
-    let id: Int
-    
-    @Guide(description: "A clear, executable goal for this step. Must be concise (e.g., 'Check system temperature' or 'List files in Downloads').")
-    let goal: String
-    
-    @Guide(description: "The specific tool that should handle this step, if known (e.g., 'fs_smart_search', 'execute_shell'). If unsure, leave null.")
-    let suggestedTool: String?
-    
-    @Guide(description: "Flag potential risks such as 'Requires SIP', 'Deletes files', 'Network usage', or 'Privacy access'. If safe, leave null.")
-    let potentialRisk: String?
-    
-    @Guide(description: "Set to TRUE if the user's request is vague, ambiguous, or could be interpreted in multiple ways for this specific step.")
-    let isAmbiguous: Bool
-    
-    @Guide(description: "If 'isAmbiguous' is true, provide a specific question to ask the user to clarify their intent (e.g., 'Do you mean the CPU temperature or the GPU temperature?').")
-    let clarificationQuestion: String?
+/// Represents the high-level state of the agent in its cognitive loop.
+/// Used for tracing and UI feedback (e.g., "Thinking...", "Executing Tool...").
+enum AgentStep: String, Codable, Sendable {
+    case idle           = "Idle"
+    case thinking       = "Reasoning"      // The agent is generating thoughts
+    case deciding       = "Deciding"       // The agent is determining which tool to use
+    case acting         = "Acting"         // The agent is executing a tool
+    case observing      = "Observing"      // The agent is processing the tool output
+    case finalizing     = "Finalizing"     // The agent is generating the final answer
+    case errorRecovery  = "Recovering"     // The agent encountered an error and is self-correcting
 }
 
-/// The Master Plan returned by the Manager Agent.
-@Generable
-struct ExecutionPlan: Sendable, Codable {
+// MARK: - Tool Abstraction
+
+/// A type-erased wrapper for tools to decouple the executor from specific library generics.
+/// This allows the executor to run any tool given a JSON string or Data.
+struct AgentTool: Sendable {
+    let name: String
+    let description: String
+    let parameters: OpenFoundationModelsCore.GenerationSchema
     
-    @Guide(description: "A high-level summary of the user's intent based on the analysis.")
-    let userIntent: String
-    
-    @Guide(description: "A distilled summary of RELEVANT facts from the chat history needed for this specific plan. Include file paths, PIDs, previous errors, or user preferences. Exclude irrelevant history.")
-    let contextBrief: String
-    
-    @Guide(description: "The ordered checklist of steps required to fulfill the intent.")
-    let steps: [PlanStep]
-    
-    @Guide(description: "Set to TRUE if ANY step in the plan is marked as 'isAmbiguous' OR if the plan involves high-risk actions (like file deletion) that require explicit user approval.")
-    let requiresUserConfirmation: Bool
+    /// The closure to execute the tool.
+    /// Takes JSON Data (arguments) and returns a String (output).
+    let run: @Sendable (Data) async throws -> String
 }
 
-// MARK: - Cognitive Definitions (The Executor's Loop)
+// MARK: - Execution Input
 
-/// Represents a specific tool execution request within a cognitive step.
-@Generable
-struct ToolAction: Sendable, Codable {
+/// The standard payload required to initialize any Agent Executor.
+struct AgentInput: Sendable {
+    let userInput: String
+    let chatHistory: [ChatMessage]
+    let conversationID: UUID
+    let tools: [AgentTool]
+    let ragContext: String?
     
-    @Guide(description: "The exact name of the tool to execute (e.g., 'execute_shell', 'read_file').")
-    let toolName: String
+    // Architecture: Split-State (Active State + History)
+    // Instead of a monolithic string, we now pass structured state + paged history.
+    let activeState: MutableActiveState?
+    let recentHistory: String?
     
-    // UPDATED: Now uses AnyCodable for robust Native JSON support
-    // The model will generate a real JSON object here, not a string.
-    @Guide(description: "The parameters for the tool as a standard JSON object. Example: { \"path\": \"/tmp/file\", \"recursive\": true }")
-    let parameters: [String: AnyCodable]
-}
-
-/// Represents a single cognitive cycle (Think -> Decide -> Act).
-/// The Agent MUST generate this structure for every step of the loop.
-@Generable
-struct CognitiveStep: Sendable, Codable {
+    // Execution Context Flag
+    // Signals that this execution is the start of a fresh user turn.
+    let isNewRequest: Bool
     
-    @Guide(description: "Analyze the previous step. Was it a 'Success' or 'Failure'? Be honest.")
-    let previousStepOutcome: String
+    // [Step 3 Architecture Update]
+    // Replaced provider-specific flags (e.g., `isGemini`) with a polymorphic strategy.
+    // This allows the Executor to remain agnostic of the underlying provider quirks.
+    let generatorStrategy: any CognitiveGenerator
     
-    @Guide(description: "Your internal reasoning process...")
-    let internalMonologue: String
+    let instructions: String?
     
-    @Guide(description: "A short, 3-5 word status headline...")
-    let displayHeadline: String
+    // The Trace Context for distributed observability
+    let traceContext: TraceContext
     
-    @Guide(description: "The specific tool you want to execute...")
-    let action: ToolAction?
-    
-    @Guide(description: "If you have made progress or completed the task, provide the MARKDOWN content to update the Session Context (Project Brief). REQUIRED when providing a 'finalAnswer'.")
-    let memoryUpdate: String?
-    
-    @Guide(description: "If the task is complete, provide the final response...")
-    let finalAnswer: String?
-}
-
-// MARK: - Extensions
-
-// We extend AnyCodable to conform to all protocols required by the @Generable macro.
-// This allows automatic parsing (decoding), serializing (encoding), and schema generation
-// for the AnyCodable type used in the tool parameters.
-extension AnyCodable: Generable, ConvertibleFromGeneratedContent, ConvertibleToGeneratedContent {
-    
-    // 1. Decoder: GeneratedContent -> AnyCodable
-    public init(_ content: GeneratedContent) throws {
-        // We leverage the fact that GeneratedContent is Encodable (representing the JSON subtree).
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(content)
+    /// Computed Compatibility Layer
+    /// Allows legacy executors or simple Chat bots to access a text representation of the memory.
+    var persistentMemory: String? {
+        guard let state = activeState else { return nil }
+        let history = recentHistory ?? "(No recent history)"
         
-        // Decode that JSON data using AnyCodable's robust decoding logic.
-        let decoder = JSONDecoder()
-        self = try decoder.decode(AnyCodable.self, from: data)
+        return """
+        ## 🧠 ACTIVE MEMORY (RAM)
+        Status: \(state.subTasks.first(where: { $0.status == "active" })?.description ?? "Idle")
+        
+        ## 📜 RECENT ACTIVITY
+        \(history)
+        """
     }
     
-    // 2. Encoder: AnyCodable -> GeneratedContent
-    public var generatedContent: GeneratedContent {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
+    init(
+        userInput: String,
+        chatHistory: [ChatMessage],
+        conversationID: UUID,
+        tools: [AgentTool],
+        ragContext: String? = nil,
+        activeState: MutableActiveState? = nil,
+        recentHistory: String? = nil,
+        isNewRequest: Bool = true,
+        generatorStrategy: (any CognitiveGenerator)? = nil,
+        instructions: String? = nil,
+        traceContext: TraceContext
+    ) {
+        self.userInput = userInput
+        self.chatHistory = chatHistory
+        self.conversationID = conversationID
+        self.tools = tools
+        self.ragContext = ragContext
+        self.activeState = activeState
+        self.recentHistory = recentHistory
+        self.isNewRequest = isNewRequest
         
-        // Encode self to JSON string, then create GeneratedContent from it.
-        // If encoding fails (unlikely for AnyCodable), fallback to empty object.
-        guard let data = try? encoder.encode(self),
-              let jsonString = String(data: data, encoding: .utf8) else {
-            return try! GeneratedContent(json: "{}")
-        }
+        // Default to NativeStructuredGenerator (OpenAI behavior) if no specific strategy is provided.
+        // This ensures backward compatibility for tests or simple bots.
+        self.generatorStrategy = generatorStrategy ?? NativeStructuredGenerator()
         
-        // GeneratedContent(json:) throws, but since we just encoded valid JSON, force try is acceptable here
-        // or we could catch and return empty.
-        return try! GeneratedContent(json: jsonString)
-    }
-    
-    // 3. Schema: Describes "Any Value" to the LLM
-    public static var generationSchema: GenerationSchema {
-        // Define a schema that represents a generic JSON value.
-        // Since we want to allow any JSON structure (string, number, object, array),
-        // we create a broad schema definition.
-        let root = DynamicGenerationSchema(
-            name: "AnyValue",
-            description: "A dynamic JSON value (string, number, boolean, array, or object).",
-            properties: [] // No specific properties enforced
-        )
-        return try! GenerationSchema(root: root, dependencies: [])
+        self.instructions = instructions
+        self.traceContext = traceContext
     }
 }

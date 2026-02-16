@@ -54,6 +54,27 @@ class VectorStoreService {
     
     // MARK: - Public API
     
+    /// Adds a single document to the vector store.
+    /// This is a convenience method that wraps the entity creation to match the Agent's expected API.
+    /// - Parameters:
+    ///   - content: The text content to store.
+    ///   - embedding: The vector embedding.
+    ///   - metadata: Additional metadata (e.g. conversation_id).
+    func addDocument(content: String, embedding: [Float], metadata: [String: String]) async {
+        // Create the entity
+        // Note: Assumes ChunkEntity is a standard ObjectBox class defined in your data model
+        let chunk = ChunkEntity()
+        chunk.content = content // FIXED: Property name is 'content', not 'text'
+        chunk.embedding = embedding
+        
+        // FIXED: Convert String to UUID safely
+        if let uuidStr = metadata["conversation_id"], let uuid = UUID(uuidString: uuidStr) {
+            chunk.conversationID = uuid
+        }
+        
+        self.add(chunks: [chunk])
+    }
+    
     /// Adds an array of `ChunkEntity` objects to the vector database.
     /// - Parameter chunks: The chunk objects to be saved.
     func add(chunks: [ChunkEntity]) {

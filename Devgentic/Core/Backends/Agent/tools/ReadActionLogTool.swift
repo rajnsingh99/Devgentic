@@ -15,7 +15,7 @@ struct ReadActionLogTool: OpenFoundationModels.Tool {
     // MARK: - Type Definitions
     
     struct Arguments: Codable, OpenFoundationModelsCore.ConvertibleFromGeneratedContent {
-        let actionID: String
+        let actionID: String 
         
         init(_ content: OpenFoundationModelsCore.GeneratedContent) throws {
             let properties = try content.properties()

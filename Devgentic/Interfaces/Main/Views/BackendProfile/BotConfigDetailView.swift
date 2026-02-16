@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 05/09/25.
 //  Updated on 04/02/26 for Modern Dashboard UI.
+//  Updated on 16/02/26 to add API Key visibility toggle.
 //
 
 import SwiftUI
@@ -21,6 +22,9 @@ struct BotConfigDetailView: View {
     // Local state for editing advanced configurations
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
+    
+    // UI State for API Key Visibility
+    @State private var isApiKeyVisible: Bool = false
     
     // MARK: - Computed Bindings
     
@@ -221,8 +225,27 @@ struct BotConfigDetailView: View {
     @ViewBuilder
     private var remoteFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                .textFieldStyle(.roundedBorder)
+            // API Key Input with Visibility Toggle
+            ZStack(alignment: .trailing) {
+                Group {
+                    if isApiKeyVisible {
+                        TextField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                
+                Button(action: { isApiKeyVisible.toggle() }) {
+                    Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
+                        .foregroundColor(.secondary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 8)
+                .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
+            }
 
             if providerConfig.wrappedValue.apiProvider == .google {
                 GeminiModelPickerView(

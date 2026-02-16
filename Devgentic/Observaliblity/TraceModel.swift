@@ -83,3 +83,76 @@ struct TraceContext: Sendable {
         self.metadata[key] = value
     }
 }
+
+// MARK: - Agent Trace Logging
+
+/// A structured record of a single step in the agent's execution trajectory.
+/// Captures the raw "Thought -> Action -> Observation" chain for debugging and transparency.
+struct AgentTraceLog: Identifiable, Codable, Sendable {
+    let id: UUID
+    
+    // --- Distributed Tracing Fields ---
+    let traceID: String
+    let spanID: String
+    let parentSpanID: String?
+    // ----------------------------------
+    
+    let stepNumber: Int
+    let timestamp: Date
+    let state: AgentStep
+    
+    /// The content of the trace.
+    let content: String
+    
+    /// Optional metadata for advanced debugging (e.g., execution time, tool name).
+    let metadata: [String: String]?
+    
+    init(
+        id: UUID = UUID(),
+        traceID: String,
+        spanID: String,
+        parentSpanID: String?,
+        stepNumber: Int,
+        state: AgentStep,
+        content: String,
+        metadata: [String: String]? = nil
+    ) {
+        self.id = id
+        self.traceID = traceID
+        self.spanID = spanID
+        self.parentSpanID = parentSpanID
+        self.stepNumber = stepNumber
+        self.timestamp = Date()
+        self.state = state
+        self.content = content
+        self.metadata = metadata
+    }
+}
+
+// MARK: - Agent Metrics
+
+struct AgentSessionMetrics {
+    let sessionID: UUID
+    var totalSteps: Int = 0
+    var toolCalls: Int = 0
+    var parseErrors: Int = 0
+    var didFinishSuccessfully: Bool = false
+    var didHitMaxIterations: Bool = false
+    var hallucinatedTools: Int = 0
+    
+    // Track tools for summary
+    var executedTools: [(name: String, success: Bool)] = []
+    
+    // Tools available to the agent (for checking hallucinations)
+    let validToolNames: Set<String>
+    
+    // Time tracking
+    let startTime: Date = Date()
+    var endTime: Date?
+    
+    var duration: TimeInterval {
+        guard let end = endTime else { return 0 }
+        return end.timeIntervalSince(startTime)
+    }
+}
+

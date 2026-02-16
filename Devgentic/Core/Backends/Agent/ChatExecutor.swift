@@ -67,10 +67,10 @@ actor ChatExecutor: AgentExecutor {
                             for segment in response.segments {
                                 switch segment {
                                 case .text(let textSegment):
-                                    // WRAPPER FIX: Wrap text in .content event
+                                    // Stream Handling: Wrap text in .content event
                                     continuation.yield(.content(textSegment.content))
                                 case .structure(let structuredSegment):
-                                    // WRAPPER FIX: Wrap structure text in .content event
+                                    // Stream Handling: Wrap structure text in .content event
                                     continuation.yield(.content(structuredSegment.content.text))
                                 }
                             }
@@ -94,7 +94,7 @@ actor ChatExecutor: AgentExecutor {
                     
                 } catch {
                     logger.error("ChatExecutor Error: \(error.localizedDescription)")
-                    // WRAPPER FIX: Emit error event before throwing
+                    // Stream Handling: Emit error event before throwing
                     continuation.yield(.error(error.localizedDescription))
                     continuation.finish(throwing: error)
                 }

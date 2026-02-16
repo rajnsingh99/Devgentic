@@ -10,122 +10,6 @@ import SwiftAgent
 import OpenFoundationModels
 import OpenFoundationModelsCore
 
-// MARK: - Agent State Definitions
-
-/// Represents the high-level state of the agent in its cognitive loop.
-/// Used for tracing and UI feedback (e.g., "Thinking...", "Executing Tool...").
-enum AgentStep: String, Codable, Sendable {
-    case idle           = "Idle"
-    case thinking       = "Reasoning"      // The agent is generating thoughts
-    case deciding       = "Deciding"       // The agent is determining which tool to use
-    case acting         = "Acting"         // The agent is executing a tool
-    case observing      = "Observing"      // The agent is processing the tool output
-    case finalizing     = "Finalizing"     // The agent is generating the final answer
-    case errorRecovery  = "Recovering"     // The agent encountered an error and is self-correcting
-}
-
-// MARK: - Trace Logging
-
-/// A structured record of a single step in the agent's execution trajectory.
-/// Captures the raw "Thought -> Action -> Observation" chain for debugging and transparency.
-struct AgentTraceLog: Identifiable, Codable, Sendable {
-    let id: UUID
-    
-    // --- Distributed Tracing Fields ---
-    let traceID: String
-    let spanID: String
-    let parentSpanID: String?
-    // ----------------------------------
-    
-    let stepNumber: Int
-    let timestamp: Date
-    let state: AgentStep
-    
-    /// The content of the trace.
-    let content: String
-    
-    /// Optional metadata for advanced debugging (e.g., execution time, tool name).
-    let metadata: [String: String]?
-    
-    init(
-        id: UUID = UUID(),
-        traceID: String,
-        spanID: String,
-        parentSpanID: String?,
-        stepNumber: Int,
-        state: AgentStep,
-        content: String,
-        metadata: [String: String]? = nil
-    ) {
-        self.id = id
-        self.traceID = traceID
-        self.spanID = spanID
-        self.parentSpanID = parentSpanID
-        self.stepNumber = stepNumber
-        self.timestamp = Date()
-        self.state = state
-        self.content = content
-        self.metadata = metadata
-    }
-}
-
-// MARK: - Tool Abstraction
-
-/// A type-erased wrapper for tools to decouple the executor from specific library generics.
-/// This allows the executor to run any tool given a JSON string or Data.
-struct AgentTool: Sendable {
-    let name: String
-    let description: String
-    let parameters: OpenFoundationModelsCore.GenerationSchema
-    
-    /// The closure to execute the tool.
-    /// Takes JSON Data (arguments) and returns a String (output).
-    let run: @Sendable (Data) async throws -> String
-}
-
-// MARK: - Execution Input
-
-/// The standard payload required to initialize any Agent Executor.
-struct AgentInput: Sendable {
-    let userInput: String
-    let chatHistory: [ChatMessage]
-    let conversationID: UUID
-    let tools: [AgentTool]
-    let ragContext: String?
-    
-    // NEW: Persistent Memory Context (Markdown)
-    let persistentMemory: String?
-    
-    let instructions: String?
-    
-    // NEW: The Trace Context for distributed observability
-    let traceContext: TraceContext
-    
-    // NEW: The "Checklist" from the Manager
-    let approvedPlan: ExecutionPlan?
-    
-    init(
-        userInput: String,
-        chatHistory: [ChatMessage],
-        conversationID: UUID,
-        tools: [AgentTool],
-        ragContext: String? = nil,
-        persistentMemory: String? = nil, // Added parameter
-        instructions: String? = nil,
-        traceContext: TraceContext,
-        approvedPlan: ExecutionPlan? = nil
-    ) {
-        self.userInput = userInput
-        self.chatHistory = chatHistory
-        self.conversationID = conversationID
-        self.tools = tools
-        self.ragContext = ragContext
-        self.persistentMemory = persistentMemory
-        self.instructions = instructions
-        self.traceContext = traceContext
-        self.approvedPlan = approvedPlan
-    }
-}
 
 // MARK: - Agent Executor Protocol
 
@@ -134,12 +18,46 @@ protocol AgentExecutor: Sendable {
     
     var architecture: AgentArchitecture { get }
     
-    // UPDATED: Now returns AgentStreamEvent instead of plain String
+    // Returns AgentStreamEvent for UI consumption
     func execute(
         model: any OpenFoundationModels.LanguageModel,
         input: AgentInput,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) -> AsyncThrowingStream<AgentStreamEvent, Error>
+}
+
+// MARK: - Agent Executor Factory
+
+/// The centralized factory for instantiating Agent Executors.
+/// Determines the execution strategy (Simple Chat vs. Agentic Loop) based on the profile configuration.
+enum AgentExecutorFactory {
+    
+    /// Creates the appropriate AgentExecutor for the given profile.
+    /// - Parameter profile: The backend profile model containing configuration details.
+    /// - Returns: A type-erased `AgentExecutor` (either `ChatExecutor` or `ReActAgentExecutor`).
+    static func create(for profile: BackendProfileModel) -> any AgentExecutor {
+        switch profile.profileType {
+            
+        case .bot:
+            // Bots use the simple pass-through executor.
+            // They don't plan, reason, or use tools in a loop.
+            return ChatExecutor()
+            
+        case .agent:
+            // Agents use the ReAct (Reasoning + Acting) loop.
+            // They can use tools, generate thoughts, and execute complex plans.
+            return ReActAgentExecutor()
+            
+        case .workflow:
+            // Future extensibility for Workflow profiles.
+            // For now, we fallback to ReAct as it is the most capable.
+            return ReActAgentExecutor()
+            
+        @unknown default:
+            // Safety fallback for future enum cases
+            return ReActAgentExecutor()
+        }
+    }
 }
 
 // MARK: - Native Tool Wrapper
@@ -156,8 +74,28 @@ struct ReActNativeToolWrapper: OpenFoundationModels.Tool {
         
         init(_ content: OpenFoundationModelsCore.GeneratedContent) throws {
             let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            self.rawData = try encoder.encode(content)
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            
+            // FIX: Unwraps the generated content to simple dictionary before encoding.
+            // This prevents passing the internal library wrapper (e.g. "structure": { ... }) to the tool.
+            let unwrappedAny = ReActNativeToolWrapper.unwrap(content: content)
+            
+            // If the unwrapped content is already a dictionary, we are good.
+            // If it's a primitive (unlikely for tool args), we wrap it in a dict or encode as is.
+            if let dict = unwrappedAny as? [String: Any] {
+                // We must use JSONSerialization for [String: Any] as it's not Encodable
+                self.rawData = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+            } else {
+                // Fallback: Try to encode the unwrapped value if possible, or the content itself if all else fails
+                // This handles edge cases where the model returns a single string argument
+                if let stringVal = unwrappedAny as? String {
+                     // Some tools might accept a single string, but usually tools expect JSON objects.
+                     // We try to wrap it if it looks like a single arg tool, but for now let's strict encode.
+                     self.rawData = try JSONEncoder().encode([stringVal])
+                } else {
+                     self.rawData = try encoder.encode(content)
+                }
+            }
         }
     }
     
@@ -165,5 +103,48 @@ struct ReActNativeToolWrapper: OpenFoundationModels.Tool {
     
     func call(arguments: Arguments) async throws -> String {
         return try await agentTool.run(arguments.rawData)
+    }
+    
+    // MARK: - Recursive Unwrapper Helper
+    
+    /// Recursively converts `GeneratedContent` (Structure, Array, Primitives) into Swift native types (`[String: Any]`, `[Any]`, `String`, etc.).
+    /// This is critical because `JSONEncoder().encode(GeneratedContent)` encodes the *enum metadata*, not the JSON value.
+    private static func unwrap(content: OpenFoundationModelsCore.GeneratedContent) -> Any? {
+        // Updated to match the specific `GeneratedContent.Kind` definition provided in the file.
+        // - Integers are covered by .number(Double)
+        // - Structure has two associated values (properties, orderedKeys)
+        // - No .blob or .integer cases exist
+        
+        switch content.kind {
+        case .structure(let properties, _):
+            var dict: [String: Any] = [:]
+            for (key, value) in properties {
+                if let unwrappedValue = unwrap(content: value) {
+                    dict[key] = unwrappedValue
+                }
+            }
+            return dict
+            
+        case .array(let items):
+            return items.compactMap { unwrap(content: $0) }
+            
+        case .string(let value):
+            return value
+            
+        case .number(let value):
+            // The model uses Double for all numbers.
+            // JSONSerialization will handle writing this correctly as a number.
+            return value
+            
+        case .bool(let value):
+            return value
+            
+        case .null:
+            return nil
+            
+        // Removed .blob, .integer, .double as they are not members of the provided Kind enum.
+        @unknown default:
+            return nil
+        }
     }
 }
