@@ -58,7 +58,16 @@ struct ChatBubbleView: View {
                     }
 
                     // ---------------------------------------------------------
-                    // 3. FINAL ANSWER (Text Content)
+                    // 3. HITL: Permission Request Card (Gating)
+                    // ---------------------------------------------------------
+                    if let confirmation = message.pendingToolConfirmation {
+                        PermissionRequestView(confirmation: confirmation, message: message)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    // ---------------------------------------------------------
+                    // 4. FINAL ANSWER (Text Content)
                     // ---------------------------------------------------------
                     switch contentToDisplay {
                     case .plainText(let text):
@@ -70,7 +79,10 @@ struct ChatBubbleView: View {
                     case .markdownText(let text):
                         // MARK: - Dynamic Thinking Headline Update
                         if message.isStreaming && text.isEmpty {
-                            AgentThinkingView(headline: message.thinkingHeadline)
+                            // Only show spinner if NOT requesting permission
+                            if message.pendingToolConfirmation == nil {
+                                AgentThinkingView(headline: message.thinkingHeadline)
+                            }
                         } else if !text.isEmpty {
                             let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
                             
@@ -234,6 +246,126 @@ struct ThinkingAccordionView: View {
     }
 }
 
+// MARK: - Permission Request Card (HITL)
+
+struct PermissionRequestView: View {
+    let confirmation: PendingToolConfirmation
+    @ObservedObject var message: ChatMessage
+    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    
+    @State private var isProcessingDecision = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 14))
+                
+                Text("Permission Required")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.primary)
+                
+                Spacer()
+            }
+            
+            Divider()
+                .background(Color.gray.opacity(0.2))
+            
+            // Content
+            VStack(alignment: .leading, spacing: 6) {
+                Text("The agent wants to execute a sensitive action:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                HStack(spacing: 6) {
+                    Text(confirmation.toolName)
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.gray.opacity(0.15))
+                        .cornerRadius(4)
+                }
+                
+                if !confirmation.params.isEmpty && confirmation.params != "{}" {
+                    Text(confirmation.params)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(4)
+                        .padding(8)
+                        .background(Color.black.opacity(0.1))
+                        .cornerRadius(6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            
+            // Actions
+            HStack(spacing: 12) {
+                if isProcessingDecision {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(height: 28)
+                } else {
+                    Button(action: {
+                        submitDecision(approved: false)
+                    }) {
+                        Text("Deny")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(Color.red.opacity(0.8))
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: {
+                        submitDecision(approved: true)
+                    }) {
+                        Text("Allow")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(Color.green.opacity(0.8))
+                            .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.top, 4)
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.05))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+        )
+        .frame(maxWidth: 500)
+    }
+    
+    private func submitDecision(approved: Bool) {
+        withAnimation {
+            isProcessingDecision = true
+        }
+        
+        // Call ViewModel to resume execution
+        mainAppViewModel.submitToolApproval(conversationID: message.conversationId, approved: approved)
+        
+        // Optimistic UI Update: clear the card immediately so the user feels responsiveness.
+        // The stream will resume and likely clear this anyway via event updates, but this feels snappier.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            withAnimation {
+                message.pendingToolConfirmation = nil
+                message.thinkingHeadline = approved ? "Permission granted. Resuming..." : "Permission denied. Reflecting..."
+            }
+        }
+    }
+}
+
 // MARK: - Artifact Card (Polymorphic Tool Output)
 
 struct ArtifactCardView: View {
@@ -278,11 +410,6 @@ struct ArtifactCardView: View {
             // Content (Polymorphic)
             if isExpanded {
                 Divider()
-                
-                // ARCHITECTURE NOTE:
-                // Here we can switch on `artifact.toolName` to provide specialized views.
-                // For now, we use a default ScrollView with text, but this structure allows
-                // us to easily add `case "fs_smart_search": SearchResultsView(...)` later.
                 
                 ScrollView(.vertical) {
                     Text(artifact.output)

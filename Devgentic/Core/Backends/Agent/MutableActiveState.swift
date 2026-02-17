@@ -135,15 +135,46 @@ struct MutableActiveState: Sendable, Codable {
 /// Used to prevent "Zombie Tasks" by explicitly marking goals as Completed or Abandoned.
 @Generable
 struct MemoryUpdate: Sendable, Codable {
-    
+
     @Guide(description: "The status of the current goal. STRICT VALUES: 'ACTIVE', 'COMPLETED', 'FAILED', 'ABANDONED'.")
     let goalStatus: String
-    
+
     @Guide(description: "A concise 1-sentence summary of what you are currently trying to achieve (e.g. 'Searching for folder X').")
     let goalSummary: String
-    
+
     @Guide(description: "The markdown log entry to append to the session history. Must include timestamp.")
     let logEntry: String
+
+    // MARK: - Manual Initializer & Codable Support
+
+    private enum CodingKeys: String, CodingKey {
+        case goalStatus, goalSummary, logEntry
+    }
+
+    // Manual Init: Required because @Generable suppresses default init, and we must init _rawGeneratedContent
+    init(goalStatus: String, goalSummary: String, logEntry: String) {
+        self.goalStatus = goalStatus
+        self.goalSummary = goalSummary
+        self.logEntry = logEntry
+        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
+    }
+
+    // Custom Decodable: Required to ignore _rawGeneratedContent during JSON decoding
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.goalStatus = try container.decode(String.self, forKey: .goalStatus)
+        self.goalSummary = try container.decode(String.self, forKey: .goalSummary)
+        self.logEntry = try container.decode(String.self, forKey: .logEntry)
+        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
+    }
+
+    // Custom Encodable: Required to exclude _rawGeneratedContent from JSON
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(goalStatus, forKey: .goalStatus)
+        try container.encode(goalSummary, forKey: .goalSummary)
+        try container.encode(logEntry, forKey: .logEntry)
+    }
 }
 
 // MARK: - Cognitive Definitions (The Executor's Loop)
@@ -151,40 +182,115 @@ struct MemoryUpdate: Sendable, Codable {
 /// Represents a specific tool execution request within a cognitive step.
 @Generable
 struct ToolAction: Sendable, Codable {
-    
+
     @Guide(description: "The exact name of the tool to execute (e.g., 'execute_shell', 'read_file').")
     let toolName: String
-    
+
     // UPDATED: Now uses AnyCodable for robust Native JSON support
     // The model will generate a real JSON object here, not a string.
     @Guide(description: "The parameters for the tool as a standard JSON object. Example: { \"path\": \"/tmp/file\", \"recursive\": true }")
     let parameters: [String: AnyCodable]
+
+    // MARK: - Manual Initializer & Codable Support
+
+    private enum CodingKeys: String, CodingKey {
+        case toolName, parameters
+    }
+
+    // Manual Init: Required because @Generable suppresses default init, and we must init _rawGeneratedContent
+    init(toolName: String, parameters: [String: AnyCodable]) {
+        self.toolName = toolName
+        self.parameters = parameters
+        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
+    }
+
+    // Custom Decodable: Required to ignore _rawGeneratedContent during JSON decoding
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.toolName = try container.decode(String.self, forKey: .toolName)
+        self.parameters = try container.decode([String: AnyCodable].self, forKey: .parameters)
+        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
+    }
+
+    // Custom Encodable: Required to exclude _rawGeneratedContent from JSON
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(toolName, forKey: .toolName)
+        try container.encode(parameters, forKey: .parameters)
+    }
 }
 
 /// Represents a single cognitive cycle (Think -> Decide -> Act).
 /// The Agent MUST generate this structure for every step of the loop.
 @Generable
 struct CognitiveStep: Sendable, Codable {
-    
+
     // ARCHITECTURAL FIX: Made Optional for First-Step Safety
     // Gemini Flash often omits this on Step 1, causing decoding errors if Mandatory.
     @Guide(description: "Analyze the previous step. Was it a 'Success' or 'Failure'? Be honest.")
     let previousStepOutcome: String?
-    
+
     @Guide(description: "Your internal reasoning process...")
     let internalMonologue: String
-    
+
     @Guide(description: "A short, 3-5 word status headline...")
     let displayHeadline: String
-    
+
     @Guide(description: "The specific tool you want to execute...")
     let action: ToolAction?
-    
+
     @Guide(description: "Required when changing state or finishing a task. Structured update for the memory file.")
     let memoryUpdate: MemoryUpdate?
-    
+
     @Guide(description: "If the task is complete, provide the final response...")
     let finalAnswer: String?
+
+    // MARK: - Manual Initializer & Codable Support
+
+    private enum CodingKeys: String, CodingKey {
+        case previousStepOutcome, internalMonologue, displayHeadline, action, memoryUpdate, finalAnswer
+    }
+
+    // Manual Init: Required because @Generable suppresses default init, and we must init _rawGeneratedContent
+    init(
+        previousStepOutcome: String?,
+        internalMonologue: String,
+        displayHeadline: String,
+        action: ToolAction?,
+        memoryUpdate: MemoryUpdate?,
+        finalAnswer: String?
+    ) {
+        self.previousStepOutcome = previousStepOutcome
+        self.internalMonologue = internalMonologue
+        self.displayHeadline = displayHeadline
+        self.action = action
+        self.memoryUpdate = memoryUpdate
+        self.finalAnswer = finalAnswer
+        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
+    }
+
+    // Custom Decodable: Required to ignore _rawGeneratedContent during JSON decoding
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.previousStepOutcome = try container.decodeIfPresent(String.self, forKey: .previousStepOutcome)
+        self.internalMonologue = try container.decode(String.self, forKey: .internalMonologue)
+        self.displayHeadline = try container.decode(String.self, forKey: .displayHeadline)
+        self.action = try container.decodeIfPresent(ToolAction.self, forKey: .action)
+        self.memoryUpdate = try container.decodeIfPresent(MemoryUpdate.self, forKey: .memoryUpdate)
+        self.finalAnswer = try container.decodeIfPresent(String.self, forKey: .finalAnswer)
+        self._rawGeneratedContent = GeneratedContent(kind: .structure(properties: [:], orderedKeys: []))
+    }
+
+    // Custom Encodable: Required to exclude _rawGeneratedContent from JSON
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(previousStepOutcome, forKey: .previousStepOutcome)
+        try container.encode(internalMonologue, forKey: .internalMonologue)
+        try container.encode(displayHeadline, forKey: .displayHeadline)
+        try container.encodeIfPresent(action, forKey: .action)
+        try container.encodeIfPresent(memoryUpdate, forKey: .memoryUpdate)
+        try container.encodeIfPresent(finalAnswer, forKey: .finalAnswer)
+    }
 }
 
 // MARK: - Extensions

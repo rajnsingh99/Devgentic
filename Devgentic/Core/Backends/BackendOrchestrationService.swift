@@ -64,7 +64,8 @@ class BackendOrchestrationService: ObservableObject {
         }
         
         return AsyncThrowingStream { continuation in
-            Task {
+            // [CRITICAL FIX] Capture the task to allow cancellation propagation
+            let task = Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
                 
                 // Resource Management: Unload local MLX models if they are not required for this request.
@@ -108,6 +109,12 @@ class BackendOrchestrationService: ObservableObject {
                     ragContextString = await self.retrieveRAGContext(for: userQuery, conversationID: conversationID, history: conversationHistory)
                 }
                 
+                // Check cancellation before heavy lifting
+                if Task.isCancelled {
+                    continuation.finish(throwing: CancellationError())
+                    return
+                }
+                
                 do {
                     switch config.profile.profileType {
                     
@@ -124,7 +131,10 @@ class BackendOrchestrationService: ObservableObject {
                             onTraceUpdate: aggregatedTraceUpdate
                         )
                         
-                        for try await event in stream { continuation.yield(event) }
+                        for try await event in stream {
+                            // Yield events as they come
+                            continuation.yield(event)
+                        }
                         continuation.finish()
 
                     case .agent:
@@ -165,6 +175,10 @@ class BackendOrchestrationService: ObservableObject {
                             case .toolCall(let name, let params):
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
+                            // [HITL] Fixed: Handle the new event type
+                            case .requestConfirmation(let toolName, let params):
+                                logger.debug("[HITL] Permission requested for \(toolName)")
+                                continuation.yield(event)
                             case .error(let err):
                                 logger.debug("[ERROR] \(err)")
                                 continuation.yield(event)
@@ -180,10 +194,18 @@ class BackendOrchestrationService: ObservableObject {
                     case .workflow:
                         throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Workflow profiles."])
                     }
+                } catch is CancellationError {
+                    logger.warning("Orchestration Stream Cancelled.")
+                    continuation.finish()
                 } catch {
                     logger.error("AGENT_CONNECT_ERROR: \(error.localizedDescription) (Trace: \(context.traceID))")
                     continuation.finish(throwing: error)
                 }
+            }
+            
+            // [CRITICAL FIX] Hook up cancellation
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }

@@ -12,6 +12,7 @@
 //  Refactored on 28/08/25 to create a compact, icon-only activity bar.
 //  Refactored on 28/08/25 to fix incorrect new chat button behavior.
 //  Refactored on 28/08/25 to rename New Chat button to Home.
+//  Modernized on 17/02/26 with hover glow, press animations, and unified surface.
 //
 
 import SwiftUI
@@ -24,11 +25,13 @@ struct HomeButton: View {
     @Binding var isSidebarVisible: Bool
     @Binding var selectedTab: SidebarTab?
 
+    @State private var isHovering = false
+
     var body: some View {
         Button {
             viewModel.deselectConversationAndShowWelcome()
             logger.debug("Triggered deselect conversation via Home button.")
-            
+
             if isSidebarVisible {
                 isSidebarVisible = false
                 logger.debug("Hid sidebar pane via Home button.")
@@ -36,13 +39,22 @@ struct HomeButton: View {
             selectedTab = nil // Deselect any active tab
         } label: {
             Image(systemName: "house.fill")
-                .font(.system(size: 22))
-                .frame(width: 40, height: 40)
+                .font(.system(size: 20))
+                .frame(width: 38, height: 38)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+                )
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ScaleButtonStyle())
         .foregroundColor(.secondary)
         .help("Home")
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
     }
 }
 
@@ -54,6 +66,8 @@ struct ActivityBarButton: View {
 
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
+
+    @State private var isHovering = false
 
     private var isActive: Bool {
         if tab == .settings || tab == .backendProfiles {
@@ -68,22 +82,37 @@ struct ActivityBarButton: View {
         } label: {
             Image(systemName: tab.iconName)
                 .font(.system(size: 18))
-                .frame(width: 40, height: 40)
+                .frame(width: 38, height: 38)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ScaleButtonStyle())
         .foregroundColor(isActive ? Color.accentColor : .secondary)
-        .background(isActive ? Color.accentColor.opacity(0.2) : Color.clear)
-        .cornerRadius(8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isActive ? Color.accentColor.opacity(0.15) :
+                      isHovering ? Color.primary.opacity(0.06) : Color.clear)
+        )
+        .shadow(
+            color: isActive ? Color.accentColor.opacity(0.2) :
+                   isHovering ? Color.accentColor.opacity(0.08) : Color.clear,
+            radius: isActive ? 6 : 4, x: 0, y: 0
+        )
         .overlay(alignment: .leading) {
             if isActive {
                 Capsule()
                     .fill(Color.accentColor)
-                    .frame(width: 3, height: 20)
-                    .offset(x: -4)
+                    .frame(width: 3, height: 24)
+                    .offset(x: -5)
+                    .transition(.scale.combined(with: .opacity))
             }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isActive)
         .help(tab.title)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
     }
 
     private func handleButtonTap() {
@@ -96,7 +125,7 @@ struct ActivityBarButton: View {
                 viewModel.showSettings = false
                 logger.debug("Ensured old settings overlay is closed.")
             }
-        
+
         case .backendProfiles:
             logger.debug("Backend Profiles button tapped. Attempting to open window.")
             openWindow(id: "backend-profiles")
@@ -121,7 +150,7 @@ struct ActivityBarButton: View {
 }
 
 struct ActivityBarView: View {
-    
+
     @Binding var selectedTab: SidebarTab?
     @Binding var isSidebarVisible: Bool
 
@@ -130,7 +159,7 @@ struct ActivityBarView: View {
 
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 6) {
             HomeButton(isSidebarVisible: $isSidebarVisible, selectedTab: $selectedTab)
 
             ForEach(topTabs) { tab in
@@ -152,7 +181,6 @@ struct ActivityBarView: View {
             }
         }
         .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor).opacity(0.9))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }

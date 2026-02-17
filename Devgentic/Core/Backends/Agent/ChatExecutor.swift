@@ -33,8 +33,12 @@ actor ChatExecutor: AgentExecutor {
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
         return AsyncThrowingStream { continuation in
-            Task {
+            // [CRITICAL FIX] Capture the task to allow cancellation propagation
+            let task = Task {
                 do {
+                    // Check cancellation before starting
+                    try Task.checkCancellation()
+                    
                     // 1. Trace: Start (UI Feedback)
                     // We map the "Chat" state to "Thinking" so the UI shows activity.
                     let traceSpan = input.traceContext.newSpan()
@@ -56,11 +60,13 @@ actor ChatExecutor: AgentExecutor {
                     let transcript = self.buildTranscript(input: input)
                     
                     // 3. Stream Response
-                    // Fix: Use correct 'stream' method from LanguageModel protocol
                     // Returns AsyncThrowingStream<Transcript.Entry, Error>
                     let entryStream = model.stream(transcript: transcript, options: nil)
                     
                     for try await entry in entryStream {
+                        // Explicitly check cancellation inside the loop for responsiveness
+                        try Task.checkCancellation()
+                        
                         switch entry {
                         case .response(let response):
                             // Extract text content from the response segments
@@ -92,12 +98,20 @@ actor ChatExecutor: AgentExecutor {
                     
                     continuation.finish()
                     
+                } catch is CancellationError {
+                    logger.info("ChatExecutor stream cancelled.")
+                    continuation.finish()
                 } catch {
                     logger.error("ChatExecutor Error: \(error.localizedDescription)")
                     // Stream Handling: Emit error event before throwing
                     continuation.yield(.error(error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
+            }
+            
+            // [CRITICAL FIX] Ensure stream termination kills the inner task
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }

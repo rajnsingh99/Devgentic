@@ -357,6 +357,23 @@ class MainApplicationViewModel: ObservableObject {
         activeStreamManager.cancelStream(for: messageID)
     }
     
+    // MARK: - [HITL] Human-in-the-Loop Permissions
+    
+    /// Submits the user's decision (Approve/Deny) for a pending tool execution.
+    /// - Parameters:
+    ///   - conversationID: The conversation ID where the permission was requested.
+    ///   - approved: True to execute the tool, False to reject it.
+    func submitToolApproval(conversationID: UUID, approved: Bool) {
+        logger.info("[HITL] Submitting approval decision: \(approved) for conversation \(conversationID)")
+        
+        Task {
+            // Signal the suspension service to resume execution
+            await ExecutionSuspensionService.shared.resume(for: conversationID, approved: approved)
+        }
+    }
+    
+    // MARK: - Message Helpers
+    
     private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) -> ChatMessage {
         var attachedTextFiles: [AttachedTextFile] = []
         var attachedImageFiles: [AttachedImageFile] = []

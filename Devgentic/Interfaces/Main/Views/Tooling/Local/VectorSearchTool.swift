@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 23/01/26.
-//  Updated for Audit Consistency.
+//  Updated for Audit Consistency and Hallucination Prevention.
 //
 
 import Foundation
@@ -28,8 +28,16 @@ struct VectorSearchTool: OpenFoundationModels.Tool {
     
     typealias Output = String
     
-    let name = "search_knowledge_base"
-    let description = "Searches the user's local documents and conversation history for relevant information."
+    // RENAMED: To prevent the LLM from thinking this is a general knowledge source (Wikipedia/Google).
+    let name = "recall_conversation_history"
+    
+    let description = """
+    [PURPOSE]: Performs a semantic search against the local vector database containing PAST CONVERSATION LOGS and UPLOADED DOCUMENTS.
+    [WHEN TO USE]: Use ONLY when the user refers to past context ("what did we just talk about?"), specific uploaded files ("summarize the PDF"), or memory. DO NOT use this for general world knowledge, facts, or writing essays about external topics.
+    [INPUT]: { "query": "summary of the uploaded contract" }
+    [OUTPUT]: Text snippets from previous messages or documents.
+    """
+    
     let conversationID: UUID?
     
     init(conversationID: UUID?) {
@@ -80,7 +88,7 @@ struct VectorSearchTool: OpenFoundationModels.Tool {
         )
         
         if results.isEmpty {
-            return "No relevant information found. (Audit Ref: \(logID))"
+            return "No relevant information found in local history. (Audit Ref: \(logID))"
         }
         
         let resultText = results.map { "--- Context ---\n\($0.content)" }.joined(separator: "\n\n")

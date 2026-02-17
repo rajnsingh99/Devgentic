@@ -21,6 +21,9 @@ enum AgentStep: String, Codable, Sendable {
     case observing      = "Observing"      // The agent is processing the tool output
     case finalizing     = "Finalizing"     // The agent is generating the final answer
     case errorRecovery  = "Recovering"     // The agent encountered an error and is self-correcting
+    
+    // [HITL] Phase 1: New State for Tool Gating
+    case requestingPermission = "Awaiting Permission" // The agent is waiting for user approval
 }
 
 // MARK: - Tool Abstraction
@@ -32,9 +35,28 @@ struct AgentTool: Sendable {
     let description: String
     let parameters: OpenFoundationModelsCore.GenerationSchema
     
+    // [HITL] Phase 1: Sensitivity Flag
+    /// If true, the Executor will pause and ask the user before running this tool.
+    let requiresConfirmation: Bool
+    
     /// The closure to execute the tool.
     /// Takes JSON Data (arguments) and returns a String (output).
     let run: @Sendable (Data) async throws -> String
+    
+    // [HITL] Updated Init with default for backward compatibility
+    init(
+        name: String,
+        description: String,
+        parameters: OpenFoundationModelsCore.GenerationSchema,
+        requiresConfirmation: Bool = false,
+        run: @escaping @Sendable (Data) async throws -> String
+    ) {
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+        self.requiresConfirmation = requiresConfirmation
+        self.run = run
+    }
 }
 
 // MARK: - Execution Input
@@ -48,18 +70,18 @@ struct AgentInput: Sendable {
     let ragContext: String?
     
     // Architecture: Split-State (Active State + History)
-    // Instead of a monolithic string, we now pass structured state + paged history.
     let activeState: MutableActiveState?
     let recentHistory: String?
     
     // Execution Context Flag
-    // Signals that this execution is the start of a fresh user turn.
     let isNewRequest: Bool
     
     // [Step 3 Architecture Update]
-    // Replaced provider-specific flags (e.g., `isGemini`) with a polymorphic strategy.
-    // This allows the Executor to remain agnostic of the underlying provider quirks.
     let generatorStrategy: any CognitiveGenerator
+    
+    // [Phase 2 Rate Limiting]
+    // The specific quota profile to enforce for this execution
+    let rateLimitCategory: RateLimitCategory
     
     let instructions: String?
     
@@ -67,7 +89,6 @@ struct AgentInput: Sendable {
     let traceContext: TraceContext
     
     /// Computed Compatibility Layer
-    /// Allows legacy executors or simple Chat bots to access a text representation of the memory.
     var persistentMemory: String? {
         guard let state = activeState else { return nil }
         let history = recentHistory ?? "(No recent history)"
@@ -91,6 +112,7 @@ struct AgentInput: Sendable {
         recentHistory: String? = nil,
         isNewRequest: Bool = true,
         generatorStrategy: (any CognitiveGenerator)? = nil,
+        rateLimitCategory: RateLimitCategory = .geminiFlash, // Default to strict for safety
         instructions: String? = nil,
         traceContext: TraceContext
     ) {
@@ -103,9 +125,8 @@ struct AgentInput: Sendable {
         self.recentHistory = recentHistory
         self.isNewRequest = isNewRequest
         
-        // Default to NativeStructuredGenerator (OpenAI behavior) if no specific strategy is provided.
-        // This ensures backward compatibility for tests or simple bots.
         self.generatorStrategy = generatorStrategy ?? NativeStructuredGenerator()
+        self.rateLimitCategory = rateLimitCategory
         
         self.instructions = instructions
         self.traceContext = traceContext

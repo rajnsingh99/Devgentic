@@ -105,11 +105,25 @@ class ActiveStreamManager: ObservableObject {
                         agentMessage.thinkingHeadline = "Using tool: \(name)"
                         agentMessage.agentState = .acting
                         
+                    // [HITL] Phase 3: Handle Permission Requests
+                    case .requestConfirmation(let toolName, let params):
+                        agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
+                        agentMessage.agentState = .requestingPermission
+                        
+                        // Populate the Pending Confirmation Data for the UI
+                        agentMessage.pendingToolConfirmation = PendingToolConfirmation(
+                            toolName: toolName,
+                            params: params
+                        )
+                        
                     case .toolOutput(let output):
                         // 2. Handle Artifacts (File lists, etc.)
                         agentMessage.agentState = .observing
                         agentMessage.artifacts.append(output)
                         agentMessage.thinkingHeadline = "Processed \(output.toolName)"
+                        
+                        // Clear pending confirmation if any (it's done now)
+                        agentMessage.pendingToolConfirmation = nil
                         
                     case .content(let textChunk):
                         // 3. Handle Final Text (Buffered)
@@ -189,6 +203,7 @@ class ActiveStreamManager: ObservableObject {
         message.isStreaming = false
         message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
+        message.pendingToolConfirmation = nil // Clear any pending UI state
         
         if let error = error {
             let errorContent = MessageContent.error(title: "Response Error", details: error.localizedDescription)

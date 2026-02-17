@@ -64,13 +64,19 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.textContainer?.lineFragmentPadding = 5
         textView.typingAttributes = defaultTypingAttributes
         textView.delegate = context.coordinator
+        textView.textStorage?.delegate = context.coordinator
         textView.allowsUndo = true
+        
+        // FIX: Enable layer backing to prevent ghosting/blur artifacts during SwiftUI transitions
+        textView.wantsLayer = true
         
         context.coordinator.isProgrammaticallyChangingText = true
         textView.string = text
         context.coordinator.isProgrammaticallyChangingText = false
         
         let scrollView = NSScrollView()
+        // FIX: Enable layer backing on ScrollView as well
+        scrollView.wantsLayer = true
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
         scrollView.documentView = textView
@@ -130,9 +136,6 @@ struct CustomTextEditor: NSViewRepresentable {
                     
                     if self.text != textView.string {
                         // Important: Update binding directly here to avoid loop
-                        // But we are in updateNSView, so we rely on coordinator to sync back if needed,
-                        // or trust that the binding update caused this.
-                        // Actually, insertion updates usually come from VM, so we must sync back to binding.
                         DispatchQueue.main.async {
                             self.text = textView.string
                         }
@@ -143,30 +146,29 @@ struct CustomTextEditor: NSViewRepresentable {
             }
         }
 
-        // CRITICAL FIX:
-        // Only update the TextView from binding if the content is actually different.
-        // We added a check to ensure we don't overwrite user input if the binding is lagging.
-        // Since we removed the debounce in textDidChange, 'self.text' should be up to date.
-        // However, we double check to ensure we don't reset cursor position unnecessarily.
-        if !textWasChangedByInsertionRequest && textView.string != self.text && !context.coordinator.isProgrammaticallyChangingText {
-            
-            // Safety Check: If the user is typing (active window), avoid replacing unless totally necessary
-            // This prevents "fighting" the user input.
+        // FIX: Allow update if the parent wants to CLEAR the text (text is empty),
+        // even if the user is currently "typing" (which is true immediately after pressing Enter).
+        let isClearing = self.text.isEmpty && !textView.string.isEmpty
+
+        if !textWasChangedByInsertionRequest && textView.string != self.text
+            && !context.coordinator.isProgrammaticallyChangingText
+            && (!context.coordinator.isTyping || isClearing) {
+
             context.coordinator.isProgrammaticallyChangingText = true
-            
+
             let currentSelectedRange = textView.selectedRange()
             let attributedString = NSAttributedString(string: self.text, attributes: defaultTypingAttributes)
-            
-            // Replace contents
+
             textView.textStorage?.replaceCharacters(in: NSRange(location: 0, length: textView.textStorage?.length ?? 0), with: attributedString)
-            
-            // Attempt to restore cursor, but clamp to new length
-            let newLocation = min(currentSelectedRange.location, self.text.count)
+
+            // Use UTF-16 length (NSString) for correct NSRange clamping
+            let utf16Length = (self.text as NSString).length
+            let newLocation = min(currentSelectedRange.location, utf16Length)
             textView.setSelectedRange(NSRange(location: newLocation, length: 0))
-            
+
             textView.typingAttributes = defaultTypingAttributes
             textView.textColor = NSColor.textColor
-            
+
             context.coordinator.isProgrammaticallyChangingText = false
         }
     }
@@ -186,7 +188,10 @@ struct CustomTextEditor: NSViewRepresentable {
 
     class CustomNSTextView: NSTextView {
         weak var coordinator: Coordinator?
-        
+        /// Cached height to avoid recomputing layout on every SwiftUI query.
+        /// Invalidated explicitly in `didChangeText` and `setFrameSize`.
+        private var cachedIntrinsicHeight: CGFloat?
+
         init(coordinator: Coordinator?) {
             self.coordinator = coordinator
             let textStorage = NSTextStorage()
@@ -217,30 +222,42 @@ struct CustomTextEditor: NSViewRepresentable {
         }
         
         override var intrinsicContentSize: NSSize {
+            if let cached = cachedIntrinsicHeight {
+                return NSSize(width: NSView.noIntrinsicMetric, height: cached)
+            }
             guard let textContainer = self.textContainer, let layoutManager = self.layoutManager else { return super.intrinsicContentSize }
             layoutManager.ensureLayout(for: textContainer)
             let usedRect = layoutManager.usedRect(for: textContainer)
             let idealHeight = ceil(usedRect.height + self.textContainerInset.height * 2)
             let finalHeight = max(coordinator?.parent.minHeight ?? 0, idealHeight)
+            cachedIntrinsicHeight = finalHeight
             return NSSize(width: NSView.noIntrinsicMetric, height: finalHeight)
+        }
+
+        override func invalidateIntrinsicContentSize() {
+            cachedIntrinsicHeight = nil
+            super.invalidateIntrinsicContentSize()
         }
 
         override func didChangeText() {
             super.didChangeText()
             self.invalidateIntrinsicContentSize()
             self.enclosingScrollView?.invalidateIntrinsicContentSize()
-            DispatchQueue.main.async { if self.window != nil { self.scrollRangeToVisible(self.selectedRange()) } }
+            // Scroll synchronously within the same layout pass to prevent
+            // the timing gap where SwiftUI relays out before scroll completes.
+            if self.window != nil {
+                self.layoutManager?.ensureLayout(for: self.textContainer!)
+                self.scrollRangeToVisible(self.selectedRange())
+            }
         }
 
         override func setFrameSize(_ newSize: NSSize) {
-            if textContainer?.widthTracksTextView == true {
-                let horizontalInsets = (textContainerInset.width * 2) + (textContainer?.lineFragmentPadding ?? 0) * 2
-                let containerWidth = max(0, newSize.width - horizontalInsets)
-                if textContainer?.containerSize.width != containerWidth {
-                    textContainer?.containerSize = NSSize(width: containerWidth, height: CGFloat.greatestFiniteMagnitude)
-                }
-            }
+            let widthChanged = self.frame.size.width != newSize.width
             super.setFrameSize(newSize)
+            if widthChanged {
+                invalidateIntrinsicContentSize()
+                enclosingScrollView?.invalidateIntrinsicContentSize()
+            }
         }
 
         override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
@@ -271,7 +288,7 @@ struct CustomTextEditor: NSViewRepresentable {
         }
     }
 
-    class Coordinator: NSObject, NSTextViewDelegate {
+    class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
         var parent: CustomTextEditor
         weak var textView: CustomNSTextView?
         weak var lastKnownTextViewInstance: CustomNSTextView?
@@ -279,15 +296,32 @@ struct CustomTextEditor: NSViewRepresentable {
         var isProgrammaticallyChangingText: Bool = false
         var lastProcessedInsertionID: UUID?
         var lastProcessedInsertionString: String?
-        
-        // Removed textUpdateWorkItem (Debouncer) to fix cursor lag/jumping issues
-        // var textUpdateWorkItem: DispatchWorkItem?
 
         let defaultTypingAttributes: [NSAttributedString.Key: Any]
 
         init(_ parent: CustomTextEditor, defaultTypingAttributes: [NSAttributedString.Key: Any]) {
             self.parent = parent
             self.defaultTypingAttributes = defaultTypingAttributes
+        }
+
+        // MARK: - NSTextStorageDelegate
+        // Normalize paragraph styles after every edit to prevent mixed lineSpacing
+        func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
+            guard editedMask.contains(.editedCharacters) else { return }
+            guard let paragraphStyle = defaultTypingAttributes[.paragraphStyle] as? NSParagraphStyle,
+                  let font = defaultTypingAttributes[.font] as? NSFont else { return }
+
+            let string = textStorage.string as NSString
+            let paragraphRange = string.paragraphRange(for: editedRange)
+
+            textStorage.enumerateAttribute(.paragraphStyle, in: paragraphRange, options: []) { value, attrRange, _ in
+                if let existing = value as? NSParagraphStyle, existing.lineSpacing == paragraphStyle.lineSpacing { return }
+                textStorage.addAttribute(.paragraphStyle, value: paragraphStyle, range: attrRange)
+            }
+            textStorage.enumerateAttribute(.font, in: paragraphRange, options: []) { value, attrRange, _ in
+                if let existing = value as? NSFont, existing == font { return }
+                textStorage.addAttribute(.font, value: font, range: attrRange)
+            }
         }
 
         func textDidBeginEditing(_ notification: Notification) { isTyping = true }
@@ -305,27 +339,21 @@ struct CustomTextEditor: NSViewRepresentable {
             let currentPlainText = textView.string
             let currentSelectedRange = textView.selectedRange()
 
-            // FIX 1 & 3: REMOVED DEBOUNCE
-            // Updating the binding immediately prevents race conditions where the parent View
-            // (triggered by suggestion state changes) would re-render CustomTextEditor with "old" text,
-            // causing the cursor to jump back.
             if parent.text != currentPlainText {
                 parent.text = currentPlainText
             }
 
             // 2. Trigger Analysis using TextTriggerAnalyzer
-            // This replaces the manual "if char == @" logic that was failing
             if let result = TextTriggerAnalyzer.analyze(text: currentPlainText, cursorLocation: currentSelectedRange.location) {
                 switch result.type {
                 case .prompt:
                     updatePromptState(result: result)
-                    clearFileState() // Mutual exclusion
+                    clearFileState()
                 case .file:
                     updateFileState(result: result)
-                    clearPromptState() // Mutual exclusion
+                    clearPromptState()
                 }
             } else {
-                // No active trigger found -> Clear all
                 clearPromptState()
                 clearFileState()
             }

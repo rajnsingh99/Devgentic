@@ -20,6 +20,12 @@ enum AgentStreamEvent: Sendable {
     /// - params: The raw JSON parameters being passed (for debugging/visibility)
     case toolCall(name: String, params: String)
     
+    /// [HITL] Phase 3: Explicit Permission Request
+    /// The agent pauses and asks the user for permission to proceed.
+    /// - toolName: The name of the sensitive tool (e.g. "delete_file")
+    /// - params: The parameters needed for the tool (e.g. path)
+    case requestConfirmation(toolName: String, params: String)
+    
     /// The tool has finished. Use this to render "Glass Box" artifacts (tables, lists, JSON).
     /// This is the "Observation" phase.
     case toolOutput(ToolOutput)
@@ -34,10 +40,6 @@ enum AgentStreamEvent: Sendable {
 
 /// Structured output from a tool execution.
 /// Used to render "Artifacts" in the UI (e.g., a file list card).
-///
-/// Updates:
-/// - Added `Codable` to support persistence in `ChatMessage`.
-/// - Added `Equatable` to support `==` comparison in `ChatMessage`.
 struct ToolOutput: Sendable, Identifiable, Codable, Equatable {
     let id: UUID
     let toolName: String
@@ -49,5 +51,18 @@ struct ToolOutput: Sendable, Identifiable, Codable, Equatable {
         self.toolName = toolName
         self.output = output
         self.isSuccess = isSuccess
+    }
+}
+
+/// [HITL] Data Model for the Permission Card
+struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
+    let id: UUID
+    let toolName: String
+    let params: String
+    
+    init(id: UUID = UUID(), toolName: String, params: String) {
+        self.id = id
+        self.toolName = toolName
+        self.params = params
     }
 }

@@ -290,18 +290,22 @@ struct ChatInputAreaView: View {
                 }
             )
             .frame(minHeight: textEditorMinHeight, maxHeight: textEditorMaxHeight)
-            .animation(.easeInOut(duration: 0.2), value: inputViewModel.userInput)
             
             if inputViewModel.userInput.isEmpty {
+                // Use fixed constants matching makeNSView setup (lineFragmentPadding=5,
+                // textContainerInset.width=2, textContainerInset.height=10) instead of
+                // reading from the optional textView ref which is nil on first render.
                 Text(placeholderText)
                     .font(Font(defaultTypingAttributes[.font] as! NSFont))
                     .foregroundColor(Color(NSColor.placeholderTextColor))
-                    .padding(.leading, 3 + (editorTextView?.textContainer?.lineFragmentPadding ?? 5))
-                    .padding(.top, editorTextView?.textContainerInset.height ?? 10)
+                    .padding(.leading, 3 + 5) // textContainerInset.width(2) + lineFragmentPadding(5) ≈ 8
+                    .padding(.top, 10)         // textContainerInset.height
                     .allowsHitTesting(false)
             }
         }
-        .padding(EdgeInsets(top: 10, leading: 12, bottom: 4, trailing: 12))
+        // Top padding removed — textContainerInset.height (10pt) already provides
+        // vertical inset inside the NSTextView. Stacking both caused 20pt top gap.
+        .padding(EdgeInsets(top: 0, leading: 12, bottom: 4, trailing: 12))
         .focused(isInputFocused)
         .disabled(!isInputEnabled)
         .opacity(isInputEnabled ? 1.0 : 0.6)

@@ -45,10 +45,14 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     @Published var thoughts: [String] = []
     @Published var artifacts: [ToolOutput] = []
     
-    // Transient UI State
+    // MARK: - Transient UI State (Not Persisted)
     @Published var thinkingHeadline: String? = nil
     @Published var agentState: AgentStep = .idle
     @Published var isThinkingExpanded: Bool = false // UI toggle for the accordion
+    
+    // [HITL] New Property for Permission Card
+    // Holds the data for the tool waiting for approval.
+    @Published var pendingToolConfirmation: PendingToolConfirmation? = nil
     
     // MARK: - Performance Caching
     var cachedMarkdownBlocks: [ContentBlock]? = nil
@@ -102,7 +106,8 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
                lhs.isStreaming == rhs.isStreaming &&
                lhs.agentResponse == rhs.agentResponse &&
                lhs.thoughts == rhs.thoughts &&
-               lhs.artifacts == rhs.artifacts
+               lhs.artifacts == rhs.artifacts &&
+               lhs.pendingToolConfirmation == rhs.pendingToolConfirmation // Update Equality Check
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {
@@ -111,7 +116,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        // NEW: Persist the glass box data
+        // Persist the glass box data
         case thoughts, artifacts
     }
 
@@ -133,11 +138,12 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.thoughts = try container.decodeIfPresent([String].self, forKey: .thoughts) ?? []
         self.artifacts = try container.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
         
-        // Transient properties initialize to default
+        // Transient properties initialize to default (NOT decoded)
         self.thinkingHeadline = nil
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
         self.isThinkingExpanded = false
+        self.pendingToolConfirmation = nil
     }
     
     func encode(to encoder: Encoder) throws {
@@ -156,6 +162,8 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         // Encode Glass Box Data
         try container.encode(thoughts, forKey: .thoughts)
         try container.encode(artifacts, forKey: .artifacts)
+        
+        // Note: pendingToolConfirmation is intentionally excluded from encoding
     }
 }
 

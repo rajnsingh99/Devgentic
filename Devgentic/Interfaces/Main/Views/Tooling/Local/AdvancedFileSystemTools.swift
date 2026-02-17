@@ -191,9 +191,12 @@ class HybridSearchService {
 
 struct SmartSearchTool: OpenFoundationModels.Tool {
     let name = "fs_smart_search"
-    
-    // OPTIMIZATION: Description updated to reflect POC logic (Indexed-only, permission sensitive)
-    let description = "Advanced system search using macOS Spotlight. Finds files by matching Filename or Content. STRATEGY: 1. Searches Documents, Downloads, Desktop, etc. 2. REQUIRES PERMISSIONS: If results are missing, ensure the app has access to user folders. 3. Supports global search (null scope) or specific folder scope."
+    let description = """
+    [PURPOSE]: Advanced macOS Spotlight Search. Finds files by matching Filename OR Text Content.
+    [WHEN TO USE]: Use when you need to find a file but don't know the path.
+    [INPUT]: { "search_term": "invoice", "search_scope": "~/Documents" }
+    [OUTPUT]: A list of matching file paths.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let search_term: String
@@ -301,7 +304,12 @@ struct SmartSearchTool: OpenFoundationModels.Tool {
 
 struct ReadMetadataTool: OpenFoundationModels.Tool {
     let name = "fs_read_metadata"
-    let description = "Retrieves detailed file metadata. Combines the capabilities of `mdls` (Spotlight attributes) and `stat` (system info)."
+    let description = """
+    [PURPOSE]: Retrieves detailed file metadata (creation date, type, size, origin URL).
+    [WHEN TO USE]: Use to analyze file properties without reading content.
+    [INPUT]: { "path": "~/Downloads/file.pdf" }
+    [OUTPUT]: A structured list of file attributes.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -404,7 +412,12 @@ struct OrganizeBatchTool: OpenFoundationModels.Tool {
     
     typealias Output = String
     let name = "fs_organize_batch"
-    let description = "Moves a batch of files to a specific destination folder. AUTOMATICALLY LOGS the action to the Evidence Locker."
+    let description = """
+    [PURPOSE]: Moves multiple files to a specific destination folder in one go.
+    [WHEN TO USE]: Use when organizing messy folders (e.g. "Clean up my desktop").
+    [INPUT]: { "sourcePaths": ["~/Desktop/a.png"], "destinationFolder": "~/Pictures/Screenshots" }
+    [OUTPUT]: Summary of moved files.
+    """
     private let fileManager = FileManager.default
     
     var parameters: OpenFoundationModelsCore.GenerationSchema {
@@ -511,7 +524,12 @@ class WatcherService {
 
 struct WatchFolderTool: OpenFoundationModels.Tool {
     let name = "fs_watch_folder"
-    let description = "Starts a background monitor on a folder, behaving like `fswatch`."
+    let description = """
+    [PURPOSE]: Starts a background monitor on a specific folder.
+    [WHEN TO USE]: Use when the user wants to be notified of changes (writes/deletes) in a directory.
+    [INPUT]: { "path": "~/Downloads" }
+    [OUTPUT]: Monitor ID and status.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String

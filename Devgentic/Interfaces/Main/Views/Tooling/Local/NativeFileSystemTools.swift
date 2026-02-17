@@ -14,8 +14,12 @@ import OpenFoundationModelsCore
 
 struct ListDirectoryTool: OpenFoundationModels.Tool {
     let name = "list_directory"
-    // OPTIMIZATION: Updated example to use Tilde (~/) for robustness against username hallucinations
-    let description = "Lists the filenames in a directory. Example: { \"path\": \"~/Documents\" }"
+    let description = """
+    [PURPOSE]: Lists the filenames and subdirectories within a specific folder.
+    [WHEN TO USE]: Use when you need to explore the file structure or verify if a file exists before reading it.
+    [INPUT]: { "path": "~/Documents" }
+    [OUTPUT]: A list of filenames or an empty status.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -93,8 +97,12 @@ struct ListDirectoryTool: OpenFoundationModels.Tool {
 
 struct ReadFileTool: OpenFoundationModels.Tool {
     let name = "read_file"
-    // OPTIMIZATION: Updated example to use Tilde (~/)
-    let description = "Reads the entire content of a text file. Example: { \"path\": \"~/Documents/notes.txt\" }"
+    let description = """
+    [PURPOSE]: Reads the plain text content of a file.
+    [WHEN TO USE]: Use to inspect code, logs, or text documents. Do not use for binary files (images/apps).
+    [INPUT]: { "path": "~/Documents/notes.txt" }
+    [OUTPUT]: The full string content of the file.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -169,7 +177,12 @@ struct ReadFileTool: OpenFoundationModels.Tool {
 
 struct WriteFileTool: OpenFoundationModels.Tool {
     let name = "write_file"
-    let description = "Writes text to a file. Example: { \"path\": \"~/tmp/log.txt\", \"content\": \"Entry 1\", \"append\": true }"
+    let description = """
+    [PURPOSE]: Writes text data to a file. Can create new files or append to existing ones.
+    [WHEN TO USE]: Use for creating scripts, saving notes, or logging data.
+    [INPUT]: { "path": "~/tmp/log.txt", "content": "Entry 1", "append": true }
+    [OUTPUT]: Success or Error message.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -268,7 +281,12 @@ struct WriteFileTool: OpenFoundationModels.Tool {
 
 struct DeleteFileTool: OpenFoundationModels.Tool {
     let name = "delete_file"
-    let description = "Permanently deletes a file/folder. Example: { \"path\": \"~/tmp/old_data\" }"
+    let description = """
+    [PURPOSE]: Permanently deletes a file or folder from the file system.
+    [WHEN TO USE]: Use only when explicitly requested by the user or when cleaning up temporary files created by you.
+    [INPUT]: { "path": "~/tmp/old_data" }
+    [OUTPUT]: Success or Error message.
+    """
 
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String
@@ -329,7 +347,12 @@ struct DeleteFileTool: OpenFoundationModels.Tool {
 
 struct MoveFileTool: OpenFoundationModels.Tool {
     let name = "move_file"
-    let description = "Moves or renames a file. Example: { \"source\": \"~/tmp/a.txt\", \"destination\": \"~/tmp/b.txt\" }"
+    let description = """
+    [PURPOSE]: Moves or renames a file/folder.
+    [WHEN TO USE]: Use to organize files or rename items.
+    [INPUT]: { "source": "~/tmp/a.txt", "destination": "~/tmp/b.txt" }
+    [OUTPUT]: Success or Error message.
+    """
 
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let source: String
@@ -413,7 +436,12 @@ struct MoveFileTool: OpenFoundationModels.Tool {
 
 struct CopyFileTool: OpenFoundationModels.Tool {
     let name = "copy_file"
-    let description = "Copies a file/folder. Example: { \"source\": \"~/tmp/a.txt\", \"destination\": \"~/tmp/a_copy.txt\" }"
+    let description = """
+    [PURPOSE]: Duplicates a file or folder.
+    [WHEN TO USE]: Use to back up files or duplicate templates.
+    [INPUT]: { "source": "~/tmp/a.txt", "destination": "~/tmp/a_copy.txt" }
+    [OUTPUT]: Success or Error message.
+    """
 
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let source: String
@@ -491,7 +519,12 @@ struct CopyFileTool: OpenFoundationModels.Tool {
 
 struct CreateFolderTool: OpenFoundationModels.Tool {
     let name = "create_folder"
-    let description = "Creates a directory. Example: { \"path\": \"~/Projects/NewApp\" }"
+    let description = """
+    [PURPOSE]: Creates a new empty directory.
+    [WHEN TO USE]: Use to organize files or prepare for new output.
+    [INPUT]: { "path": "~/Projects/NewApp" }
+    [OUTPUT]: Success or Error message.
+    """
 
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let path: String

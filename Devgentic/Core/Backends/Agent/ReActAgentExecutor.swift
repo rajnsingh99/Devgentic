@@ -5,7 +5,9 @@
 //  Created by Raj Singh on 28/01/26.
 //
 // Pure Split-State (Zero-History Context) with Rate Limiting & Context Pruning
-// + Phase 2 Refactor: Decoupled Cognitive Strategies
+// + Phase 3: Header-Aware Adaptation (The Safety Net) - Fixed APIError Type
+// + Phase 4: Graceful Cancellation & Memory State Persistence
+// + Phase 5: [HITL] Tool Gating & Suspension
 
 import Foundation
 import SwiftAgent
@@ -26,12 +28,6 @@ actor ReActAgentExecutor: AgentExecutor {
     nonisolated let architecture: AgentArchitecture = .reAct
     nonisolated private let maxIterations: Int
     
-    // Rate Limiting Configuration
-    // Gemini Flash Free Tier is ~15 RPM. We aim for 1 request every 4 seconds to be safe (15 RPM).
-    // Paid Tier is higher, but this safety net prevents "burst" bans.
-    private let minRequestInterval: TimeInterval = 4.0
-    private var lastRequestTime: Date = .distantPast
-    
     // MARK: - Initialization
     
     init(maxIterations: Int = 15) {
@@ -48,27 +44,26 @@ actor ReActAgentExecutor: AgentExecutor {
         
         return AsyncThrowingStream { continuation in
             let task = Task {
+                // [CRITICAL FIX] Capture state outside the 'do' block so it's accessible in 'catch'
+                var lastKnownState: MutableActiveState?
+                
                 do {
                     // 1. Initialize Context
-                    // Log the exact model instance to confirm profile configuration
                     logger.info("🚀 ReAct Execution Initiated. Model Instance: \(String(describing: model))")
-                    
-                    // 0. PRE-FLIGHT COOL-DOWN (CRITICAL FIX FOR 429s)
-                    await self.updateLastRequestTime()
                     
                     // [DEBUG SPY] Wrap the model to count actual API hits
                     let spyModel = APISpyModel(inner: model, logger: logger)
                     
                     var currentIteration = 0
-                    var consecutiveRetries = 0 // Track infrastructure retries separately
-                    var scratchpad: [String] = [] // Stores tool outputs for the transcript
+                    var consecutiveRetries = 0
+                    var scratchpad: [String] = []
                     
                     // Load the Active State (RAM) or create a default one if missing.
                     var currentState = input.activeState ?? MutableActiveState(
                         sessionID: input.conversationID.uuidString,
                         primaryGoal: input.userInput,
                         subTasks: [],
-                        negativeConstraints: [], // Loaded from previous sessions if persisted
+                        negativeConstraints: [],
                         workingMemory: [:]
                     )
                     
@@ -99,6 +94,9 @@ actor ReActAgentExecutor: AgentExecutor {
                         ContextMemoryManager.shared.updateActiveState(conversationID: input.conversationID, state: currentState)
                     }
                     
+                    // Sync outer variable
+                    lastKnownState = currentState
+                    
                     var currentConstraints = Set(currentState.negativeConstraints)
                     let isMemoryEnabled = true
                     var hasUpdatedMemory = false
@@ -113,13 +111,29 @@ actor ReActAgentExecutor: AgentExecutor {
                     
                     // 2. Enter the Cognitive Loop
                     cognitiveLoop: while currentIteration < self.maxIterations {
-                        // [CRITICAL FIX] Check for cancellation at the start of every loop iteration
                         try Task.checkCancellation()
                         
                         currentIteration += 1
                         
-                        // --- RATE LIMIT ENFORCEMENT ---
-                        await self.enforceRateLimit(iteration: currentIteration, continuation: continuation)
+                        // --- PHASE 2: GLOBAL TOKEN BUCKET CONSUMPTION ---
+                        // 1. Check if we need to warn the user about a long wait (Burst exhausted)
+                        let projectedWait = await GlobalRateLimiter.shared.timeUntilNextToken(for: input.rateLimitCategory)
+                        if projectedWait > 1.5 {
+                            let waitMsg = "Throttling for \(Int(projectedWait))s to respect \(input.rateLimitCategory) limits..."
+                            continuation.yield(.thought(waitMsg))
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: executionTrace.traceID,
+                                spanID: executionTrace.newSpan().spanID, // Ephemeral span
+                                parentSpanID: executionTrace.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .thinking,
+                                content: waitMsg
+                            ))
+                        }
+                        
+                        // 2. Acquire Token (Suspends execution here if bucket is empty)
+                        await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
+                        
                         
                         let iterationSpan = executionTrace.newSpan()
                         var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
@@ -139,50 +153,50 @@ actor ReActAgentExecutor: AgentExecutor {
                         
                         // --- TOKEN LOGGING ---
                         let estimatedTokens = self.estimateTokenCount(systemPrompt: systemPrompt, chatHistory: historyForExecution)
-                        logger.info("📊 [Iteration \(currentIteration)] Estimated Input: ~\(estimatedTokens) tokens")
                         if estimatedTokens > 8000 {
-                             logger.warning("⚠️ High Token Count detected! This may trigger rate limits on lower tiers.")
+                             logger.warning("⚠️ High Token Count detected (\(estimatedTokens)). This may trigger rate limits.")
                         }
-
-                        // [CRITICAL FIX] DISABLE NATIVE TOOLS IN SESSION
-                        // We pass spyModel here instead of model. Tools are empty because ReActExecutor handles them manually via JSON.
-                        let session = LanguageModelSession(model: spyModel, tools: [], transcript: transcript)
                         
+                        // [CRITICAL CHECK] Stop before calling LLM
+                        try Task.checkCancellation()
+
                         // 3. Structured Generation
                         let step: CognitiveStep
                         do {
-                            // [ARCHITECTURAL REFACTOR: STRATEGY PATTERN]
-                            // The executor delegates the "How" of generation to the injected strategy.
-                            // This supports OpenAI (Native), Gemini (Shadow Schema), and Ollama (JSON Mode) uniformly.
+                            logger.info("⚡️ Invoking Strategy.generate (Attempt: \(consecutiveRetries + 1))")
+                            
                             step = try await input.generatorStrategy.generate(
-                                session: session,
+                                model: spyModel,
+                                transcript: transcript,
                                 iteration: currentIteration
                             )
                             
-                            // Success! Update timestamp and reset retries
-                            await self.updateLastRequestTime()
+                            // Success! Reset retries.
                             consecutiveRetries = 0
                             
                         } catch {
-                            // [ARCHITECTURAL UPGRADE: RESILIENCY LAYER]
-                            // Distinguish between Infrastructure Failures and Cognitive Failures.
-                            
-                            await self.updateLastRequestTime()
-                            
+                            // --- PHASE 3: HEADER-AWARE ERROR HANDLING ---
                             let errorDesc = error.localizedDescription
                             let isRateLimit = errorDesc.contains("429") ||
                                               errorDesc.localizedCaseInsensitiveContains("rate limit") ||
-                                              errorDesc.localizedCaseInsensitiveContains("quota") ||
-                                              errorDesc.localizedCaseInsensitiveContains("resource exhausted")
-
+                                              errorDesc.localizedCaseInsensitiveContains("quota")
+                            
                             let isTimeout = (error as? URLError)?.code == .timedOut || errorDesc.contains("timed out")
                             
                             if isRateLimit {
                                 consecutiveRetries += 1
-                                let backoff = pow(2.0, Double(min(consecutiveRetries, 6)))
-                                logger.warning("🛑 Rate Limit Hit. Backing off for \(backoff)s")
                                 
-                                continuation.yield(.thought("🛑 Rate Limit Hit. Pausing for \(Int(backoff))s to cool down..."))
+                                // 3.1 Extract Server Mandate (The Truth)
+                                let retryAfter = self.extractRetryAfter(from: error, consecutiveRetries: consecutiveRetries)
+                                
+                                logger.warning("🛑 Rate Limit (429). Server requested wait: \(retryAfter)s. Draining bucket.")
+                                
+                                // 3.2 DRAIN THE BUCKET: Sync local state with server reality
+                                // This prevents the limiter from giving us a token immediately after we wake up
+                                // if the server is still angry.
+                                await GlobalRateLimiter.shared.drainAndPenalize(category: input.rateLimitCategory, penaltySeconds: retryAfter)
+                                
+                                continuation.yield(.thought("🛑 API Quota Hit. Pausing for \(Int(retryAfter))s..."))
                                 onTraceUpdate(AgentTraceLog(
                                     traceID: iterationSpan.traceID,
                                     spanID: iterationSpan.spanID,
@@ -190,44 +204,31 @@ actor ReActAgentExecutor: AgentExecutor {
                                     stepNumber: currentIteration,
                                     state: .errorRecovery,
                                     content: "Rate Limit (429). Pausing...",
-                                    metadata: ["delay": "\(backoff)"]
+                                    metadata: ["delay": "\(retryAfter)"]
                                 ))
-                                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
-                                currentIteration -= 1
+                                
+                                // 3.3 Explicit Sleep for this failure
+                                try? await Task.sleep(nanoseconds: UInt64(retryAfter * 1_000_000_000))
+                                
+                                currentIteration -= 1 // Retry the same iteration index
                                 continue cognitiveLoop
                             }
                             
                             if isTimeout {
                                 logger.warning("⏳ Network Timeout. Retrying...")
                                 continuation.yield(.thought("⏳ Network Timeout. Retrying request..."))
-                                onTraceUpdate(AgentTraceLog(
-                                    traceID: iterationSpan.traceID,
-                                    spanID: iterationSpan.spanID,
-                                    parentSpanID: iterationSpan.parentSpanID,
-                                    stepNumber: currentIteration,
-                                    state: .errorRecovery,
-                                    content: "Network Timeout. Retrying...",
-                                    metadata: ["reason": "timeout"]
-                                ))
                                 currentIteration -= 1
                                 continue cognitiveLoop
                             }
                             
                             // Cognitive/Parsing Error
                             logger.error("Cognitive Generation Failed: \(error.localizedDescription)")
-                            scratchpad.append("System Error: Your last output failed JSON validation. Ensure you are outputting a valid JSON INSTANCE (values) and NOT the schema definition. Check 'parameters' is a valid JSON Object.")
-                            
-                            continuation.yield(.thought("⚠️ Error: Invalid JSON output from model. Retrying..."))
-                            
-                            onTraceUpdate(AgentTraceLog(
-                                traceID: iterationSpan.traceID,
-                                spanID: iterationSpan.spanID,
-                                parentSpanID: iterationSpan.parentSpanID,
-                                stepNumber: currentIteration,
-                                state: .errorRecovery,
-                                content: "Invalid JSON Schema. Retrying...",
-                                metadata: iterationMetadata
-                            ))
+                            scratchpad.append("System Error: Your last output failed JSON validation. Ensure you are outputting a valid JSON INSTANCE (values) and NOT the schema definition.")
+
+                            continuation.yield(.thought("⚠️ Error: Invalid JSON output. Retrying..."))
+
+                            // Enforce rate limit before retrying to prevent rapid retry → 429 cascade
+                            await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
                             continue cognitiveLoop
                         }
                         
@@ -256,7 +257,9 @@ actor ReActAgentExecutor: AgentExecutor {
                             )
                             ContextMemoryManager.shared.updateActiveState(conversationID: input.conversationID, state: currentState)
                             
-                            logger.info("Memory Synced: \(update.goalStatus)")
+                            // Update our cancellation fallback state
+                            lastKnownState = currentState
+                            
                             continuation.yield(.thought("💾 State Synced: \(update.goalStatus)"))
                             
                             Task {
@@ -293,8 +296,52 @@ actor ReActAgentExecutor: AgentExecutor {
                         
                         // A. Tool Action
                         if let action = step.action {
+                            // [CRITICAL CHECK] Stop before executing tool
+                            try Task.checkCancellation()
+                            
                             actionWasExecuted = true
                             iterationMetadata["tool_name"] = action.toolName
+                            
+                            // [HITL] 1. Resolve the tool definition to check sensitivity
+                            let toolDefinition = input.tools.first { $0.name == action.toolName }
+                            
+                            // [HITL] 2. Check Permission Gate
+                            if let tool = toolDefinition, tool.requiresConfirmation {
+                                logger.notice("🛑 [HITL] Tool '\(action.toolName)' requires confirmation. Suspending...")
+                                
+                                // A. Notify UI using new event type
+                                continuation.yield(.requestConfirmation(
+                                    toolName: action.toolName,
+                                    params: self.serializeParams(action.parameters)
+                                ))
+                                
+                                onTraceUpdate(AgentTraceLog(
+                                    traceID: iterationSpan.traceID,
+                                    spanID: iterationSpan.spanID,
+                                    parentSpanID: iterationSpan.parentSpanID,
+                                    stepNumber: currentIteration,
+                                    state: .requestingPermission,
+                                    content: "Waiting for user approval: \(action.toolName)"
+                                ))
+                                
+                                // B. Suspend & Wait
+                                let approved = await ExecutionSuspensionService.shared.suspend(for: input.conversationID)
+                                
+                                if !approved {
+                                    logger.info("❌ [HITL] User DENIED permission for \(action.toolName)")
+                                    
+                                    // C. Handle Denial (Mock Failure)
+                                    let denialObservation = "System Security: User explicitly denied permission to execute tool '\(action.toolName)'. Do not retry this exact action."
+                                    scratchpad.append("Observation (Step \(currentIteration)): \(denialObservation)")
+                                    
+                                    continuation.yield(.toolOutput(ToolOutput(toolName: action.toolName, output: denialObservation, isSuccess: false)))
+                                    
+                                    // Skip actual execution loop
+                                    continue cognitiveLoop
+                                }
+                                
+                                logger.info("✅ [HITL] User APPROVED permission for \(action.toolName). Proceeding.")
+                            }
                             
                             if let path = self.extractPath(from: action.parameters),
                                currentState.isPathForbidden(path) {
@@ -305,8 +352,7 @@ actor ReActAgentExecutor: AgentExecutor {
                                 continue cognitiveLoop
                             }
                             
-                            let paramsJSON = try? JSONEncoder().encode(action.parameters)
-                            let paramsString = paramsJSON.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                            let paramsString = self.serializeParams(action.parameters)
                             continuation.yield(.toolCall(name: action.toolName, params: paramsString))
                             
                             onTraceUpdate(AgentTraceLog(
@@ -338,6 +384,9 @@ actor ReActAgentExecutor: AgentExecutor {
                                         workingMemory: currentState.workingMemory
                                     )
                                     ContextMemoryManager.shared.updateActiveState(conversationID: input.conversationID, state: currentState)
+                                    
+                                    // Update fallback state
+                                    lastKnownState = currentState
                                 }
                             }
                             
@@ -359,25 +408,18 @@ actor ReActAgentExecutor: AgentExecutor {
                         
                         // B. Final Answer
                         if let finalAnswer = step.finalAnswer {
+                            // Stop before yielding final answer
+                            try Task.checkCancellation()
                             
                             if isMemoryEnabled && !hasUpdatedMemory {
                                 logger.warning("Memory Guard Triggered: Agent attempted to exit without saving.")
                                 continuation.yield(.thought("⚠️ Memory Guard Triggered: Enforcing save..."))
-                                onTraceUpdate(AgentTraceLog(
-                                    traceID: iterationSpan.traceID,
-                                    spanID: iterationSpan.spanID,
-                                    parentSpanID: iterationSpan.parentSpanID,
-                                    stepNumber: currentIteration,
-                                    state: .errorRecovery,
-                                    content: "Enforcing Memory Update...",
-                                    metadata: ["reason": "unsaved_context"]
-                                ))
                                 scratchpad.append("⚠️ SYSTEM INTERVENTION: Task appears complete, but session memory is not updated. \n\n1. DO NOT retry the task. \n2. You MUST fill the `memoryUpdate` OBJECT in your next response. \n3. Then provide the `finalAnswer` again.")
                                 continue cognitiveLoop
                             }
                             
                             if let update = step.memoryUpdate, update.goalStatus.caseInsensitiveCompare("ACTIVE") == .orderedSame {
-                                logger.warning("Agent finalized with ACTIVE status. Forcing COMPLETED to prevent ghost loop.")
+                                logger.warning("Agent finalized with ACTIVE status. Forcing COMPLETED.")
                                 
                                 var finalState = currentState
                                 var wm = finalState.workingMemory
@@ -390,7 +432,6 @@ actor ReActAgentExecutor: AgentExecutor {
                                     workingMemory: wm
                                 )
                                 ContextMemoryManager.shared.updateActiveState(conversationID: input.conversationID, state: finalState)
-                                continuation.yield(.thought("✅ Auto-Correcting Memory Status: COMPLETED"))
                             }
                             
                             onTraceUpdate(AgentTraceLog(
@@ -419,59 +460,104 @@ actor ReActAgentExecutor: AgentExecutor {
                     
                 } catch is CancellationError {
                     logger.notice("🚫 Execution Task Cancelled cleanly.")
+                    
+                    // [HITL] Clean up suspension if any
+                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    
+                    // Persist the CANCELLED status so memory isn't stuck on ACTIVE
+                    if var state = lastKnownState {
+                        var wm = state.workingMemory
+                        wm["last_status"] = "CANCELLED"
+                        
+                        let cancelledState = MutableActiveState(
+                            sessionID: state.sessionID,
+                            primaryGoal: state.primaryGoal,
+                            subTasks: state.subTasks,
+                            negativeConstraints: state.negativeConstraints,
+                            workingMemory: wm
+                        )
+                        
+                        ContextMemoryManager.shared.updateActiveState(
+                            conversationID: input.conversationID,
+                            state: cancelledState
+                        )
+                        
+                        // Add an explicit log entry to history
+                        ContextMemoryManager.shared.appendToHistory(
+                            conversationID: input.conversationID,
+                            content: "### 🛑 INTERRUPTED\n**Status:** CANCELLED\nUser manually stopped the execution."
+                        )
+                    }
+                    
                     continuation.finish()
                 } catch {
                     logger.error("ReAct Fatal Error: \(error.localizedDescription)")
+                    
+                    // [HITL] Clean up suspension
+                    await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    
                     continuation.finish(throwing: error)
                 }
             }
             
-            // Forward cancellation to the Task
+            // Ensure stream termination kills the inner task
             continuation.onTermination = { @Sendable _ in
                 task.cancel()
             }
         }
     }
     
-    // MARK: - Rate Limiting & Optimization
+    // MARK: - Error Helper (Phase 3)
     
-    /// Prunes the scratchpad to keep only the most recent context.
-    /// This prevents token explosion in long-running loops.
-    nonisolated private func pruneScratchpad(_ scratchpad: [String]) -> [String] {
-        // Keep the first entry (original context) and the last 3 entries (recent actions).
-        // This simulates a "Rolling Context Window".
-        guard scratchpad.count > 4 else { return scratchpad }
+    /// Robustly extracts the Retry-After time from various error formats.
+    nonisolated private func extractRetryAfter(from error: Error, consecutiveRetries: Int) -> TimeInterval {
+        // Default Exponential Backoff (Fallback)
+        let fallback = pow(2.0, Double(min(consecutiveRetries, 6)))
         
-        var pruned = [String]()
-        if let first = scratchpad.first {
-            pruned.append(first)
+        // Use NSError to check common userInfo keys for headers (Generic approach)
+        let nsError = error as NSError
+        
+        // Check for common header keys used by Alamofire, URLSession, etc.
+        let possibleKeys = ["headers", "HTTPHeaders", "com.alamofire.serialization.response.error.response.headers"]
+        
+        for key in possibleKeys {
+            if let headers = nsError.userInfo[key] as? [AnyHashable: Any] {
+                // Check both capitalization variants
+                if let retryVal = headers["Retry-After"] as? String ?? headers["retry-after"] as? String {
+                     if let val = parseRetryHeader(retryVal) { return val }
+                }
+            }
         }
         
-        pruned.append("... [Intermediate steps summarized to save context] ...")
+        return fallback
+    }
+    
+    nonisolated private func parseRetryHeader(_ value: String) -> TimeInterval? {
+        // A. Try parsing as seconds
+        if let seconds = TimeInterval(value) {
+            return seconds
+        }
         
+        // B. Try parsing as HTTP Date (rare for 429, but possible)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        if let date = formatter.date(from: value) {
+            return date.timeIntervalSinceNow
+        }
+        
+        return nil
+    }
+    
+    // MARK: - Optimization Helpers
+    
+    nonisolated private func pruneScratchpad(_ scratchpad: [String]) -> [String] {
+        guard scratchpad.count > 4 else { return scratchpad }
+        var pruned = [String]()
+        if let first = scratchpad.first { pruned.append(first) }
+        pruned.append("... [Intermediate steps summarized to save context] ...")
         let recent = scratchpad.suffix(3)
         pruned.append(contentsOf: recent)
-        
         return pruned
-    }
-    
-    /// Enforces a minimum delay between requests to respect RPM limits.
-    private func enforceRateLimit(iteration: Int, continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation) async {
-        let now = Date()
-        let timeSinceLast = now.timeIntervalSince(lastRequestTime)
-        
-        if timeSinceLast < minRequestInterval {
-            let waitTime = minRequestInterval - timeSinceLast
-            // Only notify user if wait is substantial (> 1s)
-            if waitTime > 1.0 {
-                logger.debug("Rate Limit Throttling: Sleeping for \(waitTime)s")
-            }
-            try? await Task.sleep(nanoseconds: UInt64(waitTime * 1_000_000_000))
-        }
-    }
-    
-    private func updateLastRequestTime() {
-        self.lastRequestTime = Date()
     }
     
     // MARK: - Prompt Engineering (The Sandwich)
@@ -484,15 +570,14 @@ actor ReActAgentExecutor: AgentExecutor {
         isFreshStart: Bool
     ) -> String {
         return [
-            buildKernelLayer(),                                          // Layer 1: Immutable Physics
-            buildMemoryLayer(state, input.recentHistory, isFreshStart), // Layer 1.5: Twin-Store Memory
-            buildReActStrategyLayer(constraints),                       // Layer 2: Thinking + Constraints
-            buildPersonaLayer(input),                                   // Layer 3: User Customization
-            buildContextLayer(input, scratchpad)                        // Layer 4: Execution Context
+            buildKernelLayer(),
+            buildMemoryLayer(state, input.recentHistory, isFreshStart),
+            buildReActStrategyLayer(constraints),
+            buildPersonaLayer(input),
+            buildContextLayer(input, scratchpad)
         ].joined(separator: "\n\n")
     }
     
-    /// Constructs the immutable system facts (Kernel Layer).
     nonisolated private func buildKernelLayer() -> String {
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         let userName = NSUserName()
@@ -508,22 +593,18 @@ actor ReActAgentExecutor: AgentExecutor {
         - User: \(userName)
         - Date: \(date)
         
-        ## SAFETY PROTOCOLS (NON-NEGOTIABLE)
-        1. **NON-INTERACTIVE ONLY**: You cannot run commands that require user input (e.g., `nano`, `vim`, `sudo` without -n).
-        2. **DESTRUCTIVE ACTIONS**: Do not use `rm -rf` on system directories. Verify paths exist before operating on them.
+        ## SAFETY PROTOCOLS
+        1. **NON-INTERACTIVE ONLY**: No `nano`, `vim`, `sudo` without -n.
+        2. **DESTRUCTIVE ACTIONS**: Verify paths before `rm -rf`.
         """
     }
     
-    /// Constructs the memory layer, including RAM state and read-only history.
     nonisolated private func buildMemoryLayer(_ state: MutableActiveState, _ recentHistory: String?, _ isFreshStart: Bool) -> String {
-        // Pretty print the JSON State
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let jsonState = (try? String(data: encoder.encode(state), encoding: .utf8)) ?? "{}"
         
         let history = recentHistory ?? "(No recent history)"
-        
-        // Distinguish between "Ongoing Task" history and "Archived" history based on request type.
         let historyHeader = isFreshStart ? "## 📚 ARCHIVED LOGS (READ ONLY)" : "## 📜 RECENT ACTIVITY (Disk Tail)"
         let historyWarning = isFreshStart ? "(NOTE: These actions are from a previous turn. Do not resume them. Focus on Active Memory.)" : ""
         
@@ -539,45 +620,34 @@ actor ReActAgentExecutor: AgentExecutor {
         \(historyHeader)
         \(historyWarning)
         \(history)
-        
-        (Use 'search_action_logs' to see older history.)
         """
     }
     
-    /// Constructs the strategy layer, including negative constraints (Ghost Protocol).
     nonisolated private func buildReActStrategyLayer(_ constraints: Set<String>) -> String {
         var constraintBlock = ""
         if !constraints.isEmpty {
             constraintBlock = """
             ## 🚫 NEGATIVE CONSTRAINTS (GHOST PROTOCOL)
-            The following paths have FAILED previously. DO NOT ACCESS THEM:
+            FAILED PATHS:
             \(constraints.map { "- \($0)" }.joined(separator: "\n"))
             """
         }
         
         return """
         # LAYER 2: COGNITIVE STRATEGY
-        
-        ## THE LOOP
-        1. **Analyze**: Check Active Memory & Recent Activity.
-        2. **Reflect**: Why did the last step fail?
-        3. **Plan**: If a path failed, add it to 'negativeConstraints'.
-        
-        \(constraintBlock)
-        
         ## PROTOCOL
-        - If a tool fails, **STOP**. Do not retry the exact same arguments.
-        - Update `memoryUpdate` in your response to sync the state.
+        1. Analyze Active Memory.
+        2. If a path failed previously (Ghost Protocol), do NOT retry it.
+        3. If a tool fails, **STOP** and reflect.
+        \(constraintBlock)
         """
     }
     
-    /// Constructs the persona layer from user instructions.
     nonisolated private func buildPersonaLayer(_ input: AgentInput) -> String {
         guard let instructions = input.instructions, !instructions.isEmpty else { return "" }
         return "# LAYER 3: INSTRUCTIONS\n\(instructions)"
     }
     
-    /// Constructs the execution context layer, including the current user query and tools.
     nonisolated private func buildContextLayer(_ input: AgentInput, _ scratchpad: [String]) -> String {
         var context = "# LAYER 4: EXECUTION CONTEXT\n"
         context += "## USER REQUEST\n\"\(input.userInput)\"\n\n"
@@ -599,42 +669,35 @@ actor ReActAgentExecutor: AgentExecutor {
     
     nonisolated private func estimateTokenCount(systemPrompt: String, chatHistory: [ChatMessage]) -> Int {
         var totalCharacters = 0
-        
-        // System Prompt
         totalCharacters += systemPrompt.count
-        
-        // Chat History
         for msg in chatHistory {
             guard let text = msg.content.textContent else { continue }
-            if msg.sender == .user {
-                totalCharacters += ("[USER]: \(text)").count
-            } else {
-                totalCharacters += text.count
-            }
+            totalCharacters += text.count
         }
-        
-        // Rough estimation: ~4 characters per token for English text + JSON overhead
         return totalCharacters / 4
     }
     
     nonisolated private func extractPath(from params: [String: AnyCodable]) -> String? {
-        // Try to find a "path" argument in the dictionary
-        // We handle AnyCodable encoding/decoding here to safely extract strings
         if let val = params["path"] {
             let encoder = JSONEncoder()
             if let data = try? encoder.encode(val),
                let str = String(data: data, encoding: .utf8) {
-                // Clean up quotes that JSON encoding might add to a simple string
                 return str.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
             }
         }
         return nil
     }
     
+    nonisolated private func serializeParams(_ params: [String: AnyCodable]) -> String {
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(params), let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        return "{}"
+    }
+    
     nonisolated private func persistToVectorStore(log: String, conversationID: UUID) async {
-        // Relies on shared singletons assumed to be in the project
         guard let embedding = await EmbeddingService.shared.generateEmbedding(for: log) else { return }
-        
         await VectorStoreService.shared.addDocument(
             content: log,
             embedding: embedding,
@@ -655,8 +718,6 @@ actor ReActAgentExecutor: AgentExecutor {
         let startTime = Date()
         var isSuccess = true
         var errorDescription: String? = nil
-        
-        // Sanitize tool name (remove generic prefixes if necessary)
         var sanitizedName = action.toolName
         if !tools.contains(where: { $0.name == sanitizedName }) {
             if let clean = sanitizedName.components(separatedBy: CharacterSet(charactersIn: "<| ")).first {
@@ -672,7 +733,6 @@ actor ReActAgentExecutor: AgentExecutor {
                 encoder.outputFormatting = [.sortedKeys]
                 let paramData = try encoder.encode(action.parameters)
                 output = try await tool.run(paramData)
-                // Heuristic for success: check if output starts with "error" (case insensitive)
                 if output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("error") {
                     isSuccess = false
                     errorDescription = output
@@ -712,13 +772,11 @@ actor ReActAgentExecutor: AgentExecutor {
     nonisolated private func buildTranscript(systemPrompt: String, chatHistory: [ChatMessage]) -> OpenFoundationModels.Transcript {
         var entries: [OpenFoundationModels.Transcript.Entry] = []
         
-        // System Prompt
         entries.append(.instructions(OpenFoundationModels.Transcript.Instructions(
             segments: [.text(OpenFoundationModels.Transcript.TextSegment(content: systemPrompt))],
             toolDefinitions: []
         )))
         
-        // Chat History
         for msg in chatHistory {
             guard let text = msg.content.textContent else { continue }
             if msg.sender == .user {
@@ -750,8 +808,6 @@ actor ReActAgentExecutor: AgentExecutor {
 
 // MARK: - Debug Spy Model
 
-/// A debugging wrapper to count actual API calls.
-/// Use this to verify if the library is looping internally.
 private struct APISpyModel: OpenFoundationModels.LanguageModel {
     let inner: any OpenFoundationModels.LanguageModel
     let logger: Logger
@@ -763,12 +819,10 @@ private struct APISpyModel: OpenFoundationModels.LanguageModel {
     }
     
     func generate(transcript: OpenFoundationModels.Transcript, options: OpenFoundationModels.GenerationOptions?) async throws -> OpenFoundationModels.Transcript.Entry {
-        logger.fault("🚨 ACTUAL API CALL TRIGGERED (Generate) - Count this!")
         return try await inner.generate(transcript: transcript, options: options)
     }
     
     func stream(transcript: OpenFoundationModels.Transcript, options: OpenFoundationModels.GenerationOptions?) -> AsyncThrowingStream<OpenFoundationModels.Transcript.Entry, Error> {
-        logger.fault("🚨 ACTUAL API CALL TRIGGERED (Stream) - Count this!")
         return inner.stream(transcript: transcript, options: options)
     }
 }

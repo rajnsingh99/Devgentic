@@ -5,7 +5,7 @@
 //  Created by Raj Singh on 05/09/25.
 //  Updated on 28/01/26 to support Agent Architecture selection.
 //  Updated on 04/02/26 for Modern Dashboard UI.
-//  Updated on 16/02/26 to add API Key visibility toggle.
+//  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
 //
 
 import SwiftUI
@@ -534,10 +534,22 @@ struct AgentConfigDetailView: View {
             }
 
             if providerConfig.wrappedValue.apiProvider == .google {
-                GeminiModelPickerView(
-                    selectedModel: providerConfig.modelName,
-                    apiKey: providerConfig.wrappedValue.apiKey ?? ""
-                )
+                VStack(alignment: .leading, spacing: 8) {
+                    // The Picker: Useful when it loads, but might be hidden initially
+                    GeminiModelPickerView(
+                        selectedModel: providerConfig.modelName,
+                        apiKey: providerConfig.wrappedValue.apiKey ?? ""
+                    )
+                    
+                    // The Manual Field: Ensures the saved model is ALWAYS visible and editable
+                    HStack {
+                        Text("Model:")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        TextField("e.g. gemini-1.5-pro", text: providerConfig.modelName)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
             } else {
                 TextField("Model Name", text: providerConfig.modelName)
                     .textFieldStyle(.roundedBorder)

@@ -15,7 +15,13 @@ import OpenFoundationModelsCore
 
 struct TerminalTool: OpenFoundationModels.Tool {
     let name = "execute_shell"
-    let description = "Executes a shell command (zsh). Non-interactive. Example: { \"command\": \"ls -lah /tmp\" }"
+    let description = """
+    [PURPOSE]: Executes a ZSH shell command on the host machine.
+    [WHEN TO USE]: Use for system administration, git operations, or advanced file manipulation.
+    [CONSTRAINTS]: Commands are NON-INTERACTIVE. Do NOT use `sudo`, `nano`, `vim`, or any command requiring user input.
+    [INPUT]: { "command": "ls -lah /tmp" }
+    [OUTPUT]: Stdout and Stderr of the command.
+    """
     
     // NEW: Session Context injected by AgentConnect
     let conversationID: UUID?
@@ -89,14 +95,19 @@ struct TerminalTool: OpenFoundationModels.Tool {
         } catch {
             return "Command failed: \(error.localizedDescription) (Audit Ref: \(logID))"
         }
-    } 
+    }
 }
 
 // MARK: - Open Application Tool
 
 struct OpenApplicationTool: OpenFoundationModels.Tool {
     let name = "open_application"
-    let description = "Launches an app by Bundle ID. Example: { \"bundle_identifier\": \"com.apple.Safari\" }"
+    let description = """
+    [PURPOSE]: Launches a macOS application using its Bundle Identifier.
+    [WHEN TO USE]: Use when the user asks to open a specific app.
+    [INPUT]: { "bundle_identifier": "com.apple.Safari" }
+    [OUTPUT]: Success or Error message.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let bundle_identifier: String
@@ -176,7 +187,12 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
 
 struct RunAppleScriptTool: OpenFoundationModels.Tool {
     let name = "run_applescript"
-    let description = "Executes AppleScript. Example: { \"script\": \"tell application \\\"Finder\\\" to activate\" }"
+    let description = """
+    [PURPOSE]: Executes an AppleScript code block.
+    [WHEN TO USE]: Use for controlling macOS UI elements or apps that support AppleScript automation.
+    [INPUT]: { "script": "tell application \"Finder\" to activate" }
+    [OUTPUT]: The result of the script execution.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         let script: String
@@ -242,7 +258,12 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
 
 struct GetSystemStatsTool: OpenFoundationModels.Tool {
     let name = "get_system_stats"
-    let description = "Returns basic macOS system info. Example: {}"
+    let description = """
+    [PURPOSE]: Retrieves basic system metrics (OS version, User, Memory).
+    [WHEN TO USE]: Use when the user asks about the machine's status or configuration.
+    [INPUT]: {}
+    [OUTPUT]: Formatted string with OS, User, and RAM details.
+    """
     
     struct Arguments: Codable, ConvertibleFromGeneratedContent {
         init(_ content: GeneratedContent) throws {}

@@ -46,15 +46,25 @@ struct VSCodifiedSidebarContainerView: View {
     var body: some View {
         HStack(spacing: 0) {
             // Activity Bar (Leftmost icon strip)
+            // Uses its own material background to prevent layout shift when sidebar toggles
             ActivityBarView(selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
-                .frame(width: activityBarWidth)
-                .zIndex(1) // Ensure it sits "above" visually if needed
+                .frame(width: activityBarWidth, alignment: .center)
+                .frame(maxHeight: .infinity)
+                .background(.regularMaterial)
+                // Subtle inner separator overlaid on trailing edge (no layout shift)
+                .overlay(alignment: .trailing) {
+                    if isSidebarVisible {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.06))
+                            .frame(width: 0.5)
+                    }
+                }
+                .zIndex(1)
 
             if isSidebarVisible {
                 // Sidebar Content Pane
                 SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $sidebarWidth)
                     .frame(width: sidebarWidth)
-                    // Apply Material background for native macOS vibrancy
                     .background(.regularMaterial)
                     .transition(.move(edge: .leading))
                     .clipped()
@@ -65,7 +75,7 @@ struct VSCodifiedSidebarContainerView: View {
                     Rectangle()
                         .fill(Color.clear)
                         .frame(width: 6)
-                    
+
                     // Visual Divider Line
                     Rectangle()
                         .fill(isHoveringOnDivider ? Color.accentColor : Color.primary.opacity(0.1))
@@ -77,7 +87,7 @@ struct VSCodifiedSidebarContainerView: View {
                         .onChanged { value in
                             let newWidth = self.sidebarWidth + value.translation.width
                             self.sidebarWidth = min(max(newWidth, self.minSidebarWidth), self.maxSidebarWidth)
-                            
+
                             // Save preference
                             if let tab = selectedTab {
                                 preferredWidths[tab] = self.sidebarWidth
@@ -96,8 +106,6 @@ struct VSCodifiedSidebarContainerView: View {
             }
         }
         .frame(maxHeight: .infinity)
-        // Ensure the entire container has a clean background behind the transparency
-        .background(Color.clear)
         .onChange(of: selectedTab) { newTab in
             if let newTab = newTab {
                 if !isSidebarVisible {

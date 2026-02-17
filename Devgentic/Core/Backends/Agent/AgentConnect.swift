@@ -16,7 +16,7 @@ import OpenFoundationModelsOpenAI
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentConnect")
 
 /// A unified agent connection service that serves as the central controller for
-/// all LLM interactions (Bots, Agents, Workflows).
+/// all LLM interactions (Bots, Agents, Workflows).\
 /// It acts as the Hub, initializing models, resolving tools, and routing to the correct Executor.
 class AgentConnect: ObservableObject {
     
@@ -43,11 +43,12 @@ class AgentConnect: ObservableObject {
         logger.info("Routing request through AgentConnect Unified Pipeline for profile: \(profile.displayName)")
         
         return AsyncThrowingStream { continuation in
-            Task {
+            // [CRITICAL FIX] Capture the task handle
+            let task = Task {
                 do {
                     // 1. Extract Configuration & Tools based on Profile Type
                     let llmConfig: ProviderConfig
-                    var instructions: String? // Changed to 'var' to allow preamble injection
+                    var instructions: String?
                     let rawTools: [Tool]
                     
                     switch profile.details {
@@ -65,38 +66,37 @@ class AgentConnect: ObservableObject {
                         throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Workflows are not yet supported in the unified pipeline."])
                     }
                     
-                    // [Step 4 Update: COGNITIVE STRATEGY SELECTION]
-                    // We now select the correct "Brain Strategy" (CognitiveGenerator) based on the provider's
-                    // known capabilities and quirks (e.g., Gemini's schema echoing vs OpenAI's strict mode).
+                    // [Step 4 Update: COGNITIVE STRATEGY & RATE LIMIT SELECTION]
                     let generatorStrategy: any CognitiveGenerator
+                    let rateLimitCategory: RateLimitCategory
                     
                     switch llmConfig.apiProvider {
                     case .google:
-                        // Gemini Strategy: Uses "Shadow Schema" (Golden Prompt + Text Mode) to bypass
-                        // the "Pink Elephant" echoing bug in the compatibility layer.
+                        // Gemini: Shadow Schema + Strict 15 RPM Limits
                         generatorStrategy = ShadowSchemaGenerator()
+                        rateLimitCategory = .geminiFlash
                         
                     case .openAI:
-                        // OpenAI Strategy: Uses strict @Generable macros with `response_format: json_schema`.
+                        // OpenAI: Native Schema + Higher Limits
                         generatorStrategy = NativeStructuredGenerator()
+                        rateLimitCategory = .openAI
                         
                     case .ollama:
-                        // [FIX]: Reverted to NativeStructuredGenerator for Ollama.
-                        // Previously, Ollama was hitting the "else" block (Native) and working correctly.
-                        // The library likely handles the "format: json" handshake better than our manual text prompt.
+                        // Ollama: Native Schema + Hardware Limits
                         generatorStrategy = NativeStructuredGenerator()
+                        rateLimitCategory = .local
                         
                     case .mlx:
-                        // MLX Strategy: Same as Ollama, optimized for local silicon.
+                        // MLX: JSON Mode + Hardware Limits
                         generatorStrategy = JsonModeGenerator()
+                        rateLimitCategory = .local
                         
                     default:
-                        // Fallback: Default to Native for standard OpenAI-compatible endpoints.
                         generatorStrategy = NativeStructuredGenerator()
+                        rateLimitCategory = .geminiFlash // Fallback to safe strict mode
                     }
                     
                     // 2. Resolve Tools
-                    // Convert native macOS tools and MCP tools into executable AgentTool instances.
                     let activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
                         conversationID: conversationID
@@ -132,19 +132,17 @@ class AgentConnect: ObservableObject {
                         recentHistory = ContextMemoryManager.shared.getRecentHistory(for: conversationID, lines: 20)
                     }
                     
-                    // Construct the input payload.
-                    // We inject the selected `generatorStrategy` here, removing the need for
-                    // the executor to check `if isGemini`.
                     let input = AgentInput(
                         userInput: userInput,
                         chatHistory: chatHistory,
                         conversationID: conversationID,
                         tools: activeTools,
                         ragContext: ragContext,
-                        activeState: activeState,    // Current Active State
-                        recentHistory: recentHistory, // Historical Context
+                        activeState: activeState,
+                        recentHistory: recentHistory,
                         isNewRequest: true,
-                        generatorStrategy: generatorStrategy, // [STRATEGY INJECTION]
+                        generatorStrategy: generatorStrategy,
+                        rateLimitCategory: rateLimitCategory, // [INJECTION]
                         instructions: instructions,
                         traceContext: traceContext
                     )
@@ -158,7 +156,9 @@ class AgentConnect: ObservableObject {
                         onTraceUpdate?(log)
                     }
                     
-                    // Now returns AgentStreamEvent
+                    // Check cancellation before starting executor
+                    try Task.checkCancellation()
+                    
                     let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
                     
                     for try await event in stream {
@@ -167,10 +167,18 @@ class AgentConnect: ObservableObject {
                     
                     continuation.finish()
                     
+                } catch is CancellationError {
+                    logger.info("AgentConnect Stream Cancelled.")
+                    continuation.finish()
                 } catch {
                     logger.error("Unified Stream Error: \(error.localizedDescription)")
                     continuation.finish(throwing: error)
                 }
+            }
+            
+            // [CRITICAL FIX] Propagate cancellation to the inner task
+            continuation.onTermination = { @Sendable _ in
+                task.cancel()
             }
         }
     }
@@ -184,7 +192,6 @@ class AgentConnect: ObservableObject {
             guard let baseURL = URL(string: baseURLString) else {
                 throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL: \(baseURLString)"])
             }
-            // Ollama is local and usually fast, but we give it ample time for large contexts
             let config = OllamaConfiguration(baseURL: baseURL, timeout: 300.0)
             return OllamaLanguageModel(configuration: config, modelName: llmConfig.modelName)
             
@@ -193,9 +200,12 @@ class AgentConnect: ObservableObject {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API Key is required."])
             }
             let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : URL(string: "https://api.openai.com/v1")!
-            
-            // ARCH UPDATE: Increased to 300s to support heavy "Thinking" models and prevent premature timeouts
-            let config = OpenAIConfiguration(apiKey: apiKey, baseURL: baseURL, timeout: 300.0)
+            let config = OpenAIConfiguration(
+                apiKey: apiKey,
+                baseURL: baseURL,
+                timeout: 300.0,
+                retryPolicy: .none
+            )
             return OpenAILanguageModel(configuration: config, model: llmConfig.modelName)
             
         case .google:
@@ -203,9 +213,12 @@ class AgentConnect: ObservableObject {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Gemini API Key is required."])
             }
             let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/")!
-            
-            // ARCH UPDATE: Increased to 300s. Remote models vary wildly in latency.
-            let config = OpenAIConfiguration(apiKey: apiKey, baseURL: googleBaseURL, timeout: 300.0)
+            let config = OpenAIConfiguration(
+                apiKey: apiKey,
+                baseURL: googleBaseURL,
+                timeout: 300.0,
+                retryPolicy: .none
+            )
             return OpenAILanguageModel(configuration: config, model: llmConfig.modelName)
             
         case .mlx:
@@ -276,11 +289,20 @@ class AgentConnect: ObservableObject {
         return activeTools
     }
     
+    // [HITL] Phase 2: Sensitive Tool Detection
+    private func isSensitiveTool(_ name: String) -> Bool {
+        let sensitiveKeywords = ["delete", "write", "move", "copy", "execute", "run", "batch", "organize"]
+        return sensitiveKeywords.contains { name.lowercased().contains($0) }
+    }
+    
     private func convertToAgentTool(tool: any OpenFoundationModels.Tool) -> AgentTool? {
+        let shouldConfirm = isSensitiveTool(tool.name)
+        
         return AgentTool(
             name: tool.name,
             description: tool.description,
-            parameters: tool.parameters
+            parameters: tool.parameters,
+            requiresConfirmation: shouldConfirm // [HITL] Set flag
         ) { [weak self] dataArgs in
             guard let self = self else { return "Error: AgentConnect deallocated" }
             return try await self.invokeNativeTool(tool, with: dataArgs)
@@ -327,7 +349,7 @@ class AgentConnect: ObservableObject {
         case "fs_smart_search": return SmartSearchTool()
         case "fs_read_metadata": return ReadMetadataTool()
         case "fs_organize_batch": return OrganizeBatchTool()
-        case "read_session_history": return ReadSessionHistoryTool(conversationID: conversationID) // Also map here for safety
+        case "read_session_history": return ReadSessionHistoryTool(conversationID: conversationID)
         default: return nil
         }
     }
