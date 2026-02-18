@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 08/08/25.
 //
+//  ENHANCED: Now calculates line numbers for professional diff display.
 
 import Foundation
 
@@ -19,6 +20,8 @@ struct DiffResult: Identifiable, Hashable {
     let id = UUID()
     let line: String
     let type: LineChangeType
+    let originalLineNumber: Int?
+    let modifiedLineNumber: Int?
 }
 
 /// A utility for generating a line-by-line diff between two strings.
@@ -27,11 +30,6 @@ struct DiffUtility {
     /// Generates a diff between an original and a modified string.
     /// This implementation uses a standard Longest Common Subsequence (LCS) based algorithm
     /// to efficiently determine the differences between the two inputs.
-    ///
-    /// - Parameters:
-    ///   - original: The original string content.
-    ///   - modified: The modified string content.
-    /// - Returns: An array of `DiffResult` objects representing the changes.
     static func generateDiff(original: String, modified: String) -> [DiffResult] {
         let originalLines = original.components(separatedBy: .newlines)
         let modifiedLines = modified.components(separatedBy: .newlines)
@@ -50,29 +48,46 @@ struct DiffUtility {
         }
 
         // Backtrack through the table to build the diff results.
-        var diff: [DiffResult] = []
+        var rawDiff: [(String, LineChangeType)] = []
         var i = originalLines.count
         var j = modifiedLines.count
 
         while i > 0 || j > 0 {
             if i > 0 && j > 0 && originalLines[i-1] == modifiedLines[j-1] {
-                // This line is unchanged.
-                diff.insert(DiffResult(line: originalLines[i-1], type: .unchanged), at: 0)
+                rawDiff.insert((originalLines[i-1], .unchanged), at: 0)
                 i -= 1
                 j -= 1
             } else if j > 0 && (i == 0 || lcsTable[i][j-1] >= lcsTable[i-1][j]) {
-                // This line was added in the modified version.
-                diff.insert(DiffResult(line: modifiedLines[j-1], type: .added), at: 0)
+                rawDiff.insert((modifiedLines[j-1], .added), at: 0)
                 j -= 1
             } else if i > 0 && (j == 0 || lcsTable[i][j-1] < lcsTable[i-1][j]) {
-                // This line was deleted from the original version.
-                diff.insert(DiffResult(line: originalLines[i-1], type: .deleted), at: 0)
+                rawDiff.insert((originalLines[i-1], .deleted), at: 0)
                 i -= 1
             } else {
-                // End of diff.
                 break
             }
         }
-        return diff
+        
+        // Post-process to assign line numbers
+        var finalDiff: [DiffResult] = []
+        var oldLineCounter = 1
+        var newLineCounter = 1
+        
+        for (line, type) in rawDiff {
+            switch type {
+            case .unchanged:
+                finalDiff.append(DiffResult(line: line, type: .unchanged, originalLineNumber: oldLineCounter, modifiedLineNumber: newLineCounter))
+                oldLineCounter += 1
+                newLineCounter += 1
+            case .added:
+                finalDiff.append(DiffResult(line: line, type: .added, originalLineNumber: nil, modifiedLineNumber: newLineCounter))
+                newLineCounter += 1
+            case .deleted:
+                finalDiff.append(DiffResult(line: line, type: .deleted, originalLineNumber: oldLineCounter, modifiedLineNumber: nil))
+                oldLineCounter += 1
+            }
+        }
+        
+        return finalDiff
     }
 }

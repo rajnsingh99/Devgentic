@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 10/08/25.
 //
+//  Phase 5: Motion & Polish - Added Blinking Cursor & Text Smoothing.
 
 import SwiftUI
 import os
@@ -11,10 +12,6 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ContentBlockView")
 private let CODE_BLOCK_LINE_LIMIT = 50
 
-// MARK: - FIX: Removed the Identifiable conformance.
-// The ID was unstable during streaming because multiple blocks (like horizontal rules)
-// could have the same hash value, causing UI glitches and scrolling issues.
-// The ForEach loop will now use the array index for a stable identity.
 enum ContentBlock: Equatable, Hashable {
     case paragraph(String)
     case code(language: String, content: String, fileName: String?)
@@ -28,6 +25,8 @@ enum ContentBlock: Equatable, Hashable {
 struct ContentBlockView: View {
     let block: ContentBlock
     let message: ChatMessage
+    // New prop to determine if we should show the cursor
+    var isLastBlock: Bool = false
     
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
 
@@ -46,7 +45,7 @@ struct ContentBlockView: View {
             } else {
                 CodeBlockView(language: lang, content: codeContent)
                     .padding(.bottom, UITheme.Spacing.medium)
-                    .frame(maxWidth: 700, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
         case .heading(let level, let text):
@@ -78,101 +77,79 @@ struct ContentBlockView: View {
                 AsyncImage(url: imageUrl) { phase in
                     switch phase {
                     case .success(let image):
-                        image
-                            .resizable()
+                        image.resizable()
                             .aspectRatio(contentMode: .fit)
                             .cornerRadius(UITheme.CornerRadius.medium)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: UITheme.CornerRadius.medium)
-                                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                            )
-                            .onAppear {
-                                logger.info("✅ Successfully loaded image from URL: \(url)")
-                            }
-                    
-                    case .failure(let error):
+                            .overlay(RoundedRectangle(cornerRadius: UITheme.CornerRadius.medium).stroke(Color.gray.opacity(0.2), lineWidth: 1))
+                    case .failure(_):
                         VStack(spacing: UITheme.Spacing.xsmall) {
-                            Image(systemName: "photo.on.rectangle.angled")
-                                .font(.largeTitle)
-                                .foregroundColor(.secondary)
-                            Text("Failed to load image")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            Image(systemName: "photo.on.rectangle.angled").font(.largeTitle).foregroundColor(.secondary)
+                            Text("Failed to load image").font(.caption).foregroundColor(.secondary)
                         }
                         .frame(maxWidth: 500, minHeight: 150, alignment: .center)
                         .background(Color.gray.opacity(0.1))
                         .cornerRadius(UITheme.CornerRadius.medium)
-                        .onAppear {
-                            logger.error("❌ Failed to load image from URL: \(url). Error: \(error.localizedDescription)")
-                        }
-
                     case .empty:
                         HStack {
                             Spacer()
                             VStack {
                                 ProgressView()
-                                if let alt = altText, !alt.isEmpty {
-                                    Text(alt)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .padding(.top, 4)
-                                }
+                                if let alt = altText, !alt.isEmpty { Text(alt).font(.caption).foregroundColor(.secondary).padding(.top, 4) }
                             }
                             Spacer()
                         }
                         .frame(height: 150)
                         .background(Color.gray.opacity(0.1))
                         .cornerRadius(UITheme.CornerRadius.medium)
-                        .onAppear {
-                            logger.debug("⏳ Loading image (placeholder) for URL: \(url)")
-                        }
-
-                    @unknown default:
-                        EmptyView()
+                    @unknown default: EmptyView()
                     }
                 }
                 .padding(.vertical, UITheme.Spacing.small)
                 .frame(maxWidth: 500, alignment: .leading)
-            } else {
-                EmptyView()
+            } else { EmptyView() }
+        }
+    }
+    
+    // MARK: - Text Rendering with Motion & Polish
+    
+    /// Renders the styled text and optionally adds the blinking cursor if this is the active stream block.
+    @ViewBuilder
+    private func renderTextView(text: String, font: Font = UITheme.Fonts.body, weight: Font.Weight = .regular) -> some View {
+        HStack(alignment: .bottom, spacing: 0) {
+            Text(createStyledString(from: text, font: font, weight: weight))
+                .lineSpacing(4) // Phase 4: Editorial spacing
+                .textSelection(.enabled)
+                // Smooth out text updates slightly to avoid harsh token jitter
+                .animation(.linear(duration: 0.05), value: text.count)
+            
+            // Phase 5: The Blinking Cursor
+            if message.isStreaming && isLastBlock {
+                BlinkingCursor()
+                    .padding(.leading, 2)
+                    .padding(.bottom, 4) // Align with baseline
             }
         }
     }
     
-    /// Creates and styles an AttributedString from a Markdown string.
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
-        // 1. Try to create an AttributedString from the markdown text.
         if var attributedString = try? AttributedString(markdown: text) {
-            // 2. Iterate through the runs of the attributed string to apply styles.
             for run in attributedString.runs {
-                // Check if the run has the inline code attribute.
                 if run.inlinePresentationIntent == .code {
-                    // 3. Apply custom styling to the inline code runs.
                     attributedString[run.range].backgroundColor = UITheme.Colors.inlineCodeBackground
                     attributedString[run.range].foregroundColor = UITheme.Colors.inlineCodeText
                     attributedString[run.range].font = .system(.body, design: .monospaced)
                 } else {
-                     // 4. Ensure regular text has the correct default font and color.
                     attributedString[run.range].font = font.weight(weight)
                     attributedString[run.range].foregroundColor = UITheme.Colors.primaryText
                 }
             }
             return attributedString
         } else {
-            // 5. Fallback to a plain AttributedString if markdown parsing fails.
             var fallbackString = AttributedString(text)
             fallbackString.font = font.weight(weight)
             fallbackString.foregroundColor = UITheme.Colors.primaryText
             return fallbackString
         }
-    }
-
-    /// Renders the styled text in a Text view.
-    @ViewBuilder
-    private func renderTextView(text: String, font: Font = UITheme.Fonts.body, weight: Font.Weight = .regular) -> some View {
-        Text(createStyledString(from: text, font: font, weight: weight))
-            .lineSpacing(UITheme.Spacing.small)
-            .textSelection(.enabled)
     }
     
     private func fontForHeading(level: Int) -> Font {
@@ -189,5 +166,22 @@ struct ContentBlockView: View {
         case 2: return .semibold
         default: return .semibold
         }
+    }
+}
+
+// MARK: - Blinking Cursor View
+struct BlinkingCursor: View {
+    @State private var isVisible = true
+    
+    var body: some View {
+        Rectangle()
+            .fill(Color.accentColor)
+            .frame(width: 8, height: 16)
+            .opacity(isVisible ? 1 : 0)
+            .onAppear {
+                withAnimation(Animation.easeInOut(duration: 0.6).repeatForever()) {
+                    isVisible.toggle()
+                }
+            }
     }
 }

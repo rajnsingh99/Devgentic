@@ -5,7 +5,8 @@
 //  Created by Raj Singh on 22/07/25.
 //
 //  REFACTORED: To use centralized UITheme for consistent styling.
-//  REFACTORED: To perform syntax highlighting asynchronously to avoid blocking the main thread.
+//  REFACTORED: Phase 3 - "IDE" Window Aesthetic.
+//  UPDATED: Removed decorative traffic light buttons for a cleaner look.
 
 import SwiftUI
 import Highlightr
@@ -14,38 +15,65 @@ struct CodeBlockView: View {
     let language: String
     let content: String
     @State private var isCopied = false
+    @State private var isHovering = false
+
+    // Constants for the IDE look
+    private let headerColor = Color(red: 0.15, green: 0.15, blue: 0.17) // Dark Grey
+    private let editorColor = Color(red: 0.11, green: 0.11, blue: 0.13) // Darker Grey/Black
+    private let borderColor = Color.white.opacity(0.1)
 
     var body: some View {
         VStack(spacing: 0) {
+            // MARK: - Mac Window Header
             HStack {
-                Text(language.isEmpty ? "code" : language)
-                    .font(UITheme.Fonts.codeCaption)
-                    .foregroundColor(UITheme.Colors.secondaryText)
-                    .padding(.leading, UITheme.Spacing.medium)
+                // Language Badge (Aligned Left)
+                Text(language.isEmpty ? "plaintext" : language.lowercased())
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.gray)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(4)
+                    .padding(.leading, 4)
                 
                 Spacer()
                 
+                // Copy Button
                 Button(action: copyToClipboard) {
-                    HStack(spacing: UITheme.Spacing.xsmall) {
+                    HStack(spacing: 4) {
                         Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 10))
                         Text(isCopied ? "Copied" : "Copy")
+                            .font(.system(size: 10, weight: .medium))
                     }
-                    .font(UITheme.Fonts.caption)
+                    .foregroundColor(isCopied ? .green : .gray)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(isHovering ? Color.white.opacity(0.1) : Color.clear)
+                    .cornerRadius(4)
                 }
-                .buttonStyle(.borderless)
-                .foregroundColor(isCopied ? UITheme.Colors.success : UITheme.Colors.secondaryText)
-                .padding(.trailing, UITheme.Spacing.medium)
+                .buttonStyle(.plain)
+                .onHover { hovering in withAnimation { isHovering = hovering } }
             }
-            .padding(.vertical, UITheme.Spacing.small)
-            .background(UITheme.Colors.textBackground.opacity(0.5))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(headerColor)
+            
+            Divider()
+                .background(borderColor)
 
+            // MARK: - Editor Content
             // Use the new async wrapper view, which handles highlighting in the background.
             AsyncHighlightedCodeView(language: language, code: content)
-                .padding(UITheme.Spacing.medium)
+                .padding(12)
+                .background(editorColor)
         }
-        .background(UITheme.Colors.textBackground)
-        .cornerRadius(UITheme.CornerRadius.medium)
-        .shadow(color: .black.opacity(0.2), radius: 3, y: 2)
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(borderColor, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
     }
 
     private func copyToClipboard() {
@@ -64,7 +92,7 @@ struct CodeBlockView: View {
     }
 }
 
-// MARK: - AsyncHighlightedCodeView (NEW)
+// MARK: - AsyncHighlightedCodeView
 /// This new View wraps the NSViewRepresentable and handles the asynchronous highlighting.
 /// It uses .task to initiate the background operation whenever the code content changes.
 struct AsyncHighlightedCodeView: View {
@@ -89,9 +117,9 @@ struct AsyncHighlightedCodeView: View {
         return await Task.detached {
             // It's safe to create a new Highlightr instance here.
             let highlightr = Highlightr()!
-            highlightr.setTheme(to: "atom-one-dark")
+            highlightr.setTheme(to: "atom-one-dark") // Enforce dark theme for IDE look
 
-            // Define the base font for the code.
+            // Define the base font for the code (SF Mono or similar).
             let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 12)!
             
             // Perform the potentially slow highlighting operation.
@@ -101,6 +129,8 @@ struct AsyncHighlightedCodeView: View {
             let finalAttributedString = NSMutableAttributedString(attributedString: attributedCode)
             let fullRange = NSRange(location: 0, length: finalAttributedString.length)
             finalAttributedString.addAttribute(.font, value: baseFont, range: fullRange)
+            
+            // Adjust colors to ensure contrast if needed (optional)
             
             return finalAttributedString
         }.value
@@ -121,10 +151,7 @@ class SizingTextView: NSTextView {
     }
 }
 
-// MARK: - HighlightedCodeViewRepresentable (REFACTORED)
-/// Renamed from HighlightedCodeView. This NSViewRepresentable is now a "dumb" component.
-/// It displays an NSAttributedString if one is provided, otherwise it shows the raw code
-/// string as a placeholder.
+// MARK: - HighlightedCodeViewRepresentable
 struct HighlightedCodeViewRepresentable: NSViewRepresentable {
     let attributedString: NSAttributedString?
     let code: String // Keep raw code for placeholder
@@ -147,16 +174,14 @@ struct HighlightedCodeViewRepresentable: NSViewRepresentable {
             textToSet = attributedString
         } else {
             // Otherwise, show a plain text placeholder while loading.
-            let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 14, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 14)!
+            let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 12)!
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: baseFont,
-                .foregroundColor: NSColor.secondaryLabelColor
+                .foregroundColor: NSColor(calibratedRed: 0.8, green: 0.8, blue: 0.8, alpha: 1.0) // Light grey text for dark mode
             ]
             textToSet = NSAttributedString(string: code, attributes: attributes)
         }
         
-        // This check prevents resetting the text if it's already correct,
-        // which avoids flickering and performance issues.
         if nsView.textStorage != textToSet {
              nsView.textStorage?.setAttributedString(textToSet)
              nsView.invalidateIntrinsicContentSize()

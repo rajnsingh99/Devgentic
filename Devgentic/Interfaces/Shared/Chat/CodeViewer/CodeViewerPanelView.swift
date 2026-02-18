@@ -17,19 +17,19 @@ extension CodeEditSourceEditor.EditorTheme {
         text: .init(color: .white),
         insertionPoint: .white,
         invisibles: .init(color: .systemGray.withAlphaComponent(0.5)),
-        background: NSColor(hex: "#000000"),
-        lineHighlight: NSColor(hex: "#44475a").withAlphaComponent(0.5),
-        selection: NSColor(hex: "#44475a"),
-        keywords: .init(color: NSColor(hex: "#ff79c6")),
-        commands: .init(color: NSColor(hex: "#8be9fd")),
-        types: .init(color: NSColor(hex: "#8be9fd")),
-        attributes: .init(color: NSColor(hex: "#50fa7b")),
+        background: NSColor(hex: "#1e1e1e"), // Modern Editor Dark
+        lineHighlight: NSColor(hex: "#2c2c2c"),
+        selection: NSColor(hex: "#264f78"),
+        keywords: .init(color: NSColor(hex: "#569cd6")),
+        commands: .init(color: NSColor(hex: "#dcdcaa")),
+        types: .init(color: NSColor(hex: "#4ec9b0")),
+        attributes: .init(color: NSColor(hex: "#c586c0")),
         variables: .init(color: .white),
-        values: .init(color: NSColor(hex: "#f1fa8c")),
-        numbers: .init(color: NSColor(hex: "#bd93f9")),
-        strings: .init(color: NSColor(hex: "#f1fa8c")),
-        characters: .init(color: NSColor(hex: "#f1fa8c")),
-        comments: .init(color: NSColor(hex: "#6272a4"))
+        values: .init(color: NSColor(hex: "#b5cea8")),
+        numbers: .init(color: NSColor(hex: "#b5cea8")),
+        strings: .init(color: NSColor(hex: "#ce9178")),
+        characters: .init(color: NSColor(hex: "#d7ba7d")),
+        comments: .init(color: NSColor(hex: "#6a9955"))
     )
 }
 
@@ -49,7 +49,7 @@ extension NSColor {
     }
 }
 
-// MARK: - PHASE 2 COMPLETE: GapBuffer Data Structure
+// MARK: - GapBuffer Data Structure
 struct GapBuffer {
     private var buffer: [Character]
     private var gapStart: Int
@@ -125,7 +125,7 @@ class CodeDocument: ObservableObject, Equatable {
 struct CodeViewerPanelView: View {
     @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
     @State private var isHoveringOnDivider = false
-    @AppStorage("codeEditFontSize") var fontSize: Double = 14
+    @AppStorage("codeEditFontSize") var fontSize: Double = 13
     @AppStorage("codeViewerPanelWidth") private var panelWidth: Double = 600
 
     @State private var document: CodeDocument?
@@ -142,14 +142,8 @@ struct CodeViewerPanelView: View {
         .transition(.move(edge: .trailing))
         .shadow(radius: 10)
         .onReceive(chatHistoryViewModel.$codeViewerContent) { newContent in
-            // --- FIX ---
-            // The logic was too simple, causing unnecessary view re-renders when the
-            // diff view was toggled. This new logic ensures the `CodeDocument` is only
-            // recreated when the actual snippet content changes, not just any
-            // property on the view model.
             if let content = newContent {
                 let snippet = content.snippets[content.currentIndex]
-                // Only update the document if the snippet ID has changed.
                 if currentSnippet?.id != snippet.id {
                     currentSnippet = snippet
                     document = CodeDocument(content: snippet.code, language: snippet.language)
@@ -184,11 +178,11 @@ struct CodeViewerPanelView: View {
         VStack(spacing: 0) {
             panelHeader
             ZStack(alignment: .top) {
-                // MODIFIED: Conditionally show either the diff view or the code editor.
                 if chatHistoryViewModel.isShowingDiff,
                    let originalCode = chatHistoryViewModel.originalCodeForDiff,
                    let modifiedCode = currentSnippet?.code {
                     CodeDiffView(originalCode: originalCode, modifiedCode: modifiedCode)
+                        .transition(.opacity)
                 } else if let document = document {
                     HighPerformanceCodeViewRepresentable(
                         document: document,
@@ -196,6 +190,7 @@ struct CodeViewerPanelView: View {
                     )
                     .id(document.id)
                     .clipped()
+                    .transition(.opacity)
                 } else {
                     placeholderContent
                 }
@@ -203,7 +198,7 @@ struct CodeViewerPanelView: View {
             }
         }
         .frame(width: panelWidth)
-        .background(Color(nsColor: NSColor(hex: "#282a36")))
+        .background(Color(nsColor: NSColor(hex: "#1e1e1e")))
     }
     
     private var panelHeader: some View {
@@ -211,20 +206,17 @@ struct CodeViewerPanelView: View {
             HStack {
                 HStack(spacing: 8) {
                     Image(systemName: languageIcon(for: currentSnippet?.language))
-                        .font(.title2)
+                        .font(.system(size: 14))
                         .foregroundColor(.secondary)
-                        .frame(width: 24, alignment: .center)
 
                     Text(currentSnippet?.language?.capitalized ?? "Code Viewer")
-                        .font(.headline)
-                        .fontWeight(.medium)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
                 }
 
                 Spacer()
 
-                HStack(spacing: 4) {
-                    // --- NEW: Apply Changes Button ---
-                    // This button is only visible when the diff view is active.
+                HStack(spacing: 6) {
                     if chatHistoryViewModel.isShowingDiff, let snippet = currentSnippet {
                         HeaderButton(
                             action: {
@@ -236,11 +228,12 @@ struct CodeViewerPanelView: View {
                         )
                     }
 
-                    // Diff toggle button
                     if let snippet = currentSnippet, snippet.sourceFileID != nil {
                         HeaderButton(
                             action: {
-                                chatHistoryViewModel.toggleDiffView(for: snippet)
+                                withAnimation {
+                                    chatHistoryViewModel.toggleDiffView(for: snippet)
+                                }
                             },
                             icon: chatHistoryViewModel.isShowingDiff ? "doc.text.fill" : "arrow.left.arrow.right",
                             helpText: chatHistoryViewModel.isShowingDiff ? "Show Final Code" : "Show Changes",
@@ -289,22 +282,19 @@ struct CodeViewerPanelView: View {
                 )
             }
         }
-        .padding(.horizontal)
-        .frame(height: 48)
+        .padding(.horizontal, 16)
+        .frame(height: 44)
         .background(.ultraThinMaterial)
     }
     
     private var placeholderContent: some View {
-        VStack {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 50))
-                .foregroundColor(.gray.opacity(0.5))
-                .padding(.bottom)
-            Text("No Content")
-                .font(.title2)
-                .foregroundColor(.gray)
-            Text("Select a code block to view it here.")
-                .foregroundColor(.gray.opacity(0.8))
+        VStack(spacing: 12) {
+            Image(systemName: "curlybraces.square")
+                .font(.system(size: 48))
+                .foregroundColor(.gray.opacity(0.3))
+            Text("No Code Selected")
+                .font(.headline)
+                .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -362,7 +352,7 @@ struct CodeViewerPanelView: View {
     }
 }
 
-// MARK: - NEW: Modern Snippet Navigator View
+// MARK: - Modern Snippet Navigator View
 fileprivate struct SnippetNavigatorView: View {
     let currentIndex: Int
     let totalCount: Int
@@ -370,21 +360,24 @@ fileprivate struct SnippetNavigatorView: View {
     let onNext: () -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 1) {
             NavButton(action: onPrevious, icon: "chevron.left", enabled: currentIndex > 0)
-            Text("\(currentIndex + 1) of \(totalCount)")
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+            
+            Text("\(currentIndex + 1) / \(totalCount)")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
+                .frame(width: 50)
+                .padding(.horizontal, 4)
+                
             NavButton(action: onNext, icon: "chevron.right", enabled: currentIndex < totalCount - 1)
         }
-        .padding(4)
+        .padding(2)
         .background(Color.black.opacity(0.2))
-        .cornerRadius(8)
+        .cornerRadius(6)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.1), lineWidth: 0.5))
     }
 }
 
-// MARK: - NEW: Reusable Navigation Button
 fileprivate struct NavButton: View {
     let action: () -> Void
     let icon: String
@@ -394,22 +387,18 @@ fileprivate struct NavButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(enabled ? .primary : .secondary.opacity(0.5))
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(isHovering && enabled ? Color.gray.opacity(0.3) : Color.clear))
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(enabled ? .primary : .secondary.opacity(0.3))
+                .frame(width: 20, height: 20)
+                .background(isHovering && enabled ? Color.white.opacity(0.1) : Color.clear)
+                .cornerRadius(4)
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
-                self.isHovering = hovering
-            }
-        }
+        .onHover { self.isHovering = $0 }
     }
 }
 
-// MARK: - NEW: Modern Header Action Button
 fileprivate struct HeaderButton: View {
     let action: () -> Void
     let icon: String
@@ -421,21 +410,17 @@ fileprivate struct HeaderButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .regular))
-                .foregroundColor(isEnabled ? color : .secondary.opacity(0.5))
-                .frame(width: 32, height: 32)
-                .background(Circle().fill(isHovering && isEnabled ? Color.gray.opacity(0.25) : Color.clear))
+                .font(.system(size: 14))
+                .foregroundColor(isEnabled ? (isHovering ? color : .secondary) : .secondary.opacity(0.3))
+                .frame(width: 28, height: 28)
+                .background(isHovering && isEnabled ? Color.gray.opacity(0.15) : Color.clear)
+                .cornerRadius(6)
         }
         .buttonStyle(.plain)
         .help(helpText)
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
-                self.isHovering = hovering
-            }
-        }
+        .onHover { self.isHovering = $0 }
     }
 }
-
 
 extension CodeDocument: Identifiable {}
 

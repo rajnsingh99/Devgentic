@@ -21,11 +21,6 @@
 		35EB3F6F2F329FDA00555A83 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F6E2F329FDA00555A83 /* MLXLLM */; };
 		35EB3F712F329FDA00555A83 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F702F329FDA00555A83 /* MLXLMCommon */; };
 		35EB3F732F329FDA00555A83 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F722F329FDA00555A83 /* MLXVLM */; };
-		35F184952F2275630003320F /* AgentTools in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184942F2275630003320F /* AgentTools */; };
-		35F184972F2275630003320F /* SwiftAgent in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184962F2275630003320F /* SwiftAgent */; };
-		35F184992F2275630003320F /* SwiftAgentMCP in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184982F2275630003320F /* SwiftAgentMCP */; };
-		35F1849B2F2275630003320F /* SwiftAgentSkills in Frameworks */ = {isa = PBXBuildFile; productRef = 35F1849A2F2275630003320F /* SwiftAgentSkills */; };
-		35F1849D2F2275630003320F /* SwiftAgentSymbio in Frameworks */ = {isa = PBXBuildFile; productRef = 35F1849C2F2275630003320F /* SwiftAgentSymbio */; };
 		35F184A02F23F43E0003320F /* OpenFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = 35F1849F2F23F43E0003320F /* OpenFoundationModels */; };
 		35F184A22F23F43E0003320F /* OpenFoundationModelsCore in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184A12F23F43E0003320F /* OpenFoundationModelsCore */; };
 		35F184A42F23F43E0003320F /* OpenFoundationModelsExtra in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184A32F23F43E0003320F /* OpenFoundationModelsExtra */; };
@@ -87,16 +82,11 @@
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
 				35F184A42F23F43E0003320F /* OpenFoundationModelsExtra in Frameworks */,
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
-				35F1849B2F2275630003320F /* SwiftAgentSkills in Frameworks */,
-				35F1849D2F2275630003320F /* SwiftAgentSymbio in Frameworks */,
-				35F184952F2275630003320F /* AgentTools in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
-				35F184992F2275630003320F /* SwiftAgentMCP in Frameworks */,
 				35E068CC2F2801800060B929 /* OpenFoundationModelsOpenAI in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
 				35EB3F712F329FDA00555A83 /* MLXLMCommon in Frameworks */,
 				35EB3F732F329FDA00555A83 /* MLXVLM in Frameworks */,
-				35F184972F2275630003320F /* SwiftAgent in Frameworks */,
 				35F184A62F23F43E0003320F /* OpenFoundationModelsMacros in Frameworks */,
 				355A5D9F2E882BA0007C22CC /* MCP in Frameworks */,
 				35F184A92F23F49A0003320F /* OpenFoundationModelsOllama in Frameworks */,
@@ -188,11 +178,6 @@
 				35CDA7422E2A2A3400564AB7 /* Highlightr */,
 				35E68C412E313B0B00993F95 /* WhisperKit */,
 				355A5D9E2E882BA0007C22CC /* MCP */,
-				35F184942F2275630003320F /* AgentTools */,
-				35F184962F2275630003320F /* SwiftAgent */,
-				35F184982F2275630003320F /* SwiftAgentMCP */,
-				35F1849A2F2275630003320F /* SwiftAgentSkills */,
-				35F1849C2F2275630003320F /* SwiftAgentSymbio */,
 				35F1849F2F23F43E0003320F /* OpenFoundationModels */,
 				35F184A12F23F43E0003320F /* OpenFoundationModelsCore */,
 				35F184A32F23F43E0003320F /* OpenFoundationModelsExtra */,
@@ -295,9 +280,7 @@
 				35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */,
 				35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */,
 				35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */,
-				355A5C282E80724B007C22CC /* XCRemoteSwiftPackageReference "hummingbird" */,
 				355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */,
-				35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */,
 				35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */,
 				35F184A72F23F49A0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels-Ollama" */,
 				35E068CA2F2801800060B929 /* XCRemoteSwiftPackageReference "OpenFoundationModels-OpenAI" */,
@@ -673,14 +656,6 @@
 				minimumVersion = 0.14.1;
 			};
 		};
-		355A5C282E80724B007C22CC /* XCRemoteSwiftPackageReference "hummingbird" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/hummingbird-project/hummingbird.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.16.0;
-			};
-		};
 		355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk.git";
@@ -745,28 +720,20 @@
 				minimumVersion = 2.30.3;
 			};
 		};
-		35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/1amageek/SwiftAgent";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
 		35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/1amageek/OpenFoundationModels";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.3;
+				branch = 1.2.0;
+				kind = branch;
 			};
 		};
 		35F184A72F23F49A0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels-Ollama" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/1amageek/OpenFoundationModels-Ollama";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.2.0;
+				branch = main;
+				kind = branch;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -841,31 +808,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35EB3F6B2F329FDA00555A83 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXVLM;
-		};
-		35F184942F2275630003320F /* AgentTools */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */;
-			productName = AgentTools;
-		};
-		35F184962F2275630003320F /* SwiftAgent */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */;
-			productName = SwiftAgent;
-		};
-		35F184982F2275630003320F /* SwiftAgentMCP */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */;
-			productName = SwiftAgentMCP;
-		};
-		35F1849A2F2275630003320F /* SwiftAgentSkills */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */;
-			productName = SwiftAgentSkills;
-		};
-		35F1849C2F2275630003320F /* SwiftAgentSymbio */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F184932F2275630003320F /* XCRemoteSwiftPackageReference "SwiftAgent" */;
-			productName = SwiftAgentSymbio;
 		};
 		35F1849F2F23F43E0003320F /* OpenFoundationModels */ = {
 			isa = XCSwiftPackageProductDependency;

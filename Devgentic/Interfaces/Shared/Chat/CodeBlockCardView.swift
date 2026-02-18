@@ -4,89 +4,80 @@
 //
 //  Created by Raj Singh on 20/07/25.
 //
+//  MODERNIZED: Glassmorphic card design with language badges.
 
 import SwiftUI
-
 
 struct CodeBlockCardView: View {
     let language: String
     let lineCount: Int
     let fileName: String?
     let action: () -> Void
+    
+    @State private var isHovering = false
 
     private var title: String {
-        if let fileName = fileName, !fileName.isEmpty {
-            return fileName
-        }
-        if language.isEmpty {
-            return "Code Block"
-        }
-        return "\(language.capitalized) Code"
-    }
-    
-    private var iconName: String {
-        if let fileName = fileName, !fileName.isEmpty {
-            return "doc.text.fill"
-        }
-        return "doc.richtext.fill"
+        if let fileName = fileName, !fileName.isEmpty { return fileName }
+        return language.isEmpty ? "Code Snippet" : "\(language.capitalized) Snippet"
     }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 15) {
-                Image(systemName: iconName)
-                    .font(.largeTitle)
-                    .foregroundColor(.accentColor)
-                    .padding(.leading, 5)
+            HStack(spacing: 16) {
+                // Icon Container
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: [.blue.opacity(0.2), .purple.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 44, height: 44)
+                    
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.accentColor)
+                }
 
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.headline)
-                        .foregroundColor(Color(NSColor.labelColor))
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
 
-                    Text("\(lineCount) lines of code")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-
-                    Text("Tap to view full code")
+                    Text("\(lineCount) lines • Tap to expand")
                         .font(.caption)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.secondary)
                 }
 
                 Spacer()
-
-                Image(systemName: "chevron.right")
+                
+                // Language Badge
+                Text(language.uppercased())
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.1))
+                    .cornerRadius(4)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.1), lineWidth: 1))
+
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.5))
             }
-            .padding(15)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(16)
-            .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+            .padding(12)
+            .background(.ultraThinMaterial)
+            .cornerRadius(12)
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .stroke(Color.accentColor.opacity(0.5), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(isHovering ? Color.accentColor.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
             )
+            .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+            .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: 300, alignment: .leading)
-        .padding(.vertical, 20)
-    }
-}
-
-// MARK: - Preview Provider
-struct CodeBlockCardView_Previews: PreviewProvider {
-    static var previews: some View {
-        VStack(spacing: 20) {
-            CodeBlockCardView(language: "swift", lineCount: 78, fileName: "ChatHistoryViewModel.swift") {
-                print("File card tapped!")
-            }
-
-            CodeBlockCardView(language: "python", lineCount: 150, fileName: nil) {
-                print("Language card tapped!")
+        .frame(maxWidth: 400, alignment: .leading)
+        .padding(.vertical, 8)
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                isHovering = hovering
             }
         }
-        .padding()
-        .preferredColorScheme(.dark)
-        .previewLayout(.sizeThatFits)
     }
 }

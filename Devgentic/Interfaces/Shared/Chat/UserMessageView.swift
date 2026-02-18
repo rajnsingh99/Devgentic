@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 20/08/25.
 //
+//  Phase 4: Modern "Floating" User Bubble with Glassmorphism.
 
 import SwiftUI
 import AppKit
@@ -26,10 +27,10 @@ struct UserMessageView: View {
                     }) {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(.white.opacity(0.7))
+                            .foregroundColor(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 180 : 0))
                             .padding(6)
-                            .background(Color.black.opacity(0.25))
+                            .background(Color.black.opacity(0.1))
                             .clipShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -71,16 +72,25 @@ struct UserMessageView: View {
     }
 }
 
+// MARK: - Shape & Style
+
 struct UserBubbleShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let cornerRadius: CGFloat = 20
+        let cornerRadius: CGFloat = 16
         var path = Path()
 
         // Start just after the top-left corner radius
         path.move(to: CGPoint(x: rect.minX + cornerRadius, y: rect.minY))
         
-        // Top-right corner (sharp)
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        // Top-right corner (Slightly sharper to indicate direction, but rounded for modern look)
+        path.addLine(to: CGPoint(x: rect.maxX - 4, y: rect.minY))
+        path.addArc(
+            center: CGPoint(x: rect.maxX - 4, y: rect.minY + 4),
+            radius: 4,
+            startAngle: Angle(degrees: -90),
+            endAngle: Angle(degrees: 0),
+            clockwise: false
+        )
 
         // Bottom-right corner
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - cornerRadius))
@@ -122,10 +132,25 @@ struct UserBubbleModifier: ViewModifier {
         content
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .foregroundColor(.white)
+            .foregroundColor(.primary) // Auto-adapts to light/dark
             .background(
                 UserBubbleShape()
-                    .fill(UITheme.Colors.accent)
+                    .fill(.ultraThinMaterial) // Native glass effect
+                    .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2) // Floating depth
+            )
+            .overlay(
+                UserBubbleShape()
+                    .stroke(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                Color.white.opacity(0.3),
+                                Color.white.opacity(0.05)
+                            ]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
             )
     }
 }
@@ -135,4 +160,3 @@ extension View {
         self.modifier(UserBubbleModifier())
     }
 }
-

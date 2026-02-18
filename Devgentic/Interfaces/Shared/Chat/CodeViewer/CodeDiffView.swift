@@ -4,16 +4,14 @@
 //
 //  Created by Raj Singh on 08/08/25.
 //
+//  MODERNIZED: GitHub-style Unified Diff with line numbers and distinct gutters.
 
 import SwiftUI
 
-/// A view specifically designed to render the results of a code diff operation.
-/// It displays added, deleted, and unchanged lines with distinct visual cues.
 struct CodeDiffView: View {
     let originalCode: String
     let modifiedCode: String
 
-    // The diff results are calculated once and stored.
     private var diffResults: [DiffResult] {
         return DiffUtility.generateDiff(original: originalCode, modified: modifiedCode)
     }
@@ -22,91 +20,91 @@ struct CodeDiffView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(diffResults) { result in
-                    HStack(alignment: .top, spacing: 8) {
-                        // Gutter prefix (+, -, or empty)
-                        Text(prefix(for: result.type))
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundColor(prefixColor(for: result.type))
-                            .frame(width: 20, alignment: .trailing)
+                    HStack(alignment: .top, spacing: 0) {
+                        // Line Numbers Gutter
+                        HStack(spacing: 8) {
+                            Text(formatLineNumber(result.originalLineNumber))
+                                .foregroundColor(lineNumberColor(for: result.type))
+                            Text(formatLineNumber(result.modifiedLineNumber))
+                                .foregroundColor(lineNumberColor(for: result.type))
+                        }
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(width: 70, alignment: .trailing)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(gutterColor(for: result.type))
+                        
+                        // Vertical Divider
+                        Rectangle()
+                            .fill(borderColor(for: result.type))
+                            .frame(width: 1)
 
-                        // Code content
+                        // Marker (+/-)
+                        Text(prefix(for: result.type))
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundColor(contentColor(for: result.type))
+                            .frame(width: 20, alignment: .center)
+                            .padding(.vertical, 3)
+
+                        // Code Content
                         Text(result.line)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundColor(.white)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(contentColor(for: result.type))
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 3)
+                            .padding(.trailing, 8)
                     }
-                    .padding(.vertical, 2)
-                    .background(backgroundColor(for: result.type))
+                    .background(rowBackgroundColor(for: result.type))
                 }
             }
-            .padding(.vertical)
         }
-        .background(Color(nsColor: NSColor(hex: "#282a36"))) // Matches editor background
+        .background(Color(NSColor.textBackgroundColor))
     }
 
-    // MARK: - Helper Functions
+    // MARK: - Styling Helpers
+    
+    private func formatLineNumber(_ number: Int?) -> String {
+        guard let number = number else { return "    " }
+        return String(format: "%4d", number)
+    }
 
-    /// Provides the background color for a given line change type.
-    private func backgroundColor(for type: LineChangeType) -> Color {
+    private func rowBackgroundColor(for type: LineChangeType) -> Color {
         switch type {
-        case .added:
-            return Color.green.opacity(0.15)
-        case .deleted:
-            return Color.red.opacity(0.15)
-        case .unchanged:
-            return Color.clear
+        case .added: return Color.green.opacity(0.1)
+        case .deleted: return Color.red.opacity(0.1)
+        case .unchanged: return Color.clear
         }
     }
+    
+    private func gutterColor(for type: LineChangeType) -> Color {
+        switch type {
+        case .added: return Color.green.opacity(0.05)
+        case .deleted: return Color.red.opacity(0.05)
+        case .unchanged: return Color(NSColor.controlBackgroundColor)
+        }
+    }
+    
+    private func borderColor(for type: LineChangeType) -> Color {
+        return Color.gray.opacity(0.2)
+    }
 
-    /// Provides the gutter prefix string for a given line change type.
     private func prefix(for type: LineChangeType) -> String {
         switch type {
-        case .added:
-            return "+"
-        case .deleted:
-            return "-"
-        case .unchanged:
-            return " "
+        case .added: return "+"
+        case .deleted: return "-"
+        case .unchanged: return ""
         }
     }
 
-    /// Provides the gutter prefix color for a given line change type.
-    private func prefixColor(for type: LineChangeType) -> Color {
+    private func lineNumberColor(for type: LineChangeType) -> Color {
+        return Color.secondary.opacity(0.6)
+    }
+    
+    private func contentColor(for type: LineChangeType) -> Color {
         switch type {
-        case .added:
-            return .green
-        case .deleted:
-            return .red
-        case .unchanged:
-            return .gray
+        case .added: return Color.green.opacity(0.8) // Readable green text
+        case .deleted: return Color.red.opacity(0.8)   // Readable red text
+        case .unchanged: return Color.primary.opacity(0.9)
         }
-    }
-}
-
-// MARK: - Preview Provider
-struct CodeDiffView_Previews: PreviewProvider {
-    static var previews: some View {
-        let original = """
-        struct ContentView: View {
-            var body: some View {
-                Text("Hello, world!")
-                    .padding()
-            }
-        }
-        """
-
-        let modified = """
-        struct ContentView: View {
-            // A greeting
-            var body: some View {
-                Text("Hello, Swift!")
-                    .padding()
-                    .background(Color.blue)
-            }
-        }
-        """
-
-        CodeDiffView(originalCode: original, modifiedCode: modified)
-            .frame(width: 600, height: 400)
     }
 }
