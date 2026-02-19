@@ -13,7 +13,6 @@ struct ReadSessionHistoryTool: DevgenticTool {
     let description = """
     [PURPOSE]: Reads the chronological log of all goals, actions, and outcomes performed in the CURRENT session.
     [WHEN TO USE]: Use to answer questions like 'What did I do first?' or to review the exact sequence of your previous actions.
-    [INPUT]: {}
     [OUTPUT]: A linear text timeline of session events.
     """
     

@@ -34,6 +34,10 @@ enum AgentStreamEvent: Sendable {
     /// This is what populates the main chat bubble.
     case content(String)
     
+    /// The agent needs clarification from the user before it can proceed.
+    /// - question: The question to display to the user
+    case requestClarification(question: String)
+
     /// A non-fatal warning or error message to display in the trace/debug log.
     case error(String)
 }
@@ -59,10 +63,21 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
     let id: UUID
     let toolName: String
     let params: String
-    
+
     init(id: UUID = UUID(), toolName: String, params: String) {
         self.id = id
         self.toolName = toolName
         self.params = params
+    }
+}
+
+/// Data Model for Agent Clarification Requests
+struct PendingClarification: Sendable, Identifiable, Codable, Equatable {
+    let id: UUID
+    let question: String
+
+    init(id: UUID = UUID(), question: String) {
+        self.id = id
+        self.question = question
     }
 }

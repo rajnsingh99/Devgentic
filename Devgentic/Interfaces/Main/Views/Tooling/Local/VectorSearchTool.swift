@@ -7,7 +7,6 @@
 //
 
 import Foundation
-import SwiftAgent
 
 /// A tool that allows an Agent to perform semantic searches against the local vector database.
 struct VectorSearchTool: DevgenticTool {

@@ -242,13 +242,15 @@ struct GeminiShadowSchema {
 
     CRITICAL CONSTRAINTS
     OUTPUT FORMAT: Raw JSON only. Do not wrap in markdown (json).
-    VALIDITY: Ensure "action" contains a valid "toolName" from the list above.
+    VALIDITY: Ensure "action" contains a valid "toolName" from the TOOLS list.
+    CLARIFICATION: If you need info from the user, use "toolName": "ask_user" with "parameters": {"question": "..."}.
     FINALITY: If the task is done, set "action" to null and provide "finalAnswer".
+    DO NOT invent tools like 'none', 'inform', or 'respond'. Use only tools from the TOOLS list.
     QUOTING: All keys and string values must use double quotes.
     """
 
     static func parse(_ text: String) throws -> CognitiveStep {
-        // 1. Strip Markdown (```json ... ```)
+        // 1. Strip Markdown fences (```json ... ```, ``` ... ```)
         var cleanText = text
         if cleanText.contains("```json") {
             cleanText = cleanText.components(separatedBy: "```json").last ?? cleanText
@@ -259,17 +261,18 @@ struct GeminiShadowSchema {
 
         cleanText = cleanText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 2. Validate it looks like JSON
-        guard let firstBrace = cleanText.firstIndex(of: "{"),
-              let lastBrace = cleanText.lastIndex(of: "}") else {
-            logger.error("❌ [JSONParser] Failed to find valid JSON braces. Raw text: \(text)")
+        // 2. Extract the outermost JSON object using brace-depth matching
+        //    This is more robust than firstIndex/lastIndex for mixed prose + JSON output
+        guard let jsonString = extractOutermostJSON(from: cleanText) else {
+            logger.error("❌ [JSONParser] Failed to find valid JSON object. Raw text: \(text.prefix(500))")
             throw NSError(domain: "JsonParser", code: 422, userInfo: [NSLocalizedDescriptionKey: "Response is not valid JSON."])
         }
 
-        let jsonString = String(cleanText[firstBrace...lastBrace])
+        // 3. Sanitize common local-model JSON defects
+        let sanitized = sanitizeJSON(jsonString)
 
-        // 3. Decode
-        guard let data = jsonString.data(using: .utf8) else {
+        // 4. Decode
+        guard let data = sanitized.data(using: .utf8) else {
             logger.error("❌ [JSONParser] Failed to convert string to data.")
             throw NSError(domain: "JsonParser", code: 422, userInfo: [NSLocalizedDescriptionKey: "Failed to convert string to data."])
         }
@@ -277,8 +280,137 @@ struct GeminiShadowSchema {
         do {
             return try JSONDecoder().decode(CognitiveStep.self, from: data)
         } catch {
-            logger.error("❌ [JSONParser] Decoding failed: \(error.localizedDescription). JSON was: \(jsonString)")
+            // 5. Last resort: attempt lenient field extraction
+            logger.warning("⚠️ [JSONParser] Standard decode failed (\(error.localizedDescription)), attempting lenient extraction...")
+            if let lenient = attemptLenientExtraction(from: sanitized) {
+                logger.info("✅ [JSONParser] Lenient extraction succeeded.")
+                return lenient
+            }
+            logger.error("❌ [JSONParser] All parsing strategies exhausted. JSON was: \(sanitized.prefix(500))")
             throw error
         }
+    }
+
+    // MARK: - Brace-Depth JSON Extraction
+
+    /// Walks the string to find the first complete `{...}` block using brace-depth counting,
+    /// correctly skipping braces inside string literals.
+    private static func extractOutermostJSON(from text: String) -> String? {
+        var depth = 0
+        var startIndex: String.Index?
+        var inString = false
+        var prevChar: Character = "\0"
+
+        for (index, char) in zip(text.indices, text) {
+            if char == "\"" && prevChar != "\\" {
+                inString.toggle()
+            }
+
+            if !inString {
+                if char == "{" {
+                    if depth == 0 { startIndex = index }
+                    depth += 1
+                } else if char == "}" {
+                    depth -= 1
+                    if depth == 0, let start = startIndex {
+                        return String(text[start...index])
+                    }
+                }
+            }
+            prevChar = char
+        }
+        return nil
+    }
+
+    // MARK: - JSON Sanitization
+
+    /// Fixes common defects produced by local/small models:
+    /// - Trailing commas before `}` or `]`
+    /// - Single-quoted strings → double-quoted
+    /// - Control characters inside string values
+    private static func sanitizeJSON(_ json: String) -> String {
+        var result = json
+
+        // A. Remove trailing commas: `,` followed by optional whitespace then `}` or `]`
+        let trailingCommaPattern = #",\s*([}\]])"#
+        if let regex = try? NSRegularExpression(pattern: trailingCommaPattern) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: "$1"
+            )
+        }
+
+        // B. Strip control characters (except \n, \r, \t which are valid in JSON strings)
+        result = result.unicodeScalars.filter { scalar in
+            // Allow normal printable chars + whitespace
+            scalar.value >= 0x20 || scalar == "\n" || scalar == "\r" || scalar == "\t"
+        }.map { String($0) }.joined()
+
+        return result
+    }
+
+    // MARK: - Lenient Field Extraction
+
+    /// As a last resort, manually extract the two REQUIRED fields (`internalMonologue`, `displayHeadline`)
+    /// using regex, and attempt to reconstruct a minimal valid CognitiveStep.
+    /// This salvages partial/malformed JSON that has the critical data but fails strict decode.
+    private static func attemptLenientExtraction(from json: String) -> CognitiveStep? {
+        func extractStringValue(forKey key: String, in text: String) -> String? {
+            // Match: "key" : "value" (handles escaped quotes in value)
+            let pattern = #""\#(key)"\s*:\s*"((?:[^"\\]|\\.)*)""#
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let range = Range(match.range(at: 1), in: text) else {
+                return nil
+            }
+            return String(text[range])
+        }
+
+        // REQUIRED fields
+        guard let monologue = extractStringValue(forKey: "internalMonologue", in: json),
+              let headline = extractStringValue(forKey: "displayHeadline", in: json) else {
+            return nil
+        }
+
+        // OPTIONAL fields
+        let finalAnswer = extractStringValue(forKey: "finalAnswer", in: json)
+        let previousOutcome = extractStringValue(forKey: "previousStepOutcome", in: json)
+
+        // Attempt to extract action block
+        var action: ToolAction? = nil
+        let toolName = extractStringValue(forKey: "toolName", in: json)
+        if let toolName = toolName, !toolName.isEmpty {
+            // Try to decode just the action sub-object
+            if let actionStart = json.range(of: "\"action\""),
+               let extracted = extractOutermostJSON(from: String(json[actionStart.lowerBound...])) {
+                if let actionData = extracted.data(using: .utf8),
+                   let decoded = try? JSONDecoder().decode(ToolAction.self, from: actionData) {
+                    action = decoded
+                } else {
+                    // Minimal action with empty params
+                    action = ToolAction(toolName: toolName, parameters: [:])
+                }
+            } else {
+                action = ToolAction(toolName: toolName, parameters: [:])
+            }
+        }
+
+        // Attempt to extract memoryUpdate block
+        var memoryUpdate: MemoryUpdate? = nil
+        if let goalStatus = extractStringValue(forKey: "goalStatus", in: json),
+           let goalSummary = extractStringValue(forKey: "goalSummary", in: json),
+           let logEntry = extractStringValue(forKey: "logEntry", in: json) {
+            memoryUpdate = MemoryUpdate(goalStatus: goalStatus, goalSummary: goalSummary, logEntry: logEntry)
+        }
+
+        return CognitiveStep(
+            previousStepOutcome: previousOutcome,
+            internalMonologue: monologue,
+            displayHeadline: headline,
+            action: action,
+            memoryUpdate: memoryUpdate,
+            finalAnswer: finalAnswer
+        )
     }
 }

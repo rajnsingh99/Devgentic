@@ -293,7 +293,6 @@ struct GetSystemStatsTool: DevgenticTool {
     let description = """
     [PURPOSE]: Retrieves basic system metrics (OS version, User, Memory).
     [WHEN TO USE]: Use when the user asks about the machine's status or configuration.
-    [INPUT]: {}
     [OUTPUT]: Formatted string with OS, User, and RAM details.
     """
     

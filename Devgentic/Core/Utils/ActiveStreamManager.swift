@@ -116,14 +116,25 @@ class ActiveStreamManager: ObservableObject {
                             params: params
                         )
                         
+                    // [ASK_USER] Handle Clarification Requests
+                    case .requestClarification(let question):
+                        agentMessage.thinkingHeadline = "Asking you a question..."
+                        agentMessage.agentState = .requestingPermission
+
+                        // Populate the Pending Clarification Data for the UI
+                        agentMessage.pendingClarification = PendingClarification(
+                            question: question
+                        )
+
                     case .toolOutput(let output):
                         // 2. Handle Artifacts (File lists, etc.)
                         agentMessage.agentState = .observing
                         agentMessage.artifacts.append(output)
                         agentMessage.thinkingHeadline = "Processed \(output.toolName)"
-                        
-                        // Clear pending confirmation if any (it's done now)
+
+                        // Clear pending confirmation/clarification if any (it's done now)
                         agentMessage.pendingToolConfirmation = nil
+                        agentMessage.pendingClarification = nil
                         
                     case .content(let textChunk):
                         // 3. Handle Final Text (Buffered)

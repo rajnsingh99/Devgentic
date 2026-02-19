@@ -7,69 +7,52 @@
 //  Refactored on 28/09/25 to unify Local and MCP tool management.
 //  Updated on 26/01/26 to integrate the V2 MCP Architecture.
 //  Updated on 04/02/26 for Modern Dashboard UI.
+//  Redesigned on 20/02/26 for Phase 4: Master-Detail Architecture & HITL controls.
+//  Polished on 20/02/26 to modernize UI alignments, typography, and macOS standards.
 //
 
 import SwiftUI
 
-/// A view for managing and selecting all available tools, both built-in and from MCP servers.
+// MARK: - Navigation State
+
+enum SidebarSelection: Hashable {
+    case all
+    case local
+    case mcp(UUID)
+}
+
+struct ToolTableRow: Identifiable {
+    var id: String { "\(source.id)-\(definition.name)" }
+    let source: ToolSource
+    let definition: ToolDefinition
+}
+
+// MARK: - Main View
+
+/// A modern, macOS-native view for managing tools and MCP servers using a NavigationSplitView.
 struct ToolLibraryView: View {
     // A binding to the agent's currently configured tools.
     @Binding var configuredTools: [Tool]
     
     @Environment(\.dismiss) private var dismiss
-    @State private var searchText = ""
-    
-    // The view now observes the unified store for all its data.
     @StateObject private var toolStore = UnifiedToolStore.shared
     
+    // UI State
+    @State private var selectedSidebar: SidebarSelection? = .all
+    @State private var searchText = ""
     @State private var isPresentingAddView = false
     @State private var sourceToEdit: ToolSource? = nil
-    @State private var expandedToolIDs: Set<UUID> = []
-
-    /// Filters the unified list of tool sources based on search text.
-    var filteredSources: [ToolSource] {
-        if searchText.isEmpty {
-            return toolStore.sources
-        } else {
-            return toolStore.sources.filter { source in
-                source.serverName.localizedCaseInsensitiveContains(searchText) ||
-                source.tools.contains(where: {
-                    $0.name.localizedCaseInsensitiveContains(searchText) || $0.description.localizedCaseInsensitiveContains(searchText)
-                })
-            }
-        }
-    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // 1. Header & Search
-            headerView
-            
-            // 2. Scrollable Content
-            ScrollView {
-                VStack(spacing: 16) {
-                    if toolStore.sources.isEmpty {
-                        emptyStateView
-                    } else if filteredSources.isEmpty {
-                        noSearchResultsView
-                    } else {
-                        ForEach(filteredSources) { source in
-                            ToolSourceCard(
-                                source: source,
-                                isExpanded: expandedToolIDs.contains(source.id),
-                                configuredTools: $configuredTools,
-                                onExpandToggle: { toggleExpansion(for: source.id) },
-                                onEdit: { sourceToEdit = source },
-                                onDelete: { toolStore.deleteTool(toolSource: source) }
-                            )
-                        }
-                    }
-                }
-                .padding()
-            }
+        NavigationSplitView {
+            sidebar
+                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
+        } detail: {
+            detailView
         }
-        .frame(minWidth: 500, idealWidth: 600, minHeight: 500, idealHeight: 700)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 900, idealWidth: 1000, minHeight: 600, idealHeight: 700)
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search tools...")
+        // Sheets
         .sheet(isPresented: $isPresentingAddView) {
             AddMCPServerView(
                 onToolAdded: { serverName, serverDefinition, tools -> Bool in
@@ -93,330 +76,291 @@ struct ToolLibraryView: View {
         }
     }
     
-    // MARK: - Logic Helpers
+    // MARK: - Sidebar View
     
-    private func toggleExpansion(for id: UUID) {
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-            if expandedToolIDs.contains(id) {
-                expandedToolIDs.remove(id)
-            } else {
-                expandedToolIDs.insert(id)
-            }
-        }
-    }
-
-    // MARK: - Top Level Views
-
-    private var headerView: some View {
-        VStack(spacing: 16) {
-            // Title Bar
-            HStack {
-                VStack(alignment: .leading) {
-                    Text("Tool Library")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    Text("Manage capabilities and MCP integrations")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
+    @ViewBuilder
+    private var sidebar: some View {
+        List(selection: $selectedSidebar) {
+            
+            Section("Library") {
+                Label("All Tools", systemImage: "archivebox.fill")
+                    .tag(SidebarSelection.all)
             }
             
-            // Search Bar
-            HStack(spacing: 12) {
-                HStack {
-                    Image(systemName: "magnifyingglass")
+            Section("Environment") {
+                Label("Built-in Tools", systemImage: "cpu")
+                    .tag(SidebarSelection.local)
+            }
+            
+            Section("MCP Servers") {
+                let mcpSources = toolStore.sources.filter { $0.type == .mcp }
+                
+                if mcpSources.isEmpty {
+                    Text("No connected servers")
+                        .font(.caption)
                         .foregroundColor(.secondary)
-                    TextField("Search tools or servers...", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.body)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(mcpSources) { source in
+                        Label(source.serverName, systemImage: "network")
+                            .tag(SidebarSelection.mcp(source.id))
+                            .contextMenu {
+                                Button("Edit Configuration...") {
+                                    sourceToEdit = source
+                                }
+                                Divider()
+                                Button("Remove Server", role: .destructive) {
+                                    toolStore.deleteTool(toolSource: source)
+                                    if selectedSidebar == .mcp(source.id) {
+                                        selectedSidebar = .all
+                                    }
+                                }
+                            }
+                    }
                 }
-                .padding(8)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+            }
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("Tool Library")
+    }
+    
+    // MARK: - Detail (Table) View
+    
+    @ViewBuilder
+    private var detailView: some View {
+        VStack(spacing: 0) {
+            if displayedRows.isEmpty {
+                emptyStateView
+            } else {
+                Table(displayedRows) {
+                    // 1. Tool Identity Column
+                    TableColumn("Tool") { row in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(row.definition.name)
+                                .font(.system(.body, design: .monospaced))
+                                .fontWeight(.semibold)
+                                .foregroundColor(.primary)
+                            
+                            // Show source context if viewing "All Tools"
+                            if selectedSidebar == .all {
+                                Text(row.source.serverName)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 10)
+                    }
+                    .width(min: 200, ideal: 240, max: 320)
+                    
+                    // 2. Description Column
+                    TableColumn("Description") { row in
+                        Text(row.definition.description)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .lineLimit(3)
+                            .padding(.vertical, 10)
+                    }
+                    
+                    // 3. Status Column (Active/Inactive)
+                    TableColumn("Enabled") { row in
+                        ToolStatusToggle(
+                            configuredTools: $configuredTools,
+                            source: row.source,
+                            definition: row.definition
+                        )
+                        .padding(.vertical, 10)
+                    }
+                    .width(70)
+                    
+                    // 4. Security Column (HITL Approval)
+                    TableColumn("Require Approval") { row in
+                        ToolSecurityToggle(
+                            configuredTools: $configuredTools,
+                            source: row.source,
+                            definition: row.definition
+                        )
+                        .padding(.vertical, 10)
+                    }
+                    .width(140)
+                }
+                .padding(.top, 12) // Ensures the Table headers don't overlap with the search field/toolbar area
+            }
+            
+            // Bottom Action Bar
+            Divider()
+            HStack(spacing: 12) {
+                Spacer()
+                
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction) // Allows hitting 'Esc' to close
+                .controlSize(.large)
                 
                 Button {
                     isPresentingAddView = true
                 } label: {
-                    Label("Add MCP Server", systemImage: "server.rack")
+                    Label("Add MCP Server", systemImage: "plus")
+                        .padding(.horizontal, 8)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
                 .help("Connect a new Model Context Protocol server")
             }
+            .padding()
+            .background(Color(nsColor: .windowBackgroundColor))
         }
-        .padding()
-        .background(Color(nsColor: .windowBackgroundColor))
-        .overlay(Rectangle().frame(height: 1).foregroundColor(Color.secondary.opacity(0.1)), alignment: .bottom)
+        .navigationTitle(detailTitle)
+    }
+    
+    // MARK: - Computed Properties & Helpers
+    
+    private var detailTitle: String {
+        switch selectedSidebar {
+        case .all: return "All Tools"
+        case .local: return "Built-in Tools"
+        case .mcp(let id): return toolStore.sources.first(where: { $0.id == id })?.serverName ?? "MCP Server"
+        case .none: return "Select a category"
+        }
+    }
+    
+    /// Flattens the hierarchical data into a searchable array of rows for the Table.
+    private var displayedRows: [ToolTableRow] {
+        var rows: [ToolTableRow] = []
+        let sourcesToProcess: [ToolSource]
+        
+        switch selectedSidebar {
+        case .all:
+            sourcesToProcess = toolStore.sources
+        case .local:
+            sourcesToProcess = toolStore.sources.filter { $0.type == .local }
+        case .mcp(let id):
+            sourcesToProcess = toolStore.sources.filter { $0.id == id }
+        case .none:
+            sourcesToProcess = []
+        }
+        
+        for source in sourcesToProcess {
+            for tool in source.tools {
+                if searchText.isEmpty ||
+                   tool.name.localizedCaseInsensitiveContains(searchText) ||
+                   tool.description.localizedCaseInsensitiveContains(searchText) {
+                    rows.append(ToolTableRow(source: source, definition: tool))
+                }
+            }
+        }
+        
+        // Sort alphabetically by tool name
+        return rows.sorted { $0.definition.name < $1.definition.name }
     }
     
     private var emptyStateView: some View {
         VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "puzzlepiece.extension.fill")
+            Image(systemName: searchText.isEmpty ? "puzzlepiece.extension" : "magnifyingglass")
                 .font(.system(size: 48))
                 .foregroundColor(.secondary.opacity(0.5))
-            VStack(spacing: 4) {
-                Text("No Tools Available")
-                    .font(.headline)
-                    .foregroundColor(.primary)
-                Text("Get started by adding an MCP server.")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-            Button("Add First Server") { isPresentingAddView = true }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            Spacer()
-        }
-        .frame(minHeight: 300)
-    }
-    
-    private var noSearchResultsView: some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "magnifyingglass")
-                .font(.largeTitle)
-                .foregroundColor(.secondary)
-            Text("No matching tools found")
-                .foregroundColor(.secondary)
-            Spacer()
-        }
-        .frame(minHeight: 200)
-    }
-}
-
-// MARK: - Component: Tool Source Card
-
-struct ToolSourceCard: View {
-    let source: ToolSource
-    let isExpanded: Bool
-    @Binding var configuredTools: [Tool]
-    var onExpandToggle: () -> Void
-    var onEdit: () -> Void
-    var onDelete: () -> Void
-    
-    // Computed Selection State
-    private var selectionState: SelectionState {
-        let selectedCount = configuredTools.filter { tool in
-            tool.sourceId == source.id && source.tools.contains { $0.name == tool.name }
-        }.count
-        
-        if selectedCount == 0 { return .none }
-        if selectedCount == source.tools.count { return .all }
-        return .mixed
-    }
-    
-    enum SelectionState { case all, none, mixed }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Card Header
-            HStack(spacing: 12) {
-                // Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(source.type == .local ? Color.blue.opacity(0.1) : Color.purple.opacity(0.1))
-                        .frame(width: 36, height: 36)
-                    
-                    Image(systemName: source.type == .local ? "macpro.gen3.fill" : "network")
-                        .foregroundColor(source.type == .local ? .blue : .purple)
-                        .font(.system(size: 16))
-                }
-                
-                // Title
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(source.serverName)
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    HStack(spacing: 6) {
-                        Text(source.type == .local ? "Built-in" : "MCP Server")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.secondary.opacity(0.1))
-                            .cornerRadius(4)
-                        
-                        Text("• \(source.tools.count) tools")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                Spacer()
-                
-                // Actions
-                HStack(spacing: 12) {
-                    // Select All Toggle
-                    Button {
-                        toggleSelection()
-                    } label: {
-                        Image(systemName: selectionIcon)
-                            .font(.title3)
-                            .foregroundColor(selectionState == .none ? .secondary.opacity(0.5) : .blue)
-                    }
-                    .buttonStyle(.plain)
-                    .help(selectionState == .all ? "Deselect All" : "Select All")
-                    
-                    // MCP-Only Actions
-                    if source.type == .mcp {
-                        Menu {
-                            Button(action: onEdit) {
-                                Label("Edit Configuration", systemImage: "pencil")
-                            }
-                            Divider()
-                            Button(role: .destructive, action: onDelete) {
-                                Label("Remove Server", systemImage: "trash")
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.title3)
-                                .contentShape(Rectangle())
-                        }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden) // <--- FIX: Hides the merged arrow
-                        .foregroundColor(.secondary)
-                    }
-                    
-                    // Expansion Chevron (Explicit)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.7))
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                }
-            }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onExpandToggle()
-            }
             
-            // Expanded List
-            if isExpanded {
-                Divider()
-                
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(source.tools) { toolDef in
-                        ToolRow(
-                            toolDef: toolDef,
-                            source: source,
-                            configuredTools: $configuredTools
-                        )
-                        
-                        if toolDef.id != source.tools.last?.id {
-                            Divider()
-                                .padding(.leading, 16)
-                        }
-                    }
-                }
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            Text(searchText.isEmpty ? "No Tools Found" : "No Matches for '\(searchText)'")
+                .font(.headline)
+            
+            if searchText.isEmpty && selectedSidebar != .local {
+                Button("Add MCP Server") { isPresentingAddView = true }
+                    .buttonStyle(.bordered)
             }
         }
-        .cornerRadius(12)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.02), radius: 2, x: 0, y: 1)
-    }
-    
-    // Helpers
-    private var selectionIcon: String {
-        switch selectionState {
-        case .all: return "checkmark.circle.fill"
-        case .mixed: return "minus.circle.fill"
-        case .none: return "circle"
-        }
-    }
-    
-    private func toggleSelection() {
-        withAnimation {
-            if selectionState == .all {
-                // Deselect All
-                configuredTools.removeAll { tool in
-                    tool.sourceId == source.id && source.tools.contains { $0.name == tool.name }
-                }
-            } else {
-                // Select All
-                for toolDef in source.tools {
-                    let isAlreadySelected = configuredTools.contains {
-                        $0.sourceId == source.id && $0.name == toolDef.name
-                    }
-                    if !isAlreadySelected {
-                        let newTool = Tool(
-                            name: toolDef.name,
-                            description: toolDef.description,
-                            isEnabled: true,
-                            sourceId: source.id,
-                            parameters: toolDef.parameters
-                        )
-                        configuredTools.append(newTool)
-                    }
-                }
-            }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor))
     }
 }
 
-// MARK: - Component: Individual Tool Row
+// MARK: - Row Action Components
 
-struct ToolRow: View {
-    let toolDef: ToolDefinition
-    let source: ToolSource
+/// Manages the activation state of a tool (adding/removing from configuredTools).
+private struct ToolStatusToggle: View {
     @Binding var configuredTools: [Tool]
+    let source: ToolSource
+    let definition: ToolDefinition
     
-    private var isEnabled: Binding<Bool> {
-        Binding<Bool>(
+    var isEnabled: Binding<Bool> {
+        Binding(
             get: {
-                configuredTools.contains { $0.name == toolDef.name && $0.sourceId == source.id }
+                configuredTools.contains { $0.name == definition.name && $0.sourceId == source.id }
             },
-            set: { shouldEnable in
-                if shouldEnable {
-                    if !configuredTools.contains(where: { $0.name == toolDef.name && $0.sourceId == source.id }) {
+            set: { newValue in
+                if newValue {
+                    // Enable: Create the Tool and append it
+                    if !configuredTools.contains(where: { $0.name == definition.name && $0.sourceId == source.id }) {
                         let newTool = Tool(
-                            name: toolDef.name,
-                            description: toolDef.description,
+                            name: definition.name,
+                            description: definition.description,
                             isEnabled: true,
+                            requiresConfirmation: definition.requiresConfirmation, // Inherit default
                             sourceId: source.id,
-                            parameters: toolDef.parameters
+                            parameters: definition.parameters
                         )
                         configuredTools.append(newTool)
                     }
                 } else {
-                    configuredTools.removeAll { $0.name == toolDef.name && $0.sourceId == source.id }
+                    // Disable: Remove from the active array
+                    configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
                 }
             }
         )
     }
     
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Toggle("", isOn: isEnabled)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .padding(.top, 2)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(toolDef.name)
-                    .font(.body)
-                    .fontWeight(.medium)
-                    .foregroundColor(.primary)
-                
-                Text(toolDef.description)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        Toggle("Enable \(definition.name)", isOn: isEnabled)
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small) // Modernized from .regular to .small
+    }
+}
+
+/// Manages the HITL security preference (requiresConfirmation) for an active tool.
+private struct ToolSecurityToggle: View {
+    @Binding var configuredTools: [Tool]
+    let source: ToolSource
+    let definition: ToolDefinition
+    
+    var isConfigured: Bool {
+        configuredTools.contains { $0.name == definition.name && $0.sourceId == source.id }
+    }
+    
+    var requiresConfirmation: Binding<Bool> {
+        Binding(
+            get: {
+                // If it's configured, read the user's saved preference.
+                if let existing = configuredTools.first(where: { $0.name == definition.name && $0.sourceId == source.id }) {
+                    return existing.requiresConfirmation
+                }
+                // Otherwise, show what the default *will* be when enabled.
+                return definition.requiresConfirmation
+            },
+            set: { newValue in
+                // Only mutate if the tool is actually enabled/configured.
+                if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
+                    configuredTools[index].requiresConfirmation = newValue
+                }
             }
+        )
+    }
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Toggle("Require Approval", isOn: requiresConfirmation)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small) // Modernized from .regular to .small
+                .disabled(!isConfigured) // Lock the security control if the tool is disabled
             
-            Spacer()
-        }
-        .padding(12)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            isEnabled.wrappedValue.toggle()
+            // Visual Indicator (Fixed width ensures toggles align perfectly)
+            Image(systemName: requiresConfirmation.wrappedValue ? "lock.shield.fill" : "shield.slash")
+                .foregroundColor(requiresConfirmation.wrappedValue ? (isConfigured ? .orange : .secondary) : .secondary.opacity(0.3))
+                .font(.system(size: 14, weight: .medium)) // Slightly reduced font size to match small toggle
+                .frame(width: 20, alignment: .center)
+                .help(isConfigured
+                      ? (requiresConfirmation.wrappedValue ? "Suspends execution for user approval." : "Runs automatically.")
+                      : "Enable tool to configure security.")
         }
     }
 }

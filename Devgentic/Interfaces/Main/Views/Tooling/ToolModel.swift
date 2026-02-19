@@ -5,6 +5,8 @@
 //  Created by Raj Singh on 20/09/25.
 //
 //  Centralized on 10/10/25 to act as a single source of truth for tool-related data models.
+//  Updated for Phase 1: Security & HITL - Added requiresConfirmation to ToolDefinition
+//  Updated for Phase 2: Added requiresConfirmation to ExecutableTool protocol
 //
 
 import Foundation
@@ -39,6 +41,8 @@ struct ToolDefinition: Identifiable, Hashable, Codable {
     let name: String
     let description: String
     let parameters: ToolParameters
+    
+    var requiresConfirmation: Bool = true
 }
 
 /// An enum to differentiate between the origins of a tool source (local vs. remote).
@@ -70,6 +74,8 @@ protocol ExecutableTool {
     
     /// The schema defining the tool's required input arguments.
     var parameters: ToolParameters { get }
+    
+    var requiresConfirmation: Bool { get }
     
     /// The asynchronous method that contains the tool's core logic.
     /// - Parameter arguments: A dictionary containing the arguments, conforming to the `parameters` schema.

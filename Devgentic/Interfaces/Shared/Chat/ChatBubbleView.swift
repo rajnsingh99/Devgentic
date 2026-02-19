@@ -85,6 +85,13 @@ struct ChatBubbleView: View {
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
 
+                    // 3b. CLARIFICATION
+                    if let clarification = message.pendingClarification {
+                        ClarificationRequestView(clarification: clarification, message: message)
+                            .padding(.bottom, 8)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
                     // 4. CONTENT
                     switch contentToDisplay {
                     case .plainText(let text):
@@ -429,6 +436,71 @@ struct PermissionRequestView: View {
     }
 }
 
+
+// MARK: - Clarification Request
+struct ClarificationRequestView: View {
+    let clarification: PendingClarification
+    @ObservedObject var message: ChatMessage
+    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    @State private var userInput: String = ""
+    @State private var isSubmitting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "questionmark.bubble.fill").foregroundColor(.blue).font(.system(size: 14))
+                Text("Clarification Needed").font(.system(size: 13, weight: .semibold)).foregroundColor(.primary)
+                Spacer()
+            }
+            Divider().background(Color.gray.opacity(0.2))
+            Text(clarification.question)
+                .font(.system(size: 13))
+                .foregroundColor(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("Type your response...", text: $userInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+                .onSubmit { submitResponse() }
+            HStack(spacing: 12) {
+                if isSubmitting { ProgressView().scaleEffect(0.6).frame(height: 28) }
+                else {
+                    Button(action: { submitSkip() }) {
+                        Text("Skip").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(Color.gray.opacity(0.6)).cornerRadius(6)
+                    }.buttonStyle(.plain)
+                    Button(action: { submitResponse() }) {
+                        Text("Send").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(Color.blue.opacity(0.8)).cornerRadius(6)
+                    }.buttonStyle(.plain).disabled(userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(.top, 4)
+        }
+        .padding(12).background(Color.blue.opacity(0.05)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.3), lineWidth: 1)).frame(maxWidth: 500)
+    }
+
+    private func submitResponse() {
+        let trimmed = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        withAnimation { isSubmitting = true }
+        mainAppViewModel.submitClarificationResponse(conversationID: message.conversationId, response: trimmed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            withAnimation {
+                message.pendingClarification = nil
+                message.thinkingHeadline = "Received your input. Resuming..."
+            }
+        }
+    }
+
+    private func submitSkip() {
+        withAnimation { isSubmitting = true }
+        mainAppViewModel.submitClarificationResponse(conversationID: message.conversationId, response: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            withAnimation {
+                message.pendingClarification = nil
+                message.thinkingHeadline = "Skipped clarification. Continuing..."
+            }
+        }
+    }
+}
 
 // MARK: - Helpers
 fileprivate struct ActionButton<LabelContent: View>: View {

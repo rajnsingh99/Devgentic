@@ -173,8 +173,11 @@ class BackendOrchestrationService: ObservableObject {
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
                             // [HITL] Fixed: Handle the new event type
-                            case .requestConfirmation(let toolName, let params):
+                            case .requestConfirmation(let toolName, _):
                                 logger.debug("[HITL] Permission requested for \(toolName)")
+                                continuation.yield(event)
+                            case .requestClarification(let question):
+                                logger.debug("[ASK_USER] Clarification requested: \(question)")
                                 continuation.yield(event)
                             case .error(let err):
                                 logger.debug("[ERROR] \(err)")

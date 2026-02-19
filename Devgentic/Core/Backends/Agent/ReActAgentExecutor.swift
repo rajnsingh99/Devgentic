@@ -8,9 +8,10 @@
 // + Phase 3: Header-Aware Adaptation (The Safety Net) - Fixed APIError Type
 // + Phase 4: Graceful Cancellation & Memory State Persistence
 // + Phase 5: [HITL] Tool Gating & Suspension
+// + Refactored: Prompt Generation Layer decoupled from Persona Identity
+// + Hotfix: Explicit Task Completion instructions to prevent "Tool Not Found" loop
 
 import Foundation
-import SwiftAgent
 import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ReActExecutor")
@@ -54,6 +55,8 @@ actor ReActAgentExecutor: AgentExecutor {
                     
                     var currentIteration = 0
                     var consecutiveRetries = 0
+                    var consecutiveParseFailures = 0
+                    let maxConsecutiveParseFailures = 3
                     var scratchpad: [String] = []
                     
                     // Load the Active State (RAM) or create a default one if missing.
@@ -169,9 +172,10 @@ actor ReActAgentExecutor: AgentExecutor {
                                 iteration: currentIteration
                             )
                             
-                            // Success! Reset retries.
+                            // Success! Reset retries and parse failures.
                             consecutiveRetries = 0
-                            
+                            consecutiveParseFailures = 0
+
                         } catch {
                             // --- PHASE 3: HEADER-AWARE ERROR HANDLING ---
                             let errorDesc = error.localizedDescription
@@ -220,10 +224,19 @@ actor ReActAgentExecutor: AgentExecutor {
                             }
                             
                             // Cognitive/Parsing Error
-                            logger.error("Cognitive Generation Failed: \(error.localizedDescription)")
-                            scratchpad.append("System Error: Your last output failed JSON validation. Ensure you are outputting a valid JSON INSTANCE (values) and NOT the schema definition.")
+                            consecutiveParseFailures += 1
+                            logger.error("Cognitive Generation Failed (\(consecutiveParseFailures)/\(maxConsecutiveParseFailures)): \(error.localizedDescription)")
 
-                            continuation.yield(.thought("⚠️ Error: Invalid JSON output. Retrying..."))
+                            if consecutiveParseFailures >= maxConsecutiveParseFailures {
+                                logger.error("🛑 Max consecutive parse failures reached. Aborting with graceful message.")
+                                continuation.yield(.content("I'm having trouble processing this request right now — the model is returning responses I can't interpret. Please try rephrasing your request or switching to a different model."))
+                                continuation.finish()
+                                return
+                            }
+
+                            scratchpad.append("System Error: Your last output failed JSON validation (attempt \(consecutiveParseFailures)/\(maxConsecutiveParseFailures)). You MUST output a PURE JSON OBJECT with at minimum {\"internalMonologue\": \"...\", \"displayHeadline\": \"...\"}. No prose, no markdown, no schema definitions.")
+
+                            continuation.yield(.thought("⚠️ Error: Invalid JSON output. Retrying (\(consecutiveParseFailures)/\(maxConsecutiveParseFailures))..."))
 
                             // Enforce rate limit before retrying to prevent rapid retry → 429 cascade
                             await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
@@ -296,13 +309,54 @@ actor ReActAgentExecutor: AgentExecutor {
                         if let action = step.action {
                             // [CRITICAL CHECK] Stop before executing tool
                             try Task.checkCancellation()
-                            
+
                             actionWasExecuted = true
                             iterationMetadata["tool_name"] = action.toolName
-                            
+
+                            // [ASK_USER] Intercept clarification requests before normal dispatch
+                            if action.toolName == "ask_user" {
+                                let question: String
+                                if let q = action.parameters["question"],
+                                   let encoder = try? JSONEncoder().encode(q),
+                                   let str = String(data: encoder, encoding: .utf8) {
+                                    question = str.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                                } else {
+                                    question = step.internalMonologue
+                                }
+
+                                logger.info("🙋 [ASK_USER] Agent requesting clarification: \(question)")
+
+                                continuation.yield(.requestClarification(question: question))
+
+                                onTraceUpdate(AgentTraceLog(
+                                    traceID: iterationSpan.traceID,
+                                    spanID: iterationSpan.spanID,
+                                    parentSpanID: iterationSpan.parentSpanID,
+                                    stepNumber: currentIteration,
+                                    state: .requestingPermission,
+                                    content: "Waiting for user clarification: \(question)"
+                                ))
+
+                                let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: input.conversationID)
+
+                                if let response = userResponse, !response.isEmpty {
+                                    logger.info("✅ [ASK_USER] User responded: \(response.prefix(100))")
+                                    let observation = "User Response: \(response)"
+                                    scratchpad.append("Observation (Step \(currentIteration)): \(observation)")
+                                    continuation.yield(.toolOutput(ToolOutput(toolName: "ask_user", output: observation, isSuccess: true)))
+                                } else {
+                                    logger.info("❌ [ASK_USER] User did not respond or cancelled.")
+                                    let observation = "System: User did not provide a response. Proceed with your best judgment or provide a finalAnswer."
+                                    scratchpad.append("Observation (Step \(currentIteration)): \(observation)")
+                                    continuation.yield(.toolOutput(ToolOutput(toolName: "ask_user", output: observation, isSuccess: false)))
+                                }
+
+                                continue cognitiveLoop
+                            }
+
                             // [HITL] 1. Resolve the tool definition to check sensitivity
                             let toolDefinition = input.tools.first { $0.name == action.toolName }
-                            
+
                             // [HITL] 2. Check Permission Gate
                             if let tool = toolDefinition, tool.requiresConfirmation {
                                 logger.notice("🛑 [HITL] Tool '\(action.toolName)' requires confirmation. Suspending...")
@@ -567,33 +621,27 @@ actor ReActAgentExecutor: AgentExecutor {
         constraints: Set<String>,
         isFreshStart: Bool
     ) -> String {
-        return [
-            buildKernelLayer(),
+        let layers = [
+            buildPersonaLayer(input),
+            buildEnvironmentLayer(),
             buildMemoryLayer(state, input.recentHistory, isFreshStart),
             buildReActStrategyLayer(constraints),
-            buildPersonaLayer(input),
             buildContextLayer(input, scratchpad)
-        ].joined(separator: "\n\n")
+        ]
+        return layers.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
     
-    nonisolated private func buildKernelLayer() -> String {
+    nonisolated private func buildEnvironmentLayer() -> String {
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         let userName = NSUserName()
         let date = Date().formatted(date: .numeric, time: .shortened)
         
         return """
-        # LAYER 1: KERNEL CONTEXT
-        You are Devgentic, a specialized macOS System Agent.
-        
-        ## SYSTEM FACTS
+        # ENVIRONMENT FACTS
         - OS: macOS \(osVersion)
         - Shell: Zsh (Non-Interactive Mode)
         - User: \(userName)
         - Date: \(date)
-        
-        ## SAFETY PROTOCOLS
-        1. **NON-INTERACTIVE ONLY**: No `nano`, `vim`, `sudo` without -n.
-        2. **DESTRUCTIVE ACTIONS**: Verify paths before `rm -rf`.
         """
     }
     
@@ -607,7 +655,7 @@ actor ReActAgentExecutor: AgentExecutor {
         let historyWarning = isFreshStart ? "(NOTE: These actions are from a previous turn. Do not resume them. Focus on Active Memory.)" : ""
         
         return """
-        # LAYER 1.5: TWIN-STORE MEMORY
+        # TWIN-STORE MEMORY
         
         ## 🧠 ACTIVE MEMORY (RAM)
         This is your CURRENT brain state. Trust this over history.
@@ -632,22 +680,26 @@ actor ReActAgentExecutor: AgentExecutor {
         }
         
         return """
-        # LAYER 2: COGNITIVE STRATEGY
+        # COGNITIVE STRATEGY & MECHANICS
         ## PROTOCOL
-        1. Analyze Active Memory.
-        2. If a path failed previously (Ghost Protocol), do NOT retry it.
-        3. If a tool fails, **STOP** and reflect.
+        1. You operate in a Think -> Act -> Observe loop.
+        2. You MUST output valid JSON conforming to the CognitiveStep schema.
+        3. Analyze Active Memory before deciding your next move.
+        4. If a path failed previously (Ghost Protocol), do NOT retry it.
+        5. If a tool fails, **STOP** and reflect on the error before proceeding.
+        6. **TASK COMPLETION**: If the goal is met or you need to reply to the user, you MUST set `action` to `null` and provide your response in the `finalAnswer` field. Do NOT hallucinate tools like 'none' or 'inform'.
+        7. **CLARIFICATION**: If you need information from the user to proceed, use the `ask_user` tool: `{"toolName": "ask_user", "parameters": {"question": "Your question here"}}`. Do NOT invent tools like 'inform' or 'respond'. The ONLY way to talk to the user is via `finalAnswer` or `ask_user`.
         \(constraintBlock)
         """
     }
     
     nonisolated private func buildPersonaLayer(_ input: AgentInput) -> String {
         guard let instructions = input.instructions, !instructions.isEmpty else { return "" }
-        return "# LAYER 3: INSTRUCTIONS\n\(instructions)"
+        return "# SYSTEM INSTRUCTIONS\n\(instructions)"
     }
     
     nonisolated private func buildContextLayer(_ input: AgentInput, _ scratchpad: [String]) -> String {
-        var context = "# LAYER 4: EXECUTION CONTEXT\n"
+        var context = "# EXECUTION CONTEXT\n"
         context += "## USER REQUEST\n\"\(input.userInput)\"\n\n"
         
         context += "## TOOLS\n"

@@ -78,6 +78,7 @@
     <entity name="MCPToolEntity" representedClassName="MCPToolEntity" syncable="YES" codeGenerationType="class">
         <attribute name="name" optional="YES" attributeType="String"/>
         <attribute name="parametersData" optional="YES" attributeType="Binary"/>
+        <attribute name="requiresConfirmation" optional="YES" attributeType="Boolean" usesScalarValueType="YES"/>
         <attribute name="toolDescription" optional="YES" attributeType="String"/>
         <relationship name="toolItem" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ToolItemEntity" inverseName="tools" inverseEntity="ToolItemEntity"/>
     </entity>

@@ -7,10 +7,8 @@
 //
 
 import Foundation
-import SwiftAgent
 
 /// A generic wrapper that adapts any MCP ToolDefinition into an executable DevgenticTool.
-/// This allows the native SwiftAgent to execute tools defined dynamically by MCP servers.
 struct DynamicMCPTool: DevgenticTool {
     
     // MARK: - Properties

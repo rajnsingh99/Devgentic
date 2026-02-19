@@ -365,13 +365,22 @@ class MainApplicationViewModel: ObservableObject {
     ///   - approved: True to execute the tool, False to reject it.
     func submitToolApproval(conversationID: UUID, approved: Bool) {
         logger.info("[HITL] Submitting approval decision: \(approved) for conversation \(conversationID)")
-        
+
         Task {
             // Signal the suspension service to resume execution
             await ExecutionSuspensionService.shared.resume(for: conversationID, approved: approved)
         }
     }
-    
+
+    /// Submits the user's text response (or nil for skip) for a pending clarification request.
+    func submitClarificationResponse(conversationID: UUID, response: String?) {
+        logger.info("[ASK_USER] Submitting clarification response for conversation \(conversationID)")
+
+        Task {
+            await ExecutionSuspensionService.shared.resumeClarification(for: conversationID, userInput: response)
+        }
+    }
+
     // MARK: - Message Helpers
     
     private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) -> ChatMessage {

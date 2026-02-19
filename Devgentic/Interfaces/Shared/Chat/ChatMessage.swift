@@ -53,6 +53,10 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     // [HITL] New Property for Permission Card
     // Holds the data for the tool waiting for approval.
     @Published var pendingToolConfirmation: PendingToolConfirmation? = nil
+
+    // [ASK_USER] Property for Clarification Card
+    // Holds the data for a pending clarification request from the agent.
+    @Published var pendingClarification: PendingClarification? = nil
     
     // MARK: - Performance Caching
     var cachedMarkdownBlocks: [ContentBlock]? = nil
@@ -107,7 +111,8 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
                lhs.agentResponse == rhs.agentResponse &&
                lhs.thoughts == rhs.thoughts &&
                lhs.artifacts == rhs.artifacts &&
-               lhs.pendingToolConfirmation == rhs.pendingToolConfirmation // Update Equality Check
+               lhs.pendingToolConfirmation == rhs.pendingToolConfirmation &&
+               lhs.pendingClarification == rhs.pendingClarification
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {
@@ -144,8 +149,9 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.cachedMarkdownBlocks = nil
         self.isThinkingExpanded = false
         self.pendingToolConfirmation = nil
+        self.pendingClarification = nil
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         

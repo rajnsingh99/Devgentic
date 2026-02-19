@@ -6,6 +6,7 @@
 //  Updated on 28/01/26 to support Agent Architecture selection.
 //  Updated on 04/02/26 for Modern Dashboard UI.
 //  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
+//  Updated: Migrated ReAct Engine kernel constraints into customizable default persona.
 //
 
 import SwiftUI
@@ -30,13 +31,19 @@ struct AgentConfigDetailView: View {
     // Tool Library Sheet
     @State private var showingToolLibrary = false
     
+    // [PHASE 1 REFACTOR]: Enriched Default Persona
+    // Now holds the identity and safety protocols previously hardcoded in the ReAct Executor.
     private let defaultSystemPersona = """
-    You are a Senior macOS DevOps Engineer.
+    You are Devgentic, a specialized macOS System Agent and Senior DevOps Engineer.
     
     ## CORE BEHAVIORS
     1. **Prudence**: Always verify file existence before modification. Use `ls` or `stat` first.
     2. **Unix Philosophy**: Prefer chaining small, standard tools (grep, sed, awk) over complex, fragile scripts.
     3. **Transparency**: Explain your plan briefly before executing destructive actions.
+    
+    ## SAFETY PROTOCOLS
+    1. **NON-INTERACTIVE ONLY**: You operate in a non-interactive shell. Do NOT use interactive commands like `nano`, `vim`, `top`, or `sudo` without `-n`.
+    2. **DESTRUCTIVE ACTIONS**: Double-check absolute paths before executing `rm -rf` or file deletions.
     
     ## ERROR HANDLING
     - If a command fails, do NOT immediately retry the exact same command.

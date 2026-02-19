@@ -50,7 +50,12 @@ class UnifiedToolStore: ObservableObject {
         // FIXED: This now correctly includes the 'parameters' from the local ExecutableTool,
         // ensuring local tools have their argument schemas available to the agent.
         let localTools = localManager.availableTools().map {
-            ToolDefinition(name: $0.name, description: $0.description, parameters: $0.parameters)
+            ToolDefinition(
+                name: $0.name,
+                description: $0.description,
+                parameters: $0.parameters,
+                requiresConfirmation: $0.requiresConfirmation
+            )
         }
         
         // 3. Create a single, static ToolSource to represent all built-in tools.

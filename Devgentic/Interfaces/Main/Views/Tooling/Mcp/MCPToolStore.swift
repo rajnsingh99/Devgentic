@@ -4,6 +4,8 @@
 //
 //  Created by Raj Singh on 28/09/25.
 //
+//  Updated for Phase 1: Mapped requiresConfirmation boolean from CoreData
+//
 
 import Foundation
 import CoreData
@@ -122,6 +124,9 @@ class MCPToolStore: ObservableObject {
         newMCPToolEntity.name = tool.name
         newMCPToolEntity.toolDescription = tool.description
         
+        // [Phase 1: Persistence] Map the boolean into CoreData
+        newMCPToolEntity.requiresConfirmation = tool.requiresConfirmation
+        
         do {
             newMCPToolEntity.parametersData = try JSONEncoder().encode(tool.parameters)
         } catch {
@@ -181,7 +186,8 @@ extension ToolItemEntity {
             return ToolDefinition(
                 name: mcpToolEntity.name ?? "Unknown",
                 description: mcpToolEntity.toolDescription ?? "",
-                parameters: parameters // Use the decoded (or default) parameters
+                parameters: parameters, // Use the decoded (or default) parameters
+                requiresConfirmation: mcpToolEntity.requiresConfirmation // [Phase 1: Hydrate from Core Data]
             )
         }.sorted { $0.name < $1.name } // Sort tools alphabetically
         

@@ -147,6 +147,7 @@ struct Tool: Codable, Hashable, Identifiable {
     let name: String
     let description: String
     var isEnabled: Bool = true
+    var requiresConfirmation: Bool = true
     
     let sourceId: UUID
     let parameters: ToolParameters

@@ -36,6 +36,21 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
         return nativeTool.parameterSchema
     }
     
+    var requiresConfirmation: Bool {
+        // A whitelist of strictly read-only tools that do not alter state or execute arbitrary code.
+        let safeTools: Set<String> = [
+            "list_directory",
+            "read_file",
+            "get_system_stats",
+            "fs_watch_folder",
+            "fs_smart_search",
+            "fs_read_metadata",
+            "read_session_history"
+        ]
+        // If the tool is NOT in the safe list, it requires confirmation.
+        return !safeTools.contains(nativeTool.name)
+    }
+    
     /// Bridges the untyped execution call to the strongly-typed native tool call.
     func execute(arguments: [String: Any]) async throws -> String {
         do {
@@ -65,7 +80,7 @@ final class LocalToolManager {
     
     // The registry holds types that conform to ExecutableTool (our wrappers)
     private var toolRegistry: [String: ExecutableTool] = [:]
-
+    
     private init() {
         // Register Native File System Tools
         registerNative(ListDirectoryTool())
@@ -92,17 +107,17 @@ final class LocalToolManager {
         
         logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")
     }
-
+    
     /// Helper to wrap and register a native tool.
     private func registerNative<T: DevgenticTool>(_ tool: T) {
         let wrapper = NativeToolWrapper(nativeTool: tool)
         toolRegistry[wrapper.name] = wrapper
     }
-
+    
     func availableTools() -> [ExecutableTool] {
         return Array(toolRegistry.values)
     }
-
+    
     func execute(name: String, arguments: [String: Any]) async -> String {
         logger.info("--- executing local tool (native) ---")
         logger.info("Tool: '\(name)'")
