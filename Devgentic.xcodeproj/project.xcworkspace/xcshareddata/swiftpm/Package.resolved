@@ -1,5 +1,5 @@
 {
-  "originHash" : "512c45604618ebdf4b6fac972b74028fee7e64b2dec0eb6379c148d42b07b089",
+  "originHash" : "3706ab324715e92964f9651d3c68341f03b8a1245a8e484f09d8923360a856b3",
   "pins" : [
     {
       "identity" : "codeeditlanguages",
@@ -92,33 +92,6 @@
       }
     },
     {
-      "identity" : "openfoundationmodels",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1amageek/OpenFoundationModels",
-      "state" : {
-        "branch" : "1.2.0",
-        "revision" : "cc7c2137b9e00f3278beff09e2f599f5d0725186"
-      }
-    },
-    {
-      "identity" : "openfoundationmodels-ollama",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1amageek/OpenFoundationModels-Ollama",
-      "state" : {
-        "branch" : "main",
-        "revision" : "bcbc737eea39d79a675f9f84c586e4fe38f5656c"
-      }
-    },
-    {
-      "identity" : "openfoundationmodels-openai",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1amageek/OpenFoundationModels-OpenAI.git",
-      "state" : {
-        "branch" : "main",
-        "revision" : "5b0997c0790022067a1ce44381f27cee506014e1"
-      }
-    },
-    {
       "identity" : "rearrange",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ChimeHQ/Rearrange",
@@ -134,15 +107,6 @@
       "state" : {
         "revision" : "309a47b2b1d9b5e991f36961c983ecec72275be3",
         "version" : "1.6.1"
-      }
-    },
-    {
-      "identity" : "swift-async-algorithms",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-async-algorithms.git",
-      "state" : {
-        "revision" : "6c050d5ef8e1aa6342528460db614e9770d7f804",
-        "version" : "1.1.1"
       }
     },
     {
@@ -188,15 +152,6 @@
       "state" : {
         "revision" : "c0407a0b52677cb395d824cac2879b963075ba8c",
         "version" : "0.10.2"
-      }
-    },
-    {
-      "identity" : "swift-syntax",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/swiftlang/swift-syntax.git",
-      "state" : {
-        "revision" : "4799286537280063c85a32f09884cfbca301b1a1",
-        "version" : "602.0.0"
       }
     },
     {

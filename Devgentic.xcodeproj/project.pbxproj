@@ -12,7 +12,6 @@
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
-		35E068CC2F2801800060B929 /* OpenFoundationModelsOpenAI in Frameworks */ = {isa = PBXBuildFile; productRef = 35E068CB2F2801800060B929 /* OpenFoundationModelsOpenAI */; };
 		35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 35E68C412E313B0B00993F95 /* WhisperKit */; };
 		35EB3F662F32967000555A83 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F652F32967000555A83 /* MLX */; };
 		35EB3F682F32967000555A83 /* MLXFast in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F672F32967000555A83 /* MLXFast */; };
@@ -21,11 +20,6 @@
 		35EB3F6F2F329FDA00555A83 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F6E2F329FDA00555A83 /* MLXLLM */; };
 		35EB3F712F329FDA00555A83 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F702F329FDA00555A83 /* MLXLMCommon */; };
 		35EB3F732F329FDA00555A83 /* MLXVLM in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F722F329FDA00555A83 /* MLXVLM */; };
-		35F184A02F23F43E0003320F /* OpenFoundationModels in Frameworks */ = {isa = PBXBuildFile; productRef = 35F1849F2F23F43E0003320F /* OpenFoundationModels */; };
-		35F184A22F23F43E0003320F /* OpenFoundationModelsCore in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184A12F23F43E0003320F /* OpenFoundationModelsCore */; };
-		35F184A42F23F43E0003320F /* OpenFoundationModelsExtra in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184A32F23F43E0003320F /* OpenFoundationModelsExtra */; };
-		35F184A62F23F43E0003320F /* OpenFoundationModelsMacros in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184A52F23F43E0003320F /* OpenFoundationModelsMacros */; };
-		35F184A92F23F49A0003320F /* OpenFoundationModelsOllama in Frameworks */ = {isa = PBXBuildFile; productRef = 35F184A82F23F49A0003320F /* OpenFoundationModelsOllama */; };
 		35F483FA2E23C8680031D7CB /* EntityInfo-devgentic.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35F483F82E23C8680031D7CB /* EntityInfo-devgentic.generated.swift */; };
 /* End PBXBuildFile section */
 
@@ -78,20 +72,14 @@
 			files = (
 				35EB3F662F32967000555A83 /* MLX in Frameworks */,
 				35EB3F682F32967000555A83 /* MLXFast in Frameworks */,
-				35F184A22F23F43E0003320F /* OpenFoundationModelsCore in Frameworks */,
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
-				35F184A42F23F43E0003320F /* OpenFoundationModelsExtra in Frameworks */,
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
-				35E068CC2F2801800060B929 /* OpenFoundationModelsOpenAI in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
 				35EB3F712F329FDA00555A83 /* MLXLMCommon in Frameworks */,
 				35EB3F732F329FDA00555A83 /* MLXVLM in Frameworks */,
-				35F184A62F23F43E0003320F /* OpenFoundationModelsMacros in Frameworks */,
 				355A5D9F2E882BA0007C22CC /* MCP in Frameworks */,
-				35F184A92F23F49A0003320F /* OpenFoundationModelsOllama in Frameworks */,
 				35EB3F6D2F329FDA00555A83 /* MLXEmbedders in Frameworks */,
-				35F184A02F23F43E0003320F /* OpenFoundationModels in Frameworks */,
 				35EB3F6A2F32967000555A83 /* MLXNN in Frameworks */,
 				35EB3F6F2F329FDA00555A83 /* MLXLLM in Frameworks */,
 				35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */,
@@ -178,12 +166,6 @@
 				35CDA7422E2A2A3400564AB7 /* Highlightr */,
 				35E68C412E313B0B00993F95 /* WhisperKit */,
 				355A5D9E2E882BA0007C22CC /* MCP */,
-				35F1849F2F23F43E0003320F /* OpenFoundationModels */,
-				35F184A12F23F43E0003320F /* OpenFoundationModelsCore */,
-				35F184A32F23F43E0003320F /* OpenFoundationModelsExtra */,
-				35F184A52F23F43E0003320F /* OpenFoundationModelsMacros */,
-				35F184A82F23F49A0003320F /* OpenFoundationModelsOllama */,
-				35E068CB2F2801800060B929 /* OpenFoundationModelsOpenAI */,
 				35EB3F652F32967000555A83 /* MLX */,
 				35EB3F672F32967000555A83 /* MLXFast */,
 				35EB3F692F32967000555A83 /* MLXNN */,
@@ -281,9 +263,6 @@
 				35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */,
 				35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */,
 				355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */,
-				35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */,
-				35F184A72F23F49A0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels-Ollama" */,
-				35E068CA2F2801800060B929 /* XCRemoteSwiftPackageReference "OpenFoundationModels-OpenAI" */,
 				35EB3F642F32967000555A83 /* XCRemoteSwiftPackageReference "mlx-swift" */,
 				35EB3F6B2F329FDA00555A83 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 			);
@@ -688,14 +667,6 @@
 				minimumVersion = 4.4.0;
 			};
 		};
-		35E068CA2F2801800060B929 /* XCRemoteSwiftPackageReference "OpenFoundationModels-OpenAI" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/1amageek/OpenFoundationModels-OpenAI.git";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
 		35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
@@ -718,22 +689,6 @@
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 2.30.3;
-			};
-		};
-		35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/1amageek/OpenFoundationModels";
-			requirement = {
-				branch = 1.2.0;
-				kind = branch;
-			};
-		};
-		35F184A72F23F49A0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels-Ollama" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/1amageek/OpenFoundationModels-Ollama";
-			requirement = {
-				branch = main;
-				kind = branch;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -763,11 +718,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */;
 			productName = ObjectBox.xcframework;
-		};
-		35E068CB2F2801800060B929 /* OpenFoundationModelsOpenAI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35E068CA2F2801800060B929 /* XCRemoteSwiftPackageReference "OpenFoundationModels-OpenAI" */;
-			productName = OpenFoundationModelsOpenAI;
 		};
 		35E68C412E313B0B00993F95 /* WhisperKit */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -808,31 +758,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35EB3F6B2F329FDA00555A83 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXVLM;
-		};
-		35F1849F2F23F43E0003320F /* OpenFoundationModels */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */;
-			productName = OpenFoundationModels;
-		};
-		35F184A12F23F43E0003320F /* OpenFoundationModelsCore */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */;
-			productName = OpenFoundationModelsCore;
-		};
-		35F184A32F23F43E0003320F /* OpenFoundationModelsExtra */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */;
-			productName = OpenFoundationModelsExtra;
-		};
-		35F184A52F23F43E0003320F /* OpenFoundationModelsMacros */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F1849E2F23F43E0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels" */;
-			productName = OpenFoundationModelsMacros;
-		};
-		35F184A82F23F49A0003320F /* OpenFoundationModelsOllama */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 35F184A72F23F49A0003320F /* XCRemoteSwiftPackageReference "OpenFoundationModels-Ollama" */;
-			productName = OpenFoundationModelsOllama;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

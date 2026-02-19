@@ -6,8 +6,6 @@
 //
 
 import Foundation
-import OpenFoundationModels
-import OpenFoundationModelsCore
 
 // MARK: - Agent State Definitions
 
@@ -21,7 +19,7 @@ enum AgentStep: String, Codable, Sendable {
     case observing      = "Observing"      // The agent is processing the tool output
     case finalizing     = "Finalizing"     // The agent is generating the final answer
     case errorRecovery  = "Recovering"     // The agent encountered an error and is self-correcting
-    
+
     // [HITL] Phase 1: New State for Tool Gating
     case requestingPermission = "Awaiting Permission" // The agent is waiting for user approval
 }
@@ -33,21 +31,21 @@ enum AgentStep: String, Codable, Sendable {
 struct AgentTool: Sendable {
     let name: String
     let description: String
-    let parameters: OpenFoundationModelsCore.GenerationSchema
-    
+    let parameters: ToolParameters
+
     // [HITL] Phase 1: Sensitivity Flag
     /// If true, the Executor will pause and ask the user before running this tool.
     let requiresConfirmation: Bool
-    
+
     /// The closure to execute the tool.
     /// Takes JSON Data (arguments) and returns a String (output).
     let run: @Sendable (Data) async throws -> String
-    
+
     // [HITL] Updated Init with default for backward compatibility
     init(
         name: String,
         description: String,
-        parameters: OpenFoundationModelsCore.GenerationSchema,
+        parameters: ToolParameters,
         requiresConfirmation: Bool = false,
         run: @escaping @Sendable (Data) async throws -> String
     ) {
@@ -68,40 +66,40 @@ struct AgentInput: Sendable {
     let conversationID: UUID
     let tools: [AgentTool]
     let ragContext: String?
-    
+
     // Architecture: Split-State (Active State + History)
     let activeState: MutableActiveState?
     let recentHistory: String?
-    
+
     // Execution Context Flag
     let isNewRequest: Bool
-    
+
     // [Step 3 Architecture Update]
     let generatorStrategy: any CognitiveGenerator
-    
+
     // [Phase 2 Rate Limiting]
     // The specific quota profile to enforce for this execution
     let rateLimitCategory: RateLimitCategory
-    
+
     let instructions: String?
-    
+
     // The Trace Context for distributed observability
     let traceContext: TraceContext
-    
+
     /// Computed Compatibility Layer
     var persistentMemory: String? {
         guard let state = activeState else { return nil }
         let history = recentHistory ?? "(No recent history)"
-        
+
         return """
         ## 🧠 ACTIVE MEMORY (RAM)
         Status: \(state.subTasks.first(where: { $0.status == "active" })?.description ?? "Idle")
-        
+
         ## 📜 RECENT ACTIVITY
         \(history)
         """
     }
-    
+
     init(
         userInput: String,
         chatHistory: [ChatMessage],
@@ -124,10 +122,10 @@ struct AgentInput: Sendable {
         self.activeState = activeState
         self.recentHistory = recentHistory
         self.isNewRequest = isNewRequest
-        
+
         self.generatorStrategy = generatorStrategy ?? NativeStructuredGenerator()
         self.rateLimitCategory = rateLimitCategory
-        
+
         self.instructions = instructions
         self.traceContext = traceContext
     }

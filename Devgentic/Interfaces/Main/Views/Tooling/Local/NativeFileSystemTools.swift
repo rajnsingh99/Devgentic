@@ -7,12 +7,10 @@
 //
 
 import Foundation
-import OpenFoundationModels
-import OpenFoundationModelsCore
 
 // MARK: - List Directory Tool
 
-struct ListDirectoryTool: OpenFoundationModels.Tool {
+struct ListDirectoryTool: DevgenticTool {
     let name = "list_directory"
     let description = """
     [PURPOSE]: Lists the filenames and subdirectories within a specific folder.
@@ -21,11 +19,18 @@ struct ListDirectoryTool: OpenFoundationModels.Tool {
     [OUTPUT]: A list of filenames or an empty status.
     """
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let path: String
         
-        init(_ content: GeneratedContent) throws {
-            let properties = try content.properties()
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // ROBUST PARSING: Synonyms & Casing
             var foundPath: String? = nil
@@ -35,36 +40,33 @@ struct ListDirectoryTool: OpenFoundationModels.Tool {
             ]
             
             for key in keys {
-                if let val = properties[key], let str = try? String(val) {
-                    foundPath = str
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundPath = val
                     break
                 }
             }
             
             guard let validPath = foundPath else {
-                throw GeneratedContentError.missingProperty("path (checked aliases: \(keys.joined(separator: ", ")))")
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'path'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
+                )
             }
             self.path = validPath
         }
     }
     
-    var parameters: GenerationSchema {
-        let pathSchema = DynamicGenerationSchema(type: String.self)
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(
-                    name: "path",
-                    description: "The full absolute path (or ~/ path) to the directory.",
-                    schema: pathSchema,
-                    isOptional: false
-                )
-            ]
+                ("path", "string", "The full absolute path (or ~/ path) to the directory.")
+            ],
+            required: ["path"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
@@ -95,7 +97,7 @@ struct ListDirectoryTool: OpenFoundationModels.Tool {
 
 // MARK: - Read File Tool
 
-struct ReadFileTool: OpenFoundationModels.Tool {
+struct ReadFileTool: DevgenticTool {
     let name = "read_file"
     let description = """
     [PURPOSE]: Reads the plain text content of a file.
@@ -104,11 +106,18 @@ struct ReadFileTool: OpenFoundationModels.Tool {
     [OUTPUT]: The full string content of the file.
     """
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let path: String
         
-        init(_ content: GeneratedContent) throws {
-            let properties = try content.properties()
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // ROBUST PARSING
             var foundPath: String? = nil
@@ -118,36 +127,33 @@ struct ReadFileTool: OpenFoundationModels.Tool {
             ]
             
             for key in keys {
-                if let val = properties[key], let str = try? String(val) {
-                    foundPath = str
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundPath = val
                     break
                 }
             }
             
             guard let validPath = foundPath else {
-                throw GeneratedContentError.missingProperty("path (checked aliases: \(keys.joined(separator: ", ")))")
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'path'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
+                )
             }
             self.path = validPath
         }
     }
     
-    var parameters: GenerationSchema {
-        let pathSchema = DynamicGenerationSchema(type: String.self)
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(
-                    name: "path",
-                    description: "The full path (or ~/ path) to the file to read.",
-                    schema: pathSchema,
-                    isOptional: false
-                )
-            ]
+                ("path", "string", "The full path (or ~/ path) to the file to read.")
+            ],
+            required: ["path"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
@@ -175,7 +181,7 @@ struct ReadFileTool: OpenFoundationModels.Tool {
 
 // MARK: - Write File Tool
 
-struct WriteFileTool: OpenFoundationModels.Tool {
+struct WriteFileTool: DevgenticTool {
     let name = "write_file"
     let description = """
     [PURPOSE]: Writes text data to a file. Can create new files or append to existing ones.
@@ -184,57 +190,79 @@ struct WriteFileTool: OpenFoundationModels.Tool {
     [OUTPUT]: Success or Error message.
     """
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let path: String
         let content: String
         let append: Bool?
         
-        init(_ content: GeneratedContent) throws {
-            let properties = try content.properties()
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // Parse Path
             var foundPath: String? = nil
             let pathKeys = ["path", "file", "filename", "destination", "filepath", "target", "filePath"]
-            for key in pathKeys { if let val = properties[key], let str = try? String(val) { foundPath = str; break } }
-            guard let validPath = foundPath else { throw GeneratedContentError.missingProperty("path") }
+            for key in pathKeys {
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundPath = val
+                    break
+                }
+            }
+            guard let validPath = foundPath else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'path'"))
+            }
             self.path = validPath
             
             // Parse Content
             var foundContent: String? = nil
             let contentKeys = ["content", "text", "body", "data", "string"]
-            for key in contentKeys { if let val = properties[key], let str = try? String(val) { foundContent = str; break } }
-            guard let validContent = foundContent else { throw GeneratedContentError.missingProperty("content") }
+            for key in contentKeys {
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundContent = val
+                    break
+                }
+            }
+            guard let validContent = foundContent else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'content'"))
+            }
             self.content = validContent
             
-            // Parse Append (Optional)
-            var appendVal: Bool = false
+            // Parse Append (Optional) - handles boolean or string boolean representations
+            var appendVal: Bool? = nil
             let appendKeys = ["append", "isAppend", "shouldAppend", "appending"]
             for key in appendKeys {
-                if let val = properties[key], let boolVal = try? Bool(val) {
-                    appendVal = boolVal
-                    break
+                if let codingKey = DynamicKey(stringValue: key) {
+                    if let boolVal = try? container.decodeIfPresent(Bool.self, forKey: codingKey) {
+                        appendVal = boolVal
+                        break
+                    } else if let strVal = try? container.decodeIfPresent(String.self, forKey: codingKey), let boolVal = Bool(strVal) {
+                        appendVal = boolVal
+                        break
+                    }
                 }
             }
             self.append = appendVal
         }
     }
     
-    var parameters: GenerationSchema {
-        let strSchema = DynamicGenerationSchema(type: String.self)
-        let boolSchema = DynamicGenerationSchema(type: Bool.self)
-        
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(name: "path", description: "Target file path.", schema: strSchema),
-                DynamicGenerationSchema.Property(name: "content", description: "Text to write.", schema: strSchema),
-                DynamicGenerationSchema.Property(name: "append", description: "If true, appends to the end of the file instead of overwriting.", schema: boolSchema, isOptional: true)
-            ]
+                ("path", "string", "Target file path."),
+                ("content", "string", "Text to write."),
+                ("append", "boolean", "If true, appends to the end of the file instead of overwriting.")
+            ],
+            required: ["path", "content"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
@@ -279,7 +307,7 @@ struct WriteFileTool: OpenFoundationModels.Tool {
 
 // MARK: - Delete File Tool
 
-struct DeleteFileTool: OpenFoundationModels.Tool {
+struct DeleteFileTool: DevgenticTool {
     let name = "delete_file"
     let description = """
     [PURPOSE]: Permanently deletes a file or folder from the file system.
@@ -288,29 +316,43 @@ struct DeleteFileTool: OpenFoundationModels.Tool {
     [OUTPUT]: Success or Error message.
     """
 
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let path: String
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            
             var foundPath: String? = nil
             let keys = ["path", "file", "filename", "item", "filePath", "target"]
-            for key in keys { if let val = props[key], let str = try? String(val) { foundPath = str; break } }
-            guard let val = foundPath else { throw GeneratedContentError.missingProperty("path") }
+            for key in keys {
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundPath = val
+                    break
+                }
+            }
+            guard let val = foundPath else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'path'"))
+            }
             self.path = val
         }
     }
 
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(name: "path", description: "The absolute path of the item to delete.", schema: DynamicGenerationSchema(type: String.self))
-            ]
+                ("path", "string", "The absolute path of the item to delete.")
+            ],
+            required: ["path"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-
-    typealias Output = String
 
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
@@ -345,7 +387,7 @@ struct DeleteFileTool: OpenFoundationModels.Tool {
 
 // MARK: - Move File Tool
 
-struct MoveFileTool: OpenFoundationModels.Tool {
+struct MoveFileTool: DevgenticTool {
     let name = "move_file"
     let description = """
     [PURPOSE]: Moves or renames a file/folder.
@@ -354,12 +396,19 @@ struct MoveFileTool: OpenFoundationModels.Tool {
     [OUTPUT]: Success or Error message.
     """
 
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let source: String
         let destination: String
         
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // Alias Check: Source
             var foundSource: String? = nil
@@ -368,9 +417,15 @@ struct MoveFileTool: OpenFoundationModels.Tool {
                 "original", "sourcePath", "filePath" // CamelCase
             ]
             for key in srcKeys {
-                if let val = props[key], let str = try? String(val) { foundSource = str; break }
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundSource = val
+                    break
+                }
             }
-            guard let validSource = foundSource else { throw GeneratedContentError.missingProperty("source") }
+            guard let validSource = foundSource else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'source'"))
+            }
             self.source = validSource
             
             // Alias Check: Destination
@@ -380,26 +435,28 @@ struct MoveFileTool: OpenFoundationModels.Tool {
                 "destinationPath", "newPath", "targetPath" // CamelCase
             ]
             for key in destKeys {
-                if let val = props[key], let str = try? String(val) { foundDest = str; break }
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundDest = val
+                    break
+                }
             }
-            guard let validDest = foundDest else { throw GeneratedContentError.missingProperty("destination") }
+            guard let validDest = foundDest else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'destination'"))
+            }
             self.destination = validDest
         }
     }
 
-    var parameters: GenerationSchema {
-        let strSchema = DynamicGenerationSchema(type: String.self)
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(name: "source", description: "Current path of the file/folder.", schema: strSchema),
-                DynamicGenerationSchema.Property(name: "destination", description: "New path for the file/folder.", schema: strSchema)
-            ]
+                ("source", "string", "Current path of the file/folder."),
+                ("destination", "string", "New path for the file/folder.")
+            ],
+            required: ["source", "destination"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-
-    typealias Output = String
 
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
@@ -434,7 +491,7 @@ struct MoveFileTool: OpenFoundationModels.Tool {
 
 // MARK: - Copy File Tool
 
-struct CopyFileTool: OpenFoundationModels.Tool {
+struct CopyFileTool: DevgenticTool {
     let name = "copy_file"
     let description = """
     [PURPOSE]: Duplicates a file or folder.
@@ -443,46 +500,61 @@ struct CopyFileTool: OpenFoundationModels.Tool {
     [OUTPUT]: Success or Error message.
     """
 
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let source: String
         let destination: String
         
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // Alias Check: Source
             var foundSource: String? = nil
             let srcKeys = ["source", "src", "from", "current_path", "original", "sourcePath"]
             for key in srcKeys {
-                if let val = props[key], let str = try? String(val) { foundSource = str; break }
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundSource = val
+                    break
+                }
             }
-            guard let validSource = foundSource else { throw GeneratedContentError.missingProperty("source") }
+            guard let validSource = foundSource else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'source'"))
+            }
             self.source = validSource
             
             // Alias Check: Destination
             var foundDest: String? = nil
             let destKeys = ["destination", "dest", "to", "target", "copy_path", "destinationPath"]
             for key in destKeys {
-                if let val = props[key], let str = try? String(val) { foundDest = str; break }
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundDest = val
+                    break
+                }
             }
-            guard let validDest = foundDest else { throw GeneratedContentError.missingProperty("destination") }
+            guard let validDest = foundDest else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'destination'"))
+            }
             self.destination = validDest
         }
     }
 
-    var parameters: GenerationSchema {
-        let strSchema = DynamicGenerationSchema(type: String.self)
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(name: "source", description: "Original file path.", schema: strSchema),
-                DynamicGenerationSchema.Property(name: "destination", description: "Copy destination path.", schema: strSchema)
-            ]
+                ("source", "string", "Original file path."),
+                ("destination", "string", "Copy destination path.")
+            ],
+            required: ["source", "destination"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-
-    typealias Output = String
 
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
@@ -517,7 +589,7 @@ struct CopyFileTool: OpenFoundationModels.Tool {
 
 // MARK: - Create Folder Tool
 
-struct CreateFolderTool: OpenFoundationModels.Tool {
+struct CreateFolderTool: DevgenticTool {
     let name = "create_folder"
     let description = """
     [PURPOSE]: Creates a new empty directory.
@@ -526,11 +598,18 @@ struct CreateFolderTool: OpenFoundationModels.Tool {
     [OUTPUT]: Success or Error message.
     """
 
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let path: String
         
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // Alias Check
             var foundPath: String? = nil
@@ -539,24 +618,27 @@ struct CreateFolderTool: OpenFoundationModels.Tool {
                 "folderPath", "directoryPath" // CamelCase
             ]
             for key in keys {
-                if let val = props[key], let str = try? String(val) { foundPath = str; break }
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundPath = val
+                    break
+                }
             }
-            guard let validPath = foundPath else { throw GeneratedContentError.missingProperty("path") }
+            guard let validPath = foundPath else {
+                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'path'"))
+            }
             self.path = validPath
         }
     }
 
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(name: "path", description: "Absolute path for the new folder.", schema: DynamicGenerationSchema(type: String.self))
-            ]
+                ("path", "string", "Absolute path for the new folder.")
+            ],
+            required: ["path"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-
-    typealias Output = String
 
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion

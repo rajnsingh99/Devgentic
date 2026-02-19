@@ -3,16 +3,15 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 26/01/26.
+//  MIGRATION: Updated to native DevgenticTool protocol.
 //
 
 import Foundation
-import OpenFoundationModels
-import OpenFoundationModelsCore
 import SwiftAgent
 
-/// A generic wrapper that adapts any MCP ToolDefinition into an executable OpenFoundationModels.Tool.
+/// A generic wrapper that adapts any MCP ToolDefinition into an executable DevgenticTool.
 /// This allows the native SwiftAgent to execute tools defined dynamically by MCP servers.
-struct DynamicMCPTool: OpenFoundationModels.Tool {
+struct DynamicMCPTool: DevgenticTool {
     
     // MARK: - Properties
     
@@ -36,82 +35,38 @@ struct DynamicMCPTool: OpenFoundationModels.Tool {
     
     // MARK: - Arguments Structure
     
-    /// A generic arguments structure that can decode ANY JSON object.
-    struct Arguments: OpenFoundationModelsCore.ConvertibleFromGeneratedContent {
-        let rawDictionary: [String: Any]
+    /// A generic arguments structure that can decode ANY JSON object using AnyCodable.
+    struct Arguments: Decodable, Sendable {
+        let payload: [String: AnyCodable]
         
-        init(_ content: OpenFoundationModelsCore.GeneratedContent) throws {
-            let properties = try content.properties()
-            self.rawDictionary = try Arguments.unwrapDictionary(properties)
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            
+            // Safely attempt to decode a dictionary; default to empty if the tool takes no args
+            if let dict = try? container.decode([String: AnyCodable].self) {
+                self.payload = dict
+            } else {
+                self.payload = [:]
+            }
         }
         
-        private static func unwrapDictionary(_ dict: [String: OpenFoundationModelsCore.GeneratedContent]) throws -> [String: Any] {
-            var result: [String: Any] = [:]
-            
-            for (key, content) in dict {
-                if let stringVal = try? String(content) {
-                    result[key] = stringVal
-                } else if let intVal = try? Int(content) {
-                    result[key] = intVal
-                } else if let doubleVal = try? Double(content) {
-                    result[key] = doubleVal
-                } else if let boolVal = try? Bool(content) {
-                    result[key] = boolVal
-                } else {
-                    result[key] = String(describing: content)
-                }
+        /// Safely converts the Codable payload back into a raw [String: Any] dictionary
+        /// for the MCPClientService using JSON serialization as a bridge.
+        var rawDictionary: [String: Any] {
+            guard let data = try? JSONEncoder().encode(payload),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return [:]
             }
-            return result
+            return dict
         }
     }
     
-    typealias Output = String
-    
     // MARK: - Schema Generation
     
-    var parameters: OpenFoundationModelsCore.GenerationSchema {
-        var properties: [OpenFoundationModelsCore.DynamicGenerationSchema.Property] = []
-        
-        for (key, prop) in toolDefinition.parameters.properties {
-            let propSchema: OpenFoundationModelsCore.DynamicGenerationSchema
-            
-            switch prop.type {
-            case "string":
-                propSchema = OpenFoundationModelsCore.DynamicGenerationSchema(type: String.self)
-            case "integer":
-                propSchema = OpenFoundationModelsCore.DynamicGenerationSchema(type: Int.self)
-            case "number":
-                propSchema = OpenFoundationModelsCore.DynamicGenerationSchema(type: Double.self)
-            case "boolean":
-                propSchema = OpenFoundationModelsCore.DynamicGenerationSchema(type: Bool.self)
-            default:
-                propSchema = OpenFoundationModelsCore.DynamicGenerationSchema(type: String.self)
-            }
-            
-            let isRequired = toolDefinition.parameters.required.contains(key)
-            
-            let property = OpenFoundationModelsCore.DynamicGenerationSchema.Property(
-                name: key,
-                description: prop.description ?? "",
-                schema: propSchema,
-                isOptional: !isRequired
-            )
-            
-            properties.append(property)
-        }
-        
-        let root = OpenFoundationModelsCore.DynamicGenerationSchema(
-            name: "Arguments",
-            properties: properties
-        )
-        
-        do {
-            return try OpenFoundationModelsCore.GenerationSchema(root: root, dependencies: [])
-        } catch {
-            print("Error creating schema for MCP tool \(name): \(error)")
-            let emptyRoot = OpenFoundationModelsCore.DynamicGenerationSchema(name: "Arguments", properties: [])
-            return try! OpenFoundationModelsCore.GenerationSchema(root: emptyRoot, dependencies: [])
-        }
+    var parameterSchema: ToolParameters {
+        // Because toolDefinition.parameters is natively a ToolParameters object,
+        // we can return it directly without the manual dictionary mapping required by OFM.
+        return toolDefinition.parameters
     }
     
     // MARK: - Execution (V2 Router)

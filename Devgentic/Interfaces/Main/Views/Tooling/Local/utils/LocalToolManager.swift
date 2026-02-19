@@ -3,22 +3,21 @@
 //  LocalServer
 //
 //  Created by Raj Singh on 20/09/25.
-//  Updated on 26/01/26 to support swiftAgents Native Tools.
+//  Updated on 19/02/26 to support native DevgenticTool architecture.
+//  MIGRATION: Removed OFM dependencies, simplified NativeToolWrapper.
 //
 
 import Foundation
 import os
-import OpenFoundationModels
-import OpenFoundationModelsCore
 
 // Define a specific logger for this subsystem.
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LocalToolManager")
 
 // MARK: - Native Tool Adapter
 
-/// A wrapper that adapts the new `OpenFoundationModels.Tool` protocol to the legacy `ExecutableTool` protocol
+/// A wrapper that adapts the new `DevgenticTool` protocol to the legacy `ExecutableTool` protocol
 /// used by the rest of the application (UI, Store, etc.).
-struct NativeToolWrapper<T: OpenFoundationModels.Tool>: ExecutableTool where T.Output == String, T.Arguments: Codable {
+struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
     
     let nativeTool: T
     
@@ -32,46 +31,9 @@ struct NativeToolWrapper<T: OpenFoundationModels.Tool>: ExecutableTool where T.O
         return nativeTool.description
     }
     
-    /// Converts the `GenerationSchema` from the native tool into the `ToolParameters` expected by the UI.
+    /// Natively bridges the parameter schema without JSON hacks!
     var parameters: ToolParameters {
-        let schema = nativeTool.parameters
-        
-        do {
-            // Attempt to bridge via JSON serialization since we cannot access internal properties (like .root) of GenerationSchema directly.
-            // This assumes GenerationSchema conforms to Encodable, which is standard for AI tool schemas.
-            let encoder = JSONEncoder()
-            let jsonData = try encoder.encode(schema)
-            
-            // Try decoding directly into ToolParameters if the structure matches exactly
-            if let directParams = try? JSONDecoder().decode(ToolParameters.self, from: jsonData) {
-                return directParams
-            }
-            
-            // Fallback: Manually map from dictionary to handle potential structure mismatches
-            guard let json = try JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any] else {
-                logger.error("Could not deserialize schema JSON for \(nativeTool.name)")
-                return ToolParameters(type: "object", properties: [:], required: [])
-            }
-            
-            let type = json["type"] as? String ?? "object"
-            let required = json["required"] as? [String] ?? []
-            
-            var properties: [String: ToolParameterProperty] = [:]
-            if let propsDict = json["properties"] as? [String: [String: Any]] {
-                for (key, val) in propsDict {
-                    let pType = val["type"] as? String ?? "string"
-                    let pDesc = val["description"] as? String
-                    properties[key] = ToolParameterProperty(type: pType, description: pDesc)
-                }
-            }
-            
-            return ToolParameters(type: type, properties: properties, required: required)
-            
-        } catch {
-            logger.error("Failed to convert parameters for tool \(nativeTool.name): \(error.localizedDescription)")
-            // Return empty parameters on failure to prevent crash
-            return ToolParameters(type: "object", properties: [:], required: [])
-        }
+        return nativeTool.parameterSchema
     }
     
     /// Bridges the untyped execution call to the strongly-typed native tool call.
@@ -111,7 +73,7 @@ final class LocalToolManager {
         registerNative(WriteFileTool())
         registerNative(DeleteFileTool())
         
-        // NEW: Register File Manipulation Primitives
+        // Register File Manipulation Primitives
         registerNative(MoveFileTool())
         registerNative(CopyFileTool())
         registerNative(CreateFolderTool())
@@ -128,13 +90,11 @@ final class LocalToolManager {
         registerNative(ReadMetadataTool())
         registerNative(OrganizeBatchTool())
         
-        // Note: Clipboard tools are omitted as they were not present in the native toolset update.
-        
         logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")
     }
 
     /// Helper to wrap and register a native tool.
-    private func registerNative<T: OpenFoundationModels.Tool>(_ tool: T) where T.Output == String, T.Arguments: Codable {
+    private func registerNative<T: DevgenticTool>(_ tool: T) {
         let wrapper = NativeToolWrapper(nativeTool: tool)
         toolRegistry[wrapper.name] = wrapper
     }

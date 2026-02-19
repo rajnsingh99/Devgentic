@@ -11,8 +11,6 @@
 
 import Foundation
 import SwiftAgent
-import OpenFoundationModels
-import OpenFoundationModelsCore
 import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ReActExecutor")
@@ -37,7 +35,7 @@ actor ReActAgentExecutor: AgentExecutor {
     // MARK: - Execution Entry Point
     
     nonisolated func execute(
-        model: any OpenFoundationModels.LanguageModel,
+        model: any LLMProvider,
         input: AgentInput,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
@@ -149,7 +147,7 @@ actor ReActAgentExecutor: AgentExecutor {
                             isFreshStart: input.isNewRequest
                         )
                         
-                        let transcript = self.buildTranscript(systemPrompt: systemPrompt, chatHistory: historyForExecution)
+                        let messages = self.buildMessages(systemPrompt: systemPrompt, chatHistory: historyForExecution)
                         
                         // --- TOKEN LOGGING ---
                         let estimatedTokens = self.estimateTokenCount(systemPrompt: systemPrompt, chatHistory: historyForExecution)
@@ -167,7 +165,7 @@ actor ReActAgentExecutor: AgentExecutor {
                             
                             step = try await input.generatorStrategy.generate(
                                 model: spyModel,
-                                transcript: transcript,
+                                messages: messages,
                                 iteration: currentIteration
                             )
                             
@@ -769,34 +767,31 @@ actor ReActAgentExecutor: AgentExecutor {
         return (output, isSuccess)
     }
     
-    nonisolated private func buildTranscript(systemPrompt: String, chatHistory: [ChatMessage]) -> OpenFoundationModels.Transcript {
-        var entries: [OpenFoundationModels.Transcript.Entry] = []
-        
-        entries.append(.instructions(OpenFoundationModels.Transcript.Instructions(
-            segments: [.text(OpenFoundationModels.Transcript.TextSegment(content: systemPrompt))],
-            toolDefinitions: []
-        )))
-        
+    nonisolated private func buildMessages(systemPrompt: String, chatHistory: [ChatMessage]) -> [[String: String]] {
+        var messages: [[String: String]] = []
+
+        messages.append(["role": "system", "content": systemPrompt])
+
         for msg in chatHistory {
             guard let text = msg.content.textContent else { continue }
             if msg.sender == .user {
-                entries.append(.prompt(OpenFoundationModels.Transcript.Prompt(segments: [.text(OpenFoundationModels.Transcript.TextSegment(content: "[USER]: \(text)"))])))
+                messages.append(["role": "user", "content": "[USER]: \(text)"])
             } else {
-                entries.append(.response(OpenFoundationModels.Transcript.Response(assetIDs: [], segments: [.text(OpenFoundationModels.Transcript.TextSegment(content: text))])))
+                messages.append(["role": "assistant", "content": text])
             }
         }
-        return OpenFoundationModels.Transcript(entries: entries)
+        return messages
     }
-    
-    nonisolated private func formatJSONSchema(_ schema: OpenFoundationModelsCore.GenerationSchema) -> String {
+
+    nonisolated private func formatJSONSchema(_ schema: ToolParameters) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         if let data = try? encoder.encode(schema), let str = String(data: data, encoding: .utf8) { return str }
         return "{}"
     }
-    
+
     nonisolated private func handleMaxIterationsReached(
-        model: any OpenFoundationModels.LanguageModel,
+        model: any LLMProvider,
         scratchpad: [String],
         traceContext: TraceContext,
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
@@ -808,21 +803,15 @@ actor ReActAgentExecutor: AgentExecutor {
 
 // MARK: - Debug Spy Model
 
-private struct APISpyModel: OpenFoundationModels.LanguageModel {
-    let inner: any OpenFoundationModels.LanguageModel
+private struct APISpyModel: LLMProvider {
+    let inner: any LLMProvider
     let logger: Logger
-    
-    var isAvailable: Bool { inner.isAvailable }
-    
-    func supports(locale: Locale) -> Bool {
-        return inner.supports(locale: locale)
+
+    func generate(messages: [[String: String]], responseSchema: [String: Any]?) async throws -> String {
+        return try await inner.generate(messages: messages, responseSchema: responseSchema)
     }
-    
-    func generate(transcript: OpenFoundationModels.Transcript, options: OpenFoundationModels.GenerationOptions?) async throws -> OpenFoundationModels.Transcript.Entry {
-        return try await inner.generate(transcript: transcript, options: options)
-    }
-    
-    func stream(transcript: OpenFoundationModels.Transcript, options: OpenFoundationModels.GenerationOptions?) -> AsyncThrowingStream<OpenFoundationModels.Transcript.Entry, Error> {
-        return inner.stream(transcript: transcript, options: options)
+
+    func stream(messages: [[String: String]]) -> AsyncThrowingStream<String, Error> {
+        return inner.stream(messages: messages)
     }
 }

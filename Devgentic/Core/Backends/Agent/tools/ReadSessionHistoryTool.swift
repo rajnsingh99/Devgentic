@@ -3,54 +3,52 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 12/02/26.
-//  New Tool: Allows the agent to recall sequential events from the Twin-Store Diary.
-//  FIXED: Conformance to ConvertibleFromGeneratedContent and Schema logic.
-//  UPGRADE: Added LogManager instrumentation and robust content validation.
+//  MIGRATION: Updated to native DevgenticTool protocol & Standardized Description.
 //
 
 import Foundation
-import OpenFoundationModels
-import OpenFoundationModelsCore
 
-struct ReadSessionHistoryTool: OpenFoundationModels.Tool {
+struct ReadSessionHistoryTool: DevgenticTool {
     let name = "read_session_history"
-    let description = "Reads the chronological log of all goals, actions, and outcomes performed in the CURRENT session. Use this to answer questions like 'What did I do first?' or 'Review my previous actions'."
+    let description = """
+    [PURPOSE]: Reads the chronological log of all goals, actions, and outcomes performed in the CURRENT session.
+    [WHEN TO USE]: Use to answer questions like 'What did I do first?' or to review the exact sequence of your previous actions.
+    [INPUT]: {}
+    [OUTPUT]: A linear text timeline of session events.
+    """
     
     let conversationID: UUID
-    
-    // MARK: - Arguments Definition
-    
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
-        // No parameters needed for this tool, but we must handle the input container
-        init(_ content: GeneratedContent) throws {
-            // ROBUST PARSING: Even for empty arguments, we should validate the content structure.
-            // This prevents framework-level decoding errors (GeneratedContentError 5).
-            _ = try content.properties()
-        }
-    }
-    
-    typealias Output = String
     
     init(conversationID: UUID) {
         self.conversationID = conversationID
     }
     
+    // MARK: - Arguments Definition
+    
+    struct Arguments: Decodable, Sendable {
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            // ROBUST PARSING: Even for empty arguments, we should validate the content structure.
+            _ = try decoder.container(keyedBy: DynamicKey.self)
+        }
+    }
+    
     // MARK: - Schema Definition
     
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
-            description: "No arguments required.",
-            properties: [] // Empty properties list as this tool is context-dependent
-        )
-        return try! GenerationSchema(root: root, dependencies: [])
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.empty()
     }
     
     // MARK: - Execution
     
     func call(arguments: Arguments) async throws -> String {
         // --- LOGGING INSTRUMENTATION ---
-        // Consistent with NativeSystemTools.swift pattern
         let logID = LogManager.shared.logAction(
             toolName: self.name,
             summary: "Recalled session history timeline",

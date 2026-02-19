@@ -8,12 +8,10 @@
 
 import Foundation
 import AppKit
-import OpenFoundationModels
-import OpenFoundationModelsCore
 
 // MARK: - Terminal Tool
 
-struct TerminalTool: OpenFoundationModels.Tool {
+struct TerminalTool: DevgenticTool {
     let name = "execute_shell"
     let description = """
     [PURPOSE]: Executes a ZSH shell command on the host machine.
@@ -30,10 +28,18 @@ struct TerminalTool: OpenFoundationModels.Tool {
         self.conversationID = conversationID
     }
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let command: String
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // ROBUST PARSING: Aliases
             var foundCmd: String? = nil
@@ -43,32 +49,34 @@ struct TerminalTool: OpenFoundationModels.Tool {
             ]
             
             for key in keys {
-                if let val = props[key], let str = try? String(val) {
-                    foundCmd = str
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundCmd = val
                     break
                 }
             }
             
-            guard let cmd = foundCmd else { throw GeneratedContentError.missingProperty("command (checked aliases: \(keys.joined(separator: ", ")))") }
+            guard let cmd = foundCmd else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'command'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
+                )
+            }
+            
             self.command = cmd
         }
     }
     
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(
-                    name: "command",
-                    description: "The shell command to execute.",
-                    schema: DynamicGenerationSchema(type: String.self)
-                )
-            ]
+                ("command", "string", "The shell command to execute.")
+            ],
+            required: ["command"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // --- LOGGING INSTRUMENTATION ---
@@ -100,7 +108,7 @@ struct TerminalTool: OpenFoundationModels.Tool {
 
 // MARK: - Open Application Tool
 
-struct OpenApplicationTool: OpenFoundationModels.Tool {
+struct OpenApplicationTool: DevgenticTool {
     let name = "open_application"
     let description = """
     [PURPOSE]: Launches a macOS application using its Bundle Identifier.
@@ -109,10 +117,18 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
     [OUTPUT]: Success or Error message.
     """
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let bundle_identifier: String
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // ROBUST PARSING: Aliases
             var foundID: String? = nil
@@ -122,32 +138,34 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
             ]
             
             for key in keys {
-                if let val = props[key], let str = try? String(val) {
-                    foundID = str
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundID = val
                     break
                 }
             }
             
-            guard let val = foundID else { throw GeneratedContentError.missingProperty("bundle_identifier (checked aliases: \(keys.joined(separator: ", ")))") }
+            guard let val = foundID else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'bundle_identifier'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
+                )
+            }
+            
             self.bundle_identifier = val
         }
     }
     
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(
-                    name: "bundle_identifier",
-                    description: "The App Bundle ID.",
-                    schema: DynamicGenerationSchema(type: String.self)
-                )
-            ]
+                ("bundle_identifier", "string", "The App Bundle ID.")
+            ],
+            required: ["bundle_identifier"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // --- LOGGING INSTRUMENTATION ---
@@ -185,7 +203,7 @@ struct OpenApplicationTool: OpenFoundationModels.Tool {
 
 // MARK: - Run AppleScript Tool
 
-struct RunAppleScriptTool: OpenFoundationModels.Tool {
+struct RunAppleScriptTool: DevgenticTool {
     let name = "run_applescript"
     let description = """
     [PURPOSE]: Executes an AppleScript code block.
@@ -194,10 +212,18 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
     [OUTPUT]: The result of the script execution.
     """
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
+    struct Arguments: Decodable, Sendable {
         let script: String
-        init(_ content: GeneratedContent) throws {
-            let props = try content.properties()
+        
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
             
             // ROBUST PARSING: Aliases
             var foundScript: String? = nil
@@ -206,28 +232,34 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
             ]
             
             for key in keys {
-                if let val = props[key], let str = try? String(val) {
-                    foundScript = str
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundScript = val
                     break
                 }
             }
             
-            guard let val = foundScript else { throw GeneratedContentError.missingProperty("script (checked aliases: \(keys.joined(separator: ", ")))") }
+            guard let val = foundScript else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'script'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
+                )
+            }
+            
             self.script = val
         }
     }
     
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                DynamicGenerationSchema.Property(name: "script", description: "AppleScript source.", schema: DynamicGenerationSchema(type: String.self))
-            ]
+                ("script", "string", "AppleScript source.")
+            ],
+            required: ["script"]
         )
-        return try! GenerationSchema(root: root, dependencies: [])
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // --- LOGGING INSTRUMENTATION ---
@@ -256,7 +288,7 @@ struct RunAppleScriptTool: OpenFoundationModels.Tool {
 
 // MARK: - Get System Stats Tool
 
-struct GetSystemStatsTool: OpenFoundationModels.Tool {
+struct GetSystemStatsTool: DevgenticTool {
     let name = "get_system_stats"
     let description = """
     [PURPOSE]: Retrieves basic system metrics (OS version, User, Memory).
@@ -265,16 +297,22 @@ struct GetSystemStatsTool: OpenFoundationModels.Tool {
     [OUTPUT]: Formatted string with OS, User, and RAM details.
     """
     
-    struct Arguments: Codable, ConvertibleFromGeneratedContent {
-        init(_ content: GeneratedContent) throws {}
+    struct Arguments: Decodable, Sendable {
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            _ = try decoder.container(keyedBy: DynamicKey.self)
+        }
     }
     
-    var parameters: GenerationSchema {
-        let root = DynamicGenerationSchema(name: "Arguments", properties: [])
-        return try! GenerationSchema(root: root, dependencies: [])
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.empty()
     }
-    
-    typealias Output = String
     
     func call(arguments: Arguments) async throws -> String {
         // --- LOGGING INSTRUMENTATION ---

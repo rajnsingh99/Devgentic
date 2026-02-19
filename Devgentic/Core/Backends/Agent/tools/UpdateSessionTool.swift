@@ -3,38 +3,24 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 10/02/26.
+//  MIGRATION: Updated to native DevgenticTool protocol & Standardized Description.
 //
 
 import Foundation
-import OpenFoundationModels
-import OpenFoundationModelsCore
 
 /// A tool that allows the Agent to update the persistent "Project Brief" (Session Context)
 /// for the current conversation.
-struct UpdateSessionTool: OpenFoundationModels.Tool {
-    
-    // MARK: - Type Definitions
-    
-    struct Arguments: Codable, OpenFoundationModelsCore.ConvertibleFromGeneratedContent {
-        let content: String
-        
-        init(_ content: OpenFoundationModelsCore.GeneratedContent) throws {
-            let properties = try content.properties()
-            
-            guard let contentValue = properties["content"] else {
-                throw OpenFoundationModelsCore.GeneratedContentError.missingProperty("content")
-            }
-            
-            self.content = try String(contentValue)
-        }
-    }
-    
-    typealias Output = String
+struct UpdateSessionTool: DevgenticTool {
     
     // MARK: - Properties
     
     let name = "update_session_context"
-    let description = "Updates the persistent 'Project Brief' (markdown) for this session. Use this to record completed tasks, goals, or key decisions so you remember them later."
+    let description = """
+    [PURPOSE]: Updates the persistent 'Project Brief' (markdown) for the current session.
+    [WHEN TO USE]: Use to permanently record completed tasks, goals, or key decisions so you remember them across turns.
+    [INPUT]: { "content": "# Completed\\n- Organized desktop\\n- Moved photos" }
+    [OUTPUT]: Success or Error message.
+    """
     let conversationID: UUID
     
     // MARK: - Initialization
@@ -43,30 +29,55 @@ struct UpdateSessionTool: OpenFoundationModels.Tool {
         self.conversationID = conversationID
     }
     
+    // MARK: - Type Definitions
+    
+    struct Arguments: Decodable, Sendable {
+        let content: String
+        
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            
+            // ROBUST PARSING: Aliases
+            var foundContent: String? = nil
+            let keys = ["content", "text", "body", "data", "markdown", "summary"]
+            
+            for key in keys {
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundContent = val
+                    break
+                }
+            }
+            
+            guard let validContent = foundContent else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'content'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
+                )
+            }
+            
+            self.content = validContent
+        }
+    }
+    
     // MARK: - Schema
     
-    var parameters: OpenFoundationModelsCore.GenerationSchema {
-        let contentSchema = OpenFoundationModelsCore.DynamicGenerationSchema(
-            type: String.self
-        )
-        
-        let root = OpenFoundationModelsCore.DynamicGenerationSchema(
-            name: "Arguments",
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
             properties: [
-                OpenFoundationModelsCore.DynamicGenerationSchema.Property(
-                    name: "content",
-                    description: "The full markdown content to write to the session context. This overwrites the existing file, so ensure you include previous relevant info if needed.",
-                    schema: contentSchema,
-                    isOptional: false
-                )
-            ]
+                ("content", "string", "The full markdown content to write to the session context. This overwrites the existing file, so ensure you include previous relevant info if needed.")
+            ],
+            required: ["content"]
         )
-        
-        do {
-            return try OpenFoundationModelsCore.GenerationSchema(root: root, dependencies: [])
-        } catch {
-            fatalError("Failed to construct GenerationSchema for UpdateSessionTool: \(error)")
-        }
     }
     
     // MARK: - Execution

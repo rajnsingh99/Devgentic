@@ -2,33 +2,18 @@
 //  VectorSearchTool.swift
 //  Devgentic
 //
-//  Created by Raj Singh on 23/01/26.
 //  Updated for Audit Consistency and Hallucination Prevention.
+//  MIGRATION: Updated to native DevgenticTool protocol.
 //
 
 import Foundation
-import OpenFoundationModels
-import OpenFoundationModelsCore
 import SwiftAgent
 
 /// A tool that allows an Agent to perform semantic searches against the local vector database.
-struct VectorSearchTool: OpenFoundationModels.Tool {
+struct VectorSearchTool: DevgenticTool {
     
-    struct Arguments: Codable, OpenFoundationModelsCore.ConvertibleFromGeneratedContent {
-        let query: String
-        
-        init(_ content: OpenFoundationModelsCore.GeneratedContent) throws {
-            let properties = try content.properties()
-            guard let queryContent = properties["query"] else {
-                throw OpenFoundationModelsCore.GeneratedContentError.missingProperty("query")
-            }
-            self.query = try String(queryContent)
-        }
-    }
+    // MARK: - Properties
     
-    typealias Output = String
-    
-    // RENAMED: To prevent the LLM from thinking this is a general knowledge source (Wikipedia/Google).
     let name = "recall_conversation_history"
     
     let description = """
@@ -44,25 +29,57 @@ struct VectorSearchTool: OpenFoundationModels.Tool {
         self.conversationID = conversationID
     }
     
-    var parameters: OpenFoundationModelsCore.GenerationSchema {
-        let querySchema = OpenFoundationModelsCore.DynamicGenerationSchema(type: String.self)
-        let root = OpenFoundationModelsCore.DynamicGenerationSchema(
-            name: "Arguments",
-            properties: [
-                OpenFoundationModelsCore.DynamicGenerationSchema.Property(
-                    name: "query",
-                    description: "The semantic search query.",
-                    schema: querySchema,
-                    isOptional: false
+    // MARK: - Type Definitions
+    
+    struct Arguments: Decodable, Sendable {
+        let query: String
+        
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            
+            var foundQuery: String? = nil
+            let keys = ["query", "search", "keyword", "text", "search_term", "searchTerm"]
+            
+            for key in keys {
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    foundQuery = val
+                    break
+                }
+            }
+            
+            guard let validQuery = foundQuery else {
+                throw DecodingError.dataCorrupted(
+                    DecodingError.Context(
+                        codingPath: decoder.codingPath,
+                        debugDescription: "Missing property 'query'. Checked aliases: \(keys.joined(separator: ", "))"
+                    )
                 )
-            ]
-        )
-        do {
-            return try OpenFoundationModelsCore.GenerationSchema(root: root, dependencies: [])
-        } catch {
-            fatalError("Failed to construct GenerationSchema for VectorSearchTool: \(error)")
+            }
+            
+            self.query = validQuery
         }
     }
+    
+    // MARK: - Schema
+    
+    var parameterSchema: ToolParameters {
+        return SchemaBuilder.object(
+            properties: [
+                ("query", "string", "The semantic search query.")
+            ],
+            required: ["query"]
+        )
+    }
+    
+    // MARK: - Execution
     
     func call(arguments: Arguments) async throws -> String {
         // --- LOGGING INSTRUMENTATION ---
