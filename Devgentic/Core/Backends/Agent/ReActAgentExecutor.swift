@@ -10,6 +10,7 @@
 // + Phase 5: [HITL] Tool Gating & Suspension
 // + Refactored: Prompt Generation Layer decoupled from Persona Identity
 // + Hotfix: Explicit Task Completion instructions to prevent "Tool Not Found" loop
+// + Architecture Upgrade: Migrated to Structured ToolExecutionResult (Removed brittle string matching)
 
 import Foundation
 import OSLog
@@ -102,6 +103,17 @@ actor ReActAgentExecutor: AgentExecutor {
                     let isMemoryEnabled = true
                     var hasUpdatedMemory = false
                     let executionTrace = input.traceContext
+
+                    // --- CIRCUIT BREAKER STATE ---
+                    var consecutiveAskUserCalls = 0
+                    var consecutiveNoneActions = 0
+                    var consecutiveIdleSteps = 0
+                    let maxConsecutiveAskUser = 3
+                    let maxConsecutiveNone = 2
+                    let maxConsecutiveIdle = 5
+                    var hallucinatedTools: Set<String> = []
+                    var recentInvocations: [ToolInvocationKey: Int] = [:]
+                    let maxToolRetries = 2
                     
                     // Context Window Hygiene:
                     var historyForExecution = input.chatHistory
@@ -147,6 +159,7 @@ actor ReActAgentExecutor: AgentExecutor {
                             scratchpad: prunedScratchpad,
                             state: currentState,
                             constraints: currentConstraints,
+                            hallucinatedTools: hallucinatedTools,
                             isFreshStart: input.isNewRequest
                         )
                         
@@ -315,6 +328,45 @@ actor ReActAgentExecutor: AgentExecutor {
 
                             // [ASK_USER] Intercept clarification requests before normal dispatch
                             if action.toolName == "ask_user" {
+                                consecutiveAskUserCalls += 1
+                                consecutiveNoneActions = 0   // This IS an action
+                                consecutiveIdleSteps += 1    // But counts toward idle budget
+
+                                // --- TIER 3: DEAD MAN'S SWITCH (unified check for ALL idle paths) ---
+                                if consecutiveIdleSteps >= maxConsecutiveIdle {
+                                    logger.error("💀 [DEAD MAN'S SWITCH] \(consecutiveIdleSteps) idle steps (ask_user path). System-terminating.")
+
+                                    let recentContext = scratchpad.suffix(3).joined(separator: "\n")
+                                    let systemFinalAnswer = """
+                                    I wasn't able to complete your request after multiple attempts. \
+                                    Here's what happened:
+
+                                    \(recentContext)
+
+                                    Please try again with a more specific request, or check that \
+                                    the required tools are enabled in your agent profile.
+                                    """
+
+                                    continuation.yield(.content(systemFinalAnswer))
+                                    continuation.finish()
+                                    return
+                                }
+
+                                // --- TIER 1 CIRCUIT BREAKER: ask_user repetition cap ---
+                                if consecutiveAskUserCalls > maxConsecutiveAskUser {
+                                    logger.warning("🛑 [CIRCUIT BREAKER] ask_user called \(consecutiveAskUserCalls) consecutive times. Forcing graceful exit.")
+
+                                    scratchpad.append("""
+                                    ⚠️ SYSTEM INTERVENTION (FINAL WARNING): You have asked the user \(consecutiveAskUserCalls) \
+                                    questions without making progress. You MUST now provide a `finalAnswer`. \
+                                    Do NOT call ask_user. Do NOT ask for clarification in your finalAnswer. \
+                                    Summarize what you attempted and explain that you could not proceed. \
+                                    If you output ask_user again, the session will be terminated automatically.
+                                    """)
+                                    continuation.yield(.thought("⚠️ Clarification limit reached. Wrapping up..."))
+                                    continue cognitiveLoop
+                                }
+
                                 let question: String
                                 if let q = action.parameters["question"],
                                    let encoder = try? JSONEncoder().encode(q),
@@ -324,7 +376,7 @@ actor ReActAgentExecutor: AgentExecutor {
                                     question = step.internalMonologue
                                 }
 
-                                logger.info("🙋 [ASK_USER] Agent requesting clarification: \(question)")
+                                logger.info("🙋 [ASK_USER] Agent requesting clarification (\(consecutiveAskUserCalls)/\(maxConsecutiveAskUser)): \(question)")
 
                                 continuation.yield(.requestClarification(question: question))
 
@@ -382,8 +434,9 @@ actor ReActAgentExecutor: AgentExecutor {
                                 if !approved {
                                     logger.info("❌ [HITL] User DENIED permission for \(action.toolName)")
                                     
-                                    // C. Handle Denial (Mock Failure)
-                                    let denialObservation = "System Security: User explicitly denied permission to execute tool '\(action.toolName)'. Do not retry this exact action."
+                                    // C. Handle Denial via Structured Result
+                                    let denialResult = ToolExecutionResult.userDenied(toolName: action.toolName)
+                                    let denialObservation = denialResult.llmObservation
                                     scratchpad.append("Observation (Step \(currentIteration)): \(denialObservation)")
                                     
                                     continuation.yield(.toolOutput(ToolOutput(toolName: action.toolName, output: denialObservation, isSuccess: false)))
@@ -395,16 +448,40 @@ actor ReActAgentExecutor: AgentExecutor {
                                 logger.info("✅ [HITL] User APPROVED permission for \(action.toolName). Proceeding.")
                             }
                             
+                            // --- CIRCUIT BREAKER: Reset counters for real tool actions ---
+                            consecutiveAskUserCalls = 0
+                            consecutiveNoneActions = 0
+                            consecutiveIdleSteps = 0
+
+                            // --- GHOST PROTOCOL: Path constraints ---
                             if let path = self.extractPath(from: action.parameters),
                                currentState.isPathForbidden(path) {
-                                
+
                                 let violationMsg = "🚫 GHOST PROTOCOL: Access to '\(path)' is FORBIDDEN by Negative Constraints. Do not retry this path."
                                 scratchpad.append("System Alert: \(violationMsg)")
                                 continuation.yield(.thought(violationMsg))
                                 continue cognitiveLoop
                             }
-                            
+
+                            // --- HALLUCINATION GHOST PROTOCOL: Block previously hallucinated tool names ---
+                            if hallucinatedTools.contains(action.toolName) {
+                                let msg = "⛔ Tool '\(action.toolName)' does not exist (previously hallucinated). Available tools: \(input.tools.map(\.name).joined(separator: ", ")). Use ONLY available tools or provide a `finalAnswer`."
+                                scratchpad.append("System Alert: \(msg)")
+                                continuation.yield(.thought(msg))
+                                continue cognitiveLoop
+                            }
+
+                            // --- SAME-PARAMS RETRY CAP: Block duplicate invocations ---
                             let paramsString = self.serializeParams(action.parameters)
+                            let invocationKey = ToolInvocationKey(toolName: action.toolName, paramsHash: paramsString.hashValue)
+                            recentInvocations[invocationKey, default: 0] += 1
+
+                            if recentInvocations[invocationKey]! > maxToolRetries {
+                                let msg = "🚫 Tool '\(action.toolName)' already failed \(maxToolRetries) times with identical parameters. Skipping. Try a different approach or provide a `finalAnswer`."
+                                scratchpad.append("System: \(msg)")
+                                continuation.yield(.thought(msg))
+                                continue cognitiveLoop
+                            }
                             continuation.yield(.toolCall(name: action.toolName, params: paramsString))
                             
                             onTraceUpdate(AgentTraceLog(
@@ -417,17 +494,36 @@ actor ReActAgentExecutor: AgentExecutor {
                                 metadata: iterationMetadata
                             ))
                             
-                            let (observation, isSuccess) = await self.executeTool(
+                            // 🚀 DYNAMIC ROUTING: Execute the tool using the structured enum
+                            let executionResult = await self.executeTool(
                                 action: action,
                                 tools: input.tools,
                                 parentContext: iterationSpan
                             )
                             
-                            if !isSuccess {
+                            let observation = executionResult.llmObservation
+                            let isSuccess = executionResult.isSuccess
+                            
+                            // Explicit handling of all structured failure modes
+                            switch executionResult {
+                            case .success:
+                                break // Proceed normally
+                                
+                            case .hallucinated(let toolName, _):
+                                hallucinatedTools.insert(toolName)
+                                logger.info("Hallucination Ghost Protocol: Blocking future use of '\(toolName)'.")
+                                
+                            case .userDenied:
+                                // This is typically handled before execution via HITL check above,
+                                // but if a tool internally enforces denial, it is handled gracefully here.
+                                break
+                                
+                            case .timedOut, .semanticFailure, .systemError:
+                                // Ghost Protocol: constrain failed paths
                                 if let path = self.extractPath(from: action.parameters) {
                                     logger.info("Ghost Protocol: Adding \(path) to negative constraints.")
                                     currentConstraints.insert(path)
-                                    
+
                                     currentState = MutableActiveState(
                                         sessionID: currentState.sessionID,
                                         primaryGoal: currentState.primaryGoal,
@@ -436,9 +532,18 @@ actor ReActAgentExecutor: AgentExecutor {
                                         workingMemory: currentState.workingMemory
                                     )
                                     ContextMemoryManager.shared.updateActiveState(conversationID: input.conversationID, state: currentState)
-                                    
+
                                     // Update fallback state
                                     lastKnownState = currentState
+                                }
+                            }
+
+                            // Progress monotonicity: if ALL tool attempts have failed, inject abandon directive
+                            if !isSuccess {
+                                let totalAttempts = recentInvocations.values.reduce(0, +)
+                                let allFailed = recentInvocations.values.allSatisfy { $0 >= 1 } && totalAttempts >= 2 && !hallucinatedTools.isEmpty
+                                if allFailed {
+                                    scratchpad.append("⚠️ SYSTEM: All tool attempts have failed. The required capabilities may not be available. Consider providing a `finalAnswer` explaining what tools are needed.")
                                 }
                             }
                             
@@ -502,7 +607,44 @@ actor ReActAgentExecutor: AgentExecutor {
                         }
                         
                         if actionWasExecuted { continue cognitiveLoop }
-                        
+
+                        // --- No action AND no finalAnswer: None-action iteration ---
+                        consecutiveNoneActions += 1
+                        consecutiveIdleSteps += 1
+
+                        // --- TIER 3: DEAD MAN'S SWITCH (highest priority) ---
+                        if consecutiveIdleSteps >= maxConsecutiveIdle {
+                            logger.error("💀 [DEAD MAN'S SWITCH] \(consecutiveIdleSteps) idle steps. System-terminating.")
+
+                            let recentContext = scratchpad.suffix(3).joined(separator: "\n")
+                            let systemFinalAnswer = """
+                            I wasn't able to complete your request. I don't have the necessary tools \
+                            available to perform this action. Here's what I attempted:
+
+                            \(recentContext)
+
+                            Please check that the required tools are enabled in your agent profile, \
+                            or try rephrasing your request.
+                            """
+
+                            continuation.yield(.content(systemFinalAnswer))
+                            continuation.finish()
+                            return
+                        }
+
+                        // --- TIER 2: STALL DETECTOR ---
+                        if consecutiveNoneActions > maxConsecutiveNone {
+                            logger.warning("🛑 [STALL DETECTOR] \(consecutiveNoneActions) consecutive None-actions. Injecting escalation.")
+
+                            scratchpad.append("""
+                            ⚠️ SYSTEM INTERVENTION: You have produced \(consecutiveNoneActions) consecutive steps \
+                            with no action and no answer. You are STALLED. You MUST either:
+                            1. Execute a tool action, OR
+                            2. Provide a `finalAnswer` to the user.
+                            Continuing to \"review\" or \"observe\" without acting will terminate this session.
+                            """)
+                        }
+
                         scratchpad.append("Observation (Step \(currentIteration)): Reasoning: \"\(step.internalMonologue)\". Proceed.")
                         continue cognitiveLoop
                         
@@ -619,13 +761,14 @@ actor ReActAgentExecutor: AgentExecutor {
         scratchpad: [String],
         state: MutableActiveState,
         constraints: Set<String>,
+        hallucinatedTools: Set<String>,
         isFreshStart: Bool
     ) -> String {
         let layers = [
             buildPersonaLayer(input),
             buildEnvironmentLayer(),
             buildMemoryLayer(state, input.recentHistory, isFreshStart),
-            buildReActStrategyLayer(constraints),
+            buildReActStrategyLayer(constraints, hallucinatedTools: hallucinatedTools),
             buildContextLayer(input, scratchpad)
         ]
         return layers.filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -669,7 +812,7 @@ actor ReActAgentExecutor: AgentExecutor {
         """
     }
     
-    nonisolated private func buildReActStrategyLayer(_ constraints: Set<String>) -> String {
+    nonisolated private func buildReActStrategyLayer(_ constraints: Set<String>, hallucinatedTools: Set<String>) -> String {
         var constraintBlock = ""
         if !constraints.isEmpty {
             constraintBlock = """
@@ -678,7 +821,17 @@ actor ReActAgentExecutor: AgentExecutor {
             \(constraints.map { "- \($0)" }.joined(separator: "\n"))
             """
         }
-        
+
+        var hallucinationBlock = ""
+        if !hallucinatedTools.isEmpty {
+            hallucinationBlock = """
+            ## ⛔ HALLUCINATED TOOLS (DO NOT USE)
+            You previously attempted these tools which DO NOT EXIST:
+            \(hallucinatedTools.sorted().map { "- `\($0)`" }.joined(separator: "\n"))
+            Using any of these again will be blocked by the system. Use ONLY the tools listed in EXECUTION CONTEXT.
+            """
+        }
+
         return """
         # COGNITIVE STRATEGY & MECHANICS
         ## PROTOCOL
@@ -689,7 +842,10 @@ actor ReActAgentExecutor: AgentExecutor {
         5. If a tool fails, **STOP** and reflect on the error before proceeding.
         6. **TASK COMPLETION**: If the goal is met or you need to reply to the user, you MUST set `action` to `null` and provide your response in the `finalAnswer` field. Do NOT hallucinate tools like 'none' or 'inform'.
         7. **CLARIFICATION**: If you need information from the user to proceed, use the `ask_user` tool: `{"toolName": "ask_user", "parameters": {"question": "Your question here"}}`. Do NOT invent tools like 'inform' or 'respond'. The ONLY way to talk to the user is via `finalAnswer` or `ask_user`.
+        8. **GRACEFUL DEGRADATION**: If the user's request requires a tool that is not available, do NOT loop or ask the user to run commands themselves. Instead, immediately provide a `finalAnswer` explaining which capability is missing and suggest enabling the required tool.
+        9. **NO STALLING**: Do not produce consecutive steps with `action: null` and no `finalAnswer`. If you have nothing to act on, provide a `finalAnswer`.
         \(constraintBlock)
+        \(hallucinationBlock)
         """
     }
     
@@ -701,17 +857,25 @@ actor ReActAgentExecutor: AgentExecutor {
     nonisolated private func buildContextLayer(_ input: AgentInput, _ scratchpad: [String]) -> String {
         var context = "# EXECUTION CONTEXT\n"
         context += "## USER REQUEST\n\"\(input.userInput)\"\n\n"
-        
-        context += "## TOOLS\n"
+
+        let toolNames = input.tools.map(\.name)
+        context += "## TOOLS (\(toolNames.count) available)\n"
         for tool in input.tools {
             context += "- **\(tool.name)**: \(tool.description)\n"
             context += "  Schema: \(formatJSONSchema(tool.parameters))\n"
         }
-        
+
+        // --- CAPABILITY FENCE ---
+        context += "\n## ⚠️ CAPABILITY FENCE\n"
+        context += "You have EXACTLY \(toolNames.count) tools: \(toolNames.joined(separator: ", ")).\n"
+        context += "These are the ONLY tools that exist. Do NOT invent, guess, or hallucinate tool names.\n"
+        context += "If the user's request requires a capability not covered by these tools, "
+        context += "provide a `finalAnswer` explaining what is missing. Do NOT ask the user to run commands themselves.\n"
+
         if !scratchpad.isEmpty {
             context += "\n## SCRATCHPAD\n\(scratchpad.joined(separator: "\n\n"))"
         }
-        
+
         return context
     }
     
@@ -757,56 +921,89 @@ actor ReActAgentExecutor: AgentExecutor {
     
     // MARK: - Tool Execution
     
+    /// Executes a tool and guarantees a strictly typed `ToolExecutionResult`.
     nonisolated private func executeTool(
         action: ToolAction,
         tools: [AgentTool],
         parentContext: TraceContext
-    ) async -> (output: String, isSuccess: Bool) {
+    ) async -> ToolExecutionResult {
         var toolSpan = parentContext.newSpan()
         toolSpan.addMetadata("tool_name", value: action.toolName)
-        
+
         let startTime = Date()
-        var isSuccess = true
-        var errorDescription: String? = nil
         var sanitizedName = action.toolName
+        
+        // Clean up hallucinated wrapper syntax
         if !tools.contains(where: { $0.name == sanitizedName }) {
             if let clean = sanitizedName.components(separatedBy: CharacterSet(charactersIn: "<| ")).first {
                 sanitizedName = clean
             }
         }
-        
-        var output: String
-        
+
+        let result: ToolExecutionResult
+        var errorDescriptionForMetrics: String? = nil
+
+        // 1. Check for Hallucination
         if let tool = tools.first(where: { $0.name == sanitizedName }) {
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.sortedKeys]
                 let paramData = try encoder.encode(action.parameters)
-                output = try await tool.run(paramData)
-                if output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("error") {
-                    isSuccess = false
-                    errorDescription = output
+
+                // 2. Execute with Timeout
+                let output = try await withThrowingTaskGroup(of: String.self) { group in
+                    group.addTask {
+                        try await tool.run(paramData)
+                    }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 30_000_000_000)
+                        throw ToolTimeoutError(toolName: action.toolName)
+                    }
+                    guard let res = try await group.next() else {
+                        throw ToolTimeoutError(toolName: action.toolName)
+                    }
+                    group.cancelAll()
+                    return res
                 }
+
+                // 3. Semantic Failure Detection
+                let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                let isSemanticFailure = trimmedOutput.isEmpty
+                    || trimmedOutput.lowercased().hasPrefix("error")
+                    || trimmedOutput.count < 3
+                    || trimmedOutput.lowercased() == "null"
+                    || trimmedOutput.lowercased() == "nil"
+
+                if isSemanticFailure {
+                    result = .semanticFailure(toolName: action.toolName, output: output)
+                    errorDescriptionForMetrics = trimmedOutput.isEmpty ? "Empty tool response" : output
+                } else {
+                    result = .success(output: output)
+                }
+                
+            } catch is ToolTimeoutError {
+                result = .timedOut(toolName: action.toolName, duration: 30.0)
+                errorDescriptionForMetrics = "Tool timed out after 30s"
+                logger.warning("⏱️ Tool '\(action.toolName)' timed out.")
             } catch {
-                isSuccess = false
-                errorDescription = error.localizedDescription
-                output = "Error executing tool: \(error.localizedDescription)"
+                result = .systemError(reason: error.localizedDescription)
+                errorDescriptionForMetrics = error.localizedDescription
             }
         } else {
-            isSuccess = false
-            errorDescription = "Tool not found"
-            output = "Tool not found"
+            result = .hallucinated(toolName: action.toolName, availableTools: tools.map(\.name))
+            errorDescriptionForMetrics = "Tool not found"
             Task { @MainActor in
                 MetricsManager.shared.recordHallucination(toolName: action.toolName, context: toolSpan)
             }
         }
-        
+
+        // Metrics Logging
         let duration = Date().timeIntervalSince(startTime)
         Task { @MainActor in
             MetricsManager.shared.recordToolReliability(
                 toolName: sanitizedName,
-                isSuccess: isSuccess,
-                errorType: errorDescription,
+                isSuccess: result.isSuccess,
+                errorType: errorDescriptionForMetrics,
                 context: toolSpan
             )
             MetricsManager.shared.record(
@@ -815,8 +1012,8 @@ actor ReActAgentExecutor: AgentExecutor {
                 context: toolSpan
             )
         }
-        
-        return (output, isSuccess)
+
+        return result
     }
     
     nonisolated private func buildMessages(systemPrompt: String, chatHistory: [ChatMessage]) -> [[String: String]] {
@@ -851,6 +1048,20 @@ actor ReActAgentExecutor: AgentExecutor {
         continuation.yield(.content("⚠️ **Task Limit Reached**\n\nI've done my best, but hit the step limit."))
         continuation.finish()
     }
+}
+
+// MARK: - Circuit Breaker Helpers
+
+/// Deduplication key to detect same-tool-same-params retries.
+private struct ToolInvocationKey: Hashable {
+    let toolName: String
+    let paramsHash: Int
+}
+
+/// Thrown when a tool exceeds its per-invocation time limit.
+private struct ToolTimeoutError: Error, LocalizedError {
+    let toolName: String
+    var errorDescription: String? { "Tool '\(toolName)' timed out after 30 seconds." }
 }
 
 // MARK: - Debug Spy Model

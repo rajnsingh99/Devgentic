@@ -9,6 +9,10 @@
 //  Updated on 04/02/26 for Modern Dashboard UI.
 //  Redesigned on 20/02/26 for Phase 4: Master-Detail Architecture & HITL controls.
 //  Polished on 20/02/26 to modernize UI alignments, typography, and macOS standards.
+//  Updated on 20/02/26 for Step 3: Dependency Protection via Instructions matching.
+//  Updated on 20/02/26: Added native Hover Tooltips and Detailed Parameter Popovers.
+//  Updated on 21/02/26: Replaced scroll-glitch toggles with semantic pill buttons, unified popover scroll.
+//  Updated on 21/02/26: Switched State button to icon-only for cleaner UI, fixed vertical alignment across columns.
 //
 
 import SwiftUI
@@ -33,6 +37,7 @@ struct ToolTableRow: Identifiable {
 struct ToolLibraryView: View {
     // A binding to the agent's currently configured tools.
     @Binding var configuredTools: [Tool]
+    let instructions: String
     
     @Environment(\.dismiss) private var dismiss
     @StateObject private var toolStore = UnifiedToolStore.shared
@@ -152,28 +157,37 @@ struct ToolLibraryView: View {
                     }
                     .width(min: 200, ideal: 240, max: 320)
                     
-                    // 2. Description Column
+                    // 2. Description Column (Vertically Centered to match state toggles)
                     TableColumn("Description") { row in
-                        Text(row.definition.description)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                            .lineLimit(3)
-                            .padding(.vertical, 10)
+                        HStack(alignment: .center) { // CHANGED: from .top to .center for perfect row alignment
+                            Text(row.definition.description)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .lineLimit(3)
+                                .help(row.definition.description) // Native Hover Tooltip
+                            
+                            Spacer(minLength: 8)
+                            
+                            // Clickable Info Popover for Parameters
+                            ToolDetailsButton(definition: row.definition)
+                        }
+                        .padding(.vertical, 10)
                     }
                     
                     // 3. Status Column (Active/Inactive)
-                    TableColumn("Enabled") { row in
+                    TableColumn("State") { row in
                         ToolStatusToggle(
                             configuredTools: $configuredTools,
                             source: row.source,
-                            definition: row.definition
+                            definition: row.definition,
+                            instructions: instructions
                         )
                         .padding(.vertical, 10)
                     }
-                    .width(70)
+                    .width(60) // Reduced width since it's just an icon now
                     
                     // 4. Security Column (HITL Approval)
-                    TableColumn("Require Approval") { row in
+                    TableColumn("Approval") { row in
                         ToolSecurityToggle(
                             configuredTools: $configuredTools,
                             source: row.source,
@@ -181,7 +195,7 @@ struct ToolLibraryView: View {
                         )
                         .padding(.vertical, 10)
                     }
-                    .width(140)
+                    .width(80)
                 }
                 .padding(.top, 12) // Ensures the Table headers don't overlap with the search field/toolbar area
             }
@@ -275,11 +289,114 @@ struct ToolLibraryView: View {
 
 // MARK: - Row Action Components
 
-/// Manages the activation state of a tool (adding/removing from configuredTools).
+/// A small button that triggers a popover showing the full description and parameter schema.
+private struct ToolDetailsButton: View {
+    let definition: ToolDefinition
+    @State private var isShowingPopover = false
+    
+    var body: some View {
+        Button {
+            isShowingPopover.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .foregroundColor(.secondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("View full tool details & parameters")
+        .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
+            // Master ScrollView ensures long descriptions AND params scroll seamlessly together
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Header
+                    HStack {
+                        Image(systemName: "wrench.fill")
+                            .foregroundColor(.accentColor)
+                        Text(definition.name)
+                            .font(.headline)
+                            .fontDesign(.monospaced)
+                    }
+                    
+                    // Full Description (Unrestricted Height)
+                    Text(definition.description)
+                        .font(.body)
+                        .foregroundColor(.primary)
+                        .lineLimit(nil)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    Divider()
+                    
+                    // Parameters Section
+                    Text("Parameters Schema")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.secondary)
+                    
+                    if definition.parameters.properties.isEmpty {
+                        Text("No parameters required.")
+                            .font(.caption)
+                            .italic()
+                            .foregroundColor(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(definition.parameters.properties.keys.sorted()), id: \.self) { key in
+                                let prop = definition.parameters.properties[key]!
+                                let isRequired = definition.parameters.required.contains(key)
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(key)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .fontWeight(.bold)
+                                        Text(prop.type)
+                                            .font(.caption2)
+                                            .foregroundColor(.blue)
+                                        
+                                        if isRequired {
+                                            Text("Required")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundColor(.red)
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 2)
+                                                .background(Color.red.opacity(0.1))
+                                                .cornerRadius(4)
+                                        }
+                                    }
+                                    
+                                    if let desc = prop.description {
+                                        Text(desc)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .frame(width: 350)
+            .frame(maxHeight: 500) // Provides a ceiling so it scrolls gracefully if content is huge
+        }
+    }
+}
+
+
+/// Manages the activation state of a tool using a semantic pill button to prevent table scroll-glitch.
 private struct ToolStatusToggle: View {
     @Binding var configuredTools: [Tool]
     let source: ToolSource
     let definition: ToolDefinition
+    let instructions: String
+    
+    @State private var showingDependencyAlert = false
     
     var isEnabled: Binding<Bool> {
         Binding(
@@ -301,22 +418,48 @@ private struct ToolStatusToggle: View {
                         configuredTools.append(newTool)
                     }
                 } else {
-                    // Disable: Remove from the active array
-                    configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
+                    // Disable: Check dependency
+                    if instructions.contains("`\(definition.name)`") {
+                        // Block disable and show alert
+                        DispatchQueue.main.async {
+                            showingDependencyAlert = true
+                        }
+                    } else {
+                        // Safe to disable: Remove from the active array
+                        configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
+                    }
                 }
             }
         )
     }
     
     var body: some View {
-        Toggle("Enable \(definition.name)", isOn: isEnabled)
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.small) // Modernized from .regular to .small
+        Button {
+            isEnabled.wrappedValue.toggle()
+        } label: {
+            Image(systemName: isEnabled.wrappedValue ? "checkmark.circle.fill" : "circle.dashed")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 28, height: 16, alignment: .center)
+//            Image(systemName: "power")
+//                .font(.system(size: 12, weight: .bold))
+//                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(isEnabled.wrappedValue ? Color.accentColor : Color.secondary.opacity(0.15))
+        .foregroundColor(isEnabled.wrappedValue ? .white : .primary)
+        .cornerRadius(6)
+        .help(isEnabled.wrappedValue ? "Tool is ON. Click to disable." : "Tool is OFF. Click to enable.")
+        .alert("Tool in Use", isPresented: $showingDependencyAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Cannot disable '\(definition.name)'. It is currently referenced in the System Instructions. Please remove it from the instructions first.")
+        }
     }
 }
 
-/// Manages the HITL security preference (requiresConfirmation) for an active tool.
+/// Manages the HITL security preference using a semantic pill button.
 private struct ToolSecurityToggle: View {
     @Binding var configuredTools: [Tool]
     let source: ToolSource
@@ -329,15 +472,12 @@ private struct ToolSecurityToggle: View {
     var requiresConfirmation: Binding<Bool> {
         Binding(
             get: {
-                // If it's configured, read the user's saved preference.
                 if let existing = configuredTools.first(where: { $0.name == definition.name && $0.sourceId == source.id }) {
                     return existing.requiresConfirmation
                 }
-                // Otherwise, show what the default *will* be when enabled.
                 return definition.requiresConfirmation
             },
             set: { newValue in
-                // Only mutate if the tool is actually enabled/configured.
                 if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
                     configuredTools[index].requiresConfirmation = newValue
                 }
@@ -346,21 +486,33 @@ private struct ToolSecurityToggle: View {
     }
     
     var body: some View {
-        HStack(spacing: 12) {
-            Toggle("Require Approval", isOn: requiresConfirmation)
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small) // Modernized from .regular to .small
-                .disabled(!isConfigured) // Lock the security control if the tool is disabled
-            
-            // Visual Indicator (Fixed width ensures toggles align perfectly)
-            Image(systemName: requiresConfirmation.wrappedValue ? "lock.shield.fill" : "shield.slash")
-                .foregroundColor(requiresConfirmation.wrappedValue ? (isConfigured ? .orange : .secondary) : .secondary.opacity(0.3))
-                .font(.system(size: 14, weight: .medium)) // Slightly reduced font size to match small toggle
-                .frame(width: 20, alignment: .center)
-                .help(isConfigured
-                      ? (requiresConfirmation.wrappedValue ? "Suspends execution for user approval." : "Runs automatically.")
-                      : "Enable tool to configure security.")
+        Button {
+            if isConfigured {
+                requiresConfirmation.wrappedValue.toggle()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: requiresConfirmation.wrappedValue ? "lock.shield.fill" : "bolt.fill")
+                    .font(.system(size: 10))
+                Text(requiresConfirmation.wrappedValue ? "Ask" : "Auto")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .frame(width: 50, alignment: .center)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            !isConfigured ? Color.secondary.opacity(0.05) :
+            (requiresConfirmation.wrappedValue ? Color.orange : Color.green)
+        )
+        .foregroundColor(
+            !isConfigured ? .secondary.opacity(0.3) : .white
+        )
+        .cornerRadius(6)
+        .disabled(!isConfigured)
+        .help(!isConfigured ? "Enable tool first to configure security." :
+              (requiresConfirmation.wrappedValue ? "Ask Before Run: Suspends execution for your approval before running." : "Auto-Run: Tool executes automatically without asking."))
     }
 }

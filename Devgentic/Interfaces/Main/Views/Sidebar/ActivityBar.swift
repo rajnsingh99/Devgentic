@@ -13,6 +13,7 @@
 //  Refactored on 28/08/25 to fix incorrect new chat button behavior.
 //  Refactored on 28/08/25 to rename New Chat button to Home.
 //  Modernized on 17/02/26 with hover glow, press animations, and unified surface.
+//  Updated on 21/02/26 to add AppKit window-front checks to prevent duplicate spawning.
 //
 
 import SwiftUI
@@ -119,7 +120,13 @@ struct ActivityBarButton: View {
         switch tab {
         case .settings:
             logger.debug("Settings button tapped. Attempting to open Settings window.")
-            openWindow(id: "settings")
+            
+            // Check if it's already open, if so bring to front. If not, open it.
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "settings" }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "settings")
+            }
 
             if viewModel.showSettings {
                 viewModel.showSettings = false
@@ -127,8 +134,14 @@ struct ActivityBarButton: View {
             }
 
         case .backendProfiles:
-            logger.debug("Backend Profiles button tapped. Attempting to open window.")
-            openWindow(id: "backend-profiles")
+            
+            // Check if it's already open, if so bring to front. If not, open it.
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "backend-profiles" }) {
+                window.makeKeyAndOrderFront(nil)
+            } else {
+                openWindow(id: "backend-profiles")
+            }
+            
             if viewModel.showSettings { viewModel.showSettings = false }
 
 

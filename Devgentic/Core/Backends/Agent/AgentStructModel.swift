@@ -57,6 +57,42 @@ struct AgentTool: Sendable {
     }
 }
 
+// MARK: - Tool Execution Results
+
+/// Represents the definitive outcome of a tool execution attempt.
+enum ToolExecutionResult: Sendable, Equatable {
+    case success(output: String)
+    case hallucinated(toolName: String, availableTools: [String])
+    case userDenied(toolName: String)
+    case timedOut(toolName: String, duration: TimeInterval)
+    case semanticFailure(toolName: String, output: String) // E.g., null, empty, or explicit CLI errors
+    case systemError(reason: String)
+    
+    /// The string representation that should be fed back to the LLM as an Observation.
+    var llmObservation: String {
+        switch self {
+        case .success(let output):
+            return output
+        case .hallucinated(let toolName, let available):
+            return "System Error: Tool not found. '\(toolName)' does not exist. Available tools: \(available.joined(separator: ", ")). Use ONLY these tools or provide a `finalAnswer`."
+        case .userDenied(let toolName):
+            return "System Security: User explicitly denied permission to execute tool '\(toolName)'. Do not retry this exact action."
+        case .timedOut(let toolName, let duration):
+            return "System Error: Tool '\(toolName)' timed out after \(Int(duration)) seconds. The operation took too long."
+        case .semanticFailure(_, let output):
+            return output.isEmpty ? "System Error: Empty tool response." : output
+        case .systemError(let reason):
+            return "System Error: Failed to execute tool: \(reason)"
+        }
+    }
+    
+    var isSuccess: Bool {
+        if case .success = self { return true }
+        return false
+    }
+}
+
+
 // MARK: - Execution Input
 
 /// The standard payload required to initialize any Agent Executor.

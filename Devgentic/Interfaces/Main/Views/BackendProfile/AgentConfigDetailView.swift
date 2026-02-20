@@ -6,7 +6,7 @@
 //  Updated on 28/01/26 to support Agent Architecture selection.
 //  Updated on 04/02/26 for Modern Dashboard UI.
 //  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
-//  Updated: Migrated ReAct Engine kernel constraints into customizable default persona.
+//  Updated on 20/02/26 to add Detached Expandable Prompt Editor.
 //
 
 import SwiftUI
@@ -235,6 +235,21 @@ struct AgentConfigDetailView: View {
                             
                             Spacer()
                             
+                            // [PHASE 1] The Expand Button
+                            Button {
+                                AdvancedPromptWindowManager.shared.showEditor(
+                                    text: instructionsBinding,
+                                    agentName: profile.displayName,
+                                    configuredTools: toolsBinding
+                                )
+                            } label: {
+                                Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .font(.caption)
+                            .buttonStyle(.link)
+                            
+                            Text("|").foregroundColor(.secondary.opacity(0.3)).font(.caption)
+                            
                             Button("Use Default Persona") {
                                 instructionsBinding.wrappedValue = defaultSystemPersona
                             }
@@ -242,14 +257,15 @@ struct AgentConfigDetailView: View {
                             .buttonStyle(.link)
                         }
                         
-                        TextEditor(text: instructionsBinding)
-                            .font(.body.monospaced())
-                            .frame(minHeight: 120)
-                            .scrollContentBackground(.hidden)
-                            .padding(8)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .cornerRadius(8)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                        TokenizingTextEditor(
+                            text: instructionsBinding,
+                            configuredTools: toolsBinding
+                        )
+                        .frame(minHeight: 120)
+                        .padding(8)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
                     }
                     
                     // Description
@@ -413,7 +429,10 @@ struct AgentConfigDetailView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor)) // Main background
         .sheet(isPresented: $showingToolLibrary) {
-            ToolLibraryView(configuredTools: toolsBinding)
+            ToolLibraryView(
+                configuredTools: toolsBinding,
+                instructions: instructionsBinding.wrappedValue
+            )
         }
         .safeAreaInset(edge: .bottom) {
             actionButtons
@@ -433,7 +452,14 @@ struct AgentConfigDetailView: View {
             initialProfileState = profile
             loadAdvancedConfigs()
         }
+        .onDisappear {
+            // Cleanup: Close the floating window if the user leaves the panel entirely
+            AdvancedPromptWindowManager.shared.closeWindow()
+        }
         .onChange(of: profile.id) {
+            // Cleanup: Close the floating window if the user switches to a different agent
+            AdvancedPromptWindowManager.shared.closeWindow()
+            
             initialProfileState = profile
             loadAdvancedConfigs()
         }
@@ -548,7 +574,6 @@ struct AgentConfigDetailView: View {
                         apiKey: providerConfig.wrappedValue.apiKey ?? ""
                     )
                     
-                    // The Manual Field: Ensures the saved model is ALWAYS visible and editable
                     HStack {
                         Text("Model:")
                             .font(.subheadline)

@@ -6,6 +6,7 @@
 //
 //  Refactored on 27/08/25 to remove LLM Integration window and commands.
 //  Refactored on 27/08/25 to add Backend Profiles window and commands.
+//  Updated on 21/02/26 to fix multi-window spawning bug (WindowGroup -> Window).
 //
 
 import SwiftUI
@@ -77,7 +78,12 @@ struct DevgenticApp: App {
                 .keyboardShortcut(",", modifiers: .command)
                 
                 Button("Backend Profiles...") {
-                    openWindow(id: "backend-profiles")
+                    // Safe AppKit check to bring to front if already open
+                    if let profileWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "backend-profiles" }) {
+                        profileWindow.makeKeyAndOrderFront(nil)
+                    } else {
+                        openWindow(id: "backend-profiles")
+                    }
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
             }
@@ -98,7 +104,9 @@ struct DevgenticApp: App {
             }
         }
         
-        WindowGroup("Backend Profiles", id: "backend-profiles") {
+        // MARK: - AI Blueprints Window
+        // CHANGED: From `WindowGroup` to `Window` to enforce a single-instance lifecycle
+        Window("AI Blueprints", id: "backend-profiles") {
             BackendProfilePanelView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(themeManager)
