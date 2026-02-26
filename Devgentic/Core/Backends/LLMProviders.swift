@@ -13,6 +13,47 @@ import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMProviders")
 
+// MARK: - LLM Provider Protocol
+
+/// The contract for all Language Model providers in Devgentic.
+/// Uses the standard OpenAI-compatible messages format directly,
+/// eliminating the need for intermediate Transcript types.
+protocol LLMProvider: Sendable {
+
+    /// Generates a complete response for the given conversation.
+    /// - Parameters:
+    ///   - messages: An array of message dictionaries in OpenAI chat format:
+    ///     `[{"role": "system"|"user"|"assistant", "content": "..."}]`
+    ///   - tools: An optional array of tool dictionaries in the provider's native format.
+    ///   - responseSchema: An optional JSON Schema dictionary for structured output enforcement.
+    ///     Providers that support it (OpenAI, Ollama) embed this in the API request body.
+    /// - Returns: The full text response from the model.
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String
+
+    /// Streams a response token-by-token for the given conversation.
+    /// - Parameter messages: An array of message dictionaries in OpenAI chat format.
+    /// - Parameter tools: An optional array of tool dictionaries in the provider's native format.
+    /// - Returns: An async stream of string chunks (deltas) as they are generated.
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error>
+}
+
+// MARK: - Provider Configuration
+
+/// Lightweight configuration for HTTP-based LLM providers.
+struct LLMProviderConfig: Sendable {
+    let apiKey: String?
+    let baseURL: URL
+    let modelName: String
+    let timeout: TimeInterval
+
+    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0) {
+        self.apiKey = apiKey
+        self.baseURL = baseURL
+        self.modelName = modelName
+        self.timeout = timeout
+    }
+}
+
 // MARK: - OpenAI-Compatible Provider
 
 /// Handles OpenAI, Gemini (via compatible endpoint), and any OpenAI-compatible API.
@@ -25,7 +66,7 @@ struct OpenAILLMProvider: LLMProvider {
         self.config = config
     }
 
-    func generate(messages: [[String: String]], responseSchema: [String: Any]?) async throws -> String {
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
         let url = config.baseURL.appendingPathComponent("chat/completions")
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"
@@ -40,6 +81,11 @@ struct OpenAILLMProvider: LLMProvider {
             "messages": messages,
             "stream": false
         ]
+
+        // Inject tools if provided
+        if let tools = tools, !tools.isEmpty {
+            body["tools"] = tools
+        }
 
         // Structured output: embed JSON schema in response_format
         if let schema = responseSchema {
@@ -61,15 +107,43 @@ struct OpenAILLMProvider: LLMProvider {
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let content = message["content"] as? String else {
-            throw LLMProviderError.invalidResponse("Missing content in OpenAI response")
+              let message = choices.first?["message"] as? [String: Any] else {
+            throw LLMProviderError.invalidResponse("Missing message object in OpenAI response")
+        }
+
+        let content = message["content"] as? String ?? ""
+        
+        // --- NATIVE TOOL INTERCEPTION BRIDGE ---
+        // Maps a native tool_calls array back into the expected LeanCognitiveStep JSON string format
+        if let toolCalls = message["tool_calls"] as? [[String: Any]],
+           let firstTool = toolCalls.first?["function"] as? [String: Any],
+           let toolName = firstTool["name"] as? String {
+            
+            var argumentsDict: [String: Any] = [:]
+            
+            // OpenAI typically returns arguments as a JSON String
+            if let argsAsString = firstTool["arguments"] as? String,
+               let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
+                argumentsDict = parsedDict
+            } else if let argsAsDict = firstTool["arguments"] as? [String: Any] {
+                argumentsDict = argsAsDict
+            }
+            
+            // Synthesize the LeanCognitiveStep
+            let syntheticStep: [String: Any] = [
+                "content": content.isEmpty ? "Executing tool \(toolName)..." : content,
+                "tool_name": toolName,
+                "arguments": argumentsDict
+            ]
+            
+            let syntheticData = try JSONSerialization.data(withJSONObject: syntheticStep)
+            return String(data: syntheticData, encoding: .utf8) ?? "{}"
         }
 
         return content
     }
 
-    func stream(messages: [[String: String]]) -> AsyncThrowingStream<String, Error> {
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -82,11 +156,16 @@ struct OpenAILLMProvider: LLMProvider {
                         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                     }
 
-                    let body: [String: Any] = [
+                    var body: [String: Any] = [
                         "model": config.modelName,
                         "messages": messages,
                         "stream": true
                     ]
+
+                    // Inject tools if provided
+                    if let tools = tools, !tools.isEmpty {
+                        body["tools"] = tools
+                    }
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -154,7 +233,7 @@ struct OllamaLLMProvider: LLMProvider {
         self.config = config
     }
 
-    func generate(messages: [[String: String]], responseSchema: [String: Any]?) async throws -> String {
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
         let url = config.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"
@@ -165,6 +244,11 @@ struct OllamaLLMProvider: LLMProvider {
             "messages": messages,
             "stream": false
         ]
+
+        // Ollama supports tools natively as well
+        if let tools = tools, !tools.isEmpty {
+            body["tools"] = tools
+        }
 
         // Ollama supports structured output via the "format" field
         if let schema = responseSchema {
@@ -183,15 +267,43 @@ struct OllamaLLMProvider: LLMProvider {
         }
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let message = json?["message"] as? [String: Any],
-              let content = message["content"] as? String else {
-            throw LLMProviderError.invalidResponse("Missing content in Ollama response")
+        guard let message = json?["message"] as? [String: Any] else {
+            throw LLMProviderError.invalidResponse("Missing message object in Ollama response")
+        }
+
+        let content = message["content"] as? String ?? ""
+        
+        // --- NATIVE TOOL INTERCEPTION BRIDGE ---
+        // Maps a native tool_calls array back into the expected LeanCognitiveStep JSON string format
+        if let toolCalls = message["tool_calls"] as? [[String: Any]],
+           let firstTool = toolCalls.first?["function"] as? [String: Any],
+           let toolName = firstTool["name"] as? String {
+            
+            var argumentsDict: [String: Any] = [:]
+            
+            // Ollama typically returns arguments as a JSON Dictionary directly
+            if let argsAsDict = firstTool["arguments"] as? [String: Any] {
+                argumentsDict = argsAsDict
+            } else if let argsAsString = firstTool["arguments"] as? String,
+                      let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
+                argumentsDict = parsedDict
+            }
+            
+            // Synthesize the LeanCognitiveStep
+            let syntheticStep: [String: Any] = [
+                "content": content.isEmpty ? "Executing tool \(toolName)..." : content,
+                "tool_name": toolName,
+                "arguments": argumentsDict
+            ]
+            
+            let syntheticData = try JSONSerialization.data(withJSONObject: syntheticStep)
+            return String(data: syntheticData, encoding: .utf8) ?? "{}"
         }
 
         return content
     }
 
-    func stream(messages: [[String: String]]) -> AsyncThrowingStream<String, Error> {
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -200,11 +312,16 @@ struct OllamaLLMProvider: LLMProvider {
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-                    let body: [String: Any] = [
+                    var body: [String: Any] = [
                         "model": config.modelName,
                         "messages": messages,
                         "stream": true
                     ]
+
+                    // Ollama supports tools natively as well
+                    if let tools = tools, !tools.isEmpty {
+                        body["tools"] = tools
+                    }
 
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -252,7 +369,7 @@ struct MLXLLMProvider: LLMProvider {
         self.modelName = modelName
     }
 
-    func generate(messages: [[String: String]], responseSchema: [String: Any]?) async throws -> String {
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
         var fullText = ""
         let temperature: Float = 0.6
         let maxTokens = 2048
@@ -270,7 +387,7 @@ struct MLXLLMProvider: LLMProvider {
         return fullText
     }
 
-    func stream(messages: [[String: String]]) -> AsyncThrowingStream<String, Error> {
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
         let temperature: Float = 0.6
         let maxTokens = 2048
 

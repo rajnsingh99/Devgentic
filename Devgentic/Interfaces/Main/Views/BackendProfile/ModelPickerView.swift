@@ -75,12 +75,15 @@ struct GeminiModelPickerView: View {
 // MARK: - Ollama Model Picker View
 struct OllamaModelPickerView: View {
     @Binding var selectedModel: String
+    @Binding var supportsNativeTools: Bool
+    
     let baseURL: String
     
     /// If true, only models that support Tool Calling (Agents) will be displayed.
     var filterForTools: Bool = false
 
     @State private var models: [String] = []
+    @State private var loadedLocalModels: [LocalModel] = [] // Cache to look up capabilities
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
     
@@ -121,10 +124,13 @@ struct OllamaModelPickerView: View {
         .onChange(of: baseURL) {
             fetchModels()
         }
+        .onChange(of: selectedModel) {
+            updateCapabilityFlag(for: selectedModel)
+        }
     }
 
     private func fetchModels() {
-        guard !baseURL.isEmpty, let url = URL(string: baseURL) else {
+        guard !baseURL.isEmpty, let _ = URL(string: baseURL) else {
             self.errorMessage = "Invalid Base URL."
             self.models = []
             return
@@ -134,45 +140,66 @@ struct OllamaModelPickerView: View {
         errorMessage = nil
         
         Task {
-            // Determine which fetch strategy to use
-            let fetchedModels: [String]
-            
-            if filterForTools {
-                // Use the Capability Service to filter
-                fetchedModels = await OllamaCapabilityService.shared.getAgentReadyModels(baseURL: url)
-            } else {
-                // Use the standard connector for raw list
-                do {
-                    fetchedModels = try await OllamaConnect.fetchLocalOllamaModels(baseURL: baseURL)
-                } catch {
-                    fetchedModels = []
-                    await MainActor.run {
-                         self.errorMessage = "Connection failed. Is Ollama running?"
+            do {
+                let rawNames = try await OllamaConnect.fetchLocalOllamaModels(baseURL: baseURL)
+                
+                // Fetch rich details to evaluate capabilities
+                var fetchedDetails: [LocalModel] = []
+                await withTaskGroup(of: LocalModel?.self) { group in
+                    for name in rawNames {
+                        group.addTask {
+                            do {
+                                let response = try await OllamaConnect.fetchModelDetails(name: name, baseURL: baseURL)
+                                return LocalModel(name: name, response: response)
+                            } catch {
+                                return nil
+                            }
+                        }
+                    }
+                    for await model in group {
+                        if let m = model {
+                            fetchedDetails.append(m)
+                        }
                     }
                 }
-            }
+                
+                let sortedModels = fetchedDetails.sorted { $0.name < $1.name }
+                let validModels = filterForTools ? sortedModels.filter { $0.supportsNativeTools } : sortedModels
+                let fetchedNames = validModels.map { $0.name }
 
-            await MainActor.run {
-                // Update UI State
-                self.models = fetchedModels
-                
-                // Smart Selection Logic
-                if !fetchedModels.isEmpty {
-                    // If current selection is invalid, pick the first one
-                    if !fetchedModels.contains(selectedModel) {
-                        self.selectedModel = fetchedModels.first!
-                    } else if selectedModel.isEmpty {
-                        self.selectedModel = fetchedModels.first!
+                await MainActor.run {
+                    self.loadedLocalModels = sortedModels
+                    self.models = fetchedNames
+                    
+                    // Smart Selection Logic
+                    if !fetchedNames.isEmpty {
+                        if !fetchedNames.contains(selectedModel) || selectedModel.isEmpty {
+                            self.selectedModel = fetchedNames.first!
+                        }
+                    } else if self.errorMessage == nil {
+                        if filterForTools {
+                            self.errorMessage = "No models support Tools. Try Llama 3.1 or Qwen 2.5."
+                        }
                     }
-                } else if self.errorMessage == nil {
-                    // Only show specific error if connection didn't fail earlier
-                    if filterForTools {
-                        self.errorMessage = "No models support Tools. Try Llama 3.1 or Qwen 2.5."
-                    }
+                    
+                    // Bind the payload capability flag for the newly resolved selection
+                    updateCapabilityFlag(for: self.selectedModel)
+                    
+                    self.isLoading = false
                 }
-                
-                self.isLoading = false
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Connection failed. Is Ollama running?"
+                    self.models = []
+                    self.isLoading = false
+                }
             }
+        }
+    }
+    
+    private func updateCapabilityFlag(for modelName: String) {
+        if let matchedModel = loadedLocalModels.first(where: { $0.name == modelName }) {
+            self.supportsNativeTools = matchedModel.supportsNativeTools
         }
     }
 }

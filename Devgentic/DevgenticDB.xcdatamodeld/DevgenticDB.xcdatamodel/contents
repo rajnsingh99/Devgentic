@@ -51,7 +51,7 @@
         <attribute name="messageType" optional="YES" attributeType="String"/>
         <attribute name="senderType" optional="YES" attributeType="String"/>
         <attribute name="text_content" optional="YES" attributeType="String"/>
-        <attribute name="thoughts" optional="YES" attributeType="Transformable" valueTransformerName="StringArrayTransformer"/>
+        <attribute name="thoughts" optional="YES" attributeType="Transformable" valueTransformerName="AgentThoughtArrayTransformer"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <relationship name="attachedImageFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedImageFileEntity"/>
         <relationship name="attachedTextFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedTextFileEntity"/>
@@ -63,6 +63,7 @@
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="isPinned" optional="YES" attributeType="Boolean" usesScalarValueType="YES"/>
         <attribute name="openAIThreadID" optional="YES" attributeType="String"/>
+        <attribute name="sessionGraphData" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="userDefinedTitle" optional="YES" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>

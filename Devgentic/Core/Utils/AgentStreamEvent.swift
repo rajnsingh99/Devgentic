@@ -7,13 +7,24 @@
 
 import Foundation
 
+/// Structured representation of a single reasoning thought for the UI.
+struct AgentThought: Sendable, Identifiable, Codable, Equatable {
+    let id: UUID
+    let text: String
+    
+    init(id: UUID = UUID(), text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
 /// Represents the distinct types of events emitted during an Agent's execution loop.
 /// This structured stream allows the UI to render "Thinking", "Artifacts", and "Text" separately.
 enum AgentStreamEvent: Sendable {
     
     /// The agent is reasoning. Use this to update a "Thinking..." UI component.
-    /// Example: "Internal Monologue: Checking file system permissions..."
-    case thought(String)
+    /// Wrapped with a stable ID to fix SwiftUI ForEach layout jumps.
+    case thought(id: UUID = UUID(), _ message: String)
     
     /// The agent is about to execute a tool.
     /// - name: The tool name (e.g., "list_directory")

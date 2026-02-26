@@ -41,8 +41,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
-    // They are now Codable so the "Thinking" history is persisted.
-    @Published var thoughts: [String] = []
+    @Published var thoughts: [AgentThought] = []
     @Published var artifacts: [ToolOutput] = []
     
     // MARK: - Transient UI State (Not Persisted)
@@ -51,11 +50,9 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     @Published var isThinkingExpanded: Bool = false // UI toggle for the accordion
     
     // [HITL] New Property for Permission Card
-    // Holds the data for the tool waiting for approval.
     @Published var pendingToolConfirmation: PendingToolConfirmation? = nil
 
     // [ASK_USER] Property for Clarification Card
-    // Holds the data for a pending clarification request from the agent.
     @Published var pendingClarification: PendingClarification? = nil
     
     // MARK: - Performance Caching
@@ -121,7 +118,6 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        // Persist the glass box data
         case thoughts, artifacts
     }
 
@@ -139,11 +135,16 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
         
-        // Decode Glass Box Data (Default to empty if missing for backward compatibility)
-        self.thoughts = try container.decodeIfPresent([String].self, forKey: .thoughts) ?? []
+        // Decode Glass Box Data (With fallback for older string-based thoughts)
+        if let oldThoughts = try? container.decodeIfPresent([String].self, forKey: .thoughts) {
+            self.thoughts = oldThoughts.map { AgentThought(text: $0) }
+        } else {
+            self.thoughts = try container.decodeIfPresent([AgentThought].self, forKey: .thoughts) ?? []
+        }
+        
         self.artifacts = try container.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
         
-        // Transient properties initialize to default (NOT decoded)
+        // Transient properties initialize to default
         self.thinkingHeadline = nil
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
@@ -165,11 +166,8 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         try container.encodeIfPresent(attachedTextFiles, forKey: .attachedTextFiles)
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
         
-        // Encode Glass Box Data
         try container.encode(thoughts, forKey: .thoughts)
         try container.encode(artifacts, forKey: .artifacts)
-        
-        // Note: pendingToolConfirmation is intentionally excluded from encoding
     }
 }
 

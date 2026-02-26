@@ -13,7 +13,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// A lightweight executor for direct "Bot" interactions.
 /// Unlike the ReActAgentExecutor, this does not loop, reason, or use tools.
 /// It simply constructs messages and streams the model's response.
-actor ChatExecutor: AgentExecutor {
+actor ChatExecutor: Executor {
 
     // MARK: - Properties
 
@@ -57,7 +57,8 @@ actor ChatExecutor: AgentExecutor {
                     let messages = self.buildMessages(input: input)
 
                     // 3. Stream Response
-                    let tokenStream = model.stream(messages: messages)
+                    // Phase 1: Added tools: nil
+                    let tokenStream = model.stream(messages: messages, tools: nil)
 
                     for try await chunk in tokenStream {
                         // Explicitly check cancellation inside the loop for responsiveness

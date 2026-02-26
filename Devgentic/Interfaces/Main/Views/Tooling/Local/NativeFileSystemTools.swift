@@ -71,7 +71,7 @@ struct ListDirectoryTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
         let resolvedPath = (arguments.path as NSString).expandingTildeInPath
-        
+
         // --- LOGGING INSTRUMENTATION ---
         let logID = LogManager.shared.logAction(
             toolName: self.name,
@@ -83,12 +83,42 @@ struct ListDirectoryTool: DevgenticTool {
         // -------------------------------
 
         let fileManager = FileManager.default
+        let dirURL = URL(fileURLWithPath: resolvedPath)
+
         do {
-            let contents = try fileManager.contentsOfDirectory(atPath: resolvedPath)
-            let result = contents.isEmpty ? "(Directory is empty)" : contents.joined(separator: "\n")
-            
-            // FIX: Explicitly label the source path in the output
-            return "📂 Contents of directory '\(resolvedPath)':\n\(result)\n(Audit Ref: \(logID))"
+            let contents = try fileManager.contentsOfDirectory(
+                at: dirURL,
+                includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            if contents.isEmpty {
+                return "📂 Directory '\(resolvedPath)' is empty.\n(Audit Ref: \(logID))"
+            }
+
+            // Phase 10: Structured output with type indicators and sizes for LLM clarity.
+            var lines: [String] = []
+            var dirCount = 0
+            var fileCount = 0
+
+            for itemURL in contents.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
+                let resourceValues = try? itemURL.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+                let isDir = resourceValues?.isDirectory ?? false
+                let name = itemURL.lastPathComponent
+
+                if isDir {
+                    lines.append("  [DIR]  \(name)/")
+                    dirCount += 1
+                } else {
+                    let size = resourceValues?.fileSize ?? 0
+                    let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+                    lines.append("  [FILE] \(name) (\(sizeStr))")
+                    fileCount += 1
+                }
+            }
+
+            let header = "📂 Contents of '\(resolvedPath)' — \(contents.count) items (\(dirCount) folders, \(fileCount) files):"
+            return "\(header)\n\(lines.joined(separator: "\n"))\n(Audit Ref: \(logID))"
         } catch {
             return "Error listing directory: \(error.localizedDescription) (Audit Ref: \(logID))"
         }

@@ -90,7 +90,7 @@ class QuickAccessViewModel: ObservableObject {
         Task {
             var resultingAgentMessages: [ChatMessage] = []
             let modelName = UserDefaults.standard.string(forKey: GlobalConstants.llmModelName) ?? "gemma:2b"
-            let baseURLString = self.aiConnect.baseURL
+            let baseURLString = "self.aiConnect.baseURL"
 
             do {
                 let isConnected = await OllamaConnect.checkOllamaServerStatus(baseURL: baseURLString)
@@ -99,7 +99,7 @@ class QuickAccessViewModel: ObservableObject {
                 }
 
                 let payload: [String: Any] = [ "model": modelName, "prompt": query, "stream": false ]
-                let responseData = try await self.aiConnect.postToLocalServer(endpoint: "/api/generate", payload: payload)
+//                let responseData = try await self.aiConnect.postToLocalServer(endpoint: "/api/generate", payload: payload)
 //                let responseText = try self.agentParser.parse(data: responseData)
                 let parsedContents = "self.agentParser.parseTextToMessageContent()"
 

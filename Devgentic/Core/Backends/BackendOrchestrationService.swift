@@ -15,7 +15,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// Orchestrates the flow between the UI, file processing, RAG retrieval, and the Agent/Bot pipelines.
 @MainActor
 class BackendOrchestrationService: ObservableObject {
-
+    
     // MARK: - Dependencies
     private let ollamaService: OllamaService
     private let persistenceService: CoreDataServiceProtocol
@@ -27,7 +27,7 @@ class BackendOrchestrationService: ObservableObject {
     private let vectorStoreService = VectorStoreService.shared
     
     private var cancellables = Set<AnyCancellable>()
-
+    
     // MARK: - Initialization
     init(
         fileProcessorService: FileProcessorService
@@ -86,7 +86,7 @@ class BackendOrchestrationService: ObservableObject {
                     logger.debug("Removing duplicated current message from history to prevent double-prompting. (Trace: \(context.traceID))")
                     conversationHistory.removeLast()
                 }
-
+                
                 var queryForRequest = userQuery
                 
                 // 2. File Context Assembly
@@ -114,7 +114,7 @@ class BackendOrchestrationService: ObservableObject {
                 
                 do {
                     switch config.profile.profileType {
-                    
+                        
                     case .bot:
                         logger.info("Routing BOT profile '\(config.profile.displayName)' to Unified Pipeline.")
                         
@@ -133,7 +133,7 @@ class BackendOrchestrationService: ObservableObject {
                             continuation.yield(event)
                         }
                         continuation.finish()
-
+                        
                     case .agent:
                         logger.info("Routing AGENT profile '\(config.profile.displayName)' to AgentConnect. Trace: \(context.traceID)")
                         
@@ -163,8 +163,8 @@ class BackendOrchestrationService: ObservableObject {
                             case .content:
                                 tokensReceived += 1
                                 continuation.yield(event)
-                            case .thought(let thought):
-                                logger.debug("[THOUGHT] \(thought)")
+                            case .thought(_, let message):
+                                logger.debug("[THOUGHT] \(message)")
                                 continuation.yield(event)
                             case .toolOutput(let output):
                                 logger.debug("[ARTIFACT] \(output.toolName) - \(output.output.prefix(50))...")
@@ -172,7 +172,6 @@ class BackendOrchestrationService: ObservableObject {
                             case .toolCall(let name, let params):
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
-                            // [HITL] Fixed: Handle the new event type
                             case .requestConfirmation(let toolName, _):
                                 logger.debug("[HITL] Permission requested for \(toolName)")
                                 continuation.yield(event)
@@ -219,8 +218,8 @@ class BackendOrchestrationService: ObservableObject {
         case .workflow: return false
         }
     }
-
-   private func retrieveRAGContext(for userQuery: String, conversationID: UUID, history: [ChatMessage] = []) async -> String? {
+    
+    private func retrieveRAGContext(for userQuery: String, conversationID: UUID, history: [ChatMessage] = []) async -> String? {
         logger.info("RAG: Attempting to retrieve context for conversation: \(conversationID.uuidString)")
         
         guard let queryEmbedding = await embeddingService.generateEmbedding(for: userQuery) else {
@@ -229,23 +228,38 @@ class BackendOrchestrationService: ObservableObject {
         }
         
         let relevantChunks = vectorStoreService.findNearest(to: queryEmbedding, limit: 3, conversationID: conversationID)
-        
-        // Filter out chunks that are already present in the immediate history to save context.
-        let filteredChunks = relevantChunks.filter { chunk in
-            !history.contains { message in
-                guard let text = message.content.textContent else { return false }
-                let chunkClean = chunk.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                let msgClean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                return msgClean.contains(chunkClean) || chunkClean.contains(msgClean)
-            }
-        }
-        
-        guard !filteredChunks.isEmpty else {
-            logger.info("RAG: No relevant context found.")
+
+        guard !relevantChunks.isEmpty else {
+            logger.info("RAG: Vector store returned 0 chunks.")
             return nil
         }
-        
-        logger.info("RAG: Found \(filteredChunks.count) relevant chunks.")
+
+        // Filter out chunks already present in the immediate history to save context.
+        // Only match when the overlapping content is substantial (>50 chars) to prevent
+        // short chunks from being spuriously matched against long messages.
+        let minOverlapLength = 50
+        let filteredChunks = relevantChunks.filter { chunk in
+            let chunkClean = chunk.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isDuplicate = history.contains { message in
+                guard let text = message.content.textContent else { return false }
+                let msgClean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard chunkClean.count >= minOverlapLength else { return false }
+                return msgClean.contains(chunkClean) || chunkClean.contains(msgClean)
+            }
+            return !isDuplicate
+        }
+
+        let removedCount = relevantChunks.count - filteredChunks.count
+        if removedCount > 0 {
+            logger.info("RAG: Dedup filter removed \(removedCount)/\(relevantChunks.count) chunks already present in history.")
+        }
+
+        guard !filteredChunks.isEmpty else {
+            logger.info("RAG: No relevant context found (all \(relevantChunks.count) chunks were duplicates of history).")
+            return nil
+        }
+
+        logger.info("RAG: Found \(filteredChunks.count) relevant chunks after dedup.")
         return filteredChunks.map { $0.content }.joined(separator: "\n\n")
     }
     

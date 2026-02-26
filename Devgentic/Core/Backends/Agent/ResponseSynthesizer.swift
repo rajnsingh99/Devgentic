@@ -1,0 +1,234 @@
+//
+//  ResponseSynthesizer.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 21/02/26.
+//
+//  Converts a clean ExecutionSummary into a user-facing final response.
+//
+//  Two-path design:
+//  1. Native Fast-Path:
+//       If the orchestrator signals a Native API flow, we unconditionally trust
+//       the agent's natural conversational output. Zero latency cost.
+//
+//  2. Legacy JSON-Mode Path:
+//       Used for legacy models that were forced into strict JSON. Uses deterministic
+//       formatting for single tools, or a secondary LLM call to synthesize complex multi-tool runs.
+//
+//  Guarantees:
+//  - Never produces "I don't have the tools" when tools actually ran.
+//  - Never surfaces scratchpad entries, system escalations, or internal monologue.
+//  - Always returns a non-empty string (fallback path is always safe).
+//
+
+import Foundation
+import OSLog
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app",
+    category: "ResponseSynthesizer"
+)
+
+// MARK: - Synthesizer
+
+struct ResponseSynthesizer {
+
+    // MARK: - Entry Point
+
+    /// Synthesizes a clean, user-friendly response from an ExecutionSummary.
+    ///
+    /// - Parameters:
+    ///   - summary: The clean record of what happened during execution.
+    ///   - model: The LLM provider used for complex runs (fast-path skips this).
+    ///   - personaInstructions: Injected instructions to ensure the synthesis doesn't degrade base persona behavior.
+    ///   - originalQuery: The user's original query to ensure contextual grounding.
+    ///   - isNativeFlow: A flag indicating if the agent used Native tool calling (bypasses LLM synthesis).
+    /// - Returns: A non-empty user-facing string. Never throws.
+    static func synthesize(
+        summary: ExecutionSummary,
+        model: any LLMProvider,
+        personaInstructions: String? = nil,
+        originalQuery: String,
+        isNativeFlow: Bool = false
+    ) async -> String {
+
+        // =====================================================================
+        // PATH A: NATIVE API FLOW (Modern Models)
+        // =====================================================================
+        // Native models output conversational answers naturally when they finish.
+        // We trust them 100% and NEVER trigger a secondary LLM synthesis.
+        if isNativeFlow {
+            if let finalAnswer = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines), !finalAnswer.isEmpty {
+                logger.info("🏎️ [Synthesizer] Native API flow detected. Returning agent's natural response directly.")
+                return finalAnswer
+            }
+            
+            // If the native loop crashed or stalled abruptly without generating a final thought:
+            logger.info("⚠️ [Synthesizer] Native API flow ended without a final thought. Using deterministic fallback.")
+            return buildDeterministicFallback(summary: summary)
+        }
+
+        // =====================================================================
+        // PATH B: LEGACY JSON-MODE FLOW (Ollama/MLX strict parsing)
+        // =====================================================================
+        
+        // --- FAST PATH 1: DETERMINISTIC FORMATTING (Single Tool) ---
+        // If the agent used JSON mode but only executed 1 tool successfully,
+        // we format the raw output deterministically without calling the LLM.
+        if case .success = summary.completionStatus,
+           summary.toolResults.count == 1,
+           let result = summary.toolResults.first {
+            logger.info("🏎️ [Synthesizer] Legacy Fast path — single success: '\(result.toolName)'.")
+            return buildDeterministicResponse(for: result, goal: originalQuery)
+        }
+
+        // --- FAST PATH 2: STALLED WITH NO TOOLS ---
+        // Nothing actually ran.
+        if case .stalled = summary.completionStatus, summary.toolResults.isEmpty {
+            logger.info("🏎️ [Synthesizer] Legacy Fast path — stalled with no tool results.")
+            return buildDeterministicFallback(summary: summary)
+        }
+
+        // --- LLM SYNTHESIS PATH (Multi-Tool / Complex Output) ---
+        logger.info("🧠 [Synthesizer] Legacy LLM path triggered. Status: \(String(describing: summary.completionStatus)), tools: \(summary.toolResults.count).")
+
+        let prompt = buildSynthesisPrompt(summary: summary, originalQuery: originalQuery)
+        
+        // Context Trimming & Persona Injection (Phase 4)
+        var systemPrompt = synthesizerSystemPrompt
+        if let persona = personaInstructions {
+            systemPrompt += "\n\nCRITICAL: Maintain the following persona:\n\(persona)"
+        }
+
+        let messages: [[String: String]] = [
+            ["role": "system", "content": systemPrompt],
+            ["role": "user",   "content": prompt]
+        ]
+
+        do {
+            let response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+            let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { throw SynthesizerError.emptyResponse }
+            logger.info("✅ [Synthesizer] LLM synthesis succeeded.")
+            return trimmed
+        } catch {
+            logger.error("❌ [Synthesizer] LLM synthesis failed (\(error.localizedDescription)). Using deterministic fallback.")
+            return buildDeterministicFallback(summary: summary)
+        }
+    }
+
+    // MARK: - System Prompt (Synthesis Context)
+
+    /// Minimal system prompt for the synthesizer LLM call.
+    /// Deliberately short to reduce cognitive load and prevent reasoning bleed-through.
+    private static let synthesizerSystemPrompt = """
+    You are a response formatter. Based on the provided tool execution results and the agent's final conclusion, write a clear, concise response to the user's original request.
+
+    Rules:
+    - Write in second person, natural language.
+    - Do NOT mention internal steps, system messages, or reasoning.
+    - If status is failed/stalled, explain what was attempted and what was missing.
+    - Maximum 3 sentences for simple tasks.
+    """
+
+    // MARK: - LLM Synthesis Prompt
+
+    private static func buildSynthesisPrompt(summary: ExecutionSummary, originalQuery: String) -> String {
+        var lines: [String] = []
+        lines.append("USER REQUEST: \"\(originalQuery)\"")
+        lines.append("")
+        
+        if let thought = summary.finalAgentThought, !thought.isEmpty {
+            lines.append("AGENT'S FINAL CONCLUSION / REASONING:")
+            lines.append(thought)
+            lines.append("")
+        }
+
+        lines.append("RESULTS:")
+
+        if summary.toolResults.isEmpty {
+            lines.append("No tools were executed.")
+        } else {
+            for result in summary.toolResults {
+                let statusStr = result.isSuccess ? "Success" : "Failed"
+                // Cap output at 800 chars to stay well within context budget.
+                let truncated = result.output.count > 800
+                    ? String(result.output.prefix(800)) + "… [truncated]"
+                    : result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                lines.append("Tool: \(result.toolName) → Output: \(truncated) (\(statusStr))")
+            }
+        }
+
+        lines.append("")
+        lines.append("STATUS: \(summary.completionStatus)")
+        
+        if let failureReason = summary.failureReason {
+            lines.append("FAILURE REASON: \(failureReason)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Deterministic Fast Path
+
+    /// Formats a single successful tool result without calling the LLM.
+    private static func buildDeterministicResponse(for result: SynthesizedToolResult, goal: String) -> String {
+        let output = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // JSON array → bullet list (e.g., directory listings, search results).
+        if let data = output.data(using: .utf8),
+           let jsonArray = try? JSONSerialization.jsonObject(with: data) as? [Any] {
+            let items = jsonArray.compactMap { "\($0)" }
+            if !items.isEmpty {
+                let list = items.map { "• \($0)" }.joined(separator: "\n")
+                return "Here's what I found:\n\(list)"
+            }
+        }
+
+        // JSON dict → key-value list.
+        if let data = output.data(using: .utf8),
+           let jsonDict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let pairs = jsonDict.map { "• \($0.key): \($0.value)" }.sorted()
+            if !pairs.isEmpty {
+                return "Here are the results:\n\(pairs.joined(separator: "\n"))"
+            }
+        }
+
+        // Plain text: return as-is (the tool output is already human-readable).
+        return output
+    }
+
+    // MARK: - Deterministic Fallback (when LLM is unavailable)
+
+    private static func buildDeterministicFallback(summary: ExecutionSummary) -> String {
+        switch summary.completionStatus {
+
+        case .success, .partialSuccess:
+            let successes = summary.toolResults.filter(\.isSuccess)
+            let outputs = successes.map { r in
+                let truncated = r.output.count > 200
+                    ? String(r.output.prefix(200)) + "…"
+                    : r.output
+                return "• \(r.toolName): \(truncated)"
+            }.joined(separator: "\n")
+            return "Here's what I found:\n\(outputs)"
+
+        case .failed:
+            let tools = summary.toolResults.map(\.toolName).joined(separator: ", ")
+            return "I encountered errors while trying to complete your request. " +
+                   "The following tools were attempted but did not succeed: \(tools). " +
+                   "Please check that the required capabilities are enabled, or try rephrasing your request."
+
+        case .stalled:
+            return "I wasn't able to determine how to complete your request with the available tools. " +
+                   "Please try rephrasing, or check that the required tools are enabled in your agent profile."
+        }
+    }
+}
+
+// MARK: - Errors
+
+private enum SynthesizerError: Error {
+    case emptyResponse
+}

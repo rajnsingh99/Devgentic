@@ -7,6 +7,7 @@
 //  Updated on 04/02/26 for Modern Dashboard UI.
 //  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
 //  Updated on 20/02/26 to add Detached Expandable Prompt Editor.
+//  Updated to add Manual Override Toggle for Native Tool Calling.
 //
 
 import SwiftUI
@@ -311,6 +312,22 @@ struct AgentConfigDetailView: View {
                         default:
                             remoteFields
                         }
+                        
+                        Divider()
+                            .padding(.vertical, 4)
+                        
+                        // NEW: Manual Override for Native Tools Flag
+                        Toggle(isOn: providerConfig.supportsNativeTools) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Native Tool Calling API")
+                                    .fontWeight(.medium)
+                                Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .toggleStyle(.switch)
                     }
                 }
                 
@@ -535,6 +552,7 @@ struct AgentConfigDetailView: View {
 
             OllamaModelPickerView(
                 selectedModel: providerConfig.modelName,
+                supportsNativeTools: providerConfig.supportsNativeTools, // Bind the extracted capability to the payload
                 baseURL: providerConfig.wrappedValue.baseURL ?? "",
                 filterForTools: true
             )

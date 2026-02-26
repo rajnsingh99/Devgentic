@@ -125,12 +125,15 @@ class VectorStoreService {
             
             // Sort by score in descending order (higher is better).
             let sortedChunks = scoredChunks.sorted { $0.score > $1.score }
-            
-            // Return the top `limit` chunks.
-            let topChunks = Array(sortedChunks.prefix(limit).map { $0.chunk })
-            
-            logger.info("Found \(topChunks.count) relevant chunks for query.")
-            return topChunks
+
+            // Phase 10: Apply minimum similarity threshold and log scores for diagnostics.
+            let minimumSimilarity: Float = 0.3
+            let qualifiedChunks = sortedChunks.prefix(limit).filter { $0.score >= minimumSimilarity }
+            let topChunks = qualifiedChunks.map { $0.chunk }
+
+            let scoresSummary = sortedChunks.prefix(limit).map { String(format: "%.3f", $0.score) }.joined(separator: ", ")
+            logger.info("Found \(topChunks.count) relevant chunks for query (scores: [\(scoresSummary)], threshold: \(minimumSimilarity)).")
+            return Array(topChunks)
             
         } catch {
             logger.error("Failed to fetch chunks for nearest neighbor search: \(error.localizedDescription)")

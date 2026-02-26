@@ -10,6 +10,7 @@
 //  Updated on 05/09/25 to expand Agent configuration.
 //  Updated on 17/09/25 to add executable tool protocols.
 //  Updated on 28/01/26 to add AgentArchitecture.
+//  Updated to add supportsNativeTools to ProviderConfig for dynamic capability routing.
 //
 
 import Foundation
@@ -200,4 +201,36 @@ struct ProviderConfig: Codable, Hashable {
     var apiKey: String?
     var baseURL: String?
     var advancedConfiguration: [String: AnyCodable]?
+    
+    /// Indicates if the selected model explicitly supports the native tools API format.
+    /// This state drives the routing decision in AgentConnect.
+    var supportsNativeTools: Bool = false
+    
+    // Explicit memberwise initializer to support default value for supportsNativeTools
+    init(apiProvider: ApiProvider, modelName: String, apiKey: String? = nil, baseURL: String? = nil, advancedConfiguration: [String: AnyCodable]? = nil, supportsNativeTools: Bool = false) {
+        self.apiProvider = apiProvider
+        self.modelName = modelName
+        self.apiKey = apiKey
+        self.baseURL = baseURL
+        self.advancedConfiguration = advancedConfiguration
+        self.supportsNativeTools = supportsNativeTools
+    }
+    
+    // MARK: - Codable Conformance
+    
+    enum CodingKeys: String, CodingKey {
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, supportsNativeTools
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.apiProvider = try container.decode(ApiProvider.self, forKey: .apiProvider)
+        self.modelName = try container.decode(String.self, forKey: .modelName)
+        self.apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
+        self.baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        self.advancedConfiguration = try container.decodeIfPresent([String: AnyCodable].self, forKey: .advancedConfiguration)
+        
+        // Safely decode the new property, defaulting to false for legacy profiles that lack this key
+        self.supportsNativeTools = try container.decodeIfPresent(Bool.self, forKey: .supportsNativeTools) ?? false
+    }
 }

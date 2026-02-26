@@ -11,7 +11,7 @@ import Foundation
 // MARK: - Agent Executor Protocol
 
 /// The contract that all Agent Architectures (ReAct, Plan & Execute, etc.) must fulfill.
-protocol AgentExecutor: Sendable {
+protocol Executor: Sendable {
 
     var architecture: AgentArchitecture { get }
 
@@ -27,12 +27,12 @@ protocol AgentExecutor: Sendable {
 
 /// The centralized factory for instantiating Agent Executors.
 /// Determines the execution strategy (Simple Chat vs. Agentic Loop) based on the profile configuration.
-enum AgentExecutorFactory {
+enum ExecutorFactory {
 
     /// Creates the appropriate AgentExecutor for the given profile.
     /// - Parameter profile: The backend profile model containing configuration details.
     /// - Returns: A type-erased `AgentExecutor` (either `ChatExecutor` or `ReActAgentExecutor`).
-    static func create(for profile: BackendProfileModel) -> any AgentExecutor {
+    static func create(for profile: BackendProfileModel) -> any Executor {
         switch profile.profileType {
 
         case .bot:

@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 10/02/26.
-//  MIGRATION: Updated to native DevgenticTool protocol & Standardized Description.
+//  MIGRATION: Updated for Phase 5 Hierarchical Memory
 //
 
 import Foundation
@@ -83,7 +83,15 @@ struct UpdateSessionTool: DevgenticTool {
     // MARK: - Execution
     
     func call(arguments: Arguments) async throws -> String {
-        ContextMemoryManager.shared.updateSession(conversationID: conversationID, content: arguments.content)
-        return "Successfully updated the session context (Project Brief)."
+        // 1. Fetch the hierarchical session graph
+        var state = ContextMemoryManager.shared.getActiveState(for: conversationID)
+        
+        // 2. Store the project brief directly into the working memory dictionary
+        state.workingMemory["project_brief"] = arguments.content
+        
+        // 3. Persist the mutated graph back to storage
+        ContextMemoryManager.shared.updateActiveState(conversationID: conversationID, state: state)
+        
+        return "Successfully updated the session context (Project Brief) in your active working memory."
     }
 }

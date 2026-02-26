@@ -53,6 +53,12 @@ struct BackendProfilePanelView: View {
                 }
             }
             .listStyle(.sidebar)
+            // Trigger diagnostic logging when a profile is selected
+            .onChange(of: selectedProfileID) { newID in
+                if let id = newID {
+                    profileService.logProfileSelection(profileID: id)
+                }
+            }
         }
         .sheet(isPresented: $isAddingProfile) {
             AddBackendProfileView { newProfile in

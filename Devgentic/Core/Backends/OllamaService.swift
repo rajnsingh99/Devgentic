@@ -21,10 +21,14 @@ struct LocalModel: Identifiable, Hashable {
     let name: String
     let details: OllamaModelDetails?
     let tags: [ModelTag]
+    
+    /// Flag to inform the backend router if this model supports the NativeToolCallingStrategy.
+    let supportsNativeTools: Bool
 
     init(name: String, response: OllamaShowResponse) {
         self.name = name
         self.details = response.details
+        self.supportsNativeTools = response.supportsToolUse
         self.tags = Self.generateTags(from: response)
     }
 
@@ -32,19 +36,18 @@ struct LocalModel: Identifiable, Hashable {
     private static func generateTags(from response: OllamaShowResponse) -> [ModelTag] {
         var generatedTags: [ModelTag] = []
         let details = response.details
-        let modelfileContent = response.modelfile?.lowercased() ?? ""
-
         
         // Add quantization level tag
         if let quant = details?.quantizationLevel, !quant.isEmpty {
             generatedTags.append(ModelTag(text: quant, color: .cyan, icon: "dial.medium.fill"))
         }
 
-        // Check modelfile content for capability keywords
-        if modelfileContent.contains("tool") || modelfileContent.contains("function") {
+        // Check native tool capabilities explicitly based on the API response evaluation
+        if response.supportsToolUse {
             generatedTags.append(ModelTag(text: "Tools", color: .orange, icon: "wrench.and.screwdriver.fill"))
         }
         
+        let modelfileContent = response.modelfile?.lowercased() ?? ""
         if modelfileContent.contains("vision") || modelfileContent.contains("multimodal") || details?.supportsVision == true {
              generatedTags.append(ModelTag(text: "Vision", color: .purple, icon: "eye.fill"))
         }

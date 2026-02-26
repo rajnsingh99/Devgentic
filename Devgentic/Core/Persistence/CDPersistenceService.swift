@@ -25,6 +25,10 @@ protocol CoreDataServiceProtocol {
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func togglePinStatus(for conversationId: UUID) // New method for pinning
     
+    // Phase 8: Session Graph Persistence
+    func saveSessionGraph(for conversationId: UUID, graphData: Data)
+    func fetchSessionGraph(for conversationId: UUID) -> Data?
+    
     func saveContext()
 }
 
@@ -56,6 +60,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         // Register the transformer for the 'artifacts' attribute
         ValueTransformer.setValueTransformer(ToolOutputArrayTransformer(), forName: NSValueTransformerName("ToolOutputArrayTransformer"))
+        
+        AgentThoughtArrayTransformer.register()
         
         container.loadPersistentStores { (storeDescription, error) in
             if let error = error as NSError? {
@@ -106,6 +112,24 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             logger.error("Failed to fetch conversation with ID \(id.uuidString): \(error.localizedDescription)")
             return nil
         }
+    }
+    
+    // Phase 8: Session Graph Persistence
+    func saveSessionGraph(for conversationId: UUID, graphData: Data) {
+        viewContext.performAndWait {
+            guard let conversation = self.getConversation(withId: conversationId) else { return }
+            conversation.setValue(graphData, forKey: "sessionGraphData")
+            self.saveContext()
+        }
+    }
+
+    func fetchSessionGraph(for conversationId: UUID) -> Data? {
+        var graphData: Data?
+        viewContext.performAndWait {
+            guard let conversation = self.getConversation(withId: conversationId) else { return }
+            graphData = conversation.value(forKey: "sessionGraphData") as? Data
+        }
+        return graphData
     }
     
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {
@@ -429,9 +453,12 @@ extension ChatMessageEntity {
         chatMessage.agentResponse = finalAgentResponse
         
         // **FIX:** Decode Glass Box Data
-        if let thoughts = self.value(forKey: "thoughts") as? [String] {
+        if let oldThoughts = self.value(forKey: "thoughts") as? [String] {
+            chatMessage.thoughts = oldThoughts.map { AgentThought(text: $0) }
+        } else if let thoughts = self.value(forKey: "thoughts") as? [AgentThought] {
             chatMessage.thoughts = thoughts
         }
+        
         if let artifacts = self.value(forKey: "artifacts") as? [ToolOutput] {
             chatMessage.artifacts = artifacts
         }
@@ -590,5 +617,45 @@ final class ToolOutputArrayTransformer: ValueTransformer {
             print("Failed to decode [ToolOutput]: \(error)")
             return nil
         }
+    }
+}
+
+// NEW: Agent Thought Transformer
+@objc(AgentThoughtArrayTransformer)
+final class AgentThoughtArrayTransformer: ValueTransformer {
+
+    override class func transformedValueClass() -> AnyClass {
+        return NSData.self
+    }
+
+    override class func allowsReverseTransformation() -> Bool {
+        return true
+    }
+
+    override func transformedValue(_ value: Any?) -> Any? {
+        guard let thoughts = value as? [AgentThought] else { return nil }
+        do {
+            let data = try JSONEncoder().encode(thoughts)
+            return data as NSData
+        } catch {
+            print("Failed to encode [AgentThought]: \(error)")
+            return nil
+        }
+    }
+
+    override func reverseTransformedValue(_ value: Any?) -> Any? {
+        guard let data = value as? Data else { return nil }
+        do {
+            let thoughts = try JSONDecoder().decode([AgentThought].self, from: data)
+            return thoughts
+        } catch {
+            print("Failed to decode [AgentThought]: \(error)")
+            return nil
+        }
+    }
+    
+    static func register() {
+        let transformer = AgentThoughtArrayTransformer()
+        ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "AgentThoughtArrayTransformer"))
     }
 }

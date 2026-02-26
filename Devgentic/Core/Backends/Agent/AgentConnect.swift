@@ -6,12 +6,13 @@
 //
 
 import Foundation
-import os
+import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentConnect")
+private let logToolExecution = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecution")
 
 /// A unified agent connection service that serves as the central controller for
-/// all LLM interactions (Bots, Agents, Workflows).\
+/// all LLM interactions (Bots, Agents, Workflows).
 /// It acts as the Hub, initializing models, resolving tools, and routing to the correct Executor.
 class AgentConnect: ObservableObject {
     
@@ -38,7 +39,6 @@ class AgentConnect: ObservableObject {
         logger.info("Routing request through AgentConnect Unified Pipeline for profile: \(profile.displayName)")
         
         return AsyncThrowingStream { continuation in
-            // [CRITICAL FIX] Capture the task handle
             let task = Task {
                 do {
                     // 1. Extract Configuration & Tools based on Profile Type
@@ -61,43 +61,41 @@ class AgentConnect: ObservableObject {
                         throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Workflows are not yet supported in the unified pipeline."])
                     }
                     
-                    // [Step 4 Update: COGNITIVE STRATEGY & RATE LIMIT SELECTION]
+                    // 2. Select Cognitive Strategy & Rate Limit Boundary
                     let generatorStrategy: any CognitiveGenerator
                     let rateLimitCategory: RateLimitCategory
                     
                     switch llmConfig.apiProvider {
                     case .google:
-                        // Gemini: Shadow Schema + Strict 15 RPM Limits
                         generatorStrategy = ShadowSchemaGenerator()
                         rateLimitCategory = .geminiFlash
                         
                     case .openAI:
-                        // OpenAI: Native Schema + Higher Limits
                         generatorStrategy = NativeStructuredGenerator()
                         rateLimitCategory = .openAI
                         
                     case .ollama:
-                        // Ollama: Native Schema + Hardware Limits
-                        generatorStrategy = NativeStructuredGenerator()
+                        // DYNAMIC ROUTING: Use Native Tools if supported by the model, otherwise fallback to JsonMode.
+                        generatorStrategy = llmConfig.supportsNativeTools ? NativeStructuredGenerator() : JsonModeGenerator()
                         rateLimitCategory = .local
                         
                     case .mlx:
-                        // MLX: JSON Mode + Hardware Limits
-                        generatorStrategy = JsonModeGenerator()
+                        // DYNAMIC ROUTING: Use Native Tools if supported by the model, otherwise fallback to JsonMode.
+                        generatorStrategy = llmConfig.supportsNativeTools ? NativeStructuredGenerator() : JsonModeGenerator()
                         rateLimitCategory = .local
                         
                     default:
                         generatorStrategy = NativeStructuredGenerator()
-                        rateLimitCategory = .geminiFlash // Fallback to safe strict mode
+                        rateLimitCategory = .geminiFlash
                     }
                     
-                    // 2. Resolve Tools
+                    // 3. Resolve Tools
                     let activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
                         conversationID: conversationID
                     )
                     
-                    // 3. Initialize Evaluation Session (Metrics)
+                    // 4. Initialize Evaluation Session (Metrics)
                     let evalSessionID = UUID()
                     if !activeTools.isEmpty {
                         EvaluationLogger.shared.startSession(id: evalSessionID, availableTools: activeTools)
@@ -109,20 +107,19 @@ class AgentConnect: ObservableObject {
                         }
                     }
                     
-                    // 4. Initialize the Language Model
+                    // 5. Initialize the Language Model
                     let model = try await self.initializeModel(config: llmConfig)
                     
-                    // 5. Instantiate the Executor (The Factory Pattern)
-                    let executor = AgentExecutorFactory.create(for: profile)
+                    // 6. Instantiate the Executor
+                    let executor = ExecutorFactory.create(for: profile)
                     
                     logger.info("Starting execution using executor strategy: \(executor.architecture.rawValue)")
                     
-                    // 6. Prepare Input (State Injection)
-                    var activeState: MutableActiveState? = nil
+                    // 7. Prepare Input (State Injection)
+                    var activeState: SessionGraph? = nil
                     var recentHistory: String? = nil
                     
                     if !activeTools.isEmpty {
-                        // Fetch components for the Split-State memory model
                         activeState = ContextMemoryManager.shared.getActiveState(for: conversationID)
                         recentHistory = ContextMemoryManager.shared.getRecentHistory(for: conversationID, lines: 20)
                     }
@@ -135,14 +132,13 @@ class AgentConnect: ObservableObject {
                         ragContext: ragContext,
                         activeState: activeState,
                         recentHistory: recentHistory,
-                        isNewRequest: true,
                         generatorStrategy: generatorStrategy,
-                        rateLimitCategory: rateLimitCategory, // [INJECTION]
+                        rateLimitCategory: rateLimitCategory,
                         instructions: instructions,
                         traceContext: traceContext
                     )
                     
-                    // 7. Execute & Stream
+                    // 8. Execute & Stream
                     let traceHandler: (AgentTraceLog) -> Void = { log in
                         logger.debug("[\(log.state.rawValue)] \(log.content) (span: \(log.spanID))")
                         if !activeTools.isEmpty {
@@ -151,7 +147,6 @@ class AgentConnect: ObservableObject {
                         onTraceUpdate?(log)
                     }
                     
-                    // Check cancellation before starting executor
                     try Task.checkCancellation()
                     
                     let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
@@ -171,7 +166,6 @@ class AgentConnect: ObservableObject {
                 }
             }
             
-            // [CRITICAL FIX] Propagate cancellation to the inner task
             continuation.onTermination = { @Sendable _ in
                 task.cancel()
             }
@@ -247,10 +241,10 @@ class AgentConnect: ObservableObject {
         for toolConfig in profileTools where toolConfig.isEnabled {
             if let agentTool = self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation) {
                 activeTools.append(agentTool)
-                logger.debug("Enabled Tool: \(toolConfig.name)")
+                logger.debug("Enabled Native Tool: \(toolConfig.name)")
             } else if let agentTool = self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources) {
                 activeTools.append(agentTool)
-                logger.debug("Enabled Tool: \(toolConfig.name)")
+                logger.debug("Enabled MCP Tool: \(toolConfig.name)")
             } else {
                 logger.warning("Failed to resolve tool: \(toolConfig.name)")
             }
@@ -259,20 +253,47 @@ class AgentConnect: ObservableObject {
         return activeTools
     }
     
-    // MARK: - Tool Wrapping (Generic)
+    // MARK: - Tool Wrapping
     
     /// Wraps a concrete DevgenticTool into an AgentTool with type-erased execution closure.
-    /// This replaces the old OFM-based `convertToAgentTool` and `invokeNativeTool` pipeline.
     private func wrapTool<T: DevgenticTool>(_ tool: T, requiresConfirmation: Bool) -> AgentTool {
+        let toolName = tool.name
+        let requiredKeys = tool.parameterSchema.required
+        
         return AgentTool(
             name: tool.name,
             description: tool.description,
             parameters: tool.parameterSchema,
             requiresConfirmation: requiresConfirmation
         ) { dataArgs in
-            let args = try JSONDecoder().decode(T.Arguments.self, from: dataArgs)
+            let args: T.Arguments
+            do {
+                args = try JSONDecoder().decode(T.Arguments.self, from: dataArgs)
+            } catch let decodingError as DecodingError {
+                let paramHint = requiredKeys.isEmpty ? "" : " Required parameters: [\(requiredKeys.joined(separator: ", "))]."
+                let rawJSON = String(data: dataArgs, encoding: .utf8) ?? "{}"
+                
+                logToolExecution.error("❌ Tool Argument Decoding Failed. Tool: \(toolName). Expected Keys: \(requiredKeys). Raw Payload: \(rawJSON). Error: \(decodingError.localizedDescription)")
+                
+                throw ToolArgumentError(
+                    toolName: toolName,
+                    detail: "Argument decoding failed for '\(toolName)'.\(paramHint) Received: \(rawJSON). Underlying: \(decodingError.localizedDescription)"
+                )
+            }
             return try await tool.call(arguments: args)
         }
+    }
+    
+    /// OVERLOAD: Wraps an already-constructed `AgentTool` (like MCP tools).
+    /// Resolves the Swift compiler's generic type inference failures for external tool protocols.
+    private func wrapTool(_ tool: AgentTool, requiresConfirmation: Bool) -> AgentTool {
+        return AgentTool(
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+            requiresConfirmation: requiresConfirmation,
+            run: tool.run
+        )
     }
     
     // MARK: - Native Tool Resolution

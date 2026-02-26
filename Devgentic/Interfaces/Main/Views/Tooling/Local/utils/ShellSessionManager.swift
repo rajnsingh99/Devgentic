@@ -42,9 +42,28 @@ final class ShellSessionManager: @unchecked Sendable {
         lock.unlock()
         
         // 2. Safety & Timeout Setup
-        let blockedCommands = ["nano", "vim", "emacs", "top", "htop", "sudo -s", "python", "node", "less", "more"]
-        if blockedCommands.contains(where: { command.contains($0) }) {
-             return "Error: Interactive commands are blocked. Use non-interactive alternatives."
+        // Phase 10: Token-aware blocking to prevent false positives on non-interactive invocations
+        // (e.g. `python3 script.py`, `node index.js`, `topology` containing "top").
+        let trimmedCmd = command.trimmingCharacters(in: .whitespaces)
+        let firstToken = trimmedCmd.components(separatedBy: .whitespaces).first ?? ""
+        let hasArgs = trimmedCmd.components(separatedBy: .whitespaces).count > 1
+
+        // Always-interactive: block regardless of arguments
+        let alwaysInteractive: Set<String> = ["nano", "vim", "vi", "emacs", "top", "htop", "less", "more"]
+        if alwaysInteractive.contains(firstToken) {
+            return "Error: Interactive command '\(firstToken)' is blocked. Use non-interactive alternatives (e.g., 'cat' instead of 'less')."
+        }
+
+        // REPL commands: only block when invoked without arguments (interactive REPL mode)
+        let replCommands: Set<String> = ["python", "python3", "node", "irb", "ruby", "swift"]
+        if replCommands.contains(firstToken) && !hasArgs {
+            return "Error: Running '\(firstToken)' in REPL mode is blocked. Pass a script file or use the -c flag (e.g., 'python3 -c \"print(1)\"')."
+        }
+
+        // Exact pattern blocks for interactive sudo sessions
+        let blockedPatterns = ["sudo -s", "sudo su", "sudo -i"]
+        if blockedPatterns.contains(where: { trimmedCmd.hasPrefix($0) }) {
+            return "Error: Interactive sudo sessions are blocked."
         }
         
         // 3. Construct "Stateful" Command
@@ -137,16 +156,13 @@ final class ShellSessionManager: @unchecked Sendable {
             }
             
             try process.run()
-            
-            // Timeout (30s)
-            let timeoutTask = Task {
-                try await Task.sleep(nanoseconds: 30 * 1_000_000_000)
-                if process.isRunning { process.terminate() }
-            }
-            
+
+            // Phase 10: Removed the 30s hard kill. Shell commands (git clone, find,
+            // large builds, etc.) can legitimately exceed 30s. The cognitive loop's
+            // task cancellation and maxIterations cap are the real safety nets.
+            // Process cleanup on app termination is handled by cleanup().
             process.waitUntilExit()
-            timeoutTask.cancel()
-            
+
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }.value

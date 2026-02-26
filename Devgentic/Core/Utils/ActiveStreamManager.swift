@@ -74,7 +74,6 @@ class ActiveStreamManager: ObservableObject {
             guard let self = self else { return }
             
             do {
-                // Now that BackendOrchestrationService returns AgentStreamEvent, this assignment is valid.
                 let stream = self.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,
@@ -95,11 +94,11 @@ class ActiveStreamManager: ObservableObject {
                     try Task.checkCancellation()
                     
                     switch event {
-                    case .thought(let thought):
-                        // 1. Handle Thoughts (Update Headline + Append to History)
-                        agentMessage.thinkingHeadline = thought
+                    case .thought(let id, let thoughtText):
+                        // 1. Handle Thoughts (Update Headline + Append to History using structured ID)
+                        agentMessage.thinkingHeadline = thoughtText
                         agentMessage.agentState = .thinking
-                        agentMessage.thoughts.append(thought)
+                        agentMessage.thoughts.append(AgentThought(id: id, text: thoughtText))
                         
                     case .toolCall(let name, _):
                         agentMessage.thinkingHeadline = "Using tool: \(name)"

@@ -216,6 +216,7 @@ struct BotConfigDetailView: View {
             // Standard Bot view does NOT filter models.
             OllamaModelPickerView(
                 selectedModel: providerConfig.modelName,
+                supportsNativeTools: providerConfig.supportsNativeTools, // Bind the extracted capability to the payload
                 baseURL: providerConfig.wrappedValue.baseURL ?? "",
                 filterForTools: false
             )
