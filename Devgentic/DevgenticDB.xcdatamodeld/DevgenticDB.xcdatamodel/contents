@@ -77,9 +77,12 @@
         <relationship name="remoteConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="RemoteConfigEntity" inverseName="integration" inverseEntity="RemoteConfigEntity"/>
     </entity>
     <entity name="MCPToolEntity" representedClassName="MCPToolEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="annotationsData" optional="YES" attributeType="Binary"/>
+        <attribute name="iconsData" optional="YES" attributeType="Binary"/>
         <attribute name="name" optional="YES" attributeType="String"/>
         <attribute name="parametersData" optional="YES" attributeType="Binary"/>
         <attribute name="requiresConfirmation" optional="YES" attributeType="Boolean" usesScalarValueType="YES"/>
+        <attribute name="title" optional="YES" attributeType="String"/>
         <attribute name="toolDescription" optional="YES" attributeType="String"/>
         <relationship name="toolItem" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ToolItemEntity" inverseName="tools" inverseEntity="ToolItemEntity"/>
     </entity>

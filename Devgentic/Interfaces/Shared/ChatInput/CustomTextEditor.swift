@@ -142,6 +142,11 @@ struct CustomTextEditor: NSViewRepresentable {
                         textWasChangedByInsertionRequest = true
                     }
                     context.coordinator.isProgrammaticallyChangingText = false
+
+                    // FIX: Programmatic textStorage replacement does not trigger
+                    // didChangeText(), so the intrinsic content size cache is stale.
+                    textView.invalidateIntrinsicContentSize()
+                    scrollView.invalidateIntrinsicContentSize()
                 }
             }
         }
@@ -170,9 +175,14 @@ struct CustomTextEditor: NSViewRepresentable {
             textView.textColor = NSColor.textColor
 
             context.coordinator.isProgrammaticallyChangingText = false
+
+            // FIX: Programmatic textStorage replacement does not trigger
+            // didChangeText(), so the intrinsic content size cache is stale.
+            textView.invalidateIntrinsicContentSize()
+            scrollView.invalidateIntrinsicContentSize()
         }
     }
-    
+
     func sizeThatFits(_ proposal: ProposedViewSize, nsView scrollView: NSScrollView, context: Context) -> CGSize? {
         guard let textView = scrollView.documentView as? CustomNSTextView else {
             return CGSize(width: proposal.width ?? minHeight, height: minHeight)
@@ -260,7 +270,47 @@ struct CustomTextEditor: NSViewRepresentable {
             }
         }
 
-        override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+        override func paste(_ sender: Any?) {
+            let pasteboard = NSPasteboard.general
+            let attrs = coordinator?.parent.defaultTypingAttributes ?? [:]
+
+            // Extract text from the best available pasteboard type
+            let text: String? = {
+                // 1. Plain text — most reliable, preserves Unicode emoji
+                if let t = pasteboard.string(forType: .string), !t.isEmpty { return t }
+
+                // 2. HTML — handles web sources with emoji
+                if let data = pasteboard.data(forType: .html),
+                   let attr = try? NSAttributedString(
+                       data: data,
+                       options: [.documentType: NSAttributedString.DocumentType.html,
+                                 .characterEncoding: String.Encoding.utf8.rawValue],
+                       documentAttributes: nil
+                   ) {
+                    let s = attr.string.replacingOccurrences(of: "\u{FFFC}", with: "")
+                    if !s.isEmpty { return s }
+                }
+
+                // 3. RTF — handles rich text sources
+                if let data = pasteboard.data(forType: .rtf),
+                   let attr = try? NSAttributedString(
+                       data: data,
+                       options: [.documentType: NSAttributedString.DocumentType.rtf],
+                       documentAttributes: nil
+                   ) {
+                    let s = attr.string.replacingOccurrences(of: "\u{FFFC}", with: "")
+                    if !s.isEmpty { return s }
+                }
+
+                return nil
+            }()
+
+            guard let text, !text.isEmpty else { return }
+
+            breakUndoCoalescing()
+            let attrStr = NSAttributedString(string: text, attributes: attrs)
+            insertText(attrStr, replacementRange: selectedRange())
+        }
 
         override func keyDown(with event: NSEvent) {
             let suggestionsActive = coordinator?.parent.showPromptSuggestions == true || coordinator?.parent.showFileSuggestions == true
@@ -281,6 +331,23 @@ struct CustomTextEditor: NSViewRepresentable {
             
             let keyCodeReturn: UInt16 = 36
             if event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty && event.keyCode == keyCodeReturn {
+                // Check if we're in a list context — if so, Enter continues/terminates the list
+                // instead of sending the message.
+                if let textStorage = self.textStorage {
+                    let action = ListFormattingEngine.handleEnterKey(
+                        textStorage: textStorage,
+                        selectedRange: self.selectedRange()
+                    )
+                    switch action {
+                    case .passthrough:
+                        coordinator?.parent.onCommit(self.attributedString())
+                        return
+                    case .continueList, .terminateList:
+                        // Fall through to super.keyDown which triggers insertNewline → shouldChangeTextIn
+                        super.keyDown(with: event)
+                        return
+                    }
+                }
                 coordinator?.parent.onCommit(self.attributedString())
                 return
             }
@@ -298,6 +365,7 @@ struct CustomTextEditor: NSViewRepresentable {
         var lastProcessedInsertionString: String?
 
         let defaultTypingAttributes: [NSAttributedString.Key: Any]
+        let listConfig = ListFormattingEngine.Config.default
 
         init(_ parent: CustomTextEditor, defaultTypingAttributes: [NSAttributedString.Key: Any]) {
             self.parent = parent
@@ -305,22 +373,38 @@ struct CustomTextEditor: NSViewRepresentable {
         }
 
         // MARK: - NSTextStorageDelegate
-        // Normalize paragraph styles after every edit to prevent mixed lineSpacing
+        // Normalize paragraph styles and apply list formatting after every edit
         func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
             guard editedMask.contains(.editedCharacters) else { return }
-            guard let paragraphStyle = defaultTypingAttributes[.paragraphStyle] as? NSParagraphStyle,
-                  let font = defaultTypingAttributes[.font] as? NSFont else { return }
+            guard let font = defaultTypingAttributes[.font] as? NSFont else { return }
 
             let string = textStorage.string as NSString
-            let paragraphRange = string.paragraphRange(for: editedRange)
+            let fullEditedParagraphRange = string.paragraphRange(for: editedRange)
 
-            textStorage.enumerateAttribute(.paragraphStyle, in: paragraphRange, options: []) { value, attrRange, _ in
-                if let existing = value as? NSParagraphStyle, existing.lineSpacing == paragraphStyle.lineSpacing { return }
-                textStorage.addAttribute(.paragraphStyle, value: paragraphStyle, range: attrRange)
-            }
-            textStorage.enumerateAttribute(.font, in: paragraphRange, options: []) { value, attrRange, _ in
-                if let existing = value as? NSFont, existing == font { return }
-                textStorage.addAttribute(.font, value: font, range: attrRange)
+            // Process each paragraph independently for list detection
+            string.enumerateSubstrings(in: fullEditedParagraphRange, options: [.byParagraphs, .substringNotRequired]) { _, paragraphRange, enclosingRange, _ in
+                let targetStyle: NSParagraphStyle
+
+                if let (_, markerRange) = ListFormattingEngine.detectListItem(in: string, paragraphRange: paragraphRange) {
+                    let markerText = string.substring(with: markerRange)
+                    targetStyle = ListFormattingEngine.listParagraphStyle(for: markerText, config: self.listConfig)
+                } else {
+                    targetStyle = ListFormattingEngine.defaultParagraphStyle(config: self.listConfig)
+                }
+
+                textStorage.addAttribute(.paragraphStyle, value: targetStyle, range: enclosingRange)
+
+                // Enforce font uniformity — but preserve Apple Color Emoji
+                // (set by fixAttributes for emoji characters before this delegate fires)
+                textStorage.enumerateAttribute(.font, in: enclosingRange, options: []) { value, attrRange, _ in
+                    guard let existing = value as? NSFont else {
+                        textStorage.addAttribute(.font, value: font, range: attrRange)
+                        return
+                    }
+                    if existing == font { return }
+                    if existing.fontName.contains("AppleColorEmoji") { return }
+                    textStorage.addAttribute(.font, value: font, range: attrRange)
+                }
             }
         }
 
@@ -329,7 +413,49 @@ struct CustomTextEditor: NSViewRepresentable {
             isTyping = false
             if let tv = notification.object as? NSTextView, parent.text != tv.string { parent.text = tv.string }
         }
-        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool { return true }
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+            // Intercept newlines to handle list continuation/termination
+            guard let replacement = replacementString, replacement == "\n",
+                  let textStorage = textView.textStorage else { return true }
+
+            let action = ListFormattingEngine.handleEnterKey(
+                textStorage: textStorage,
+                selectedRange: affectedCharRange
+            )
+
+            switch action {
+            case .passthrough:
+                return true
+
+            case .continueList(let insertionText):
+                isProgrammaticallyChangingText = true
+                let attrs = defaultTypingAttributes
+                textStorage.replaceCharacters(
+                    in: affectedCharRange,
+                    with: NSAttributedString(string: insertionText, attributes: attrs)
+                )
+                let newCursorPos = affectedCharRange.location + (insertionText as NSString).length
+                textView.setSelectedRange(NSRange(location: newCursorPos, length: 0))
+                textView.typingAttributes = defaultTypingAttributes
+                isProgrammaticallyChangingText = false
+                parent.text = textView.string
+                textView.didChangeText()
+                return false
+
+            case .terminateList(let paragraphRange):
+                isProgrammaticallyChangingText = true
+                textStorage.replaceCharacters(
+                    in: paragraphRange,
+                    with: NSAttributedString(string: "", attributes: defaultTypingAttributes)
+                )
+                textView.setSelectedRange(NSRange(location: paragraphRange.location, length: 0))
+                textView.typingAttributes = defaultTypingAttributes
+                isProgrammaticallyChangingText = false
+                parent.text = textView.string
+                textView.didChangeText()
+                return false
+            }
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = self.textView else { return }

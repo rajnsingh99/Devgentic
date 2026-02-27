@@ -19,6 +19,30 @@ struct ExecuteToolRequest: Decodable {
     let arguments: [String: AnyCodable]
 }
 
+// MARK: - MCP v0.11.0 Icon & Annotation Models
+
+/// A lightweight, Codable representation of an MCP tool icon.
+/// Decoupled from the SDK's `MCP.Icon` type for persistence and UI use.
+struct ToolIcon: Codable, Hashable {
+    let src: String              // URL string or base64 data URI
+    let mimeType: String?
+    let sizes: [String]?
+    let theme: ToolIconTheme?
+
+    enum ToolIconTheme: String, Codable, Hashable {
+        case light, dark
+    }
+}
+
+/// Behavioral hints about a tool, surfaced from MCP SDK v0.11.0.
+/// All fields are optional hints — not guarantees.
+struct ToolAnnotations: Codable, Hashable {
+    var destructiveHint: Bool?
+    var idempotentHint: Bool?
+    var openWorldHint: Bool?
+    var readOnlyHint: Bool?
+}
+
 // MARK: - Client-Side Tooling Foundation & Models
 
 /// Defines the JSON schema for a single property within a tool's parameters.
@@ -41,8 +65,16 @@ struct ToolDefinition: Identifiable, Hashable, Codable {
     let name: String
     let description: String
     let parameters: ToolParameters
-    
+
     var requiresConfirmation: Bool = true
+
+    // MCP v0.11.0 fields
+    /// Human-readable display title. Falls back to `name` when nil.
+    var title: String? = nil
+    /// Icons provided by the MCP server for this tool.
+    var icons: [ToolIcon]? = nil
+    /// Behavioral hints from the MCP server.
+    var annotations: ToolAnnotations? = nil
 }
 
 /// An enum to differentiate between the origins of a tool source (local vs. remote).

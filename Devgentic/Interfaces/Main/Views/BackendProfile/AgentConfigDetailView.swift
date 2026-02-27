@@ -7,7 +7,7 @@
 //  Updated on 04/02/26 for Modern Dashboard UI.
 //  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
 //  Updated on 20/02/26 to add Detached Expandable Prompt Editor.
-//  Updated to add Manual Override Toggle for Native Tool Calling.
+//  Updated on 27/02/26 to add explicit MLX Warning Banner.
 //
 
 import SwiftUI
@@ -33,7 +33,6 @@ struct AgentConfigDetailView: View {
     @State private var showingToolLibrary = false
     
     // [PHASE 1 REFACTOR]: Enriched Default Persona
-    // Now holds the identity and safety protocols previously hardcoded in the ReAct Executor.
     private let defaultSystemPersona = """
     You are Devgentic, a specialized macOS System Agent and Senior DevOps Engineer.
     
@@ -236,7 +235,6 @@ struct AgentConfigDetailView: View {
                             
                             Spacer()
                             
-                            // [PHASE 1] The Expand Button
                             Button {
                                 AdvancedPromptWindowManager.shared.showEditor(
                                     text: instructionsBinding,
@@ -308,7 +306,10 @@ struct AgentConfigDetailView: View {
                             Text("Model Selection")
                                 .fontWeight(.medium)
                                 .font(.subheadline)
-                            MLXModelPickerView(selectedModel: providerConfig.modelName)
+                            MLXModelPickerView(
+                                selectedModel: providerConfig.modelName,
+                                supportsNativeTools: providerConfig.supportsNativeTools
+                            )
                         default:
                             remoteFields
                         }
@@ -317,17 +318,57 @@ struct AgentConfigDetailView: View {
                             .padding(.vertical, 4)
                         
                         // NEW: Manual Override for Native Tools Flag
-                        Toggle(isOn: providerConfig.supportsNativeTools) {
+                        Toggle(isOn: Binding(
+                            get: { providerConfig.wrappedValue.supportsNativeTools },
+                            set: { newValue in
+                                withAnimation(.snappy) {
+                                    providerConfig.wrappedValue.supportsNativeTools = newValue
+                                }
+                            }
+                        )) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Native Tool Calling API")
                                     .fontWeight(.medium)
-                                Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                
+                                if providerConfig.wrappedValue.apiProvider == .mlx {
+                                    Text("When enabled, tools are sent via the native API payload. Defaults to OFF for MLX models to prioritize stability.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                    Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
                         }
                         .toggleStyle(.switch)
+                        
+                        // WARNING BANNER (Only shows when MLX and Native Tools are both selected)
+                        if providerConfig.wrappedValue.apiProvider == .mlx && providerConfig.wrappedValue.supportsNativeTools {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.yellow)
+                                    .font(.title2)
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Experimental Feature")
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.primary)
+                                    Text("Many community MLX models have broken chat templates that cause the Native Parser to crash or ignore tools. If the agent fails or hallucinates, disable this to rely on the robust Legacy JSON mode.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(12)
+                            .background(Color.yellow.opacity(0.1))
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.2), lineWidth: 1))
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
                     }
                 }
                 
@@ -636,40 +677,6 @@ struct AgentConfigDetailView: View {
             ) ?? .default()
         default:
             break
-        }
-    }
-}
-
-// MARK: - Reusable Card Component
-fileprivate struct ModernSection<Content: View>: View {
-    let title: String
-    let icon: String
-    let content: Content
-    
-    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.icon = icon
-        self.content = content()
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon)
-                .font(.headline)
-                .foregroundColor(.primary)
-                .padding(.horizontal, 4)
-            
-            VStack(alignment: .leading, spacing: 16) {
-                content
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.03), radius: 2, x: 0, y: 1)
         }
     }
 }

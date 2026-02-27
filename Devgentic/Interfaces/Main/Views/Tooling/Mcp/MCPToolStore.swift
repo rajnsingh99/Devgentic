@@ -123,16 +123,14 @@ class MCPToolStore: ObservableObject {
         let newMCPToolEntity = MCPToolEntity(context: context)
         newMCPToolEntity.name = tool.name
         newMCPToolEntity.toolDescription = tool.description
-        
-        // [Phase 1: Persistence] Map the boolean into CoreData
         newMCPToolEntity.requiresConfirmation = tool.requiresConfirmation
-        
-        do {
-            newMCPToolEntity.parametersData = try JSONEncoder().encode(tool.parameters)
-        } catch {
-            print("Failed to encode tool parameters for \(tool.name): \(error)")
-        }
-        
+        newMCPToolEntity.parametersData = try? JSONEncoder().encode(tool.parameters)
+
+        // MCP v0.11.0 fields
+        newMCPToolEntity.title = tool.title
+        newMCPToolEntity.iconsData = tool.icons.flatMap { try? JSONEncoder().encode($0) }
+        newMCPToolEntity.annotationsData = tool.annotations.flatMap { try? JSONEncoder().encode($0) }
+
         parent.addToTools(newMCPToolEntity)
     }
 
@@ -168,28 +166,40 @@ extension ToolItemEntity {
         // Safely unwrap the related MCPToolEntity set and convert each to a ToolDefinition struct
         let toolSet = self.tools as? Set<MCPToolEntity> ?? []
         let mappedTools = toolSet.map { mcpToolEntity -> ToolDefinition in
-            // Decode the parameters from Data, providing a default if it fails or is nil.
+            // Decode parameters from Data, providing a default if it fails or is nil.
             var parameters: ToolParameters
             if let data = mcpToolEntity.parametersData {
                 do {
                     parameters = try JSONDecoder().decode(ToolParameters.self, from: data)
                 } catch {
                     print("Failed to decode parameters for tool \(mcpToolEntity.name ?? "Unknown"): \(error). Using default.")
-                    // Provide a default empty schema if decoding fails to prevent crashes.
                     parameters = ToolParameters(type: "object", properties: [:], required: [])
                 }
             } else {
-                // Provide a default for older data that doesn't have the parametersData attribute.
                 parameters = ToolParameters(type: "object", properties: [:], required: [])
             }
-            
+
+            // Hydrate v0.11.0 fields
+            var icons: [ToolIcon]? = nil
+            if let data = mcpToolEntity.iconsData {
+                icons = try? JSONDecoder().decode([ToolIcon].self, from: data)
+            }
+
+            var annotations: ToolAnnotations? = nil
+            if let data = mcpToolEntity.annotationsData {
+                annotations = try? JSONDecoder().decode(ToolAnnotations.self, from: data)
+            }
+
             return ToolDefinition(
                 name: mcpToolEntity.name ?? "Unknown",
                 description: mcpToolEntity.toolDescription ?? "",
-                parameters: parameters, // Use the decoded (or default) parameters
-                requiresConfirmation: mcpToolEntity.requiresConfirmation // [Phase 1: Hydrate from Core Data]
+                parameters: parameters,
+                requiresConfirmation: mcpToolEntity.requiresConfirmation,
+                title: mcpToolEntity.title,
+                icons: icons,
+                annotations: annotations
             )
-        }.sorted { $0.name < $1.name } // Sort tools alphabetically
+        }.sorted { $0.name < $1.name }
         
         // Decode the ServerDefinition from the stored Data.
         var serverDefinition: ServerDefinition?

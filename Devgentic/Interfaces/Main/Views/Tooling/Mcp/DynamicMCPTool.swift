@@ -71,8 +71,7 @@ struct DynamicMCPTool: DevgenticTool {
     
     @MainActor
     func call(arguments: Arguments) async throws -> String {
-        // 1. Attempt Execution via V2 Service
-        // This ensures we use ShellProcess with the correct PATH injection.
+        // 1. Attempt execution via active session
         do {
             return try await MCPClientService.shared.executeTool(
                 sourceId: self.source.id,
@@ -80,31 +79,37 @@ struct DynamicMCPTool: DevgenticTool {
                 arguments: arguments.rawDictionary
             )
         } catch {
-            // 2. Auto-Reconnection Logic
-            // If the V2 service threw an error, it might mean the session isn't active
-            // (e.g., app was restarted, or connection dropped).
-            
-            // Check if we have a definition to reconnect with
+            // 2. Auto-reconnection with exponential backoff
             guard let serverDef = self.source.serverDefinition else {
                 return "Execution Failed: No active connection and no server definition found to reconnect."
             }
-            
-            print("DynamicMCPTool: Session missing or failed. Attempting auto-reconnect for \(source.serverName)...")
-            
-            do {
-                // Attempt to reconnect using the stored definition
-                _ = try await MCPClientService.shared.connect(sourceId: self.source.id, config: serverDef)
-                
-                // Retry execution immediately after successful connection
-                return try await MCPClientService.shared.executeTool(
-                    sourceId: self.source.id,
-                    name: self.name,
-                    arguments: arguments.rawDictionary
-                )
-            } catch {
-                // If reconnection or retry fails, return the error to the Agent
-                return "Error executing tool '\(name)': \(error.localizedDescription)"
+
+            let maxRetries = 3
+            var lastError = error
+
+            for attempt in 1...maxRetries {
+                let backoffSeconds = Double(1 << (attempt - 1)) // 1s, 2s, 4s
+                print("DynamicMCPTool: Retry \(attempt)/\(maxRetries) for \(source.serverName) after \(backoffSeconds)s backoff...")
+
+                MCPClientService.shared.connectionStates[source.id] = .reconnecting(attempt: attempt)
+
+                try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+
+                do {
+                    _ = try await MCPClientService.shared.connect(sourceId: self.source.id, config: serverDef)
+                    return try await MCPClientService.shared.executeTool(
+                        sourceId: self.source.id,
+                        name: self.name,
+                        arguments: arguments.rawDictionary
+                    )
+                } catch {
+                    lastError = error
+                }
             }
+
+            // All retries exhausted
+            MCPClientService.shared.connectionStates[source.id] = .error(lastError.localizedDescription)
+            return "Error executing tool '\(name)' after \(maxRetries) retries: \(lastError.localizedDescription)"
         }
     }
 }

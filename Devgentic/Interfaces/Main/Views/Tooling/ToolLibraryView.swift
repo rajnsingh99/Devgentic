@@ -86,47 +86,101 @@ struct ToolLibraryView: View {
     @ViewBuilder
     private var sidebar: some View {
         List(selection: $selectedSidebar) {
-            
+
             Section("Library") {
-                Label("All Tools", systemImage: "archivebox.fill")
-                    .tag(SidebarSelection.all)
+                HStack {
+                    Label("All Tools", systemImage: "archivebox.fill")
+                    Spacer()
+                    Text("\(totalToolCount)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.12))
+                        .cornerRadius(8)
+                }
+                .tag(SidebarSelection.all)
             }
-            
+
             Section("Environment") {
-                Label("Built-in Tools", systemImage: "cpu")
-                    .tag(SidebarSelection.local)
+                HStack {
+                    Label("Built-in Tools", systemImage: "cpu")
+                    Spacer()
+                    Text("\(localToolCount)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.12))
+                        .cornerRadius(8)
+                }
+                .tag(SidebarSelection.local)
             }
-            
+
             Section("MCP Servers") {
                 let mcpSources = toolStore.sources.filter { $0.type == .mcp }
-                
+
                 if mcpSources.isEmpty {
-                    Text("No connected servers")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.vertical, 4)
+                    VStack(spacing: 4) {
+                        Text("No MCP servers")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Button("Add Server") { isPresentingAddView = true }
+                            .font(.caption2)
+                            .buttonStyle(.borderless)
+                    }
+                    .padding(.vertical, 4)
                 } else {
                     ForEach(mcpSources) { source in
-                        Label(source.serverName, systemImage: "network")
-                            .tag(SidebarSelection.mcp(source.id))
-                            .contextMenu {
-                                Button("Edit Configuration...") {
-                                    sourceToEdit = source
-                                }
-                                Divider()
-                                Button("Remove Server", role: .destructive) {
-                                    toolStore.deleteTool(toolSource: source)
-                                    if selectedSidebar == .mcp(source.id) {
-                                        selectedSidebar = .all
-                                    }
+                        HStack(spacing: 6) {
+                            MCPIconView(
+                                icons: source.tools.first?.icons,
+                                fallbackSymbol: "network",
+                                size: 16
+                            )
+                            .foregroundColor(.secondary)
+
+                            Text(source.serverName)
+
+                            Spacer()
+
+                            Text("\(source.tools.count)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.12))
+                                .cornerRadius(8)
+
+                            ConnectionStateIndicator(sourceId: source.id)
+                        }
+                        .tag(SidebarSelection.mcp(source.id))
+                        .contextMenu {
+                            Button("Edit Configuration...") {
+                                sourceToEdit = source
+                            }
+                            Divider()
+                            Button("Remove Server", role: .destructive) {
+                                toolStore.deleteTool(toolSource: source)
+                                if selectedSidebar == .mcp(source.id) {
+                                    selectedSidebar = .all
                                 }
                             }
+                        }
                     }
                 }
             }
         }
         .listStyle(.sidebar)
         .navigationTitle("Tool Library")
+    }
+
+    private var totalToolCount: Int {
+        toolStore.sources.reduce(0) { $0 + $1.tools.count }
+    }
+
+    private var localToolCount: Int {
+        toolStore.sources.filter { $0.type == .local }.reduce(0) { $0 + $1.tools.count }
     }
     
     // MARK: - Detail (Table) View
@@ -140,22 +194,43 @@ struct ToolLibraryView: View {
                 Table(displayedRows) {
                     // 1. Tool Identity Column
                     TableColumn("Tool") { row in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(row.definition.name)
-                                .font(.system(.body, design: .monospaced))
-                                .fontWeight(.semibold)
-                                .foregroundColor(.primary)
-                            
-                            // Show source context if viewing "All Tools"
-                            if selectedSidebar == .all {
-                                Text(row.source.serverName)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                        HStack(spacing: 10) {
+                            MCPIconView(
+                                icons: row.definition.icons,
+                                fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
+                                size: 20
+                            )
+                            .foregroundColor(.accentColor)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                if let title = row.definition.title {
+                                    Text(title)
+                                        .font(.body)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.primary)
+                                    Text(row.definition.name)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .fontDesign(.monospaced)
+                                } else {
+                                    Text(row.definition.name)
+                                        .font(.system(.body, design: .monospaced))
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.primary)
+                                }
+
+                                ToolAnnotationBadges(annotations: row.definition.annotations)
+
+                                if selectedSidebar == .all {
+                                    Text(row.source.serverName)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
                             }
                         }
                         .padding(.vertical, 10)
                     }
-                    .width(min: 200, ideal: 240, max: 320)
+                    .width(min: 200, ideal: 260, max: 360)
                     
                     // 2. Description Column (Vertically Centered to match state toggles)
                     TableColumn("Description") { row in
@@ -310,13 +385,23 @@ private struct ToolDetailsButton: View {
                 VStack(alignment: .leading, spacing: 16) {
                     // Header
                     HStack {
-                        Image(systemName: "wrench.fill")
+                        MCPIconView(icons: definition.icons, fallbackSymbol: "wrench.fill", size: 20)
                             .foregroundColor(.accentColor)
-                        Text(definition.name)
-                            .font(.headline)
-                            .fontDesign(.monospaced)
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let title = definition.title {
+                                Text(title).font(.headline)
+                                Text(definition.name)
+                                    .font(.caption)
+                                    .fontDesign(.monospaced)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text(definition.name)
+                                    .font(.headline)
+                                    .fontDesign(.monospaced)
+                            }
+                        }
                     }
-                    
+
                     // Full Description (Unrestricted Height)
                     Text(definition.description)
                         .font(.body)
@@ -325,8 +410,18 @@ private struct ToolDetailsButton: View {
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                     
+                    // Behavior Hints (if present)
+                    if definition.annotations != nil {
+                        Divider()
+                        Text("Behavior Hints")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                        ToolAnnotationBadges(annotations: definition.annotations)
+                    }
+
                     Divider()
-                    
+
                     // Parameters Section
                     Text("Parameters Schema")
                         .font(.subheadline)
@@ -407,11 +502,20 @@ private struct ToolStatusToggle: View {
                 if newValue {
                     // Enable: Create the Tool and append it
                     if !configuredTools.contains(where: { $0.name == definition.name && $0.sourceId == source.id }) {
+                        // Smart HITL default from annotations
+                        var confirmation = definition.requiresConfirmation
+                        if let annotations = definition.annotations {
+                            if annotations.destructiveHint == true {
+                                confirmation = true
+                            } else if annotations.readOnlyHint == true {
+                                confirmation = false
+                            }
+                        }
                         let newTool = Tool(
                             name: definition.name,
                             description: definition.description,
                             isEnabled: true,
-                            requiresConfirmation: definition.requiresConfirmation, // Inherit default
+                            requiresConfirmation: confirmation,
                             sourceId: source.id,
                             parameters: definition.parameters
                         )
@@ -514,5 +618,88 @@ private struct ToolSecurityToggle: View {
         .disabled(!isConfigured)
         .help(!isConfigured ? "Enable tool first to configure security." :
               (requiresConfirmation.wrappedValue ? "Ask Before Run: Suspends execution for your approval before running." : "Auto-Run: Tool executes automatically without asking."))
+    }
+}
+
+// MARK: - MCP v0.11.0 UI Components
+
+/// Displays annotation badges for a tool's behavioral hints.
+private struct ToolAnnotationBadges: View {
+    let annotations: ToolAnnotations?
+
+    var body: some View {
+        if let annotations = annotations {
+            HStack(spacing: 4) {
+                if annotations.destructiveHint == true {
+                    AnnotationBadge(text: "Destructive", color: .red, symbol: "exclamationmark.triangle.fill")
+                }
+                if annotations.readOnlyHint == true {
+                    AnnotationBadge(text: "Read-only", color: .blue, symbol: "eye.fill")
+                }
+                if annotations.idempotentHint == true {
+                    AnnotationBadge(text: "Idempotent", color: .green, symbol: "arrow.2.squarepath")
+                }
+                if annotations.openWorldHint == true {
+                    AnnotationBadge(text: "Open World", color: .purple, symbol: "globe")
+                }
+            }
+        }
+    }
+}
+
+/// A compact colored pill badge with an SF Symbol and label.
+private struct AnnotationBadge: View {
+    let text: String
+    let color: Color
+    let symbol: String
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: symbol)
+                .font(.system(size: 8))
+            Text(text)
+                .font(.system(size: 9, weight: .medium))
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.1))
+        .cornerRadius(4)
+    }
+}
+
+/// Displays a colored circle indicating the MCP server's connection state.
+private struct ConnectionStateIndicator: View {
+    let sourceId: UUID
+    @ObservedObject private var clientService = MCPClientService.shared
+
+    private var state: MCPConnectionState {
+        clientService.connectionStates[sourceId] ?? .disconnected
+    }
+
+    var body: some View {
+        Circle()
+            .fill(stateColor)
+            .frame(width: 8, height: 8)
+            .help(stateDescription)
+    }
+
+    private var stateColor: Color {
+        switch state {
+        case .disconnected: return .secondary.opacity(0.4)
+        case .connecting, .reconnecting: return .orange
+        case .connected: return .green
+        case .error: return .red
+        }
+    }
+
+    private var stateDescription: String {
+        switch state {
+        case .disconnected: return "Disconnected"
+        case .connecting: return "Connecting..."
+        case .connected: return "Connected"
+        case .reconnecting(let attempt): return "Reconnecting (attempt \(attempt))..."
+        case .error(let msg): return "Error: \(msg)"
+        }
     }
 }

@@ -3,12 +3,15 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 04/02/26.
+//  Updated: Refactored to prioritize stability (Defaults to JSON Mode)
 //
 
 import SwiftUI
 
 struct MLXModelPickerView: View {
     @Binding var selectedModel: String
+    @Binding var supportsNativeTools: Bool // Added binding
+    
     @StateObject private var service = MLXModelService.shared
     @State private var showingStore = false
     
@@ -31,10 +34,6 @@ struct MLXModelPickerView: View {
                 }
                 .labelsHidden() // Hide label to prevent weird alignment issues
             }
-            
-             // Forces the button to the far right edge
-            
-             // Prevents the button from being compressed
         }
         .onAppear {
             service.refreshInstalledModels()
@@ -60,6 +59,9 @@ struct MLXModelPickerView: View {
         if selectedModel.isEmpty || !isSelectionValid {
             DispatchQueue.main.async {
                 self.selectedModel = first.displayName
+                // DEFAULT TO SAFETY: Force Legacy JSON Mode by default for MLX.
+                // User must manually opt-in to the Native API due to Jinja parser fragility.
+                self.supportsNativeTools = false
             }
         }
     }

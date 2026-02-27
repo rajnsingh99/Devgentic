@@ -114,7 +114,10 @@ struct BotConfigDetailView: View {
                             Text("Model Selection")
                                 .fontWeight(.medium)
                                 .font(.subheadline)
-                            MLXModelPickerView(selectedModel: providerConfig.modelName)
+                            MLXModelPickerView(
+                                selectedModel: providerConfig.modelName,
+                                supportsNativeTools: providerConfig.supportsNativeTools
+                            )
                         default:
                             remoteFields
                         }
@@ -301,41 +304,6 @@ struct BotConfigDetailView: View {
             ) ?? .default()
         default:
             break
-        }
-    }
-}
-
-// MARK: - Reusable Card Component
-// (Duplicated here to ensure file self-containment if AgentConfigDetailView is not visible)
-fileprivate struct ModernSection<Content: View>: View {
-    let title: String
-    let icon: String
-    let content: Content
-    
-    init(title: String, icon: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.icon = icon
-        self.content = content()
-    }
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: icon)
-                .font(.headline)
-                .foregroundColor(.primary)
-                .padding(.horizontal, 4)
-            
-            VStack(alignment: .leading, spacing: 16) {
-                content
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.03), radius: 2, x: 0, y: 1)
         }
     }
 }

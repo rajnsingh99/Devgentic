@@ -63,6 +63,12 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         
         AgentThoughtArrayTransformer.register()
         
+        // Enable lightweight migration for schema changes (e.g., new optional attributes)
+        if let description = container.persistentStoreDescriptions.first {
+            description.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
+            description.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
+        }
+
         container.loadPersistentStores { (storeDescription, error) in
             if let error = error as NSError? {
                 self.logger.critical("Unresolved error \(error), \(error.userInfo)")
