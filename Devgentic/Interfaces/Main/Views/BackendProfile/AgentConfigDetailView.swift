@@ -8,6 +8,11 @@
 //  Updated on 16/02/26 to add API Key visibility toggle and persistent model display.
 //  Updated on 20/02/26 to add Detached Expandable Prompt Editor.
 //  Updated on 27/02/26 to add explicit MLX Warning Banner.
+//  Updated on 27/02/26 to refine Remote LLM UI and API Key gating.
+//  Updated on 28/02/26 to add OpenAI dynamic model picker.
+//  Updated on 28/02/26 to add editable Base URL endpoint field with default placeholders.
+//  Updated on 28/02/26 to align inputs right matching Modern Settings UI.
+//  Updated on 28/02/26 to fix MLX native tool toggle auto-enable bug.
 //
 
 import SwiftUI
@@ -26,8 +31,9 @@ struct AgentConfigDetailView: View {
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
     
-    // UI State for API Key Visibility
+    // UI State for API Key Visibility and Endpoint Editing
     @State private var isApiKeyVisible: Bool = false
+    @State private var isEditingBaseURL: Bool = false
     
     // Tool Library Sheet
     @State private var showingToolLibrary = false
@@ -74,6 +80,16 @@ struct AgentConfigDetailView: View {
                         knowledgeSources: sources
                     )
                 }
+            }
+        )
+    }
+    
+    private var baseURLBinding: Binding<String> {
+        Binding<String>(
+            get: { providerConfig.wrappedValue.baseURL ?? "" },
+            set: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                providerConfig.wrappedValue.baseURL = trimmed.isEmpty ? nil : trimmed
             }
         )
     }
@@ -169,7 +185,6 @@ struct AgentConfigDetailView: View {
         )
     }
 
-
     // MARK: - Body
     var body: some View {
         ScrollView {
@@ -202,9 +217,10 @@ struct AgentConfigDetailView: View {
                 
                 // 2. Cognitive Architecture (The Brain)
                 ModernSection(title: "Cognitive Architecture", icon: "brain.head.profile") {
+                    
                     // Strategy Picker
-                    HStack {
-                        VStack(alignment: .leading) {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("Reasoning Strategy")
                                 .fontWeight(.medium)
                             Text(architectureBinding.wrappedValue.description)
@@ -212,7 +228,7 @@ struct AgentConfigDetailView: View {
                                 .foregroundColor(.secondary)
                         }
                         
-                        Spacer()
+                        Spacer(minLength: 16)
                         
                         Picker("", selection: architectureBinding) {
                             ForEach(AgentArchitecture.allCases) { arch in
@@ -220,7 +236,7 @@ struct AgentConfigDetailView: View {
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 180)
+                        .fixedSize()
                     }
                     
                     Divider()
@@ -281,18 +297,21 @@ struct AgentConfigDetailView: View {
                 
                 // 3. Inference Engine (Provider)
                 ModernSection(title: "Inference Engine", icon: "cpu") {
-                    HStack {
-                        VStack(alignment: .leading) {
+                    
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("LLM Provider")
                                 .fontWeight(.medium)
                             Text("The underlying model powering this agent.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        Spacer()
+                        
+                        Spacer(minLength: 16)
+                        
                         providerPicker
                             .labelsHidden()
-                            .frame(width: 200)
+                            .fixedSize()
                     }
                     
                     Divider()
@@ -303,80 +322,100 @@ struct AgentConfigDetailView: View {
                         case .ollama:
                             ollamaFields
                         case .mlx:
-                            Text("Model Selection")
-                                .fontWeight(.medium)
-                                .font(.subheadline)
-                            MLXModelPickerView(
-                                selectedModel: providerConfig.modelName,
-                                supportsNativeTools: providerConfig.supportsNativeTools
-                            )
+                            HStack(alignment: .center) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Model Selection")
+                                        .fontWeight(.medium)
+                                }
+                                Spacer(minLength: 16)
+                                MLXModelPickerView(
+                                    selectedModel: providerConfig.modelName,
+                                    supportsNativeTools: Binding(
+                                        get: { providerConfig.wrappedValue.supportsNativeTools },
+                                        set: { _ in } // Prevent MLX Model Picker from auto-enabling this setting
+                                    )
+                                )
+                                .labelsHidden()
+                                .frame(maxWidth: 350, alignment: .trailing)
+                            }
                         default:
                             remoteFields
                         }
                         
-                        Divider()
-                            .padding(.vertical, 4)
+                        // ONLY show Native Tools override toggle for Local providers
+                        let isLocalProvider = providerConfig.wrappedValue.apiProvider == .mlx || providerConfig.wrappedValue.apiProvider == .ollama
                         
-                        // NEW: Manual Override for Native Tools Flag
-                        Toggle(isOn: Binding(
-                            get: { providerConfig.wrappedValue.supportsNativeTools },
-                            set: { newValue in
-                                withAnimation(.snappy) {
-                                    providerConfig.wrappedValue.supportsNativeTools = newValue
-                                }
-                            }
-                        )) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Native Tool Calling API")
-                                    .fontWeight(.medium)
-                                
-                                if providerConfig.wrappedValue.apiProvider == .mlx {
-                                    Text("When enabled, tools are sent via the native API payload. Defaults to OFF for MLX models to prioritize stability.")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                } else {
-                                    Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
-                        .toggleStyle(.switch)
-                        
-                        // WARNING BANNER (Only shows when MLX and Native Tools are both selected)
-                        if providerConfig.wrappedValue.apiProvider == .mlx && providerConfig.wrappedValue.supportsNativeTools {
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundColor(.yellow)
-                                    .font(.title2)
-                                
+                        if isLocalProvider {
+                            Divider()
+                                .padding(.vertical, 4)
+                            
+                            // Manual Override for Native Tools Flag
+                            HStack(alignment: .center) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Experimental Feature")
-                                        .font(.subheadline)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.primary)
-                                    Text("Many community MLX models have broken chat templates that cause the Native Parser to crash or ignore tools. If the agent fails or hallucinates, disable this to rely on the robust Legacy JSON mode.")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text("Native Tool Calling API")
+                                        .fontWeight(.medium)
+                                    
+                                    if providerConfig.wrappedValue.apiProvider == .mlx {
+                                        Text("When enabled, tools are sent via the native API payload. Defaults to OFF for MLX models to prioritize stability.")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    } else {
+                                        Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
                                 }
+                                
+                                Spacer(minLength: 16)
+                                
+                                Toggle("", isOn: Binding(
+                                    get: { providerConfig.wrappedValue.supportsNativeTools },
+                                    set: { newValue in
+                                        withAnimation(.snappy) {
+                                            providerConfig.wrappedValue.supportsNativeTools = newValue
+                                        }
+                                    }
+                                ))
+                                .toggleStyle(.switch)
+                                .labelsHidden()
                             }
-                            .padding(12)
-                            .background(Color.yellow.opacity(0.1))
-                            .cornerRadius(8)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.2), lineWidth: 1))
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            
+                            // WARNING BANNER (Only shows when MLX and Native Tools are both selected)
+                            if providerConfig.wrappedValue.apiProvider == .mlx && providerConfig.wrappedValue.supportsNativeTools {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.yellow)
+                                        .font(.title2)
+                                    
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Experimental Feature")
+                                            .font(.subheadline)
+                                            .fontWeight(.semibold)
+                                            .foregroundColor(.primary)
+                                        Text("Many community MLX models have broken chat templates that cause the Native Parser to crash or ignore tools. If the agent fails or hallucinates, disable this to rely on the robust Legacy JSON mode.")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .padding(12)
+                                .background(Color.yellow.opacity(0.1))
+                                .cornerRadius(8)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.2), lineWidth: 1))
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
                         }
                     }
                 }
                 
                 // 4. Capabilities (Tools & Knowledge)
                 ModernSection(title: "Capabilities", icon: "hammer.fill") {
+                    
                     // Tools Header
-                    HStack {
-                        VStack(alignment: .leading) {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("Tools")
                                 .fontWeight(.medium)
                             let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
@@ -384,7 +423,9 @@ struct AgentConfigDetailView: View {
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        Spacer()
+                        
+                        Spacer(minLength: 16)
+                        
                         Button("Manage Library...") {
                             showingToolLibrary = true
                         }
@@ -424,15 +465,17 @@ struct AgentConfigDetailView: View {
                     Divider()
                     
                     // Knowledge Header
-                    HStack {
-                        VStack(alignment: .leading) {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text("Knowledge Base")
                                 .fontWeight(.medium)
                             Text("RAG sources for context awareness")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        Spacer()
+                        
+                        Spacer(minLength: 16)
+                        
                         Menu {
                             Button("Add File") { /* Not implemented */ }
                             Button("Add URL") { /* Not implemented */ }
@@ -441,6 +484,7 @@ struct AgentConfigDetailView: View {
                         }
                         .fixedSize()
                         .menuStyle(.borderedButton)
+                        .controlSize(.small)
                     }
                     
                     // Knowledge List
@@ -522,6 +566,8 @@ struct AgentConfigDetailView: View {
             loadAdvancedConfigs()
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) {
+            // Reset edit state when switching providers
+            isEditingBaseURL = false
             loadAdvancedConfigs()
         }
         .onChange(of: localOllamaConfig) {
@@ -577,73 +623,204 @@ struct AgentConfigDetailView: View {
     }
     
     private var providerPicker: some View {
-        Picker("Provider", selection: providerConfig.apiProvider) {
+        Picker("", selection: Binding(
+            get: { providerConfig.wrappedValue.apiProvider },
+            set: { newValue in
+                let oldValue = providerConfig.wrappedValue.apiProvider
+                providerConfig.wrappedValue.apiProvider = newValue
+                
+                if newValue != oldValue {
+                    if [.openAI, .google, .anthropic].contains(newValue) {
+                        providerConfig.wrappedValue.supportsNativeTools = true
+                    } else if newValue == .mlx {
+                        // Default to false for MLX, user must opt-in manually to prevent unstable behavior
+                        providerConfig.wrappedValue.supportsNativeTools = false
+                    }
+                }
+            }
+        )) {
             ForEach(ApiProvider.allCases) { provider in
                 Text(provider.rawValue).tag(provider)
             }
         }
     }
     
+    private func defaultBaseURL(for provider: ApiProvider) -> String {
+        switch provider {
+        case .google: return "https://generativelanguage.googleapis.com/v1beta/"
+        case .anthropic: return "https://api.anthropic.com/v1/"
+        case .openAI: return "https://api.openai.com/v1/"
+        case .ollama: return "http://localhost:11434"
+        case .mlx: return "Local Engine"
+        default: return ""
+        }
+    }
+    
+    @ViewBuilder
+    private func endpointField(for provider: ApiProvider) -> some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Endpoint")
+                    .fontWeight(.medium)
+                Text("Optional override for custom gateways.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer(minLength: 16)
+            
+            HStack {
+                if isEditingBaseURL || (providerConfig.wrappedValue.baseURL != nil && !providerConfig.wrappedValue.baseURL!.isEmpty) {
+                    TextField(defaultBaseURL(for: provider), text: baseURLBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                    
+                    Button(action: {
+                        // Clear the custom URL and exit edit mode
+                        providerConfig.wrappedValue.baseURL = nil
+                        isEditingBaseURL = false
+                    }) {
+                        Image(systemName: "arrow.uturn.backward.circle.fill")
+                            .foregroundColor(.secondary)
+                            .help("Reset to Default")
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, 4)
+                } else {
+                    Text(defaultBaseURL(for: provider))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 5)
+                        .padding(.horizontal, 8)
+                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                    
+                    Button("Edit") {
+                        isEditingBaseURL = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .frame(maxWidth: 350)
+        }
+    }
+    
     @ViewBuilder
     private var ollamaFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField("Base URL", text: providerConfig.baseURL.toNonOptional(defaultValue: "http://localhost:11434"))
-                .textFieldStyle(.roundedBorder)
-                .disableAutocorrection(true)
+            
+            endpointField(for: providerConfig.wrappedValue.apiProvider)
+            
+            Divider()
 
-            OllamaModelPickerView(
-                selectedModel: providerConfig.modelName,
-                supportsNativeTools: providerConfig.supportsNativeTools, // Bind the extracted capability to the payload
-                baseURL: providerConfig.wrappedValue.baseURL ?? "",
-                filterForTools: true
-            )
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model Selection")
+                        .fontWeight(.medium)
+                }
+                Spacer(minLength: 16)
+                OllamaModelPickerView(
+                    selectedModel: providerConfig.modelName,
+                    supportsNativeTools: providerConfig.supportsNativeTools,
+                    baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
+                    filterForTools: true
+                )
+                .labelsHidden()
+                .frame(maxWidth: 350, alignment: .trailing)
+            }
         }
     }
     
     @ViewBuilder
     private var remoteFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // API Key Input with Visibility Toggle
-            ZStack(alignment: .trailing) {
-                Group {
-                    if isApiKeyVisible {
-                        TextField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                            .textFieldStyle(.roundedBorder)
-                    } else {
-                        SecureField("API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                            .textFieldStyle(.roundedBorder)
-                    }
+            
+            // API Key Input
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("API Key").fontWeight(.medium)
                 }
                 
-                Button(action: { isApiKeyVisible.toggle() }) {
-                    Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
-                        .foregroundColor(.secondary)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 8)
-                .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
-            }
-
-            if providerConfig.wrappedValue.apiProvider == .google {
-                VStack(alignment: .leading, spacing: 8) {
-                    // The Picker: Useful when it loads, but might be hidden initially
-                    GeminiModelPickerView(
-                        selectedModel: providerConfig.modelName,
-                        apiKey: providerConfig.wrappedValue.apiKey ?? ""
-                    )
+                Spacer(minLength: 16)
+                
+                ZStack(alignment: .trailing) {
+                    Group {
+                        if isApiKeyVisible {
+                            TextField("Enter API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            SecureField("Enter API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
                     
-                    HStack {
-                        Text("Model:")
-                            .font(.subheadline)
+                    Button(action: { isApiKeyVisible.toggle() }) {
+                        Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
                             .foregroundColor(.secondary)
-                        TextField("e.g. gemini-1.5-pro", text: providerConfig.modelName)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 8)
+                    .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
+                }
+                .frame(maxWidth: 350)
+            }
+            
+            Divider()
+            
+            // Endpoint URL Selection / Override
+            endpointField(for: providerConfig.wrappedValue.apiProvider)
+            
+            Divider()
+            
+            // Model Selection
+            let currentApiKey = providerConfig.wrappedValue.apiKey ?? ""
+            
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model Selection").fontWeight(.medium)
+                }
+                
+                Spacer(minLength: 16)
+                
+                if currentApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Enter a valid API Key to select a model.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    if providerConfig.wrappedValue.apiProvider == .google {
+                        GeminiModelPickerView(
+                            selectedModel: providerConfig.modelName,
+                            apiKey: currentApiKey
+                        )
+                        .labelsHidden()
+                        .frame(maxWidth: 350, alignment: .trailing)
+                        
+                    } else if providerConfig.wrappedValue.apiProvider == .anthropic {
+                        AnthropicModelPickerView(
+                            selectedModel: providerConfig.modelName,
+                            apiKey: currentApiKey
+                        )
+                        .labelsHidden()
+                        .frame(maxWidth: 350, alignment: .trailing)
+                        
+                    } else if providerConfig.wrappedValue.apiProvider == .openAI {
+                        OpenAIModelPickerView(
+                            selectedModel: providerConfig.modelName,
+                            apiKey: currentApiKey
+                        )
+                        .labelsHidden()
+                        .frame(maxWidth: 350, alignment: .trailing)
+                        
+                    } else {
+                        // Fallback for other remote providers lacking a dynamic picker yet
+                        TextField("e.g. gpt-4o", text: providerConfig.modelName)
                             .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 350)
                     }
                 }
-            } else {
-                TextField("Model Name", text: providerConfig.modelName)
-                    .textFieldStyle(.roundedBorder)
             }
         }
     }

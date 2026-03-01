@@ -11,4 +11,9 @@ import Foundation
 struct AppSettings {
     /// Key for the boolean value that determines if LLM responses should be streamed.
     static let useStreamingResponseKey = "useStreamingResponse"
+
+    // Speech Recognition
+    static let speechModelKey = "speechModel"
+    static let speechLanguageKey = "speechLanguage"
+    static let speechAutoStopOnSilenceKey = "speechAutoStopOnSilence"
 }

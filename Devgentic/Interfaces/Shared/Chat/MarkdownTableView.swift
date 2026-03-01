@@ -133,7 +133,7 @@ private struct TableCellView: View {
             }
         }
         .padding(UITheme.Spacing.small)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         // Cell-specific Actions
         .contextMenu {
             Button {

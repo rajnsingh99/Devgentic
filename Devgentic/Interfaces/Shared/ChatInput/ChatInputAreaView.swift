@@ -107,7 +107,7 @@ struct ChatInputAreaView: View {
 
     private var currentDynamicButtonMode: DynamicButtonMode {
         if mainViewModel.streamingMessageID != nil { return .stopStreaming }
-        if inputViewModel.voiceInputState == .recording { return .stopVoice }
+        if inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence { return .stopVoice }
         if hasInputText { return .send }
         return .mic
     }
@@ -153,10 +153,10 @@ struct ChatInputAreaView: View {
             .padding(.horizontal, 4)
             
             ZStack {
-                if inputViewModel.voiceInputState == .recording {
+                if inputViewModel.voiceInputState == .recording
+                    || inputViewModel.voiceInputState == .finalizingSilence {
                     RecordingOverlayView(
-                        recordingTime: $inputViewModel.recordingTime,
-                        powerLevels: $inputViewModel.audioPowerLevels,
+                        displayStore: inputViewModel.recordingDisplay,
                         onCancel: { inputViewModel.cancelRecording() },
                         onConfirm: { inputViewModel.toggleVoiceInput() }
                     )
@@ -318,6 +318,7 @@ struct ChatInputAreaView: View {
             switch inputViewModel.voiceInputState {
                 case .recording: return "Listening..."
                 case .processing: return "Processing..."
+                case .finalizingSilence: return "Finalizing..."
                 case .error: return "Voice error..."
                 default: return "Type a message..."
             }
@@ -466,6 +467,19 @@ struct ChatInputAreaView: View {
                                 .transition(.scale(scale: 0.5).combined(with: .opacity))
                         }
                     }
+
+                    // Inline progress spinner overlay during model download/preparation
+                    if inputViewModel.voiceInputState == .modelLoading || inputViewModel.voiceInputState == .modelPreparing {
+                        Circle()
+                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.85))
+                            .frame(width: dynamicButtonSize, height: dynamicButtonSize)
+                            .overlay {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.8)
+                            }
+                            .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                    }
                 }
                 .frame(width: dynamicButtonSize, height: dynamicButtonSize)
                 .scaleEffect(isDynamicButtonHovering ? 1.05 : 1.0)
@@ -475,6 +489,15 @@ struct ChatInputAreaView: View {
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isDynamicButtonHovering = hover } }
         .disabled(isDynamicButtonDisabled(for: mode))
         .help(buttonHelpText(for: mode))
+        .popover(isPresented: $inputViewModel.showModelSelectorPopover, arrowEdge: .top) {
+            WhisperModelSelectorPopover(
+                isPresented: $inputViewModel.showModelSelectorPopover,
+                currentModelName: inputViewModel.currentSpeechModelName,
+                onSelectModel: { modelName in
+                    inputViewModel.selectAndDownloadModel(modelName)
+                }
+            )
+        }
     }
 
     private func dynamicActionButtonIconName(for mode: DynamicButtonMode) -> String {
@@ -486,7 +509,8 @@ struct ChatInputAreaView: View {
             case .processing: return "hourglass"
             case .permissionsDeniedMic, .error: return "mic.slash.fill"
             case .requestingPermissions: return "mic.badge.plus"
-            default: return "mic.fill"
+            case .modelLoading, .modelPreparing: return "arrow.down.circle"
+            default: return "waveform"
             }
         }
     }
@@ -526,6 +550,7 @@ struct ChatInputAreaView: View {
             case .processing: return .orange
             case .permissionsDeniedMic, .error: return .red.opacity(0.8)
             case .requestingPermissions: return .orange
+            case .modelLoading, .modelPreparing: return .accentColor
             default: return .primary
             }
         }
@@ -536,11 +561,11 @@ struct ChatInputAreaView: View {
         switch mode {
         case .send:
             let isEmptyText = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            return isEmptyText || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing
+            return isEmptyText || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .finalizingSilence
         case .stopVoice: return isSending || showSettings
         case .stopStreaming: return false
         case .mic:
-            return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording
+            return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence || inputViewModel.voiceInputState == .modelLoading || inputViewModel.voiceInputState == .modelPreparing
         }
     }
 

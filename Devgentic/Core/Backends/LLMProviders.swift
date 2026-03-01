@@ -424,11 +424,63 @@ enum LLMProviderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .httpError(let status, let body):
-            return "HTTP \(status): \(body)"
+            return LLMProviderError.formatHTTPError(status: status, body: body)
         case .invalidResponse(let detail):
             return "Invalid response: \(detail)"
         case .unsupportedProvider(let name):
             return "Unsupported provider: \(name)"
         }
+    }
+    
+    /// Translates raw HTTP API errors into clean, user-facing guidance.
+    private static func formatHTTPError(status: Int, body: String) -> String {
+        let lowerBody = body.lowercased()
+        
+        // 1. Specific Interception: Gemini 429 Quota / Billing Error
+        if status == 429 && (lowerBody.contains("gemini") || lowerBody.contains("generativelanguage")) {
+            return """
+            ⚠️ Google Gemini API Quota Exceeded
+            
+            Your request was blocked by Google. This typically occurs because:
+            1. You are located in a region (e.g., UK, EEA, or Switzerland) where Google requires an active billing account to use the API, even for free-tier models.
+            2. You have exceeded the strict rate limits on your current plan.
+            
+            Action Required:
+            Please visit Google AI Studio (https://aistudio.google.com/) to attach a valid billing account to your API key, or switch your Devgentic profile to a different LLM provider (like OpenAI or local Ollama).
+            """
+        }
+        
+        // 2. Specific Interception: OpenAI 429 Quota Error
+        if status == 429 && lowerBody.contains("openai") {
+            return "⚠️ OpenAI API Quota Exceeded. Please check your billing details and account balance at https://platform.openai.com."
+        }
+        
+        // 3. General JSON Error Extraction (prevents dumping huge raw JSON strings into the UI)
+        if let data = body.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) {
+            
+            // Google's array-wrapped error format: [{"error": {"message": "..."}}]
+            if let array = json as? [[String: Any]],
+               let first = array.first,
+               let errorObj = first["error"] as? [String: Any],
+               let msg = errorObj["message"] as? String {
+                 return "API Error (\(status)): \(msg)"
+            }
+            
+            // Standard API error format: {"error": {"message": "..."}}
+            if let dict = json as? [String: Any] {
+                if let errorObj = dict["error"] as? [String: Any],
+                   let msg = errorObj["message"] as? String {
+                     return "API Error (\(status)): \(msg)"
+                }
+                if let msg = dict["error"] as? String {
+                     return "API Error (\(status)): \(msg)"
+                }
+            }
+        }
+        
+        // 4. Fallback for unparseable or unknown errors
+        let truncatedBody = body.count > 300 ? String(body.prefix(300)) + "..." : body
+        return "HTTP \(status): \(truncatedBody)"
     }
 }

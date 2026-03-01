@@ -9,13 +9,11 @@ import Foundation
 import os
 
 /// Defines distinct rate limit profiles for different providers.
-enum RateLimitCategory: Hashable, Sendable {
-    /// Gemini Flash: Very strict (15 RPM).
-    case geminiFlash
-    /// OpenAI: Generally high limits, but good to prevent rapid bursts.
-    case openAI
-    /// Local Inference: Constrained by hardware, not quotas.
+enum RateLimitCategory: String, Codable {
     case local
+    case openAI
+    case geminiFlash
+    case anthropic
 }
 
 /// A thread-safe Token Bucket implementation to manage API quotas globally.

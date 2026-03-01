@@ -105,13 +105,14 @@ struct ChatBubbleView: View {
                         if !text.isEmpty {
                             let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
                             
-                            // Phase 5: Pass isLastBlock for Cursor Placement
-                            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                            // Phase 5: Pass isLastBlock for Cursor Placement & Use stable IDs
+                            ForEach(blocks) { block in
                                 ContentBlockView(
                                     block: block,
                                     message: message,
-                                    isLastBlock: index == blocks.count - 1
+                                    isLastBlock: block.id == blocks.last?.id
                                 )
+                                .equatable() // Explicitly enforce equatable checking for memoization
                             }
                         }
 

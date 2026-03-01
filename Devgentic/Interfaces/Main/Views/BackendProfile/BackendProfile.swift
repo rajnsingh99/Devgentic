@@ -188,7 +188,7 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable {
             return "ollama"
         case .anthropic:
             return "anthropic"
-        case .mlx:               // <--- NEW CASE
+        case .mlx:
             return "mlx"
         }
     }

@@ -67,6 +67,15 @@ struct DevgenticApp: App {
                 }
                 .keyboardShortcut("w", modifiers: .command)
             }
+            CommandMenu("Input") {
+                Button("Toggle Voice Input") {
+                    NotificationCenter.default.post(
+                        name: GlobalConstants.toggleVoiceInputNotification,
+                        object: nil
+                    )
+                }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
+            }
             CommandGroup(after: .appInfo) {
                 Button("Settings...") {
                     if let settingsWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "settings" }) {

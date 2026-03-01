@@ -45,17 +45,20 @@ class AgentConnect: ObservableObject {
                     let llmConfig: ProviderConfig
                     var instructions: String?
                     let rawTools: [Tool]
+                    let isBotFlow: Bool
                     
                     switch profile.details {
                     case .bot(let config):
                         llmConfig = config
                         instructions = nil
                         rawTools = []
+                        isBotFlow = true
                         
                     case .agent(let config, _, let tools, _, let instr, _):
                         llmConfig = config
                         instructions = instr
                         rawTools = tools
+                        isBotFlow = false
                         
                     case .workflow:
                         throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Workflows are not yet supported in the unified pipeline."])
@@ -66,8 +69,14 @@ class AgentConnect: ObservableObject {
                     let rateLimitCategory: RateLimitCategory
                     
                     switch llmConfig.apiProvider {
+                    case .anthropic:
+                        // DYNAMIC ROUTING: Use Native API flow with the new Claude adapter
+                        generatorStrategy = NativeStructuredGenerator(toolAdapter: ClaudeToolSchemaAdapter())
+                        rateLimitCategory = .anthropic
+                        
                     case .google:
-                        generatorStrategy = ShadowSchemaGenerator()
+                        // DYNAMIC ROUTING: Use Native API flow with the new Gemini adapter
+                        generatorStrategy = NativeStructuredGenerator(toolAdapter: GeminiToolSchemaAdapter())
                         rateLimitCategory = .geminiFlash
                         
                     case .openAI:
@@ -107,8 +116,8 @@ class AgentConnect: ObservableObject {
                         }
                     }
                     
-                    // 5. Initialize the Language Model
-                    let model = try await self.initializeModel(config: llmConfig)
+                    // 5. Initialize the Language Model (Passing isBotFlow to determine endpoint routing)
+                    let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
                     
                     // 6. Instantiate the Executor
                     let executor = ExecutorFactory.create(for: profile)
@@ -174,8 +183,16 @@ class AgentConnect: ObservableObject {
     
     // MARK: - Model Initialization
     
-    private func initializeModel(config llmConfig: ProviderConfig) async throws -> any LLMProvider {
+    private func initializeModel(config llmConfig: ProviderConfig, isBotFlow: Bool) async throws -> any LLMProvider {
         switch llmConfig.apiProvider {
+        case .anthropic:
+            guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
+                throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Anthropic API Key is required."])
+            }
+            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : URL(string: "https://api.anthropic.com/v1/")!
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0)
+            return ClaudeLLMProvider(config: config)
+            
         case .ollama:
             let baseURLString = llmConfig.baseURL ?? "http://127.0.0.1:11434"
             guard let baseURL = URL(string: baseURLString) else {
@@ -196,9 +213,11 @@ class AgentConnect: ObservableObject {
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Gemini API Key is required."])
             }
-            let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/")!
+            
+            // Use native Gemini endpoint exclusively to prevent 429 schema compatibility errors
+            let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(llmConfig.modelName)")!
             let config = LLMProviderConfig(apiKey: apiKey, baseURL: googleBaseURL, modelName: llmConfig.modelName, timeout: 300.0)
-            return OpenAILLMProvider(config: config)
+            return GeminiLLMProvider(config: config)
             
         case .mlx:
             let modelName = llmConfig.modelName

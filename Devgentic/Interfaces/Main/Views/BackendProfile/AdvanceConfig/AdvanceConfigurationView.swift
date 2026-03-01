@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 05/09/25.
+//  Updated on 28/02/26 to adopt Modern UI Layout and alignment.
 //
 
 import SwiftUI
@@ -11,36 +12,114 @@ struct GeminiSettingsView: View {
     @Binding var config: GeminiAdvancedConfig
     
     var body: some View {
-        Section(header: Text("Advanced Gemini Settings").font(.headline)) {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Temperature")
-                    Spacer()
-                    Text("\(config.temperature ?? 0.0, specifier: "%.2f")")
-                }
-                Slider(value: $config.temperature.toNonOptional(defaultValue: 0.9), in: 0.0...1.0, step: 0.05)
-            }
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Top P")
-                    Spacer()
-                    Text("\(config.topP ?? 0.0, specifier: "%.2f")")
-                }
-                Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
-            }
-            Stepper("Top K: \(config.topK ?? 1)", value: $config.topK.toNonOptional(defaultValue: 1), in: 1...100)
-            Stepper("Max Output Tokens: \(config.maxOutputTokens ?? 2048)", value: $config.maxOutputTokens.toNonOptional(defaultValue: 2048), in: 256...8192, step: 256)
+        VStack(alignment: .leading, spacing: 16) {
             
-            // Sub-header for safety settings within the same section
-            Text("Safety Settings").font(.subheadline).padding(.top)
-            ForEach($config.safetySettings.toNonOptional(defaultValue: [])) { $setting in
-                Picker(setting.category.rawValue.replacingOccurrences(of: "HARM_CATEGORY_", with: ""), selection: $setting.threshold) {
-                    ForEach(HarmBlockThreshold.allCases, id: \.self) { threshold in
-                        Text(threshold.rawValue.replacingOccurrences(of: "BLOCK_", with: "")).tag(threshold)
-                    }
+            // Temperature
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Temperature").fontWeight(.medium)
+                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(.secondary)
                 }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.temperature.toNonOptional(defaultValue: 0.9), in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.temperature ?? 0.9, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+            
+            Divider()
+            
+            // Top P
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top P").fontWeight(.medium)
+                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.topP ?? 1.0, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+            
+            Divider()
+            
+            // Top K
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top K").fontWeight(.medium)
+                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.topK ?? 1)").monospacedDigit()
+                    Stepper("", value: $config.topK.toNonOptional(defaultValue: 1), in: 1...100).labelsHidden()
+                }
+            }
+            
+            Divider()
+            
+            // Max Output Tokens
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Max Output Tokens").fontWeight(.medium)
+                    Text("Maximum length of the generated response.").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.maxOutputTokens ?? 2048)").monospacedDigit()
+                    Stepper("", value: $config.maxOutputTokens.toNonOptional(defaultValue: 2048), in: 256...8192, step: 256).labelsHidden()
+                }
+            }
+            
+            Divider()
+            
+            // Safety Settings Header
+            Text("Safety Settings")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .padding(.top, 8)
+            
+            ForEach($config.safetySettings.toNonOptional(defaultValue: GeminiAdvancedConfig.default().safetySettings ?? [])) { $setting in
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(formatCategory(setting.category.rawValue))
+                            .fontWeight(.medium)
+                    }
+                    
+                    Spacer(minLength: 16)
+                    
+                    Picker("", selection: $setting.threshold) {
+                        ForEach(HarmBlockThreshold.allCases, id: \.self) { threshold in
+                            Text(formatThreshold(threshold.rawValue)).tag(threshold)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                Divider()
             }
         }
+    }
+    
+    // Formatting Helpers for Gemini Safety Labels
+    private func formatCategory(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "HARM_CATEGORY_", with: "")
+           .replacingOccurrences(of: "_", with: " ")
+           .capitalized
+    }
+
+    private func formatThreshold(_ raw: String) -> String {
+        let text = raw.replacingOccurrences(of: "BLOCK_", with: "")
+                      .replacingOccurrences(of: "_", with: " ")
+                      .capitalized
+        return text == "None" ? "Block None" : text
     }
 }
 
@@ -48,28 +127,85 @@ struct OllamaSettingsView: View {
     @Binding var config: OllamaAdvancedConfig
     
     var body: some View {
-        Section(header: Text("Advanced Ollama Settings").font(.headline)) {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("Temperature")
-                    Spacer()
-                    Text("\(config.temperature ?? 0.0, specifier: "%.2f")")
+        VStack(alignment: .leading, spacing: 16) {
+            
+            // Temperature
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Temperature").fontWeight(.medium)
+                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(.secondary)
                 }
-                Slider(value: $config.temperature.toNonOptional(defaultValue: 0.8), in: 0.0...2.0, step: 0.1)
-            }
-            VStack(alignment: .leading) {
+                Spacer(minLength: 16)
                 HStack {
-                    Text("Top P")
-                    Spacer()
-                    Text("\(config.topP ?? 0.0, specifier: "%.2f")")
+                    Slider(value: $config.temperature.toNonOptional(defaultValue: 0.8), in: 0.0...2.0, step: 0.1)
+                        .frame(width: 150)
+                    Text("\(config.temperature ?? 0.8, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
                 }
-                Slider(value: $config.topP.toNonOptional(defaultValue: 0.9), in: 0.0...1.0, step: 0.05)
             }
-            Stepper("Top K: \(config.topK ?? 40)", value: $config.topK.toNonOptional(defaultValue: 40), in: 1...100)
-            Stepper("Context Window (num_ctx): \(config.numCtx ?? 2048)", value: $config.numCtx.toNonOptional(defaultValue: 2048), in: 256...8192, step: 256)
-            TextField("Seed (Optional)", value: $config.seed, format: .number)
+            
+            Divider()
+            
+            // Top P
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top P").fontWeight(.medium)
+                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.topP.toNonOptional(defaultValue: 0.9), in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.topP ?? 0.9, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+            
+            Divider()
+            
+            // Top K
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top K").fontWeight(.medium)
+                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.topK ?? 40)").monospacedDigit()
+                    Stepper("", value: $config.topK.toNonOptional(defaultValue: 40), in: 1...100).labelsHidden()
+                }
+            }
+            
+            Divider()
+            
+            // Context Window
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Context Window").fontWeight(.medium)
+                    Text("Number of tokens the model can remember (num_ctx).").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.numCtx ?? 2048)").monospacedDigit()
+                    Stepper("", value: $config.numCtx.toNonOptional(defaultValue: 2048), in: 256...8192, step: 256).labelsHidden()
+                }
+            }
+            
+            Divider()
+            
+            // Seed
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Random Seed").fontWeight(.medium)
+                    Text("Set a specific seed for reproducible outputs.").font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 16)
+                TextField("Optional", value: $config.seed, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+            }
         }
     }
 }
-
-

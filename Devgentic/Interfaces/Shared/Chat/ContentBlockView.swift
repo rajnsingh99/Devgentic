@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 10/08/25.
 //
 //  Phase 5: Motion & Polish - Added Blinking Cursor & Text Smoothing.
+//  Step 5: Equatable Conformance for High-Performance Memoization.
 
 import SwiftUI
 import os
@@ -12,26 +13,39 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ContentBlockView")
 private let CODE_BLOCK_LINE_LIMIT = 50
 
-enum ContentBlock: Equatable, Hashable {
-    case paragraph(String)
-    case code(language: String, content: String, fileName: String?)
-    case heading(level: Int, text: String)
-    case listItem(prefix: String, text: String, indentation: Int)
-    case horizontalRule
-    case table(headers: [String], rows: [[String]])
-    case image(url: String, altText: String?)
+struct ContentBlock: Identifiable, Equatable, Hashable {
+    let id: String // e.g., "block-0", "block-1"
+    let type: BlockType
+    
+    enum BlockType: Equatable, Hashable {
+        case paragraph(String)
+        case code(language: String, content: String, fileName: String?)
+        case heading(level: Int, text: String)
+        case listItem(prefix: String, text: String, indentation: Int)
+        case horizontalRule
+        case table(headers: [String], rows: [[String]])
+        case image(url: String, altText: String?)
+    }
 }
 
-struct ContentBlockView: View {
+struct ContentBlockView: View, Equatable {
     let block: ContentBlock
     let message: ChatMessage
-    // New prop to determine if we should show the cursor
     var isLastBlock: Bool = false
     
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
 
+    // MARK: - Equatable Memoization
+    // This allows SwiftUI to completely skip re-rendering blocks that haven't changed.
+    static func == (lhs: ContentBlockView, rhs: ContentBlockView) -> Bool {
+        return lhs.block == rhs.block &&
+               lhs.isLastBlock == rhs.isLastBlock &&
+               lhs.message.id == rhs.message.id &&
+               lhs.message.isStreaming == rhs.message.isStreaming
+    }
+
     var body: some View {
-        switch block {
+        switch block.type {
         case .paragraph(let text):
             renderTextView(text: text)
                 .padding(.bottom, UITheme.Spacing.small)
@@ -71,6 +85,7 @@ struct ContentBlockView: View {
         
         case .table(let headers, let rows):
             MarkdownTableView(headers: headers, rows: rows)
+                .transaction { $0.animation = nil }
             
         case .image(let url, let altText):
             if let imageUrl = URL(string: url) {

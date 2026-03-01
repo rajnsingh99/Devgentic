@@ -30,4 +30,10 @@ struct GlobalConstants {
     
     // --- Notification Name ---
     static let showQuickAccessPanelNotification = Notification.Name("devgentic.showQuickAccessPanel")
+
+    // --- Speech Notifications ---
+    static let toggleVoiceInputNotification = Notification.Name("devgentic.toggleVoiceInput")
+    static let speechModelChangedNotification = Notification.Name("devgentic.speechModelChanged")
+    static let speechLanguageChangedNotification = Notification.Name("devgentic.speechLanguageChanged")
+    static let speechAutoStopChangedNotification = Notification.Name("devgentic.speechAutoStopChanged")
 }

@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3516A8692F519D3500CFA72D /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = 3516A8682F519D3500CFA72D /* Markdown */; };
+		3516AAA22F54A01300CFA72D /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 3516AAA12F54A01300CFA72D /* Tokenizers */; };
 		35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 35243D362E26F08800602933 /* CodeEditSourceEditor */; settings = {ATTRIBUTES = (Required, ); }; };
 		355A5D9F2E882BA0007C22CC /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 355A5D9E2E882BA0007C22CC /* MCP */; };
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
@@ -73,6 +75,7 @@
 				35EB3F662F32967000555A83 /* MLX in Frameworks */,
 				35EB3F682F32967000555A83 /* MLXFast in Frameworks */,
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
+				3516A8692F519D3500CFA72D /* Markdown in Frameworks */,
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
@@ -83,6 +86,7 @@
 				35EB3F6A2F32967000555A83 /* MLXNN in Frameworks */,
 				35EB3F6F2F329FDA00555A83 /* MLXLLM in Frameworks */,
 				35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */,
+				3516AAA22F54A01300CFA72D /* Tokenizers in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -173,6 +177,8 @@
 				35EB3F6E2F329FDA00555A83 /* MLXLLM */,
 				35EB3F702F329FDA00555A83 /* MLXLMCommon */,
 				35EB3F722F329FDA00555A83 /* MLXVLM */,
+				3516A8682F519D3500CFA72D /* Markdown */,
+				3516AAA12F54A01300CFA72D /* Tokenizers */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -265,6 +271,8 @@
 				355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */,
 				35EB3F642F32967000555A83 /* XCRemoteSwiftPackageReference "mlx-swift" */,
 				35EB3F6B2F329FDA00555A83 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+				3516A8672F519D3500CFA72D /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				3516AAA02F54A01300CFA72D /* XCRemoteSwiftPackageReference "swift-transformers" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -627,6 +635,22 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		3516A8672F519D3500CFA72D /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-markdown.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.7.3;
+			};
+		};
+		3516AAA02F54A01300CFA72D /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-transformers";
+			requirement = {
+				kind = exactVersion;
+				version = 1.1.7;
+			};
+		};
 		35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/CodeEditApp/CodeEditSourceEditor";
@@ -694,6 +718,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		3516A8682F519D3500CFA72D /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3516A8672F519D3500CFA72D /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
+		3516AAA12F54A01300CFA72D /* Tokenizers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3516AAA02F54A01300CFA72D /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Tokenizers;
+		};
 		35243D362E26F08800602933 /* CodeEditSourceEditor */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 35243D352E26F08800602933 /* XCRemoteSwiftPackageReference "CodeEditSourceEditor" */;
