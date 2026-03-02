@@ -55,6 +55,17 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     // [ASK_USER] Property for Clarification Card
     @Published var pendingClarification: PendingClarification? = nil
     
+    // MARK: - RAG Indexing State
+    var isIndexedForRAG: Bool = false
+
+    /// Estimated token count for the message content.
+    /// Uses a heuristic of ~4 characters per token (standard for English/code text).
+    /// This avoids expensive tokenizer calls for UI display and cost estimation.
+    var tokenCountEstimate: Int {
+        guard let text = content.textContent else { return 0 }
+        return max(1, text.count / 4)
+    }
+
     // MARK: - Performance Caching
     var cachedMarkdownBlocks: [ContentBlock]? = nil
     
@@ -99,6 +110,18 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     func invalidateMarkdownCache() {
         self.cachedMarkdownBlocks = nil
+    }
+
+    /// Returns parsed ContentBlocks for the RAG indexing pipeline.
+    func getBlocksForIndexing() -> [ContentBlock] {
+        switch content {
+        case .plainText(let text), .markdownText(let text):
+            return getOrCreateMarkdownBlocks(from: text)
+        case .codeBlock(let language, let code):
+            return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
+        case .error, .image:
+            return []
+        }
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {

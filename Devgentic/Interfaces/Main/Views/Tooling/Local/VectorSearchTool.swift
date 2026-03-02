@@ -107,7 +107,7 @@ struct VectorSearchTool: DevgenticTool {
             return "No relevant information found in local history. (Audit Ref: \(logID))"
         }
         
-        let resultText = results.map { "--- Context ---\n\($0.content)" }.joined(separator: "\n\n")
+        let resultText = results.map { "--- Context ---\n\($0.fullTextContent)" }.joined(separator: "\n\n")
         return resultText + "\n(Audit Ref: \(logID))"
     }
 }

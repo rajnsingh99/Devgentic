@@ -227,40 +227,34 @@ class BackendOrchestrationService: ObservableObject {
             return nil
         }
         
-        let relevantChunks = vectorStoreService.findNearest(to: queryEmbedding, limit: 3, conversationID: conversationID)
+        // Retrieve relevant parent documents based on child chunk embeddings
+        let relevantParents = vectorStoreService.findNearest(to: queryEmbedding, limit: 3, conversationID: conversationID)
 
-        guard !relevantChunks.isEmpty else {
-            logger.info("RAG: Vector store returned 0 chunks.")
+        guard !relevantParents.isEmpty else {
+            logger.info("RAG: Vector store returned 0 documents.")
             return nil
         }
 
-        // Filter out chunks already present in the immediate history to save context.
-        // Only match when the overlapping content is substantial (>50 chars) to prevent
-        // short chunks from being spuriously matched against long messages.
-        let minOverlapLength = 50
-        let filteredChunks = relevantChunks.filter { chunk in
-            let chunkClean = chunk.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isDuplicate = history.contains { message in
-                guard let text = message.content.textContent else { return false }
-                let msgClean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard chunkClean.count >= minOverlapLength else { return false }
-                return msgClean.contains(chunkClean) || chunkClean.contains(msgClean)
-            }
-            return !isDuplicate
+        // Phase 5: O(1) ID-based Deduplication instead of heavy string matching.
+        // We simply check if the parent document's source message is already in the current chat history.
+        let historyIDs = Set(history.map { $0.id })
+        
+        let filteredParents = relevantParents.filter { parent in
+            !historyIDs.contains(parent.sourceMessageID)
         }
 
-        let removedCount = relevantChunks.count - filteredChunks.count
+        let removedCount = relevantParents.count - filteredParents.count
         if removedCount > 0 {
-            logger.info("RAG: Dedup filter removed \(removedCount)/\(relevantChunks.count) chunks already present in history.")
+            logger.info("RAG: Dedup filter removed \(removedCount)/\(relevantParents.count) documents already present in history.")
         }
 
-        guard !filteredChunks.isEmpty else {
-            logger.info("RAG: No relevant context found (all \(relevantChunks.count) chunks were duplicates of history).")
+        guard !filteredParents.isEmpty else {
+            logger.info("RAG: No relevant context found (all \(relevantParents.count) documents were duplicates of history).")
             return nil
         }
 
-        logger.info("RAG: Found \(filteredChunks.count) relevant chunks after dedup.")
-        return filteredChunks.map { $0.content }.joined(separator: "\n\n")
+        logger.info("RAG: Found \(filteredParents.count) relevant documents after dedup.")
+        return filteredParents.map { $0.fullTextContent }.joined(separator: "\n\n")
     }
     
     private func assembleTextFileContent(for files: [FileSystemItem]) -> String {

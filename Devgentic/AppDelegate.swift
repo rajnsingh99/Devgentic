@@ -26,6 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate. Saving core data.")
         CoreDataPersistenceService.shared.saveContext()
+
+        // Stop the background RAG indexing service
+        RAGIndexingService.shared.stop()
         
         // 1. Terminate any active shell processes to prevent zombies
         ShellSessionManager.shared.cleanup()

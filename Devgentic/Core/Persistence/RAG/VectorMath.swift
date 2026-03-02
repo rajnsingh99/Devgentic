@@ -1,0 +1,49 @@
+//
+//  VectorMath.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 02/03/26.
+//
+
+import Foundation
+
+/// A namespace for pure vector math operations used across the RAG pipeline.
+///
+/// Provides cosine similarity, dot product, magnitude, and L2 normalization —
+/// the building blocks for nearest-neighbor vector search. Extracted from
+/// VectorStoreService and EmbeddingService to enable direct unit testing
+/// via `@testable import`.
+enum VectorMath {
+
+    /// Calculates the dot product of two vectors.
+    /// - Returns: The scalar dot product, or `0` if vectors have different lengths.
+    static func dotProduct(_ vectorA: [Float], _ vectorB: [Float]) -> Float {
+        guard vectorA.count == vectorB.count else { return 0.0 }
+        return zip(vectorA, vectorB).map(*).reduce(0, +)
+    }
+
+    /// Calculates the L2 magnitude (Euclidean norm) of a vector.
+    /// - Returns: `sqrt(sum(x_i^2))`, or `0` for an empty/zero vector.
+    static func magnitude(of vector: [Float]) -> Float {
+        return sqrt(vector.map { $0 * $0 }.reduce(0, +))
+    }
+
+    /// Calculates the cosine similarity between two vectors.
+    /// - Returns: A value between `-1` (opposite) and `1` (identical direction).
+    ///   Returns `0` if either vector has zero magnitude.
+    static func cosineSimilarity(between vectorA: [Float], and vectorB: [Float]) -> Float {
+        let dot = dotProduct(vectorA, vectorB)
+        let magA = magnitude(of: vectorA)
+        let magB = magnitude(of: vectorB)
+        guard magA > 0, magB > 0 else { return 0.0 }
+        return dot / (magA * magB)
+    }
+
+    /// L2-normalizes a vector to unit length (magnitude = 1).
+    /// - Returns: The normalized vector. Returns the original vector unmodified if its norm is `0`.
+    static func l2Normalize(_ vector: [Float]) -> [Float] {
+        let norm = sqrt(vector.reduce(0) { $0 + $1 * $1 })
+        guard norm > 0 else { return vector }
+        return vector.map { $0 / norm }
+    }
+}

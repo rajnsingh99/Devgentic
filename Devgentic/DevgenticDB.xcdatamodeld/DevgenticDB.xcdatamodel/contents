@@ -48,6 +48,7 @@
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="image_data" optional="YES" attributeType="Binary"/>
         <attribute name="image_url" optional="YES" attributeType="String"/>
+        <attribute name="isIndexedForRAG" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="messageType" optional="YES" attributeType="String"/>
         <attribute name="senderType" optional="YES" attributeType="String"/>
         <attribute name="text_content" optional="YES" attributeType="String"/>

@@ -30,6 +30,11 @@ protocol CoreDataServiceProtocol {
     func fetchSessionGraph(for conversationId: UUID) -> Data?
     
     func saveContext()
+    
+    // Phase 4: Background RAG Indexing Support
+    func fetchUnindexedMessages(limit: Int) async -> [ChatMessage]
+    func markMessageAsIndexed(id: UUID) async
+    func resetAllRAGIndexingFlags()
 }
 
 
@@ -41,11 +46,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
     // MARK: - Private Properties
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CoreDataPersistenceService")
-    
-    // RAG Services - Dependencies for creating vector embeddings
-    private let embeddingService = EmbeddingService.shared
-    private let vectorStoreService = VectorStoreService.shared
-    private let textChunker = TextChunker()
 
     lazy var persistentContainer: NSPersistentContainer = {
         let container = NSPersistentContainer(name: "DevgenticDB")
@@ -195,6 +195,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             newMessage.setValue(message.agentResponse, forKey: "agentResponse")
             newMessage.setValue(message.thoughts, forKey: "thoughts")
             newMessage.setValue(message.artifacts, forKey: "artifacts")
+            newMessage.setValue(message.isIndexedForRAG, forKey: "isIndexedForRAG")
             
             newConversation.addToMessages(newMessage)
         }
@@ -244,6 +245,9 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 entityToUpdate.setValue(message.thoughts, forKey: "thoughts")
                 entityToUpdate.setValue(message.artifacts, forKey: "artifacts")
                 
+                // Track indexing state for background worker
+                entityToUpdate.setValue(message.isIndexedForRAG, forKey: "isIndexedForRAG")
+                
                 self.logger.info("Saving message \(message.id.uuidString) with \(message.thoughts.count) thoughts and \(message.artifacts.count) artifacts.")
                 
                 if let textFiles = message.attachedTextFiles {
@@ -268,10 +272,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
                 if existingEntity == nil {
                     conversation.addToMessages(entityToUpdate)
-                }
-                
-                Task {
-                    await self.indexMessageForRAG(message)
                 }
             }
             conversation.timestamp = Date()
@@ -303,47 +303,62 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         saveContext()
     }
     
-    // MARK: - RAG Indexing
+    // MARK: - RAG Background Indexing Methods (Phase 4)
     
-    private func indexMessageForRAG(_ message: ChatMessage) async {
-        var textToProcess = ""
-        
-        if let textContent = message.content.textContent {
-            textToProcess += textContent + "\n"
-        }
-        
-        if let attachedFiles = message.attachedTextFiles {
-            for file in attachedFiles {
-                textToProcess += "\n--- Start of file: \(file.name) ---\n"
-                textToProcess += file.content
-                textToProcess += "\n--- End of file: \(file.name) ---\n"
+    func fetchUnindexedMessages(limit: Int) async -> [ChatMessage] {
+        return await viewContext.perform {
+            let request: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
+            
+            // Predicate to find messages that haven't been indexed yet
+            request.predicate = NSPredicate(format: "isIndexedForRAG == NO OR isIndexedForRAG == nil")
+            request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)] // Oldest first
+            request.fetchLimit = limit
+            
+            do {
+                let entities = try self.viewContext.fetch(request)
+                return entities.map { $0.toChatMessageStruct() }
+            } catch {
+                self.logger.error("Failed to fetch unindexed messages: \(error.localizedDescription)")
+                return []
             }
         }
-        
-        guard !textToProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            logger.debug("Message \(message.id.uuidString) has no text content to index for RAG.")
-            return
-        }
-        
-        let chunks = textChunker.chunk(text: textToProcess)
-        var chunkEntities: [ChunkEntity] = []
-        
-        for chunkText in chunks {
-            if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
-                let chunkEntity = ChunkEntity(
-                    sourceMessageID: message.id,
-                    conversationID: message.conversationId,
-                    content: chunkText,
-                    embedding: embedding,
-                    timestamp: message.timestamp
-                )
-                chunkEntities.append(chunkEntity)
+    }
+
+    func markMessageAsIndexed(id: UUID) async {
+        await viewContext.perform {
+            let request: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+            
+            do {
+                if let entity = try self.viewContext.fetch(request).first {
+                    entity.setValue(true, forKey: "isIndexedForRAG")
+                    self.saveContext()
+                    self.logger.debug("Successfully marked message \(id.uuidString) as indexed for RAG.")
+                }
+            } catch {
+                self.logger.error("Failed to mark message \(id.uuidString) as indexed: \(error.localizedDescription)")
             }
         }
-        
-        if !chunkEntities.isEmpty {
-            vectorStoreService.add(chunks: chunkEntities)
-            logger.info("Indexed \(chunkEntities.count) chunks for message \(message.id.uuidString) in conversation \(message.conversationId.uuidString).")
+    }
+
+    /// Resets `isIndexedForRAG` to `false` on ALL messages in the database.
+    /// Called during tokenizer migration to force a full re-index with correct embeddings.
+    func resetAllRAGIndexingFlags() {
+        // Fetch ALL messages (no predicate filter on isIndexedForRAG) to avoid issues
+        // if the attribute was recently added to the Core Data model.
+        let request: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
+
+        do {
+            let entities = try viewContext.fetch(request)
+            var resetCount = 0
+            for entity in entities {
+                entity.setValue(false, forKey: "isIndexedForRAG")
+                resetCount += 1
+            }
+            saveContext()
+            logger.info("Phase 3 Migration: Reset RAG indexing flags on \(resetCount) messages for re-indexing.")
+        } catch {
+            logger.error("Failed to reset RAG indexing flags: \(error.localizedDescription)")
         }
     }
 
@@ -467,6 +482,11 @@ extension ChatMessageEntity {
         
         if let artifacts = self.value(forKey: "artifacts") as? [ToolOutput] {
             chatMessage.artifacts = artifacts
+        }
+        
+        // Phase 4: Decode RAG Indexing State
+        if let isIndexed = self.value(forKey: "isIndexedForRAG") as? Bool {
+            chatMessage.isIndexedForRAG = isIndexed
         }
         
         return chatMessage
