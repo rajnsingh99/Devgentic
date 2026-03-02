@@ -59,7 +59,7 @@ final class BackendProfileService: ObservableObject {
         // 1. Extract the ProviderConfig based on the profile's details.
         let providerConfig: ProviderConfig?
         switch profile.details {
-        case .bot(let llmConfig):
+        case .bot(let llmConfig, _):
             providerConfig = llmConfig
         case .agent(let llmConfig, _, _, _, _, _):
             providerConfig = llmConfig
@@ -144,9 +144,10 @@ final class BackendProfileService: ObservableObject {
         logOutput += "Last Selected: \(profile.lastSelected?.description ?? "Never")\n\n"
         
         switch profile.details {
-        case .bot(let llmConfig):
+        case .bot(let llmConfig, let instructions):
             logOutput += "🤖 [BOT CONFIGURATION]\n"
             logOutput += formatLLMConfig(llmConfig)
+            logOutput += "Instructions (Length): \(instructions?.count ?? 0) characters\n"
             
         case .agent(let llmConfig, let architecture, let tools, let description, let instructions, let knowledgeSources):
             logOutput += "🕵️ [AGENT CONFIGURATION]\n"

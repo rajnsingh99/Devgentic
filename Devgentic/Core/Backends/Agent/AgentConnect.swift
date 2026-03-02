@@ -48,9 +48,9 @@ class AgentConnect: ObservableObject {
                     let isBotFlow: Bool
                     
                     switch profile.details {
-                    case .bot(let config):
+                    case .bot(let config, let instr):
                         llmConfig = config
-                        instructions = nil
+                        instructions = instr
                         rawTools = []
                         isBotFlow = true
                         
@@ -129,8 +129,14 @@ class AgentConnect: ObservableObject {
                     var recentHistory: String? = nil
                     
                     if !activeTools.isEmpty {
-                        activeState = ContextMemoryManager.shared.getActiveState(for: conversationID)
-                        recentHistory = ContextMemoryManager.shared.getRecentHistory(for: conversationID, lines: 20)
+                        // Build the ephemeral SessionGraph from the UI history
+                        activeState = ChatHistoryAdapter.buildGraph(
+                            from: chatHistory,
+                            sessionID: conversationID.uuidString
+                        )
+                        
+                        // Generate the "Recent History" text block directly from the chat history
+                        recentHistory = ChatHistoryAdapter.buildRecentHistoryString(from: chatHistory)
                     }
                     
                     let input = AgentInput(

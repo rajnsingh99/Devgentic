@@ -69,6 +69,7 @@ extension CognitiveGenerator {
         6. **CLARIFICATION**: If you need information from the user, use the `ask_user` tool: `{"tool_name": "ask_user", "arguments": {"question": "Your question here"}}`. Do NOT invent tools like 'inform' or 'respond'.
         7. **GRACEFUL DEGRADATION**: If the user's request requires a tool that is not available, do NOT loop. Immediately return tool_name: null explaining which capability is missing.
         8. **UNSUPPORTED FORMATS**: If a tool fails due to an unsupported format (e.g., trying to read a binary `.docx` file), do NOT ask the user for workarounds. Output `tool_name: null` immediately explaining the limitation.
+        9. **ANTI-HALLUCINATION (ARCHIVED MEMORY)**: Do NOT guess, assume, or hallucinate the details of past events. If the user refers to an older conversation turn found in the [ARCHIVED MEMORY POINTERS], you MUST use the `conversation_history_tool` to retrieve the exact text before generating your final answer.
         """
         
         if !context.negativeConstraints.isEmpty {

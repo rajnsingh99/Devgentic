@@ -34,6 +34,7 @@
         <relationship name="workflowConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="WorkflowConfigEntity" inverseName="parentProfile" inverseEntity="WorkflowConfigEntity"/>
     </entity>
     <entity name="BotConfigEntity" representedClassName="BotConfigEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="instructions" optional="YES" attributeType="String"/>
         <attribute name="llmConfig" optional="YES" attributeType="Binary"/>
         <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="botConfig" inverseEntity="BackendProfileEntity"/>
     </entity>
@@ -64,7 +65,6 @@
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="isPinned" optional="YES" attributeType="Boolean" usesScalarValueType="YES"/>
         <attribute name="openAIThreadID" optional="YES" attributeType="String"/>
-        <attribute name="sessionGraphData" optional="YES" attributeType="Binary" allowsExternalBinaryDataStorage="YES"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="userDefinedTitle" optional="YES" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>

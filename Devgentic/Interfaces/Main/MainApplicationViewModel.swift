@@ -488,7 +488,7 @@ class MainApplicationViewModel: ObservableObject {
             case .agent:
                 legacyBackendType = .agent
             case .bot:
-                if case .bot(let config) = profile.details, config.apiProvider == .ollama {
+                if case .bot(let config, _) = profile.details, config.apiProvider == .ollama {
                     legacyBackendType = .ollama
                 } else {
                     legacyBackendType = .remote

@@ -39,15 +39,15 @@ struct BotConfigDetailView: View {
         Binding<ProviderConfig>(
             get: {
                 switch profile.details {
-                case .bot(let llmConfig): return llmConfig
+                case .bot(let llmConfig, _): return llmConfig
                 case .agent(let llmConfig, _, _, _, _, _): return llmConfig
                 case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
             },
             set: { newConfig in
                 switch profile.details {
-                case .bot:
-                    profile.details = .bot(llmConfig: newConfig)
+                case .bot(_, let instructions):
+                    profile.details = .bot(llmConfig: newConfig, instructions: instructions)
                 case .agent(_, let architecture, let tools, let description, let instructions, let knowledgeSources):
                     profile.details = .agent(
                         llmConfig: newConfig,
@@ -70,6 +70,21 @@ struct BotConfigDetailView: View {
             set: { newValue in
                 let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                 providerConfig.wrappedValue.baseURL = trimmed.isEmpty ? nil : trimmed
+            }
+        )
+    }
+
+    private var instructionsBinding: Binding<String> {
+        Binding<String>(
+            get: {
+                if case .bot(_, let instructions) = profile.details { return instructions ?? "" }
+                return ""
+            },
+            set: { newValue in
+                let val = String(newValue.prefix(5000))
+                if case .bot(let config, _) = profile.details {
+                    profile.details = .bot(llmConfig: config, instructions: val.isEmpty ? nil : val)
+                }
             }
         )
     }
@@ -153,7 +168,45 @@ struct BotConfigDetailView: View {
                     }
                 }
                 
-                // 3. Advanced Configuration
+                // 3. Persona & Behavior
+                ModernSection(title: "Persona & Behavior", icon: "text.quote") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("System Instructions", systemImage: "text.quote")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundColor(.secondary)
+
+                            Spacer()
+
+                            Button {
+                                SimplePromptWindowManager.shared.showEditor(
+                                    text: instructionsBinding,
+                                    botName: profile.displayName
+                                )
+                            } label: {
+                                Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .font(.caption)
+                            .buttonStyle(.link)
+                        }
+
+                        TextEditor(text: instructionsBinding)
+                            .font(.system(.body, design: .monospaced))
+                            .disableAutocorrection(true)
+                            .frame(minHeight: 120)
+                            .padding(8)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+
+                        Text("\(instructionsBinding.wrappedValue.count) characters · ~\(instructionsBinding.wrappedValue.count / 4) tokens")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                // 4. Advanced Configuration
                 ModernSection(title: "Advanced Configuration", icon: "gearshape.2.fill") {
                    advancedSettingsView
                 }

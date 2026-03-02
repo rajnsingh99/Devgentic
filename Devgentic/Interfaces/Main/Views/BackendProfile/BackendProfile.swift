@@ -50,7 +50,7 @@ struct BackendProfileModel: Codable, Identifiable, Hashable {
 // MARK: - Profile Details Enum
 
 enum ProfileDetails: Codable, Hashable {
-    case bot(llmConfig: ProviderConfig)
+    case bot(llmConfig: ProviderConfig, instructions: String?)
     // Updated to include architecture
     case agent(llmConfig: ProviderConfig, architecture: AgentArchitecture, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
     case workflow(agents: [BackendProfileModel])
@@ -70,7 +70,8 @@ enum ProfileDetails: Codable, Hashable {
         switch type {
         case .bot:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
-            self = .bot(llmConfig: llmConfig)
+            let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
+            self = .bot(llmConfig: llmConfig, instructions: instructions)
         case .agent:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
             // Decode architecture, default to .reAct for backward compatibility
@@ -92,9 +93,10 @@ enum ProfileDetails: Codable, Hashable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         
         switch self {
-        case .bot(let llmConfig):
+        case .bot(let llmConfig, let instructions):
             try container.encode(ProfileType.bot, forKey: .profileType)
             try container.encode(llmConfig, forKey: .llmConfig)
+            try container.encodeIfPresent(instructions, forKey: .instructions)
         case .agent(let llmConfig, let architecture, let tools, let description, let instructions, let knowledgeSources):
             try container.encode(ProfileType.agent, forKey: .profileType)
             try container.encode(llmConfig, forKey: .llmConfig)

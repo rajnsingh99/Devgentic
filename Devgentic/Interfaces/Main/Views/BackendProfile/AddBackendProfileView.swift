@@ -121,7 +121,7 @@ struct AddBackendProfileView: View {
         let details: ProfileDetails
         switch selectedType {
         case .bot:
-            details = .bot(llmConfig: defaultLLMConfig)
+            details = .bot(llmConfig: defaultLLMConfig, instructions: nil)
         case .agent:
             // FIXED: Added default architecture: .reAct
             details = .agent(

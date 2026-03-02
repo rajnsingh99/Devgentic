@@ -146,7 +146,7 @@ private struct ItemCell: View {
 
     private var detailText: String? {
         switch profile.details {
-        case .bot(let llmConfig):
+        case .bot(let llmConfig, _):
             return llmConfig.modelName
         case .agent:
             return "Agent" // Placeholder

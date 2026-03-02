@@ -213,7 +213,7 @@ class BackendOrchestrationService: ObservableObject {
     
     private func isMLXProfile(_ profile: BackendProfileModel) -> Bool {
         switch profile.details {
-        case .bot(let config): return config.apiProvider == .mlx
+        case .bot(let config, _): return config.apiProvider == .mlx
         case .agent(let config, _, _, _, _, _): return config.apiProvider == .mlx
         case .workflow: return false
         }

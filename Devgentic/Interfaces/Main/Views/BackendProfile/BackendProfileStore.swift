@@ -111,9 +111,10 @@ class BackendProfileStore: BackendProfileStoreProtocol {
 
         // 2. Switch on the details to handle type-specific configuration
         switch profile.details {
-        case .bot(let llmConfig):
+        case .bot(let llmConfig, let instructions):
             let botEntity = entity.botConfig ?? BotConfigEntity(context: context)
             botEntity.llmConfig = encode(llmConfig)
+            botEntity.instructions = instructions
             entity.botConfig = botEntity
             // Clean up other potential relationships
             entity.agentConfig = nil
@@ -202,7 +203,8 @@ extension BackendProfileEntity {
               let llmConfig: ProviderConfig = decode(from: configData) else {
             return nil
         }
-        return .bot(llmConfig: llmConfig)
+        let instructions = configEntity.instructions
+        return .bot(llmConfig: llmConfig, instructions: instructions)
     }
     
     private func createAgentDetails() -> ProfileDetails? {

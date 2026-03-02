@@ -41,9 +41,23 @@ enum ExecutorFactory {
             return ChatExecutor()
 
         case .agent:
-            // Agents use the ReAct (Reasoning + Acting) loop.
-            // They can use tools, generate thoughts, and execute complex plans.
-            return ReActAgentExecutor()
+            // Route to the correct architecture based on the profile's configuration.
+            let architecture: AgentArchitecture
+            if case .agent(_, let arch, _, _, _, _) = profile.details {
+                architecture = arch
+            } else {
+                architecture = .reAct
+            }
+            switch architecture {
+            case .reAct:
+                return ReActAgentExecutor()
+            case .planAndExecute:
+                return PlanAndExecuteExecutor()
+            case .reflexion:
+                return ReflexionExecutor()
+            case .supervisor:
+                return SupervisorExecutor()
+            }
 
         case .workflow:
             // Future extensibility for Workflow profiles.

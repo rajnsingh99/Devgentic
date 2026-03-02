@@ -70,7 +70,7 @@ struct ChatInputAreaView: View {
         switch profile.profileType {
         case .agent: return "person.2.fill"
         case .bot:
-            if case .bot(let config) = profile.details, config.apiProvider == .ollama { return "cpu" }
+            if case .bot(let config, _) = profile.details, config.apiProvider == .ollama { return "cpu" }
             return "cloud.fill"
         case .workflow: return "square.stack.3d.up.fill"
         }

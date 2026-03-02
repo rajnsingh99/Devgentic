@@ -25,10 +25,6 @@ protocol CoreDataServiceProtocol {
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
     func togglePinStatus(for conversationId: UUID) // New method for pinning
     
-    // Phase 8: Session Graph Persistence
-    func saveSessionGraph(for conversationId: UUID, graphData: Data)
-    func fetchSessionGraph(for conversationId: UUID) -> Data?
-    
     func saveContext()
     
     // Phase 4: Background RAG Indexing Support
@@ -118,24 +114,6 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             logger.error("Failed to fetch conversation with ID \(id.uuidString): \(error.localizedDescription)")
             return nil
         }
-    }
-    
-    // Phase 8: Session Graph Persistence
-    func saveSessionGraph(for conversationId: UUID, graphData: Data) {
-        viewContext.performAndWait {
-            guard let conversation = self.getConversation(withId: conversationId) else { return }
-            conversation.setValue(graphData, forKey: "sessionGraphData")
-            self.saveContext()
-        }
-    }
-
-    func fetchSessionGraph(for conversationId: UUID) -> Data? {
-        var graphData: Data?
-        viewContext.performAndWait {
-            guard let conversation = self.getConversation(withId: conversationId) else { return }
-            graphData = conversation.value(forKey: "sessionGraphData") as? Data
-        }
-        return graphData
     }
     
     func fetchMessages(for conversationId: UUID, offset: Int, limit: Int) async -> [ChatMessage] {

@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 10/02/26.
-//  Updated: Phase 8 - Core Data Session Graph Persistence
+//  Updated: Memory Architecture Migration - Step 3 (Deprecated DB Logic)
 //
 
 import Foundation
@@ -12,7 +12,8 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ContextMemoryManager")
 
 /// Manages the persistence of high-level context using a Hierarchical JSON Graph.
-/// Shifted from a "text file appender" to a "Core Data JSON Graph Mutator" (Phase 8 Migration).
+/// Shifted from "Core Data JSON Graph Mutator" to an "Ephemeral In-Memory Cache"
+/// as part of the SSOT Architecture Migration.
 class ContextMemoryManager {
     
     static let shared = ContextMemoryManager()
@@ -20,32 +21,30 @@ class ContextMemoryManager {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     
+    // Ephemeral in-memory storage to replace Core Data persistence
+    private var ephemeralGraphs: [UUID: SessionGraph] = [:]
+    
     // MARK: - Initialization
     
     private init() {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
     
-    // MARK: - Core API: State Management (JSON Graph via Core Data)
+    // MARK: - Core API: State Management (Ephemeral Memory)
     
-    /// Loads the SessionGraph (JSON State) directly from Core Data
+    /// Loads the SessionGraph (JSON State) directly from Ephemeral Memory
     func getActiveState(for conversationID: UUID) -> SessionGraph {
-        if let data = CoreDataPersistenceService.shared.fetchSessionGraph(for: conversationID),
-           let state = try? decoder.decode(SessionGraph.self, from: data) {
+        if let state = ephemeralGraphs[conversationID] {
             return state
         }
-        logger.debug("No existing SessionGraph found for \(conversationID.uuidString). Creating new.")
+        logger.debug("No existing ephemeral SessionGraph found for \(conversationID.uuidString). Creating new.")
         return SessionGraph(sessionID: conversationID.uuidString)
     }
     
-    /// Persists the SessionGraph directly to Core Data
+    /// Persists the SessionGraph directly to Ephemeral Memory
     func updateActiveState(conversationID: UUID, state: SessionGraph) {
-        if let data = try? encoder.encode(state) {
-            CoreDataPersistenceService.shared.saveSessionGraph(for: conversationID, graphData: data)
-            logger.debug("Updated and saved SessionGraph to Core Data for \(conversationID.uuidString)")
-        } else {
-            logger.error("Failed to encode SessionGraph for \(conversationID.uuidString)")
-        }
+        ephemeralGraphs[conversationID] = state
+        logger.debug("Updated and saved SessionGraph to Ephemeral Memory for \(conversationID.uuidString)")
     }
     
     // MARK: - Legacy / Compatibility Shims
@@ -66,7 +65,7 @@ class ContextMemoryManager {
     }
     
     func listRecentSessions() -> [URL] {
-        // Deprecated: No longer using file-based session list
+        // Deprecated: No longer using file-based or DB-based session list
         return []
     }
 }

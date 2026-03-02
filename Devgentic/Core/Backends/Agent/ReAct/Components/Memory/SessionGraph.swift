@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Created by Devgentic Architect
-//  Updated: Hierarchical JSON Memory (Phase 3 Migration - Semantic Compression)
+//  Updated: Memory Architecture Migration - Phase 2 (Pointer-Based Memory)
 //
 
 import Foundation
@@ -12,6 +12,7 @@ import Foundation
 
 /// Represents a specific action or sub-task the agent took.
 /// Maps to the LLM's `goalSummary`. Replaces the old `SubTask` model.
+/// Decoupled from database identity constraints.
 struct MemoryAction: Sendable, Codable, Identifiable {
     let id: UUID
     let intent: String
@@ -26,19 +27,30 @@ struct MemoryAction: Sendable, Codable, Identifiable {
     }
 }
 
-/// Represents a single overarching user request (e.g., "Move the files").
+/// Represents a single overarching interaction turn (User Query -> Agent Response).
+/// Ephemeralized: Decoupled from persistent Core Data stores.
 struct MemoryEpisode: Sendable, Codable, Identifiable {
     let id: UUID
+    
+    /// Holds the User's query for this turn.
     let primaryGoal: String
+    
     var status: String
-    var finalOutcome: String? // NEW: Persists the final synthesized answer across turns
+    
+    /// Holds the Agent's final synthesized response.
+    var finalOutcome: String?
+    
+    /// NEW: A brief description or intent of the turn for pointer-based memory.
+    var summary: String?
+    
     var actions: [MemoryAction]
     
-    init(id: UUID = UUID(), primaryGoal: String, status: String = "ACTIVE", finalOutcome: String? = nil, actions: [MemoryAction] = []) {
+    init(id: UUID = UUID(), primaryGoal: String, status: String = "ACTIVE", finalOutcome: String? = nil, summary: String? = nil, actions: [MemoryAction] = []) {
         self.id = id
         self.primaryGoal = primaryGoal
         self.status = status
         self.finalOutcome = finalOutcome
+        self.summary = summary
         self.actions = actions
     }
     
@@ -48,11 +60,15 @@ struct MemoryEpisode: Sendable, Codable, Identifiable {
     }
 }
 
-/// The root object for the entire conversation's state graph.
+/// The root object for the agent's active cognitive state.
+/// Ephemeralized: This is no longer persisted to a database. It represents a computed
+/// state dynamically generated from the Single Source of Truth (`ChatMessage` history).
 struct SessionGraph: Sendable, Codable {
     let sessionID: String
     var episodes: [MemoryEpisode]
     var negativeConstraints: [String]
+    
+    /// A simple key-value store that starts fresh on every new user request.
     var workingMemory: [String: String]
     
     init(
@@ -67,6 +83,43 @@ struct SessionGraph: Sendable, Codable {
         self.workingMemory = workingMemory
     }
     
+    /// Generates a pointer-based string representation for the LLM prompt.
+    /// It separates older history into lightweight pointers (UUIDs + summaries)
+    /// and retains full JSON context only for the recent sliding window.
+    func compressWithPointers(windowSize: Int = 5) -> String {
+        let totalEpisodes = episodes.count
+        
+        if totalEpisodes <= windowSize {
+            return """
+            [RECENT MEMORY - LAST \(totalEpisodes) TURNS]
+            \(self.compressForPrompt())
+            """
+        }
+        
+        let splitIndex = totalEpisodes - windowSize
+        let archivedEpisodes = episodes.prefix(splitIndex)
+        let recentEpisodes = episodes.suffix(windowSize)
+        
+        // Build the pointers string
+        var pointersBlock = "[ARCHIVED MEMORY POINTERS]\n"
+        for (index, ep) in archivedEpisodes.enumerated() {
+            let turnNum = index + 1
+            let summaryText = ep.summary ?? ep.primaryGoal
+            pointersBlock += "- Turn \(turnNum) [UUID: \(ep.id.uuidString)]: \(summaryText)\n"
+        }
+        pointersBlock += "(Use conversation_history_tool to retrieve full details if needed)\n"
+        
+        // Build the recent JSON string by masking older episodes
+        var recentGraph = self
+        recentGraph.episodes = Array(recentEpisodes)
+        let recentJson = recentGraph.compressForPrompt()
+        
+        return """
+        \(pointersBlock)
+        [RECENT MEMORY - LAST \(windowSize) TURNS]
+        \(recentJson)
+        """
+    }
     
     /// Generates a token-efficient JSON string representation for the LLM prompt.
     /// Strips out raw logs from COMPLETED episodes to save context window space,
@@ -109,4 +162,3 @@ struct SessionGraph: Sendable, Codable {
         return negativeConstraints.contains { path.contains($0) }
     }
 }
-

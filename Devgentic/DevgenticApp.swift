@@ -51,9 +51,9 @@ struct DevgenticApp: App {
 
         // Start background RAG indexing service (processes chat messages into vector embeddings)
         // Skip during unit tests to prevent ObjectBox/CoreData initialization crashes
-        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
-            RAGIndexingService.shared.start()
-        }
+//        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+//            RAGIndexingService.shared.start()
+//        }
     }
 
     var body: some Scene {

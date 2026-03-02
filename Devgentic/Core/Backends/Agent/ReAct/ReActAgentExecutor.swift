@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 28/01/26.
-//  Updated: Phase 5 - Modular Orchestrator Refactoring
+//  Updated: Phase 5 - Modular Orchestrator Refactoring & Memory Pointers
 //
 
 import Foundation
@@ -103,7 +103,7 @@ actor ReActAgentExecutor: Executor {
                         let context = SemanticContext(
                             instructions: input.instructions,
                             environmentFacts: envFacts,
-                            compressedStateGraph: stateMutator.currentState.compressForPrompt(),
+                            compressedStateGraph: stateMutator.currentState.compressWithPointers(windowSize: 5), // <-- Updated to use Pointer Compression
                             recentHistory: input.recentHistory,
                             originalQuery: input.userInput,
                             currentIteration: currentIteration,

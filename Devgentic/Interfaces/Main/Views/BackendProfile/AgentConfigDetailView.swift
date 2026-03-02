@@ -64,7 +64,7 @@ struct AgentConfigDetailView: View {
         Binding<ProviderConfig>(
             get: {
                 switch profile.details {
-                case .bot(let llmConfig): return llmConfig
+                case .bot(let llmConfig, _): return llmConfig
                 case .agent(let llmConfig, _, _, _, _, _): return llmConfig
                 case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
