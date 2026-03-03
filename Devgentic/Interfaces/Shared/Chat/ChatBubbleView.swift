@@ -17,18 +17,19 @@ struct ChatBubbleView: View {
     @ObservedObject var message: ChatMessage
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
     @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
 
     // MARK: - State to control the animation
     @State private var applyMinHeight: Bool = false
-    
+
     // MARK: - Identity Logic
     private var isAgentic: Bool {
         if !message.thoughts.isEmpty { return true }
-        
+
         if let response = message.agentResponse,
            let variant = response.variants.indices.contains(response.selectedVariantIndex) ? response.variants[response.selectedVariantIndex] : nil,
            let entityId = variant.backendEntityId {
-            
+
             let profiles = BackendProfileStore.shared.fetchProfiles()
             if let profile = profiles.first(where: { $0.id == entityId }) {
                 return profile.profileType == .agent
@@ -45,10 +46,10 @@ struct ChatBubbleView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: UITheme.Spacing.medium) {
+        HStack(alignment: .top, spacing: theme.spacingMedium) {
             if message.sender == .agent {
-                VStack(alignment: .leading, spacing: UITheme.Spacing.medium) {
-                    
+                VStack(alignment: .leading, spacing: theme.spacingMedium) {
+
                     // 1. INDICATORS
                     if message.isStreaming {
                         if isAgentic {
@@ -71,7 +72,7 @@ struct ChatBubbleView: View {
                             isExpanded: $message.isThinkingExpanded
                         )
                     }
-                    
+
                     // 2. ARTIFACTS
                     if !message.artifacts.isEmpty {
                         ToolArtifactsRow(artifacts: message.artifacts)
@@ -96,15 +97,15 @@ struct ChatBubbleView: View {
                     switch contentToDisplay {
                     case .plainText(let text):
                         Text(text)
-                            .font(UITheme.Fonts.body)
-                            .foregroundColor(UITheme.Colors.primaryText)
+                            .font(theme.fontBody)
+                            .foregroundColor(theme.primaryText)
                             .textSelection(.enabled)
                             .lineSpacing(4)
 
                     case .markdownText(let text):
                         if !text.isEmpty {
                             let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
-                            
+
                             // Phase 5: Pass isLastBlock for Cursor Placement & Use stable IDs
                             ForEach(blocks) { block in
                                 ContentBlockView(
@@ -124,7 +125,7 @@ struct ChatBubbleView: View {
                             }
                         } else {
                             CodeBlockView(language: language ?? "code", content: code)
-                                .padding(.bottom, UITheme.Spacing.medium)
+                                .padding(.bottom, theme.spacingMedium)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
 
@@ -135,31 +136,31 @@ struct ChatBubbleView: View {
                     case .image(_, _, let imageData):
                         if let data = imageData {
                             ImageView(imageData: data)
-                                .padding(.vertical, UITheme.Spacing.small)
+                                .padding(.vertical, theme.spacingSmall)
                                 .frame(maxWidth: 500, alignment: .leading)
                         } else {
                             ErrorMessageView(title: "Image Not Available", details: "The image data could not be loaded.")
                                 .cardStyle()
                         }
                     }
-                    
+
                     if !message.isStreaming && contentToDisplay.textContent != nil {
                         AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
                             .environmentObject(chatHistoryViewModel)
-                            .opacity(0.8)
+                            .opacity(0.6)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(minHeight: applyMinHeight ? STREAMING_BUBBLE_MIN_HEIGHT : nil, alignment: .topLeading)
-                
+
             } else { // User
                 Spacer()
-                
+
                 HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .trailing, spacing: UITheme.Spacing.small) {
+                    VStack(alignment: .trailing, spacing: theme.spacingSmall) {
                         if let attachedTextFiles = message.attachedTextFiles, !attachedTextFiles.isEmpty {
                             ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: UITheme.Spacing.small) {
+                                HStack(spacing: theme.spacingSmall) {
                                     ForEach(attachedTextFiles) { file in
                                         FileAttachmentCardView(
                                             fileName: file.name,
@@ -182,10 +183,10 @@ struct ChatBubbleView: View {
                         }
                     }
                     .frame(maxWidth: 600, alignment: .trailing)
-                    
+
                     Image(systemName: "person.circle.fill")
                         .font(.system(size: 24))
-                        .foregroundColor(Color.gray.opacity(0.4))
+                        .foregroundColor(theme.secondaryText.opacity(0.4))
                         .padding(.top, 4)
                 }
             }
@@ -213,18 +214,19 @@ struct ChatBubbleView: View {
 // MARK: - Bot: Sparkle Loading View
 struct SparkleLoadingView: View {
     var headline: String?
+    @Environment(\.appTheme) private var theme
     @State private var isAnimating = false
-    
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles")
                 .symbolEffect(.bounce.up.byLayer, options: .repeating, value: isAnimating)
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.purple)
-            
+                .foregroundColor(theme.accentColor)
+
             Text(headline ?? "Generating...")
                 .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
         }
         .padding(.vertical, 4)
         .onAppear { isAnimating = true }
@@ -234,7 +236,7 @@ struct SparkleLoadingView: View {
 // MARK: - Agent: Tool Artifacts
 struct ToolArtifactsRow: View {
     let artifacts: [ToolOutput]
-    
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -250,24 +252,25 @@ struct ToolArtifactsRow: View {
 
 struct ToolChipView: View {
     let artifact: ToolOutput
+    @Environment(\.appTheme) private var theme
     @State private var showPopover: Bool = false
-    
+
     var body: some View {
         Button(action: { showPopover.toggle() }) {
             HStack(spacing: 6) {
                 Image(systemName: iconForTool(artifact.toolName))
                     .font(.system(size: 10))
-                    .foregroundColor(artifact.isSuccess ? .secondary : .orange)
-                Text(artifact.toolName).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(.primary)
+                    .foregroundColor(artifact.isSuccess ? theme.secondaryText : theme.warningColor)
+                Text(artifact.toolName).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(theme.primaryText)
                 if !artifact.isSuccess {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)).foregroundColor(.orange)
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)).foregroundColor(theme.warningColor)
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(.ultraThinMaterial)
+            .background(theme.surfaceOverlay)
             .cornerRadius(6)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(artifact.isSuccess ? Color.green.opacity(0.3) : Color.orange.opacity(0.5), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(artifact.isSuccess ? theme.successColor.opacity(0.2) : theme.warningColor.opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
@@ -275,11 +278,11 @@ struct ToolChipView: View {
                 HStack {
                     Text("Tool Output: \(artifact.toolName)").font(.headline)
                     Spacer()
-                    if artifact.isSuccess { Label("Success", systemImage: "checkmark.circle.fill").foregroundColor(.green) }
-                    else { Label("Failed", systemImage: "xmark.circle.fill").foregroundColor(.orange) }
+                    if artifact.isSuccess { Label("Success", systemImage: "checkmark.circle.fill").foregroundColor(theme.successColor) }
+                    else { Label("Failed", systemImage: "xmark.circle.fill").foregroundColor(theme.warningColor) }
                 }
                 .padding()
-                .background(Color(NSColor.controlBackgroundColor))
+                .background(theme.controlBackground)
                 Divider()
                 ScrollView {
                     Text(artifact.output).font(.system(size: 11, design: .monospaced)).padding().frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
@@ -288,7 +291,7 @@ struct ToolChipView: View {
             .frame(width: 400, height: 300)
         }
     }
-    
+
     private func iconForTool(_ name: String) -> String {
         switch name {
         case "list_directory": return "folder.fill"
@@ -308,37 +311,38 @@ struct PermissionRequestView: View {
     let confirmation: PendingToolConfirmation
     @ObservedObject var message: ChatMessage
     @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
     @State private var isProcessingDecision = false
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Image(systemName: "lock.shield.fill").foregroundColor(.orange).font(.system(size: 14))
-                Text("Permission Required").font(.system(size: 13, weight: .semibold)).foregroundColor(.primary)
+                Image(systemName: "lock.shield.fill").foregroundColor(theme.warningColor).font(.system(size: 14))
+                Text("Permission Required").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.primaryText)
                 Spacer()
             }
-            Divider().background(Color.gray.opacity(0.2))
+            Divider().background(theme.dividerColor)
             VStack(alignment: .leading, spacing: 6) {
-                Text("The agent wants to execute a sensitive action:").font(.caption).foregroundColor(.secondary)
+                Text("The agent wants to execute a sensitive action:").font(.caption).foregroundColor(theme.secondaryText)
                 HStack(spacing: 6) {
-                    Text(confirmation.toolName).font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(.primary).padding(.horizontal, 6).padding(.vertical, 2).background(Color.gray.opacity(0.15)).cornerRadius(4)
+                    Text(confirmation.toolName).font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(theme.primaryText).padding(.horizontal, 6).padding(.vertical, 2).background(theme.surfaceOverlay).cornerRadius(4)
                 }
                 if !confirmation.params.isEmpty && confirmation.params != "{}" {
-                    Text(confirmation.params).font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary).lineLimit(4).padding(8).background(Color.black.opacity(0.1)).cornerRadius(6).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(confirmation.params).font(.system(size: 11, design: .monospaced)).foregroundColor(theme.secondaryText).lineLimit(4).padding(8).background(theme.surfaceOverlayStrong).cornerRadius(6).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             HStack(spacing: 12) {
                 if isProcessingDecision { ProgressView().scaleEffect(0.6).frame(height: 28) }
                 else {
-                    Button(action: { submitDecision(approved: false) }) { Text("Deny").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(Color.red.opacity(0.8)).cornerRadius(6) }.buttonStyle(.plain)
-                    Button(action: { submitDecision(approved: true) }) { Text("Allow").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(Color.green.opacity(0.8)).cornerRadius(6) }.buttonStyle(.plain)
+                    Button(action: { submitDecision(approved: false) }) { Text("Deny").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.errorColor.opacity(0.8)).cornerRadius(6) }.buttonStyle(.plain)
+                    Button(action: { submitDecision(approved: true) }) { Text("Allow").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.successColor.opacity(0.8)).cornerRadius(6) }.buttonStyle(.plain)
                 }
             }
             .padding(.top, 4)
         }
-        .padding(12).background(Color.orange.opacity(0.05)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.3), lineWidth: 1)).frame(maxWidth: 500)
+        .padding(12).background(theme.warningColor.opacity(0.08)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.warningColor.opacity(0.2), lineWidth: 1)).frame(maxWidth: 500)
     }
-    
+
     private func submitDecision(approved: Bool) {
         withAnimation { isProcessingDecision = true }
         mainAppViewModel.submitToolApproval(conversationID: message.conversationId, approved: approved)
@@ -357,20 +361,21 @@ struct ClarificationRequestView: View {
     let clarification: PendingClarification
     @ObservedObject var message: ChatMessage
     @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
     @State private var userInput: String = ""
     @State private var isSubmitting = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Image(systemName: "questionmark.bubble.fill").foregroundColor(.blue).font(.system(size: 14))
-                Text("Clarification Needed").font(.system(size: 13, weight: .semibold)).foregroundColor(.primary)
+                Image(systemName: "questionmark.bubble.fill").foregroundColor(theme.streamingIndicator).font(.system(size: 14))
+                Text("Clarification Needed").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.primaryText)
                 Spacer()
             }
-            Divider().background(Color.gray.opacity(0.2))
+            Divider().background(theme.dividerColor)
             Text(clarification.question)
                 .font(.system(size: 13))
-                .foregroundColor(.primary)
+                .foregroundColor(theme.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("Type your response...", text: $userInput)
                 .textFieldStyle(.roundedBorder)
@@ -380,16 +385,16 @@ struct ClarificationRequestView: View {
                 if isSubmitting { ProgressView().scaleEffect(0.6).frame(height: 28) }
                 else {
                     Button(action: { submitSkip() }) {
-                        Text("Skip").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(Color.gray.opacity(0.6)).cornerRadius(6)
+                        Text("Skip").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.secondaryText.opacity(0.6)).cornerRadius(6)
                     }.buttonStyle(.plain)
                     Button(action: { submitResponse() }) {
-                        Text("Send").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(Color.blue.opacity(0.8)).cornerRadius(6)
+                        Text("Send").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.streamingIndicator.opacity(0.8)).cornerRadius(6)
                     }.buttonStyle(.plain).disabled(userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .padding(.top, 4)
         }
-        .padding(12).background(Color.blue.opacity(0.05)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.3), lineWidth: 1)).frame(maxWidth: 500)
+        .padding(12).background(theme.streamingIndicator.opacity(0.08)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.streamingIndicator.opacity(0.2), lineWidth: 1)).frame(maxWidth: 500)
     }
 
     private func submitResponse() {
@@ -422,11 +427,12 @@ fileprivate struct ActionButton<LabelContent: View>: View {
     let action: () -> Void
     @ViewBuilder let label: LabelContent
     var disabled: Bool = false
+    @Environment(\.appTheme) private var theme
     @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
-            label.padding(.horizontal, 8).padding(.vertical, 4).background(RoundedRectangle(cornerRadius: 8).fill(isHovering && !disabled ? Color.gray.opacity(0.3) : Color.clear))
+            label.padding(.horizontal, 8).padding(.vertical, 4).background(RoundedRectangle(cornerRadius: 8).fill(isHovering && !disabled ? theme.secondaryText.opacity(0.3) : Color.clear))
         }
         .buttonStyle(.plain).disabled(disabled).onHover { hovering in withAnimation(.easeInOut(duration: 0.2)) { isHovering = hovering } }
     }
@@ -436,6 +442,7 @@ fileprivate struct AgentMessageActionsView: View {
     @ObservedObject var message: ChatMessage
     var mainAppViewModel: MainApplicationViewModel
     @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(\.appTheme) private var theme
     @State private var didCopy: Bool = false
     @State private var showVariantsPopover: Bool = false
 
@@ -451,7 +458,7 @@ fileprivate struct AgentMessageActionsView: View {
     var body: some View {
         HStack {
             Spacer()
-            HStack(spacing: UITheme.Spacing.small) {
+            HStack(spacing: theme.spacingSmall) {
                 if !containsCode {
                     ActionButton(action: {
                         chatHistoryViewModel.copyMessageContentToClipboard(message: message)
@@ -460,14 +467,14 @@ fileprivate struct AgentMessageActionsView: View {
                     }) {
                         Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                     }
-                    .foregroundColor(didCopy ? .green : .secondary)
+                    .foregroundColor(didCopy ? theme.successColor : theme.secondaryText)
                 }
 
                 if message.agentResponse?.variants.count ?? 0 > 1 {
                     ActionButton(action: { showVariantsPopover.toggle() }) {
                         Label("\(message.agentResponse?.variants.count ?? 0) Versions", systemImage: "square.3.layers.3d.down.right")
                     }
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .popover(isPresented: $showVariantsPopover, arrowEdge: .bottom) {
                         VariantsSelectionView(message: message, isPresented: $showVariantsPopover)
                     }
@@ -477,17 +484,17 @@ fileprivate struct AgentMessageActionsView: View {
                 ActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
                     Label("Redo", systemImage: "arrow.clockwise")
                 }
-                .foregroundColor(isRedoDisabled ? .gray.opacity(0.5) : .secondary)
+                .foregroundColor(isRedoDisabled ? theme.tertiaryText : theme.secondaryText)
 
                 if containsCode {
                     ActionButton(action: { chatHistoryViewModel.openMessageInCodeViewer(message: message) }) {
                         Label("Open in Editor", systemImage: "doc.text.magnifyingglass")
                     }
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                 }
             }
             .font(.system(size: 12))
-            .padding(.top, UITheme.Spacing.small)
+            .padding(.top, theme.spacingSmall)
         }
     }
 }
@@ -495,6 +502,7 @@ fileprivate struct AgentMessageActionsView: View {
 fileprivate struct VariantsSelectionView: View {
     @ObservedObject var message: ChatMessage
     @Binding var isPresented: Bool
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -506,11 +514,11 @@ fileprivate struct VariantsSelectionView: View {
                         ForEach(Array(zip(agentResponse.variants.indices, agentResponse.variants)), id: \.0) { index, variant in
                             Button(action: { message.agentResponse?.selectedVariantIndex = index; isPresented = false }) {
                                 HStack {
-                                    Text(variant.content.textContent ?? "Empty Response").lineLimit(3).font(.body).foregroundColor(.primary).frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(variant.content.textContent ?? "Empty Response").lineLimit(3).font(.body).foregroundColor(theme.primaryText).frame(maxWidth: .infinity, alignment: .leading)
                                     Spacer()
-                                    if index == agentResponse.selectedVariantIndex { Image(systemName: "checkmark.circle.fill").foregroundColor(.accentColor) }
+                                    if index == agentResponse.selectedVariantIndex { Image(systemName: "checkmark.circle.fill").foregroundColor(theme.accentColor) }
                                 }
-                                .padding().background(index == agentResponse.selectedVariantIndex ? Color.accentColor.opacity(0.1) : Color.clear)
+                                .padding().background(index == agentResponse.selectedVariantIndex ? theme.accentColor.opacity(0.08) : Color.clear)
                             }
                             .buttonStyle(.plain)
                             if index < agentResponse.variants.count - 1 { Divider() }

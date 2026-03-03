@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 28/09/25.
 //
 //  Updated for Phase 1: Mapped requiresConfirmation boolean from CoreData
+//  Updated for Phase 5: Injected serverName as the category for UI grouping
 //
 
 import Foundation
@@ -193,6 +194,7 @@ extension ToolItemEntity {
             return ToolDefinition(
                 name: mcpToolEntity.name ?? "Unknown",
                 description: mcpToolEntity.toolDescription ?? "",
+                category: self.serverName ?? "MCP Server",
                 parameters: parameters,
                 requiresConfirmation: mcpToolEntity.requiresConfirmation,
                 title: mcpToolEntity.title,

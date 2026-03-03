@@ -10,6 +10,7 @@ import SwiftUI
 
 struct GeminiSettingsView: View {
     @Binding var config: GeminiAdvancedConfig
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -18,7 +19,7 @@ struct GeminiSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Temperature").fontWeight(.medium)
-                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(.secondary)
+                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -36,7 +37,7 @@ struct GeminiSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Top P").fontWeight(.medium)
-                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -54,7 +55,7 @@ struct GeminiSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Top K").fontWeight(.medium)
-                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -69,7 +70,7 @@ struct GeminiSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Max Output Tokens").fontWeight(.medium)
-                    Text("Maximum length of the generated response.").font(.caption).foregroundColor(.secondary)
+                    Text("Maximum length of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -125,6 +126,7 @@ struct GeminiSettingsView: View {
 
 struct OllamaSettingsView: View {
     @Binding var config: OllamaAdvancedConfig
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -133,7 +135,7 @@ struct OllamaSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Temperature").fontWeight(.medium)
-                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(.secondary)
+                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -151,7 +153,7 @@ struct OllamaSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Top P").fontWeight(.medium)
-                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -169,7 +171,7 @@ struct OllamaSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Top K").fontWeight(.medium)
-                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(.secondary)
+                    Text("Maximum number of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -184,7 +186,7 @@ struct OllamaSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Context Window").fontWeight(.medium)
-                    Text("Number of tokens the model can remember (num_ctx).").font(.caption).foregroundColor(.secondary)
+                    Text("Number of tokens the model can remember (num_ctx).").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 HStack {
@@ -199,7 +201,7 @@ struct OllamaSettingsView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Random Seed").fontWeight(.medium)
-                    Text("Set a specific seed for reproducible outputs.").font(.caption).foregroundColor(.secondary)
+                    Text("Set a specific seed for reproducible outputs.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
                 TextField("Optional", value: $config.seed, format: .number)

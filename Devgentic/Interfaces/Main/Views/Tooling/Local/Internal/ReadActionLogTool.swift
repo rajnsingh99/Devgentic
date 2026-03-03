@@ -14,12 +14,7 @@ struct ReadActionLogTool: DevgenticTool {
     // MARK: - Properties
     
     let name = "read_action_log"
-    let description = """
-    [PURPOSE]: Retrieves the full technical details (JSON manifest) of a past system action using its ID.
-    [WHEN TO USE]: Use to investigate what exactly happened during a specific past action (e.g., 'ACT-8821') found in the audit logs.
-    [INPUT]: { "actionID": "ACT-8821" }
-    [OUTPUT]: The complete JSON manifest of the requested action.
-    """
+    let description = "Retrieves the full technical details (JSON manifest) of a past system action using its ID."
     
     // MARK: - Type Definitions
     

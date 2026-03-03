@@ -15,6 +15,7 @@ struct MarkdownTableView: View {
     let headers: [String]
     let rows: [[String]]
 
+    @Environment(\.appTheme) private var theme
     @State private var hoveredRowIndex: Int? = nil
 
     var body: some View {
@@ -24,7 +25,7 @@ struct MarkdownTableView: View {
                 GridRow {
                     ForEach(headers.indices, id: \.self) { index in
                         TableCellView(content: headers[index], isHeader: true)
-                            .background(Color.secondary.opacity(0.1))
+                            .background(theme.secondaryText.opacity(0.1))
                     }
                 }
 
@@ -47,7 +48,7 @@ struct MarkdownTableView: View {
                                 }
                         }
                     }
-                    
+
                     // Row Divider (except after the last row)
                     if rowIndex < rows.count - 1 {
                         Divider()
@@ -56,11 +57,11 @@ struct MarkdownTableView: View {
                 }
             }
             .overlay(
-                RoundedRectangle(cornerRadius: UITheme.CornerRadius.small)
-                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                RoundedRectangle(cornerRadius: theme.cornerRadiusSmall)
+                    .stroke(theme.dividerColor, lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: UITheme.CornerRadius.small))
-            .padding(.bottom, UITheme.Spacing.medium)
+            .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusSmall))
+            .padding(.bottom, theme.spacingMedium)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Global Table Actions
@@ -72,20 +73,20 @@ struct MarkdownTableView: View {
             }
         }
     }
-    
+
     private func rowBackgroundColor(for rowIndex: Int) -> Color {
         if hoveredRowIndex == rowIndex {
-            return Color.secondary.opacity(0.1)
+            return theme.secondaryText.opacity(0.1)
         }
-        return rowIndex % 2 == 0 ? Color.clear : Color.secondary.opacity(0.03)
+        return rowIndex % 2 == 0 ? Color.clear : theme.secondaryText.opacity(0.03)
     }
-    
+
     private func copyTableAsMarkdown() {
         let headerRow = "| " + headers.joined(separator: " | ") + " |"
         let separatorRow = "| " + headers.map { _ in "---" }.joined(separator: " | ") + " |"
         let dataRows = rows.map { row in "| " + row.joined(separator: " | ") + " |" }.joined(separator: "\n")
         let markdown = "\(headerRow)\n\(separatorRow)\n\(dataRows)"
-        
+
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(markdown, forType: .string)
     }
@@ -94,6 +95,7 @@ struct MarkdownTableView: View {
 private struct TableCellView: View {
     let content: String
     let isHeader: Bool
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading) {
@@ -108,7 +110,7 @@ private struct TableCellView: View {
                     case .failure(let error):
                         Image(systemName: "photo.fill")
                             .font(.largeTitle)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                             .onAppear {
                                 logger.error("Failed to load image from URL \(url.absoluteString): \(error.localizedDescription)")
                             }
@@ -122,8 +124,8 @@ private struct TableCellView: View {
                 .help(url.absoluteString)
             } else {
                 Text(try! AttributedString(markdown: content))
-                    .font(isHeader ? UITheme.Fonts.body.weight(.bold) : UITheme.Fonts.body)
-                    .foregroundColor(UITheme.Colors.primaryText)
+                    .font(isHeader ? theme.fontBody.weight(.bold) : theme.fontBody)
+                    .foregroundColor(theme.primaryText)
                     .multilineTextAlignment(.leading)
                     .textSelection(.enabled)
                     // CRITICAL: Max width triggers wrapping for long text,
@@ -132,7 +134,7 @@ private struct TableCellView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(UITheme.Spacing.small)
+        .padding(theme.spacingSmall)
         .frame(maxWidth: .infinity, alignment: .leading)
         // Cell-specific Actions
         .contextMenu {

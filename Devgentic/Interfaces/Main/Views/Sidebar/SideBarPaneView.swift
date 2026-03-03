@@ -51,6 +51,7 @@ struct SideBarPaneView: View {
     @EnvironmentObject var themeManager: ThemeManager
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -60,7 +61,7 @@ struct SideBarPaneView: View {
                  HStack {
                      Text(tab.title)
                          .font(.system(size: 11, weight: .bold))
-                         .foregroundColor(.secondary)
+                         .foregroundColor(theme.primaryText)
                          .textCase(.uppercase)
                          .tracking(0.5)
                      
@@ -71,7 +72,7 @@ struct SideBarPaneView: View {
                  .padding(.bottom, 8)
                  
                  Divider()
-                     .background(Color.white.opacity(0.1))
+                     .background(theme.dividerColor)
             }
 
             VStack {
@@ -117,6 +118,8 @@ struct PlaceholderSidebarView: View {
     let title: String
     let description: String
     
+    @Environment(\.appTheme) private var theme
+    
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
@@ -132,10 +135,10 @@ struct PlaceholderSidebarView: View {
             VStack(spacing: 6) {
                 Text(title)
                     .font(.headline)
-                    .foregroundColor(.primary)
+                    .foregroundColor(theme.primaryText)
                 Text(description)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)
             }

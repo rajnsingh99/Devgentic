@@ -15,11 +15,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// Used to recover deep logs from completed episodes that were stripped by Semantic Compression.
 struct ReadSessionHistoryTool: DevgenticTool {
     let name = "read_session_history"
-    let description = """
-    [PURPOSE]: Retrieves the full, uncompressed hierarchical memory graph of the current session.
-    [WHEN TO USE]: Use ONLY when you need to read the deep logs of a COMPLETED past episode that have been compressed out of your active state. Do NOT use this to check your current status.
-    [OUTPUT]: A pretty-printed JSON string of the session graph.
-    """
+    let description = "Retrieves the full, uncompressed hierarchical memory graph of the current session."
     
     let conversationID: UUID
     

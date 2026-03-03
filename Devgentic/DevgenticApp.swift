@@ -61,6 +61,7 @@ struct DevgenticApp: App {
         WindowGroup {
             MainApplicationView()
                 .environmentObject(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(mainApplicationViewModel.explorerViewModel)
                 .environmentObject(chatHistoryViewModel)
@@ -109,6 +110,7 @@ struct DevgenticApp: App {
             SettingsView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
         }.defaultSize(width: 1000, height: 850)
 
         // MARK: - Window Groups
@@ -116,6 +118,7 @@ struct DevgenticApp: App {
             if let url = fileURL {
                 FileWindowViewer(fileURL: url)
                     .environmentObject(themeManager)
+                    .environment(\.appTheme, themeManager.currentTheme)
             }
         }
         
@@ -125,6 +128,7 @@ struct DevgenticApp: App {
             BackendProfilePanelView()
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
         }.defaultSize(width: 850, height: 700)
     }
 }

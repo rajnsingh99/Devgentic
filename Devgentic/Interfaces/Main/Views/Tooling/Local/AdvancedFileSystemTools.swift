@@ -190,12 +190,8 @@ class HybridSearchService {
 
 struct SmartSearchTool: DevgenticTool {
     let name = "fs_smart_search"
-    let description = """
-    [PURPOSE]: Advanced macOS Spotlight Search. Finds files by matching Filename OR Text Content.
-    [WHEN TO USE]: Use when you need to find a file but don't know the path.
-    [INPUT]: { "search_term": "invoice", "search_scope": "~/Documents" }
-    [OUTPUT]: A list of matching file paths.
-    """
+    let category = "File System"
+    let description = "Advanced macOS Spotlight Search. Finds files by matching Filename OR Text Content. Supports partial matches and scope limiting."
     
     struct Arguments: Decodable, Sendable {
         let search_term: String
@@ -311,12 +307,8 @@ struct SmartSearchTool: DevgenticTool {
 
 struct ReadMetadataTool: DevgenticTool {
     let name = "fs_read_metadata"
-    let description = """
-    [PURPOSE]: Retrieves detailed file metadata (creation date, type, size, origin URL).
-    [WHEN TO USE]: Use to analyze file properties without reading content.
-    [INPUT]: { "path": "~/Downloads/file.pdf" }
-    [OUTPUT]: A structured list of file attributes.
-    """
+    let category = "File System"
+    let description = "Retrieves detailed file metadata including creation date, type, size, and origin URL."
     
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -405,12 +397,9 @@ struct ReadMetadataTool: DevgenticTool {
 
 struct OrganizeBatchTool: DevgenticTool {
     let name = "fs_organize_batch"
-    let description = """
-    [PURPOSE]: Moves multiple files to a specific destination folder in one go.
-    [WHEN TO USE]: Use when organizing messy folders (e.g. "Clean up my desktop").
-    [INPUT]: { "sourcePaths": ["~/Desktop/a.png"], "destinationFolder": "~/Pictures/Screenshots" }
-    [OUTPUT]: Summary of moved files.
-    """
+    let category = "File System"
+    let description = "Moves multiple files to a specific destination folder in a single operation."
+
     
     struct Arguments: Decodable, Sendable {
         let sourcePaths: [String]
@@ -566,12 +555,8 @@ class WatcherService {
 
 struct WatchFolderTool: DevgenticTool {
     let name = "fs_watch_folder"
-    let description = """
-    [PURPOSE]: Starts a background monitor on a specific folder.
-    [WHEN TO USE]: Use when the user wants to be notified of changes (writes/deletes) in a directory.
-    [INPUT]: { "path": "~/Downloads" }
-    [OUTPUT]: Monitor ID and status.
-    """
+    let category = "File System"
+    let description = "Starts a background monitor on a specific folder to notify of writes, deletes, or renames."
     
     struct Arguments: Decodable, Sendable {
         let path: String

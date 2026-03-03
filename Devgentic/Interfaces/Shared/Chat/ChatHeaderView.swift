@@ -4,28 +4,25 @@ import SwiftUI
 struct ChatHeaderView: View {
     // The title of the current chat, passed from the parent view
     let chatTitle: String
-    
+
     // Flag indicating if the "user messages only" filter is active
     let isFilterActive: Bool
-    
+
     // Action to perform when the eye button is tapped
     let onEyeButtonTapped: () -> Void
-    
+
     // --- NEW: Action for the transfer button ---
     /// Action to perform when the transfer button is tapped. Optional because it might not always be available/enabled.
     let onTransferButtonTapped: (() -> Void)?
     /// Flag indicating if a conversation is selected (to enable/disable the transfer button).
     let isConversationSelected: Bool
     // --- END NEW ---
-    
+
+    @Environment(\.appTheme) private var theme: any Theme
+
     // A subtle color for the bottom border, adaptable to light/dark mode
     private var borderColor: Color {
-        #if os(macOS)
-        return Color(NSColor.separatorColor).opacity(0.6)
-        #else
-        // Placeholder for potential iOS adaptation
-        return Color(.systemGray4).opacity(0.6)
-        #endif
+        return theme.dividerColor.opacity(0.6)
     }
 
     var body: some View {
@@ -33,7 +30,7 @@ struct ChatHeaderView: View {
             // Chat Title on the left
             Text(chatTitle)
                 .font(.headline) // Suitable font size for a header title
-                .foregroundColor(.primary) // Adapts to light/dark mode
+                .foregroundColor(theme.primaryText) // Adapts to light/dark mode
                 .lineLimit(1) // Prevent title from wrapping
                 .truncationMode(.tail) // Truncate if too long
 
@@ -47,7 +44,7 @@ struct ChatHeaderView: View {
                     .font(.title3) // Match eye icon size
             }
             .buttonStyle(.plain)
-            .foregroundColor(isConversationSelected ? .secondary : .gray.opacity(0.5)) // Use secondary color, gray out if disabled
+            .foregroundColor(isConversationSelected ? theme.secondaryText : theme.secondaryText.opacity(0.5)) // Use secondary color, gray out if disabled
             .help(isConversationSelected ? "Continue this chat in Quick Access overlay" : "Select a chat to transfer")
             .disabled(!isConversationSelected) // Disable if no conversation is selected
             // --- END NEW ---
@@ -58,7 +55,7 @@ struct ChatHeaderView: View {
                     .font(.title3)
             }
             .buttonStyle(.plain)
-            .foregroundColor(isFilterActive ? .blue : .secondary)
+            .foregroundColor(isFilterActive ? theme.streamingIndicator : theme.secondaryText)
             .help(isFilterActive ? "Show all messages" : "Show only my messages")
         }
         .padding(.horizontal) // Horizontal padding for content
@@ -101,7 +98,7 @@ struct ChatHeaderView_Previews: PreviewProvider {
              )
         }
         .padding()
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(AppThemes.DefaultTheme().primaryBackground) // Preview-only
         .previewLayout(.sizeThatFits)
     }
 }

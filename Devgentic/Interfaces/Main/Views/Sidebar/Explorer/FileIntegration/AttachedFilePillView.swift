@@ -21,6 +21,7 @@ struct AttachedFilePillView: View {
     // MARK: - State
     @State private var isHovering: Bool = false
     @State private var isRemoveButtonHovering: Bool = false
+    @Environment(\.appTheme) private var theme
 
     // MARK: - Modern Styling Constants
     private var pillBackgroundColor: Color {
@@ -67,25 +68,25 @@ struct AttachedFilePillView: View {
             // Modern twist: Use accent color for the icon instead of the background
             ZStack {
                 Circle()
-                    .fill(Color.accentColor.opacity(0.1))
+                    .fill(theme.accentColor.opacity(0.1))
                     .frame(width: 28, height: 28)
-                
+
                 Image(systemName: displayIconName)
                     .font(.system(size: 11, weight: displayIconFontWeight))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(theme.accentColor)
             }
 
             // File Name and Type
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.primary)
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
                 Text(fileItem.fileTypeDescription.uppercased())
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
             }
 
@@ -96,11 +97,11 @@ struct AttachedFilePillView: View {
             Button(action: onRemove) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(isRemoveButtonHovering ? .white : .secondary)
+                    .foregroundColor(isRemoveButtonHovering ? .white : theme.secondaryText)
                     .frame(width: 20, height: 20)
                     .background(
                         Circle()
-                            .fill(isRemoveButtonHovering ? Color.red.opacity(0.9) : Color.clear)
+                            .fill(isRemoveButtonHovering ? theme.errorColor.opacity(0.9) : Color.clear)
                     )
             }
             .buttonStyle(.plain)
@@ -177,7 +178,7 @@ struct AttachedFilePillView_Previews: PreviewProvider {
             )
         }
         .padding(30)
-        .background(Color(NSColor.textBackgroundColor)) // Simulating editor background
+        .background(AppThemes.DefaultTheme().primaryBackground) // Preview-only
         .previewLayout(.sizeThatFits)
         .frame(width: 350)
     }

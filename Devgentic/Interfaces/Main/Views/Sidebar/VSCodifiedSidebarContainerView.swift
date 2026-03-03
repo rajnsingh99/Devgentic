@@ -37,6 +37,7 @@ struct VSCodifiedSidebarContainerView: View {
     ]
 
     @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
 
     init(isSidebarVisible: Binding<Bool>, sidebarWidth: Binding<CGFloat>) {
         self._isSidebarVisible = isSidebarVisible
@@ -45,65 +46,83 @@ struct VSCodifiedSidebarContainerView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Activity Bar (Leftmost icon strip)
-            // Uses its own material background to prevent layout shift when sidebar toggles
-            ActivityBarView(selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
-                .frame(width: activityBarWidth, alignment: .center)
-                .frame(maxHeight: .infinity)
-                .background(.regularMaterial)
-                // Subtle inner separator overlaid on trailing edge (no layout shift)
-                .overlay(alignment: .trailing) {
-                    if isSidebarVisible {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.06))
-                            .frame(width: 0.5)
-                    }
-                }
-                .zIndex(1)
+            // Detached Floating Sidebar Unit
+            HStack(spacing: 0) {
+                // Activity Bar (Leftmost icon strip)
+                ActivityBarView(selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
+                    .frame(width: activityBarWidth, alignment: .center)
+                    .frame(maxHeight: .infinity)
 
-            if isSidebarVisible {
-                // Sidebar Content Pane
-                SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $sidebarWidth)
-                    .frame(width: sidebarWidth)
-                    .background(.regularMaterial)
-                    .transition(.move(edge: .leading))
-                    .clipped()
-
-                // Resize Handle
-                ZStack {
-                    // Invisible hit target area (wider than the visual line)
+                if isSidebarVisible {
+                    // Vertical Separator (Padded so it doesn't touch the outer border)
                     Rectangle()
-                        .fill(Color.clear)
-                        .frame(width: 6)
-
-                    // Visual Divider Line
-                    Rectangle()
-                        .fill(isHoveringOnDivider ? Color.accentColor : Color.primary.opacity(0.1))
+                        .fill(theme.surfaceOverlayStrong.opacity(0.3))
                         .frame(width: 1)
-                }
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 1)
-                        .onChanged { value in
-                            let newWidth = self.sidebarWidth + value.translation.width
-                            self.sidebarWidth = min(max(newWidth, self.minSidebarWidth), self.maxSidebarWidth)
+                        .padding(.vertical, 16)
 
-                            // Save preference
-                            if let tab = selectedTab {
-                                preferredWidths[tab] = self.sidebarWidth
-                            }
-                        }
-                )
-                .onHover { hovering in
-                    self.isHoveringOnDivider = hovering
-                    if hovering {
-                        NSCursor.resizeLeftRight.set()
-                    } else {
-                        NSCursor.arrow.set()
-                    }
+                    // Sidebar Content Pane
+                    SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $sidebarWidth)
+                        .frame(width: sidebarWidth)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .leading).combined(with: .opacity),
+                            removal: .move(edge: .leading).combined(with: .opacity)
+                        ))
+                        .clipped()
                 }
-                .zIndex(2) // Resize handle on top
             }
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(theme.secondaryBackground)
+                    .shadow(color: Color.black.opacity(0.18), radius: 15, x: 0, y: 6)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(theme.surfaceOverlayStrong.opacity(0.5), lineWidth: 1)
+            )
+            .overlay(alignment: .trailing) {
+                if isSidebarVisible {
+                    // Resize Handle (Overlapping the border)
+                    ZStack {
+                        // Invisible hit target area (wider than the visual line)
+                        Rectangle()
+                            .fill(Color.clear)
+                            .frame(width: 10)
+
+                        // Visual Divider Line (subtle highlight on hover)
+                        Rectangle()
+                            .fill(isHoveringOnDivider ? theme.accentColor : Color.clear)
+                            .frame(width: 1.5)
+                            .padding(.vertical, 20) // Don't touch the corners
+                    }
+                    .contentShape(Rectangle())
+                    .frame(width: 10)
+                    .offset(x: 5) // Center the 10pt hit area on the 1pt border
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .onChanged { value in
+                                let newWidth = self.sidebarWidth + value.translation.width
+                                self.sidebarWidth = min(max(newWidth, self.minSidebarWidth), self.maxSidebarWidth)
+
+                                // Save preference
+                                if let tab = selectedTab {
+                                    preferredWidths[tab] = self.sidebarWidth
+                                }
+                            }
+                    )
+                    .onHover { hovering in
+                        self.isHoveringOnDivider = hovering
+                        if hovering {
+                            NSCursor.resizeLeftRight.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .padding(.leading, 12)
+            .padding(.vertical, 12)
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
         }
         .frame(maxHeight: .infinity)
         .onChange(of: selectedTab) { newTab in

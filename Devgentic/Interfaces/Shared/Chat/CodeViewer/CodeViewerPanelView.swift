@@ -108,15 +108,46 @@ class CodeDocument: ObservableObject, Equatable {
     static func == (lhs: CodeDocument, rhs: CodeDocument) -> Bool {
         return lhs === rhs
     }
-    
+
     @Published var content: GapBuffer
     @Published var language: CodeLanguage
 
+    /// Maps language identifiers not natively supported by CodeEditLanguages
+    /// to their closest supported equivalent for syntax highlighting.
+    private static let languageFallbacks: [String: String] = [
+        "xml": "html",
+        "xhtml": "html",
+        "svg": "html",
+        "xaml": "html",
+        "xsl": "html",
+        "xslt": "html",
+        "plist": "html",
+        "jsp": "html",
+        "erb": "html",
+        "vue": "html",
+        "sh": "bash",
+        "zsh": "bash",
+        "fish": "bash",
+        "makefile": "bash",
+        "cmake": "bash",
+        "cs": "cSharp",
+        "objcpp": "cpp",
+        "h": "c",
+        "hpp": "cpp",
+        "jsonc": "json",
+        "yml": "yaml",
+    ]
+
     init(content: String, language: String?) {
         self.content = GapBuffer(string: content)
+        let key = language?.lowercased()
         self.language = CodeLanguage.allLanguages.first {
-            $0.id.rawValue.lowercased() == language?.lowercased()
-        } ?? .default
+            $0.id.rawValue.lowercased() == key
+        } ?? key.flatMap({ fallbackKey in
+            CodeDocument.languageFallbacks[fallbackKey]
+        }).flatMap({ resolvedID in
+            CodeLanguage.allLanguages.first { $0.id.rawValue.lowercased() == resolvedID }
+        }) ?? .default
     }
 }
 
@@ -343,10 +374,14 @@ struct CodeViewerPanelView: View {
         case "python": return "chevron.left.forwardslash.chevron.right"
         case "javascript", "typescript", "tsx": return "curlybraces"
         case "java": return "cup.and.saucer.fill"
-        case "html": return "chevron.left.slash.chevron.right"
+        case "html", "xml", "svg", "xhtml": return "chevron.left.slash.chevron.right"
         case "css": return "number"
         case "ruby": return "diamond.fill"
-        case "shell": return "terminal.fill"
+        case "shell", "bash", "zsh": return "terminal.fill"
+        case "json", "yaml", "yml", "toml": return "doc.badge.gearshape"
+        case "rust": return "gearshape.2"
+        case "go": return "arrow.right.arrow.left"
+        case "c", "cpp", "objc": return "memorychip"
         default: return "doc.text"
         }
     }
@@ -441,7 +476,7 @@ private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentab
 
 // MARK: - High-Performance NSViewController
 class HighPerformanceCodeViewController: NSViewController {
-    
+
     private var document: CodeDocument
     private var cancellables = Set<AnyCancellable>()
 
@@ -452,12 +487,49 @@ class HighPerformanceCodeViewController: NSViewController {
         self.document = document
         super.init(nibName: nil, bundle: nil)
     }
-    
+
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         setupEditorView()
+    }
+
+    /// Builds the full SourceEditor configuration with all supported features enabled.
+    private func makeConfiguration(font: NSFont) -> SourceEditorConfiguration {
+        .init(
+            appearance: .init(
+                theme: .defaultDark,
+                useThemeBackground: true,
+                font: font,
+                lineHeightMultiple: 1.2,
+                letterSpacing: 1.0,
+                wrapLines: true,
+                tabWidth: 4,
+                bracketPairEmphasis: .bordered(color: NSColor(hex: "#569cd6").withAlphaComponent(0.4))
+            ),
+            behavior: .init(
+                isEditable: false,
+                isSelectable: true,
+                indentOption: .spaces(count: 4)
+            ),
+            layout: .init(
+                editorOverscroll: 0.3,
+                contentInsets: NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+            ),
+            peripherals: .init(
+                showGutter: true,
+                showMinimap: false,
+                showReformattingGuide: false,
+                showFoldingRibbon: true,
+                invisibleCharactersConfiguration: .init(
+                    showSpaces: false,
+                    showTabs: false,
+                    showLineEndings: false
+                ),
+                warningCharacters: [0x200B, 0x200C, 0x200D, 0xFEFF]
+            )
+        )
     }
 
     private func setupEditorView() {
@@ -470,27 +542,20 @@ class HighPerformanceCodeViewController: NSViewController {
             }
         )
 
+        let font = NSFont.monospacedSystemFont(ofSize: currentFontSize, weight: .regular)
         let editorView = SourceEditor(
             contentBinding,
             language: document.language,
-            configuration: .init(
-                appearance: .init(
-                    theme: .defaultDark,
-                    font: .monospacedSystemFont(ofSize: currentFontSize, weight: .regular),
-                    lineHeightMultiple: 1.2,
-                    wrapLines: true
-                ),
-                peripherals: .init(showGutter: true, showMinimap: false)
-            ),
+            configuration: makeConfiguration(font: font),
             state: .constant(.init())
         )
-        
+
         let hosting = NSHostingController(rootView: editorView)
         self.hostingController = hosting
-        
+
         addChild(hosting)
         view.addSubview(hosting.view)
-        
+
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             hosting.view.topAnchor.constraint(equalTo: view.topAnchor),
@@ -499,10 +564,10 @@ class HighPerformanceCodeViewController: NSViewController {
             hosting.view.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         ])
     }
-    
+
     private func updatePresentationView() {
         let font = NSFont.monospacedSystemFont(ofSize: self.currentFontSize, weight: .regular)
-        
+
         let contentBinding = Binding<String>(
             get: { self.document.content.string },
             set: { newString in
@@ -511,19 +576,11 @@ class HighPerformanceCodeViewController: NSViewController {
                 }
             }
         )
-        
+
         let newEditorView = SourceEditor(
             contentBinding,
             language: self.document.language,
-            configuration: .init(
-                appearance: .init(
-                    theme: .defaultDark,
-                    font: font,
-                    lineHeightMultiple: 1.2,
-                    wrapLines: true
-                ),
-                peripherals: .init(showGutter: true, showMinimap: false)
-            ),
+            configuration: makeConfiguration(font: font),
             state: .constant(.init())
         )
         hostingController?.rootView = newEditorView
@@ -531,17 +588,17 @@ class HighPerformanceCodeViewController: NSViewController {
 
     func update(document: CodeDocument, fontSize: Double) {
         var needsViewUpdate = false
-        
+
         if self.document != document {
             self.document = document
             needsViewUpdate = true
         }
-        
+
         if self.currentFontSize != fontSize {
             self.currentFontSize = fontSize
             needsViewUpdate = true
         }
-        
+
         if needsViewUpdate {
             updatePresentationView()
         }

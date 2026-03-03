@@ -12,6 +12,7 @@ import SwiftUI
 struct GeneralSettingsView: View {
     // Access the main view model from the environment to bind the setting.
     @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
 
     // Speech settings stored via @AppStorage for direct UserDefaults binding
     @AppStorage(AppSettings.speechModelKey) private var selectedModel: String = "base.en"
@@ -57,10 +58,11 @@ struct GeneralSettingsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Stream LLM Responses")
                                 .fontWeight(.medium)
+                                .foregroundColor(theme.primaryText)
                             
                             Text("When enabled, the LLM response will appear word-by-word. Disable this if you prefer to receive the full response at once after it has been generated.")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         
@@ -81,10 +83,11 @@ struct GeneralSettingsView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Model")
                                     .fontWeight(.medium)
+                                    .foregroundColor(theme.primaryText)
                                 
                                 Text("Larger models are more accurate but slower and use more memory. Multilingual models support 99 languages; English-only models (.en) are faster for English.")
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(theme.secondaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             
@@ -110,23 +113,26 @@ struct GeneralSettingsView: View {
                             }
                         }
 
-                        Divider()
+                        Rectangle()
+                            .fill(theme.dividerColor)
+                            .frame(height: 1)
 
                         // Language Picker
                         HStack(alignment: .center) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Language")
                                     .fontWeight(.medium)
+                                    .foregroundColor(theme.primaryText)
                                 
                                 if isEnglishOnlyModel {
                                     Text("Language selection is disabled for English-only models. Choose a multilingual model to enable other languages.")
                                         .font(.caption)
-                                        .foregroundColor(.orange)
+                                        .foregroundColor(theme.warningColor)
                                         .fixedSize(horizontal: false, vertical: true)
                                 } else {
                                     Text("Select a specific language for better accuracy, or use Auto-detect. Auto-detect requires a multilingual model.")
                                         .font(.caption)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(theme.secondaryText)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
@@ -149,17 +155,20 @@ struct GeneralSettingsView: View {
                             )
                         }
 
-                        Divider()
+                        Rectangle()
+                            .fill(theme.dividerColor)
+                            .frame(height: 1)
 
                         // VAD Auto-Stop Toggle
                         HStack(alignment: .center) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Auto-stop on silence")
                                     .fontWeight(.medium)
+                                    .foregroundColor(theme.primaryText)
                                 
                                 Text("When enabled, transcription will automatically finalize after detecting silence, allowing hands-free voice input.")
                                     .font(.caption)
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(theme.secondaryText)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             
@@ -180,6 +189,7 @@ struct GeneralSettingsView: View {
             }
             .padding()
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .scrollContentBackground(.hidden)
+        .background(theme.primaryBackground)
     }
 }

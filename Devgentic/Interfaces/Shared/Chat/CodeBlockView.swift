@@ -7,6 +7,7 @@
 //  REFACTORED: To use centralized UITheme for consistent styling.
 //  REFACTORED: Phase 3 - "IDE" Window Aesthetic.
 //  UPDATED: Removed decorative traffic light buttons for a cleaner look.
+//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 
 import SwiftUI
 import Highlightr
@@ -16,11 +17,7 @@ struct CodeBlockView: View {
     let content: String
     @State private var isCopied = false
     @State private var isHovering = false
-
-    // Constants for the IDE look
-    private let headerColor = Color(red: 0.15, green: 0.15, blue: 0.17) // Dark Grey
-    private let editorColor = Color(red: 0.11, green: 0.11, blue: 0.13) // Darker Grey/Black
-    private let borderColor = Color.white.opacity(0.1)
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,15 +26,15 @@ struct CodeBlockView: View {
                 // Language Badge (Aligned Left)
                 Text(language.isEmpty ? "plaintext" : language.lowercased())
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.gray)
+                    .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
-                    .background(Color.white.opacity(0.05))
+                    .background(theme.surfaceOverlay)
                     .cornerRadius(4)
                     .padding(.leading, 4)
-                
+
                 Spacer()
-                
+
                 // Copy Button
                 Button(action: copyToClipboard) {
                     HStack(spacing: 4) {
@@ -46,7 +43,7 @@ struct CodeBlockView: View {
                         Text(isCopied ? "Copied" : "Copy")
                             .font(.system(size: 10, weight: .medium))
                     }
-                    .foregroundColor(isCopied ? .green : .gray)
+                    .foregroundColor(isCopied ? theme.successColor : theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(isHovering ? Color.white.opacity(0.1) : Color.clear)
@@ -57,21 +54,21 @@ struct CodeBlockView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(headerColor)
-            
+            .background(theme.codeBlockHeaderBackground)
+
             Divider()
-                .background(borderColor)
+                .background(theme.surfaceOverlayStrong)
 
             // MARK: - Editor Content
             // Use the new async wrapper view, which handles highlighting in the background.
             AsyncHighlightedCodeView(language: language, code: content)
                 .padding(12)
-                .background(editorColor)
+                .background(theme.codeBlockEditorBackground)
         }
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(borderColor, lineWidth: 1)
+                .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
     }
@@ -79,11 +76,11 @@ struct CodeBlockView: View {
     private func copyToClipboard() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(content, forType: .string)
-        
+
         withAnimation {
             isCopied = true
         }
-        
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation {
                 isCopied = false
@@ -98,7 +95,7 @@ struct CodeBlockView: View {
 struct AsyncHighlightedCodeView: View {
     let language: String
     let code: String
-    
+
     @State private var highlightedCode: NSAttributedString?
 
     var body: some View {
@@ -110,7 +107,7 @@ struct AsyncHighlightedCodeView: View {
                 highlightedCode = await highlightCodeAsync(language: language, code: code)
             }
     }
-    
+
     /// Performs syntax highlighting on a background thread.
     private func highlightCodeAsync(language: String, code: String) async -> NSAttributedString {
         // Use Task.detached to ensure this doesn't run on a main-actor-bound context.
@@ -121,17 +118,17 @@ struct AsyncHighlightedCodeView: View {
 
             // Define the base font for the code (SF Mono or similar).
             let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 12)!
-            
+
             // Perform the potentially slow highlighting operation.
             let attributedCode = highlightr.highlight(code, as: language, fastRender: true) ?? NSAttributedString(string: code)
-            
+
             // Apply the base font to the entire string, preserving the colors from Highlightr.
             let finalAttributedString = NSMutableAttributedString(attributedString: attributedCode)
             let fullRange = NSRange(location: 0, length: finalAttributedString.length)
             finalAttributedString.addAttribute(.font, value: baseFont, range: fullRange)
-            
+
             // Adjust colors to ensure contrast if needed (optional)
-            
+
             return finalAttributedString
         }.value
     }
@@ -181,7 +178,7 @@ struct HighlightedCodeViewRepresentable: NSViewRepresentable {
             ]
             textToSet = NSAttributedString(string: code, attributes: attributes)
         }
-        
+
         if nsView.textStorage != textToSet {
              nsView.textStorage?.setAttributedString(textToSet)
              nsView.invalidateIntrinsicContentSize()

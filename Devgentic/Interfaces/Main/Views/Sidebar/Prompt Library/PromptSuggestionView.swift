@@ -16,6 +16,7 @@ struct PromptSuggestionView: View {
 
     // MARK: - State
     @State private var hoveredItemID: DevPrompt.ID?
+    @Environment(\.appTheme) private var theme
 
     // MARK: - Constants
     private let rowHeight: CGFloat = 44
@@ -64,7 +65,7 @@ struct PromptSuggestionView: View {
             .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadiusValue)
-                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    .stroke(theme.dividerColor, lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -77,14 +78,14 @@ struct PromptSuggestionView: View {
         } else if !suggestionQuery.isEmpty {
             Text("No prompts match \"\(suggestionQuery)\"")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(VisualEffectBlur(material: .popover).opacity(0.9))
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadiusValue)
-                        .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                        .stroke(theme.dividerColor, lineWidth: 1)
                 )
                 .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
                 .transition(.opacity)
@@ -102,7 +103,7 @@ struct PromptSuggestionView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: iconSize, height: iconSize)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
                 .frame(width: 20, alignment: .center)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -114,7 +115,7 @@ struct PromptSuggestionView: View {
                 // The beginning of the prompt's text for context
                 Text(prompt.text)
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -124,7 +125,7 @@ struct PromptSuggestionView: View {
         .padding(.horizontal, 10)
         .frame(height: rowHeight)
         .background(
-            (isSelected || isHovered) ? Color.gray.opacity(isSelected ? 0.25 : 0.15) : Color.clear
+            (isSelected || isHovered) ? theme.secondaryText.opacity(isSelected ? 0.25 : 0.15) : Color.clear
         )
         .cornerRadius(6)
     }
@@ -133,7 +134,7 @@ struct PromptSuggestionView: View {
     private func highlightedText(for text: String, query: String) -> AttributedString {
         var attributedString = AttributedString(text)
         
-        attributedString.foregroundColor = Color(NSColor.labelColor)
+        attributedString.foregroundColor = theme.primaryText
 
         if !query.isEmpty, let range = attributedString.range(of: query, options: .caseInsensitive) {
             attributedString[range].font = .system(size: 13, weight: .bold)
@@ -166,6 +167,6 @@ struct PromptSuggestionView_Previews: PreviewProvider {
         }
         .frame(width: 450)
         .padding()
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(AppThemes.DefaultTheme().primaryBackground)
     }
 }

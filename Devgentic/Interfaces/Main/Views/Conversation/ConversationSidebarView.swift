@@ -37,156 +37,10 @@ extension ConversationEntity {
     }
 }
 
-// MARK: - Sidebar Header View
-/// The top header of the sidebar, displaying the title and the "New Chat" button.
-struct SidebarHeaderView: View {
-    /// Closure triggered when the user wants to start a new chat.
-    var onNewChat: () -> Void
-    
-    var body: some View {
-        HStack {
-            Text("Chats")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.primary)
-            
-            Spacer()
-            
-            Button(action: onNewChat) {
-                HStack(spacing: 4) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("New Chat")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.15))
-                .foregroundColor(.accentColor)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-            .buttonStyle(.plain) // Standardizes button press behavior
-            .help("Start a new conversation (⌘N)")
-        }
-    }
-}
 
-// MARK: - Sidebar Search Bar
-/// A self-contained search bar that manages its own focus state.
-struct SidebarSearchBarView: View {
-    /// Binding to the search text held in the parent view.
-    @Binding var searchText: String
-    
-    /// Local focus state, removing this burden from the parent view.
-    @FocusState private var isFocused: Bool
-    
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundColor(isFocused ? .accentColor : .secondary.opacity(0.7))
-                .font(.system(size: 14))
-                .animation(.easeInOut(duration: 0.2), value: isFocused)
-            
-            TextField("Search conversations...", text: $searchText)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .focused($isFocused)
-            
-            if !searchText.isEmpty {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        searchText = ""
-                    }
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary.opacity(0.6))
-                }
-                .buttonStyle(.plain)
-                .transition(.scale.combined(with: .opacity))
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color.white.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(
-                    isFocused ? Color.accentColor.opacity(0.5) : Color.white.opacity(0.1),
-                    lineWidth: isFocused ? 1.0 : 0.5
-                )
-        )
-        .shadow(
-            color: isFocused ? Color.accentColor.opacity(0.15) : Color.clear,
-            radius: 6, x: 0, y: 0
-        )
-        .animation(.easeInOut(duration: 0.2), value: isFocused)
-    }
-}
 
 // MARK: - Sidebar Empty State
 /// Displayed when there are no conversations available.
-struct SidebarEmptyStateView: View {
-    /// Closure triggered to start a new chat.
-    var onStartChat: () -> Void
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            
-            ZStack {
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.accentColor.opacity(0.08), Color.purple.opacity(0.06)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 90, height: 90)
-                
-                Image(systemName: "bubble.left.and.text.bubble.right")
-                    .font(.system(size: 36))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.accentColor.opacity(0.7), .purple.opacity(0.5)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-            
-            VStack(spacing: 6) {
-                Text("No Conversations Yet")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.primary)
-                
-                Text("Start a new chat to begin exploring")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            
-            Button(action: onStartChat) {
-                HStack(spacing: 6) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("Start a Conversation")
-                        .font(.system(size: 13, weight: .medium))
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color.accentColor)
-                .foregroundColor(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
 
 // MARK: - Sidebar Group Header View
 /// A custom disclosure group header representing time-based categories (e.g., "Today", "Previous 7 Days").
@@ -198,12 +52,13 @@ struct SidebarGroupHeaderView: View {
     @Binding var isExpanded: Bool
     
     @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack(spacing: 0) {
             Image(systemName: "chevron.right")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(.secondary.opacity(0.5))
+                .foregroundColor(theme.secondaryText.opacity(0.5))
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isExpanded)
                 .frame(width: 16)
@@ -370,17 +225,29 @@ struct ConversationSidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             
-            SidebarHeaderView(onNewChat: { viewModel.startNewConversation() })
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
+            SidebarHeaderView(
+                title: "Chats",
+                buttonTitle: "New Chat",
+                systemImage: "plus",
+                shortcut: "⌘N",
+                onAction: { viewModel.startNewConversation() }
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
-            SidebarSearchBarView(searchText: $searchText)
+            SidebarSearchBarView("Search conversations...", text: $searchText)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
 
             if conversations.isEmpty && searchText.isEmpty {
-                SidebarEmptyStateView(onStartChat: { viewModel.startNewConversation() })
+                SidebarEmptyStateView(
+                    title: "No Conversations Yet",
+                    subtitle: "Start a new chat to begin exploring",
+                    buttonTitle: "Start a Conversation",
+                    systemImage: "bubble.left.and.text.bubble.right",
+                    onAction: { viewModel.startNewConversation() }
+                )
             } else {
                 conversationList
             }

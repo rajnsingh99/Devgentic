@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Extracted during Phase 2 Modularization
-//  Updated: Native API Integration (Loosened Prompts)
+//  Updated: Native API Integration (Loosened Prompts + Smart Plain Text Fallback)
 //
 
 import Foundation
@@ -37,9 +37,11 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         // --- NATURAL PROMPT TRIGGER ---
         // We no longer force the model to output strict JSON markdown.
         // We let it act naturally and rely on the LLMProvider to intercept native tool_calls.
+        // However, for local models (like Llama 3 Groq) to reliably trigger native tool outputs,
+        // we append a stronger call-to-action to use the provided tool schema.
         let promptTrigger = (iteration == 1)
-            ? "Begin ReAct loop. Analyze Active Memory. Decide your next step. If you need to take an action, use the provided tools."
-            : "Review OBSERVATION. Update State. Decide your next step. If you need to take an action, use the provided tools."
+            ? "Begin ReAct loop. Analyze Active Memory. Decide your next step. If you need to take an action, you MUST use one of the provided tools using its exact function calling format."
+            : "Review OBSERVATION. Update State. Decide your next step. If you need to take an action, you MUST use one of the provided tools using its exact function calling format."
 
         executionMessages.append(["role": "user", "content": promptTrigger])
 
@@ -67,15 +69,37 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         }
 
         do {
-            // The JSONDecoder will seamlessly parse the synthetic JSON string created by LLMProviders.swift
+            // 1. Try standard Native decoding (Intercepted Synthetic JSON)
             let step = try JSONDecoder().decode(LeanCognitiveStep.self, from: data)
             logLLMOps.info("🎉 [Native:\(reqId)] Successfully decoded LeanCognitiveStep. Action: \(step.toolName ?? "None (Termination)")")
             return step
         } catch {
             logLLMOps.warning("⚠️ [Native:\(reqId)] Direct decode failed, trying shadow parser: \(error.localizedDescription)")
-            // Falls back to the shared robust parser defined in PromptedJsonModeGenerator
-            return try GeminiShadowSchema.parse(responseText)
+            
+            // 2. Try shadow parser for malformed JSON outputs
+            do {
+                return try GeminiShadowSchema.parse(responseText)
+            } catch {
+                let trimmed = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // 3. IMPROVED FIX: Smart Fallback for Plain Text Conversational Responses
+                // If the text contains strong indicators of an attempted JSON tool call, throw the error
+                // so the LLMRetryStrategy can instruct the model to fix its JSON.
+                if trimmed.contains("\"tool_name\"") || trimmed.contains("\"arguments\"") {
+                    logLLMOps.warning("⚠️ [Native:\(reqId)] Response looks like a broken JSON tool call. Throwing to trigger retry.")
+                    throw error
+                }
+                
+                // If it doesn't look like JSON, the model is likely just talking to the user
+                // (e.g., "Here is your essay..."). We wrap it as a successful termination step.
+                logLLMOps.info("🔧 [Native:\(reqId)] Response is plain text. Wrapping as conversational termination step.")
+                
+                return LeanCognitiveStep(
+                    content: trimmed,
+                    toolName: nil, // Trigger loop termination
+                    arguments: nil
+                )
+            }
         }
     }
 }
-

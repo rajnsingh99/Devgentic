@@ -13,6 +13,7 @@ import SwiftUI
 /// A view that allows the user to choose a type and name for a new Backend Profile.
 struct AddBackendProfileView: View {
     @Environment(\.dismiss) var dismiss
+    @Environment(\.appTheme) private var theme
 
     // MARK: - State Management
     @State private var displayName: String = ""
@@ -41,16 +42,16 @@ struct AddBackendProfileView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Identity")
                             .font(.headline)
-                            .foregroundColor(.primary)
+                            .foregroundColor(theme.primaryText)
                         
                         TextField("Profile Name (e.g. 'Coding Assistant')", text: $displayName)
                             .textFieldStyle(.plain)
                             .padding(12)
-                            .background(Color(nsColor: .controlBackgroundColor))
+                            .background(theme.secondaryBackground)
                             .cornerRadius(10)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10)
-                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                                    .stroke(theme.dividerColor, lineWidth: 1)
                             )
                     }
                     
@@ -58,7 +59,7 @@ struct AddBackendProfileView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Architecture Type")
                             .font(.headline)
-                            .foregroundColor(.primary)
+                            .foregroundColor(theme.primaryText)
                         
                         VStack(spacing: 12) {
                             ProfileTypeCard(
@@ -83,7 +84,7 @@ struct AddBackendProfileView: View {
                 }
                 .padding(20)
             }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(theme.primaryBackground)
             
             Divider()
 
@@ -101,7 +102,8 @@ struct AddBackendProfileView: View {
                     .keyboardShortcut(.defaultAction)
             }
             .padding()
-            .background(.regularMaterial)
+            .background(theme.secondaryBackground)
+            .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .top)
         }
         .frame(width: 500, height: 650) // Optimized for content
     }
@@ -156,15 +158,16 @@ struct AddBackendProfileView: View {
                 Text("New Profile")
                     .font(.title2)
                     .fontWeight(.bold)
+                    .foregroundColor(theme.primaryText)
                 Text("Configure a new intelligence unit.")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
             }
             
             Spacer()
         }
         .padding(20)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(theme.primaryBackground)
     }
 }
 
@@ -176,6 +179,7 @@ struct ProfileTypeCard: View {
     let action: () -> Void
     
     @State private var isHovering: Bool = false
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         Button(action: action) {
@@ -183,22 +187,22 @@ struct ProfileTypeCard: View {
                 // Icon Container
                 ZStack {
                     Circle()
-                        .fill(isSelected ? color.opacity(0.2) : Color.secondary.opacity(0.1))
+                        .fill(isSelected ? color.opacity(0.2) : theme.dividerColor)
                         .frame(width: 44, height: 44)
                     
                     Image(systemName: icon)
                         .font(.system(size: 20))
-                        .foregroundColor(isSelected ? color : .secondary)
+                        .foregroundColor(isSelected ? color : theme.secondaryText)
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(type.rawValue)
                         .font(.headline)
-                        .foregroundColor(isSelected ? .primary : .primary.opacity(0.9))
+                        .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.9))
                     
                     Text(description)
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -211,8 +215,7 @@ struct ProfileTypeCard: View {
                         .font(.title3)
                 } else {
                     Image(systemName: "circle")
-                        .foregroundColor(.secondary.opacity(0.2))
-                        .font(.title3)
+                        .foregroundColor(theme.secondaryText)
                 }
             }
             .padding(16)
@@ -239,12 +242,12 @@ struct ProfileTypeCard: View {
     
     private var backgroundColor: Color {
         if isSelected { return color.opacity(0.05) }
-        return isHovering ? Color(nsColor: .controlBackgroundColor).opacity(0.8) : Color(nsColor: .controlBackgroundColor)
+        return isHovering ? theme.secondaryBackground.opacity(0.8) : theme.secondaryBackground
     }
     
     private var borderColor: Color {
         if isSelected { return color }
-        return isHovering ? Color.secondary.opacity(0.3) : Color.secondary.opacity(0.1)
+        return isHovering ? theme.secondaryText.opacity(0.5) : theme.dividerColor
     }
     
     private var shadowColor: Color {

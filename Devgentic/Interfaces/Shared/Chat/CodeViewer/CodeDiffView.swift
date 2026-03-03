@@ -5,12 +5,14 @@
 //  Created by Raj Singh on 08/08/25.
 //
 //  MODERNIZED: GitHub-style Unified Diff with line numbers and distinct gutters.
+//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 
 import SwiftUI
 
 struct CodeDiffView: View {
     let originalCode: String
     let modifiedCode: String
+    @Environment(\.appTheme) private var theme
 
     private var diffResults: [DiffResult] {
         return DiffUtility.generateDiff(original: originalCode, modified: modifiedCode)
@@ -33,7 +35,7 @@ struct CodeDiffView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(gutterColor(for: result.type))
-                        
+
                         // Vertical Divider
                         Rectangle()
                             .fill(borderColor(for: result.type))
@@ -58,11 +60,11 @@ struct CodeDiffView: View {
                 }
             }
         }
-        .background(Color(NSColor.textBackgroundColor))
+        .background(theme.textBackground)
     }
 
     // MARK: - Styling Helpers
-    
+
     private func formatLineNumber(_ number: Int?) -> String {
         guard let number = number else { return "    " }
         return String(format: "%4d", number)
@@ -70,22 +72,22 @@ struct CodeDiffView: View {
 
     private func rowBackgroundColor(for type: LineChangeType) -> Color {
         switch type {
-        case .added: return Color.green.opacity(0.1)
-        case .deleted: return Color.red.opacity(0.1)
+        case .added: return theme.successColor.opacity(0.1)
+        case .deleted: return theme.errorColor.opacity(0.1)
         case .unchanged: return Color.clear
         }
     }
-    
+
     private func gutterColor(for type: LineChangeType) -> Color {
         switch type {
-        case .added: return Color.green.opacity(0.05)
-        case .deleted: return Color.red.opacity(0.05)
-        case .unchanged: return Color(NSColor.controlBackgroundColor)
+        case .added: return theme.successColor.opacity(0.05)
+        case .deleted: return theme.errorColor.opacity(0.05)
+        case .unchanged: return theme.controlBackground
         }
     }
-    
+
     private func borderColor(for type: LineChangeType) -> Color {
-        return Color.gray.opacity(0.2)
+        return theme.dividerColor
     }
 
     private func prefix(for type: LineChangeType) -> String {
@@ -97,14 +99,14 @@ struct CodeDiffView: View {
     }
 
     private func lineNumberColor(for type: LineChangeType) -> Color {
-        return Color.secondary.opacity(0.6)
+        return theme.secondaryText.opacity(0.6)
     }
-    
+
     private func contentColor(for type: LineChangeType) -> Color {
         switch type {
-        case .added: return Color.green.opacity(0.8) // Readable green text
-        case .deleted: return Color.red.opacity(0.8)   // Readable red text
-        case .unchanged: return Color.primary.opacity(0.9)
+        case .added: return theme.successColor.opacity(0.8) // Readable green text
+        case .deleted: return theme.errorColor.opacity(0.8)   // Readable red text
+        case .unchanged: return theme.primaryText.opacity(0.9)
         }
     }
 }

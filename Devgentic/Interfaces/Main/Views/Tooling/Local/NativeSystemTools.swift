@@ -13,13 +13,8 @@ import AppKit
 
 struct TerminalTool: DevgenticTool {
     let name = "execute_shell"
-    let description = """
-    [PURPOSE]: Executes a ZSH shell command on the host machine.
-    [WHEN TO USE]: Use for system administration, git operations, or advanced file manipulation.
-    [CONSTRAINTS]: Commands are NON-INTERACTIVE. Do NOT use `sudo`, `nano`, `vim`, or any command requiring user input.
-    [INPUT]: { "command": "ls -lah /tmp" }
-    [OUTPUT]: Stdout and Stderr of the command.
-    """
+    let category = "System & Shell"
+    let description = "Executes a non-interactive ZSH shell command on the host. Do not use sudo or interactive commands."
     
     // NEW: Session Context injected by AgentConnect
     let conversationID: UUID?
@@ -110,12 +105,8 @@ struct TerminalTool: DevgenticTool {
 
 struct OpenApplicationTool: DevgenticTool {
     let name = "open_application"
-    let description = """
-    [PURPOSE]: Launches a macOS application using its Bundle Identifier.
-    [WHEN TO USE]: Use when the user asks to open a specific app.
-    [INPUT]: { "bundle_identifier": "com.apple.Safari" }
-    [OUTPUT]: Success or Error message.
-    """
+    let category = "System & Shell"
+    let description = "Launches a macOS application using its Bundle Identifier."
     
     struct Arguments: Decodable, Sendable {
         let bundle_identifier: String
@@ -205,12 +196,8 @@ struct OpenApplicationTool: DevgenticTool {
 
 struct RunAppleScriptTool: DevgenticTool {
     let name = "run_applescript"
-    let description = """
-    [PURPOSE]: Executes an AppleScript code block.
-    [WHEN TO USE]: Use for controlling macOS UI elements or apps that support AppleScript automation.
-    [INPUT]: { "script": "tell application \"Finder\" to activate" }
-    [OUTPUT]: The result of the script execution.
-    """
+    let category = "System & Shell"
+    let description = "Executes an AppleScript code block for application or system automation."
     
     struct Arguments: Decodable, Sendable {
         let script: String
@@ -290,11 +277,8 @@ struct RunAppleScriptTool: DevgenticTool {
 
 struct GetSystemStatsTool: DevgenticTool {
     let name = "get_system_stats"
-    let description = """
-    [PURPOSE]: Retrieves basic system metrics (OS version, User, Memory).
-    [WHEN TO USE]: Use when the user asks about the machine's status or configuration.
-    [OUTPUT]: Formatted string with OS, User, and RAM details.
-    """
+    let category = "System & Shell"
+    let description = "Retrieves basic system metrics including OS version, user, and free memory."
     
     struct Arguments: Decodable, Sendable {
         private struct DynamicKey: CodingKey {

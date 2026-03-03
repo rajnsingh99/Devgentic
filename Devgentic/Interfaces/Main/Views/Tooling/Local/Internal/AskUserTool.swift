@@ -26,12 +26,7 @@ struct AskUserTool: DevgenticTool {
     // MARK: - Properties
 
     let name = "ask_user"
-    let description = """
-    [PURPOSE]: Asks the user a clarifying question and waits for their response.
-    [WHEN TO USE]: Use when you lack critical information to proceed — e.g., ambiguous instructions, missing file paths, or unclear intent. Do NOT use for status updates or confirmations.
-    [INPUT]: { "question": "Which file would you like me to modify?" }
-    [OUTPUT]: The user's text response.
-    """
+    let description = "Asks the user a clarifying question and waits for their response."
 
     // MARK: - Type Definitions
 

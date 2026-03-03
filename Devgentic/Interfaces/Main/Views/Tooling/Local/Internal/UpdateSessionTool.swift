@@ -15,12 +15,7 @@ struct UpdateSessionTool: DevgenticTool {
     // MARK: - Properties
     
     let name = "update_session_context"
-    let description = """
-    [PURPOSE]: Updates the persistent 'Project Brief' (markdown) for the current session.
-    [WHEN TO USE]: Use to permanently record completed tasks, goals, or key decisions so you remember them across turns.
-    [INPUT]: { "content": "# Completed\\n- Organized desktop\\n- Moved photos" }
-    [OUTPUT]: Success or Error message.
-    """
+    let description = "Updates the persistent 'Project Brief' (markdown) for the current session."
     let conversationID: UUID
     
     // MARK: - Initialization

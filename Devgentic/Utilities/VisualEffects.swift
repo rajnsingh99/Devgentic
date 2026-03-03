@@ -1,5 +1,5 @@
 //
-//  AppTheme.swift
+//  VisualEffects.swift
 //  Devgentic
 //
 //  Created by Raj Singh on 18/08/25.
@@ -7,24 +7,20 @@
 
 import SwiftUI
 
-struct AppTheme {
-    struct Colors {
-        static let premiumDarkGrey = Color(red: 0.1, green: 0.1, blue: 0.1)
-    }
-}
-
 struct ChatGPTBackgroundView: View {
+    @Environment(\.appTheme) private var theme
+    
     var body: some View {
         LinearGradient(
             gradient: Gradient(colors: [
-                Color(red: 0.15, green: 0.15, blue: 0.16),
-                Color(red: 0.1, green: 0.1, blue: 0.11)
+                theme.primaryBackground,
+                theme.controlBackground
             ]),
             startPoint: .top,
             endPoint: .bottom
         )
         .overlay(
-            Color.black.opacity(0.04)
+            theme.primaryText.opacity(0.04)
                 .blendMode(.multiply)
         )
         .edgesIgnoringSafeArea(.all)
@@ -32,10 +28,12 @@ struct ChatGPTBackgroundView: View {
 }
 
 struct ChatHistoryVisualEffectBlur: View {
+    @Environment(\.appTheme) private var theme
+    
     var body: some View {
         ZStack {
             CHVisualEffectBlur(material: .underWindowBackground)
-            Color.black.opacity(0.4)
+            theme.primaryBackground.opacity(0.4)
         }
     }
 }
@@ -60,5 +58,3 @@ private struct CHVisualEffectBlur: NSViewRepresentable {
         nsView.state = state
     }
 }
-
-

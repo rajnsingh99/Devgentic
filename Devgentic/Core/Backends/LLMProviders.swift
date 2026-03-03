@@ -358,61 +358,6 @@ struct OllamaLLMProvider: LLMProvider {
     }
 }
 
-// MARK: - MLX Provider
-
-/// Wraps the existing MLXService for on-device inference.
-struct MLXLLMProvider: LLMProvider {
-
-    let modelName: String
-
-    init(modelName: String) {
-        self.modelName = modelName
-    }
-
-    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
-        var fullText = ""
-        let temperature: Float = 0.6
-        let maxTokens = 2048
-
-        let stream = await MLXService.shared.streamChat(
-            messages: messages,
-            maxTokens: maxTokens,
-            temperature: temperature
-        )
-
-        for try await token in stream {
-            fullText += token
-        }
-
-        return fullText
-    }
-
-    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
-        let temperature: Float = 0.6
-        let maxTokens = 2048
-
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    let tokenStream = await MLXService.shared.streamChat(
-                        messages: messages,
-                        maxTokens: maxTokens,
-                        temperature: temperature
-                    )
-
-                    for try await token in tokenStream {
-                        continuation.yield(token)
-                    }
-
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-        }
-    }
-}
-
 // MARK: - Error Type
 
 /// Errors specific to LLM provider operations.

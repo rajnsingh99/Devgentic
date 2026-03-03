@@ -19,18 +19,19 @@ struct ChatInputAreaView: View {
 
     @Binding var showContextArea: Bool
     @Binding var activeContextFilePath: String?
-    
+
     let isSending: Bool
     let showSettings: Bool
     var isInputFocused: FocusState<Bool>.Binding
-    
+
     @ObservedObject var backendConfiguration: BackendConfiguration
-    
+
     let onSendMessage: (NSAttributedString, BackendRequestConfig) -> Void
     let onToggleContext: () -> Void
 
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
 
     // MARK: - UI State (Cleaned of Business Logic)
     @State private var showingBackendSelectorPopup: Bool = false
@@ -227,12 +228,12 @@ struct ChatInputAreaView: View {
         }
         .background(
             RoundedRectangle(cornerRadius: 16)
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(theme.controlBackground)
                 .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(theme.surfaceOverlay, lineWidth: 1)
         )
         .transition(.opacity)
     }
@@ -297,7 +298,7 @@ struct ChatInputAreaView: View {
                 // reading from the optional textView ref which is nil on first render.
                 Text(placeholderText)
                     .font(Font(defaultTypingAttributes[.font] as! NSFont))
-                    .foregroundColor(Color(NSColor.placeholderTextColor))
+                    .foregroundColor(theme.placeholderText)
                     .padding(.leading, 3 + 5) // textContainerInset.width(2) + lineFragmentPadding(5) ≈ 8
                     .padding(.top, 10)         // textContainerInset.height
                     .allowsHitTesting(false)
@@ -333,11 +334,11 @@ struct ChatInputAreaView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 14, height: 14)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .padding(6)
                     .background(
                         Circle()
-                            .fill(isPlusButtonHovering ? Color.secondary.opacity(0.15) : Color.clear)
+                            .fill(isPlusButtonHovering ? theme.secondaryText.opacity(0.15) : Color.clear)
                     )
             }
             .buttonStyle(.plain)
@@ -369,22 +370,22 @@ struct ChatInputAreaView: View {
 
                 Text(profileButtonText)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.primary)
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.secondary.opacity(0.8))
+                    .foregroundColor(theme.secondaryText.opacity(0.8))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(
                 Capsule()
-                    .fill(isBackendPickerHovering ? Color.primary.opacity(0.04) : Color.clear)
+                    .fill(isBackendPickerHovering ? theme.surfaceOverlay : Color.clear)
             )
             .overlay(
                 Capsule()
-                    .stroke(Color.secondary.opacity(isBackendPickerHovering ? 0.3 : 0.15), lineWidth: 1)
+                    .stroke(theme.secondaryText.opacity(isBackendPickerHovering ? 0.3 : 0.15), lineWidth: 1)
             )
             .scaleEffect(isBackendPickerHovering ? 1.02 : 1.0)
         }
@@ -471,7 +472,7 @@ struct ChatInputAreaView: View {
                     // Inline progress spinner overlay during model download/preparation
                     if inputViewModel.voiceInputState == .modelLoading || inputViewModel.voiceInputState == .modelPreparing {
                         Circle()
-                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.85))
+                            .fill(theme.controlBackground.opacity(0.85))
                             .frame(width: dynamicButtonSize, height: dynamicButtonSize)
                             .overlay {
                                 ProgressView()
@@ -530,13 +531,13 @@ struct ChatInputAreaView: View {
     private func buttonBackgroundColor(for mode: DynamicButtonMode, canSend: Bool, isDisabledBySystem: Bool) -> Color {
         switch mode {
         case .send:
-            return (canSend && !isDisabledBySystem) ? Color(NSColor.controlAccentColor) : Color.secondary.opacity(0.2)
+            return (canSend && !isDisabledBySystem) ? theme.controlAccent : theme.secondaryText.opacity(0.2)
         case .stopVoice:
-            return Color.red.opacity(0.9)
+            return theme.errorColor.opacity(0.9)
         case .stopStreaming:
-            return Color.primary
+            return theme.primaryText
         case .mic:
-            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? Color(NSColor.controlAccentColor) : Color.secondary.opacity(0.2)
+            return (isDisabledBySystem || inputViewModel.voiceInputState != .available && inputViewModel.voiceInputState != .idle) ? theme.controlAccent : theme.secondaryText.opacity(0.2)
         }
     }
 
@@ -550,8 +551,8 @@ struct ChatInputAreaView: View {
             case .processing: return .orange
             case .permissionsDeniedMic, .error: return .red.opacity(0.8)
             case .requestingPermissions: return .orange
-            case .modelLoading, .modelPreparing: return .accentColor
-            default: return .primary
+            case .modelLoading, .modelPreparing: return theme.accentColor
+            default: return theme.primaryText
             }
         }
     }

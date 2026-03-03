@@ -92,10 +92,6 @@ class AgentConnect: ObservableObject {
                         // DYNAMIC ROUTING: Use Native Tools if supported by the model, otherwise fallback to JsonMode.
                         generatorStrategy = llmConfig.supportsNativeTools ? NativeStructuredGenerator() : JsonModeGenerator()
                         rateLimitCategory = .local
-                        
-                    default:
-                        generatorStrategy = NativeStructuredGenerator()
-                        rateLimitCategory = .geminiFlash
                     }
                     
                     // 3. Resolve Tools
@@ -341,6 +337,17 @@ class AgentConnect: ObservableObject {
         case "fs_read_metadata": return wrapTool(ReadMetadataTool(), requiresConfirmation: requiresConfirmation)
         case "fs_organize_batch": return wrapTool(OrganizeBatchTool(), requiresConfirmation: requiresConfirmation)
         case "read_session_history": return wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: requiresConfirmation)
+            
+        // NEW MACOS SYSTEM COMMANDING TOOLS
+        case "read_screen_state": return wrapTool(ReadScreenStateTool(), requiresConfirmation: requiresConfirmation)
+        case "click_ui_element": return wrapTool(ClickUIElementTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_windows": return wrapTool(ManageWindowsTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_calendar": return wrapTool(ManageCalendarTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_reminders": return wrapTool(ManageRemindersTool(), requiresConfirmation: requiresConfirmation)
+        case "read_contacts": return wrapTool(ReadContactsTool(), requiresConfirmation: requiresConfirmation)
+        case "run_mac_shortcut": return wrapTool(RunMacShortcutTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_clipboard": return wrapTool(ManageClipboardTool(), requiresConfirmation: requiresConfirmation)
+        case "push_local_notification": return wrapTool(PushLocalNotificationTool(), requiresConfirmation: requiresConfirmation)
         default: return nil
         }
     }

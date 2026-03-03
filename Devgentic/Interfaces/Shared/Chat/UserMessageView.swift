@@ -15,6 +15,8 @@ struct UserMessageView: View {
     @State private var isExpanded = false
     @State private var isTruncatable = false
 
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if isTruncatable {
@@ -39,7 +41,7 @@ struct UserMessageView: View {
             }
 
             Text(text)
-                .font(UITheme.Fonts.body)
+                .font(theme.fontBody)
                 .lineLimit(isExpanded ? nil : lineLimitCollapsed)
                 .background(
                     GeometryReader { geometry in
@@ -55,11 +57,11 @@ struct UserMessageView: View {
     
     private func determineTruncation(availableWidth: CGFloat) {
         let fullTextView = Text(text)
-            .font(UITheme.Fonts.body)
+            .font(.system(size: 15)) // Fallback for fixed size calc
             .frame(width: availableWidth, alignment: .leading)
         
         let truncatedTextView = Text(text)
-            .font(UITheme.Fonts.body)
+            .font(.system(size: 15)) // Fallback for fixed size calc
             .lineLimit(lineLimitCollapsed)
             .frame(width: availableWidth, alignment: .leading)
             

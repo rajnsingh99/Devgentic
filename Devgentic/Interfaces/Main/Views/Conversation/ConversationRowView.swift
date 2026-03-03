@@ -18,6 +18,7 @@ struct ConversationRowView: View {
 
     // Local state for hover effect
     @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack(spacing: 0) {
@@ -30,7 +31,7 @@ struct ConversationRowView: View {
                     .onSubmit(onCommitRename)
                     .padding(.vertical, 8)
                     .padding(.horizontal, 10)
-                    .background(Color.black.opacity(0.2))
+                    .background(theme.surfaceOverlayStrong)
                     .cornerRadius(6)
             } else {
                 standardContentView
@@ -72,7 +73,7 @@ struct ConversationRowView: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(
                         LinearGradient(
-                            colors: [Color.accentColor, Color.accentColor.opacity(0.4)],
+                            colors: [theme.accentColor, theme.accentColor.opacity(0.4)],
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -107,13 +108,13 @@ struct ConversationRowView: View {
                     if conversation.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 9))
-                            .foregroundColor(.secondary.opacity(0.6))
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
                             .rotationEffect(.degrees(-45))
                     }
 
                     Text(conversation.displayTitle)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.primary)
+                        .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
                     Spacer()
@@ -122,7 +123,7 @@ struct ConversationRowView: View {
                     if !isHovering {
                         Text(conversation.relativeTimestamp)
                             .font(.system(size: 10, weight: .regular))
-                            .foregroundColor(.secondary.opacity(0.6))
+                            .foregroundColor(theme.secondaryText.opacity(0.6))
                             .lineLimit(1)
                             .transition(.opacity)
                     }
@@ -131,7 +132,7 @@ struct ConversationRowView: View {
                 HStack(spacing: 6) {
                     Text(conversation.lastMessageSnippet)
                         .font(.system(size: 11, weight: .regular))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.tail)
 
@@ -143,8 +144,8 @@ struct ConversationRowView: View {
                             .font(.system(size: 9, weight: .medium))
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(badgeColor(for: backendType).opacity(0.12))
-                            .foregroundColor(badgeColor(for: backendType).opacity(0.9))
+                            .background(badgeColor(for: backendType).opacity(0.1))
+                            .foregroundColor(badgeColor(for: backendType).opacity(0.8))
                             .clipShape(Capsule())
                     }
                 }
@@ -181,16 +182,16 @@ struct ConversationRowView: View {
         if isSelected {
             // Accent-tinted selected state
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.accentColor.opacity(0.10))
+                .fill(theme.accentColor.opacity(0.08))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color.accentColor.opacity(0.15), lineWidth: 0.5)
+                        .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
                 )
-                .shadow(color: Color.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
+                .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
         } else if isHovering {
             // Subtle hover plate
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.06))
+                .fill(theme.surfaceOverlay)
         } else {
             Color.clear
         }
@@ -316,7 +317,7 @@ struct ConversationRowView_Previews: PreviewProvider {
             }
             .padding()
             .frame(width: 300)
-            .background(Color(NSColor.windowBackgroundColor))
+            .background(AppThemes.DefaultTheme().primaryBackground)
         }
     }
 }

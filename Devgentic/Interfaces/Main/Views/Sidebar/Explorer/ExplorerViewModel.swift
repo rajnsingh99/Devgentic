@@ -60,6 +60,38 @@ final class ExplorerViewModel: ObservableObject {
             }
         }
     }
+    
+    @Published var searchText: String = ""
+    
+    var filteredRootItems: [FileSystemItem] {
+        if searchText.isEmpty {
+            return rootItems
+        }
+        
+        let query = searchText.lowercased()
+        
+        // Deep search in the visible tree
+        func filterItems(_ items: [FileSystemItem]) -> [FileSystemItem] {
+            var result: [FileSystemItem] = []
+            
+            for item in items {
+                if item.name.lowercased().contains(query) {
+                    result.append(item)
+                } else if let children = item.children {
+                    let filteredChildren = filterItems(children)
+                    if !filteredChildren.isEmpty {
+                        var itemWithFilteredChildren = item
+                        itemWithFilteredChildren.children = filteredChildren
+                        result.append(itemWithFilteredChildren)
+                    }
+                }
+            }
+            
+            return result
+        }
+        
+        return filterItems(rootItems)
+    }
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
     

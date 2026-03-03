@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 20/07/25.
 //
 //  MODERNIZED: Glassmorphic card design with language badges.
+//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 
 import SwiftUI
 
@@ -13,8 +14,9 @@ struct CodeBlockCardView: View {
     let lineCount: Int
     let fileName: String?
     let action: () -> Void
-    
+
     @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     private var title: String {
         if let fileName = fileName, !fileName.isEmpty { return fileName }
@@ -27,46 +29,46 @@ struct CodeBlockCardView: View {
                 // Icon Container
                 ZStack {
                     Circle()
-                        .fill(LinearGradient(colors: [.blue.opacity(0.2), .purple.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .fill(LinearGradient(colors: [theme.streamingIndicator.opacity(0.2), theme.accentColor.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
                         .frame(width: 44, height: 44)
-                    
+
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
                         .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(theme.accentColor)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .foregroundColor(theme.primaryText)
 
                     Text("\(lineCount) lines • Tap to expand")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
 
                 Spacer()
-                
+
                 // Language Badge
                 Text(language.uppercased())
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.black.opacity(0.1))
+                    .background(theme.surfaceOverlayStrong)
                     .cornerRadius(4)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.surfaceOverlayStrong, lineWidth: 1))
 
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.caption)
-                    .foregroundColor(.secondary.opacity(0.5))
+                    .foregroundColor(theme.secondaryText.opacity(0.5))
             }
             .padding(12)
             .background(.ultraThinMaterial)
             .cornerRadius(12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isHovering ? Color.accentColor.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                    .stroke(isHovering ? theme.accentColor.opacity(0.5) : theme.surfaceOverlayStrong, lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
             .scaleEffect(isHovering ? 1.01 : 1.0)

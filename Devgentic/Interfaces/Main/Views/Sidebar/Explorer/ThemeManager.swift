@@ -23,7 +23,8 @@ final class ThemeManager: ObservableObject {
     /// The array of all themes available in the application.
     let availableThemes: [any Theme] = [
         AppThemes.DefaultTheme(),
-        AppThemes.DraculaTheme()
+        AppThemes.DraculaTheme(),
+        AppThemes.OneLightTheme()
     ]
 
     /// The currently active theme. Published to allow SwiftUI views to automatically

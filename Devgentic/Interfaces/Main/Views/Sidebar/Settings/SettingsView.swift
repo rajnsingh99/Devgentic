@@ -41,9 +41,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             // Use the new dedicated view for Ollama settings
             OllamaSettingsView_old()
         case .theme:
-            Text("Theme Settings")
-                .font(.title2)
-                .foregroundColor(.secondary)
+            ThemeSettingsView()
         case .about:
             Text("About Devgentic")
                 .font(.title2)
@@ -57,6 +55,7 @@ struct SettingsView: View {
     @State private var selectedCategory: SettingsCategory? = .general
     
     @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         NavigationSplitView {
@@ -67,17 +66,26 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .scrollContentBackground(.hidden)
+            .background(theme.secondaryBackground)
         } detail: {
-            if let category = selectedCategory {
-                category.destination
-                    .environmentObject(mainApplicationViewModel)
-            } else {
-                Text("Select a category")
-                    .font(.title2)
-                    .foregroundColor(.secondary)
+            ZStack {
+                theme.primaryBackground
+                    .ignoresSafeArea()
+                
+                if let category = selectedCategory {
+                    category.destination
+                        .environmentObject(mainApplicationViewModel)
+                } else {
+                    Text("Select a category")
+                        .font(.title2)
+                        .foregroundColor(theme.secondaryText)
+                }
             }
         }
         .frame(minWidth: 700, minHeight: 550)
+        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
+        .configureWindow(collectionBehavior: [.canJoinAllSpaces, .fullScreenAuxiliary])
     }
 }
 

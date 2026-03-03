@@ -16,15 +16,20 @@ class SimplePromptWindowManager {
     private var window: NSWindow?
 
     /// Spawns or brings the editor window to the front.
-    func showEditor(text: Binding<String>, botName: String) {
+    func showEditor(text: Binding<String>, botName: String, theme: Theme) {
         if let existingWindow = window, existingWindow.isVisible {
-            existingWindow.contentView = NSHostingView(rootView: SimplePromptEditorView(text: text, botName: botName))
+            existingWindow.contentView = NSHostingView(
+                rootView: SimplePromptEditorView(text: text, botName: botName)
+                    .environment(\.appTheme, theme)
+            )
             existingWindow.title = "System Instructions: \(botName)"
+            existingWindow.backgroundColor = NSColor(theme.primaryBackground)
             existingWindow.makeKeyAndOrderFront(nil)
             return
         }
 
         let editorView = SimplePromptEditorView(text: text, botName: botName)
+            .environment(\.appTheme, theme)
         
         let newWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 600, height: 500),
@@ -40,7 +45,7 @@ class SimplePromptWindowManager {
         newWindow.level = .floating
         
         newWindow.isOpaque = false
-        newWindow.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.98)
+        newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
 
         self.window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
@@ -57,6 +62,7 @@ class SimplePromptWindowManager {
 struct SimplePromptEditorView: View {
     @Binding var text: String
     var botName: String
+    @Environment(\.appTheme) private var theme
     
     // Local state to drive real-time UI updates in the detached window
     @State private var localText: String = ""
@@ -69,9 +75,10 @@ struct SimplePromptEditorView: View {
                 VStack(alignment: .leading) {
                     Text("System Instructions")
                         .font(.headline)
+                        .foregroundColor(theme.primaryText)
                     Text("Defines the core persona and behavior for \(botName).")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
                 Spacer()
                 
@@ -79,24 +86,31 @@ struct SimplePromptEditorView: View {
                     Text("\(localText.count) characters")
                         .font(.subheadline)
                         .monospacedDigit()
+                        .foregroundColor(theme.primaryText)
                     Text("~ \(localText.count / 4) tokens")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
             }
             .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(theme.primaryBackground)
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor)
+                .frame(height: 1)
 
             // The Core Editor (Standard SwiftUI TextEditor)
             TextEditor(text: $localText)
                 .font(.system(.body, design: .monospaced))
+                .foregroundColor(theme.primaryText)
                 .disableAutocorrection(true)
                 .padding(8)
-                .background(Color(nsColor: .textBackgroundColor))
+                .scrollContentBackground(.hidden)
+                .background(theme.textBackground)
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor)
+                .frame(height: 1)
 
             // Footer
             HStack {
@@ -104,7 +118,7 @@ struct SimplePromptEditorView: View {
                     .foregroundColor(.green)
                 Text("Changes sync automatically to the main window.")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                 
                 Spacer()
                 
@@ -115,9 +129,10 @@ struct SimplePromptEditorView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(theme.secondaryBackground)
         }
         .frame(minWidth: 400, minHeight: 300)
+        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "midnight" ? .dark : (theme.id == "dracula" ? .dark : nil)))
         .onAppear {
             // Initialize local state from the binding
             localText = text

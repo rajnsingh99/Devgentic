@@ -16,6 +16,7 @@ struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(\.appTheme) private var theme
 
     @FocusState private var isInputFocused: Bool
     
@@ -23,8 +24,9 @@ struct MainApplicationView: View {
     @State private var currentSidebarPaneWidth: CGFloat = 300
 
     private let activityBarWidth: CGFloat = 50
+    private let sidebarGap: CGFloat = 12
     private var totalSidebarWidth: CGFloat {
-        activityBarWidth + (isSidebarVisible ? currentSidebarPaneWidth : 0)
+        (isSidebarVisible ? currentSidebarPaneWidth : 0) + activityBarWidth + (sidebarGap * 1.5)
     }
 
     private let inputAreaCornerRadius: CGFloat = 12
@@ -82,6 +84,7 @@ struct MainApplicationView: View {
                 .keyboardShortcut("n", modifiers: .command)
         }
         .frame(minWidth: 800, minHeight: 500)
+        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
         .onAppear {
              if viewModel.selectedConversationID != nil && !viewModel.showSettings {
                  DispatchQueue.main.async { isInputFocused = true }
@@ -100,20 +103,20 @@ struct MainApplicationView: View {
             }
         }
         .onChange(of: viewModel.selectedConversationID) { newID in
-             if newID != nil {
-                 if chatHistoryViewModel.isUserMessagesOnlyFilterActive {
-                     chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-                     logger.info("Reset user messages filter due to conversation change.")
-                 }
-                 if !viewModel.showSettings {
-                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                         isInputFocused = true
-                     }
-                 }
-             } else {
-                 isInputFocused = false
-             }
-         }
+            if newID != nil {
+                if chatHistoryViewModel.isUserMessagesOnlyFilterActive {
+                    chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
+                    logger.info("Reset user messages filter due to conversation change.")
+                }
+                if !viewModel.showSettings {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        isInputFocused = true
+                    }
+                }
+            } else {
+                isInputFocused = false
+            }
+        }
     }
     
     // MARK: - Subviews

@@ -20,6 +20,7 @@ import SwiftUI
 struct AgentConfigDetailView: View {
     @Binding var profile: BackendProfileModel
     @EnvironmentObject var profileService: BackendProfileService
+    @Environment(\.appTheme) private var theme
     
     // State to track unsaved changes
     @State private var initialProfileState: BackendProfileModel?
@@ -37,6 +38,14 @@ struct AgentConfigDetailView: View {
     
     // Tool Library Sheet
     @State private var showingToolLibrary = false
+    
+    // Deletion State
+    @State private var showingDeleteAlert = false
+    
+    // Button Hover States
+    @State private var isDeleteHovered = false
+    @State private var isRevertHovered = false
+    @State private var isSaveHovered = false
     
     // [PHASE 1 REFACTOR]: Enriched Default Persona
     private let defaultSystemPersona = """
@@ -203,17 +212,18 @@ struct AgentConfigDetailView: View {
                             .font(.title2)
                             .fontWeight(.bold)
                             .textFieldStyle(.plain)
+                            .foregroundColor(theme.primaryText)
                         
                         Text("Define your agent's personality, logic, and tools.")
                             .font(.subheadline)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                     }
                     Spacer()
                 }
                 .padding()
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(theme.secondaryBackground)
                 .cornerRadius(12)
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.dividerColor, lineWidth: 1))
                 
                 // 2. Cognitive Architecture (The Brain)
                 ModernSection(title: "Cognitive Architecture", icon: "brain.head.profile") {
@@ -225,7 +235,7 @@ struct AgentConfigDetailView: View {
                                 .fontWeight(.medium)
                             Text(architectureBinding.wrappedValue.description)
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                         }
                         
                         Spacer(minLength: 16)
@@ -247,7 +257,7 @@ struct AgentConfigDetailView: View {
                             Label("System Instructions", systemImage: "text.quote")
                                 .font(.subheadline)
                                 .fontWeight(.medium)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                             
                             Spacer()
                             
@@ -255,7 +265,8 @@ struct AgentConfigDetailView: View {
                                 AdvancedPromptWindowManager.shared.showEditor(
                                     text: instructionsBinding,
                                     agentName: profile.displayName,
-                                    configuredTools: toolsBinding
+                                    configuredTools: toolsBinding,
+                                    theme: theme
                                 )
                             } label: {
                                 Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
@@ -263,7 +274,7 @@ struct AgentConfigDetailView: View {
                             .font(.caption)
                             .buttonStyle(.link)
                             
-                            Text("|").foregroundColor(.secondary.opacity(0.3)).font(.caption)
+                            Text("|").foregroundColor(theme.secondaryText).font(.caption)
                             
                             Button("Use Default Persona") {
                                 instructionsBinding.wrappedValue = defaultSystemPersona
@@ -274,13 +285,15 @@ struct AgentConfigDetailView: View {
                         
                         TokenizingTextEditor(
                             text: instructionsBinding,
-                            configuredTools: toolsBinding
+                            configuredTools: toolsBinding,
+                            theme: theme
                         )
                         .frame(minHeight: 120)
                         .padding(8)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .scrollContentBackground(.hidden)
+                        .background(theme.textBackground)
                         .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
                     }
                     
                     // Description
@@ -288,10 +301,11 @@ struct AgentConfigDetailView: View {
                         Label("Internal Description", systemImage: "info.circle")
                             .font(.subheadline)
                             .fontWeight(.medium)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                         
                         TextField("Brief description of this agent's purpose...", text: descriptionBinding)
                             .textFieldStyle(.roundedBorder)
+                            .foregroundColor(theme.primaryText)
                     }
                 }
                 
@@ -304,7 +318,7 @@ struct AgentConfigDetailView: View {
                                 .fontWeight(.medium)
                             Text("The underlying model powering this agent.")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                         }
                         
                         Spacer(minLength: 16)
@@ -358,12 +372,12 @@ struct AgentConfigDetailView: View {
                                     if providerConfig.wrappedValue.apiProvider == .mlx {
                                         Text("When enabled, tools are sent via the native API payload. Defaults to OFF for MLX models to prioritize stability.")
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(theme.secondaryText)
                                             .fixedSize(horizontal: false, vertical: true)
                                     } else {
                                         Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(theme.secondaryText)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
@@ -396,7 +410,7 @@ struct AgentConfigDetailView: View {
                                             .foregroundColor(.primary)
                                         Text("Many community MLX models have broken chat templates that cause the Native Parser to crash or ignore tools. If the agent fails or hallucinates, disable this to rely on the robust Legacy JSON mode.")
                                             .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .foregroundColor(theme.secondaryText)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
@@ -421,7 +435,7 @@ struct AgentConfigDetailView: View {
                             let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
                             Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                         }
                         
                         Spacer(minLength: 16)
@@ -459,7 +473,7 @@ struct AgentConfigDetailView: View {
                         Text("Enable tools to give your agent agency.")
                             .font(.caption)
                             .italic()
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                     }
                     
                     Divider()
@@ -471,7 +485,7 @@ struct AgentConfigDetailView: View {
                                 .fontWeight(.medium)
                             Text("RAG sources for context awareness")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                         }
                         
                         Spacer(minLength: 16)
@@ -503,20 +517,20 @@ struct AgentConfigDetailView: View {
                                         knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
                                     } label: {
                                         Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.secondary.opacity(0.7))
+                                            .foregroundColor(theme.secondaryText)
                                     }
                                     .buttonStyle(.plain)
                                 }
                                 .padding(10)
-                                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                                .background(theme.secondaryBackground.opacity(0.5))
                                 .cornerRadius(8)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
                             }
                         }
                     } else {
                          Text("No documents or URLs added.")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                             .italic()
                     }
                 }
@@ -529,7 +543,7 @@ struct AgentConfigDetailView: View {
             .padding()
             .padding(.bottom, 80) // Space for action bar
         }
-        .background(Color(nsColor: .windowBackgroundColor)) // Main background
+        .background(theme.primaryBackground) // Main background
         .sheet(isPresented: $showingToolLibrary) {
             ToolLibraryView(
                 configuredTools: toolsBinding,
@@ -539,8 +553,16 @@ struct AgentConfigDetailView: View {
         .safeAreaInset(edge: .bottom) {
             actionButtons
                 .padding()
-                .background(.regularMaterial)
-                .overlay(Rectangle().frame(height: 1).foregroundColor(Color.secondary.opacity(0.1)), alignment: .top)
+                .background(theme.secondaryBackground)
+                .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .top)
+        }
+        .alert("Delete '\(profile.displayName)'?", isPresented: $showingDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                profileService.deleteProfile(withId: profile.id)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Are you sure you want to delete this agent? This action cannot be undone.")
         }
         .onAppear {
             // Auto-populate default instructions if nil (first time setup)
@@ -558,24 +580,24 @@ struct AgentConfigDetailView: View {
             // Cleanup: Close the floating window if the user leaves the panel entirely
             AdvancedPromptWindowManager.shared.closeWindow()
         }
-        .onChange(of: profile.id) {
+        .onChange(of: profile.id) { _ in
             // Cleanup: Close the floating window if the user switches to a different agent
             AdvancedPromptWindowManager.shared.closeWindow()
             
             initialProfileState = profile
             loadAdvancedConfigs()
         }
-        .onChange(of: providerConfig.wrappedValue.apiProvider) {
+        .onChange(of: providerConfig.wrappedValue.apiProvider) { _ in
             // Reset edit state when switching providers
             isEditingBaseURL = false
             loadAdvancedConfigs()
         }
-        .onChange(of: localOllamaConfig) {
+        .onChange(of: localOllamaConfig) { _ in
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
             }
         }
-        .onChange(of: localGeminiConfig) {
+        .onChange(of: localGeminiConfig) { _ in
             if providerConfig.wrappedValue.apiProvider == .google {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }
@@ -587,12 +609,19 @@ struct AgentConfigDetailView: View {
     private var actionButtons: some View {
         HStack {
             Button(role: .destructive) {
-                profileService.deleteProfile(withId: profile.id)
+                showingDeleteAlert = true
             } label: {
                 Label("Delete Agent", systemImage: "trash")
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(isDeleteHovered ? Color.red.opacity(0.1) : Color.clear)
+                    .cornerRadius(8)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .foregroundColor(.red)
+            .scaleEffect(isDeleteHovered ? 1.02 : 1.0)
+            .onHover { isDeleteHovered = $0 }
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isDeleteHovered)
             
             Spacer()
             
@@ -605,19 +634,38 @@ struct AgentConfigDetailView: View {
                         }
                     }
                     .keyboardShortcut(.cancelAction)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(isRevertHovered ? theme.surfaceOverlay : Color.clear)
+                    .cornerRadius(8)
+                    .onHover { isRevertHovered = $0 }
+                    .scaleEffect(isRevertHovered ? 1.02 : 1.0)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isRevertHovered)
                     
-                    Button("Save Changes") {
+                    Button {
                         profileService.saveProfile(profile)
                         initialProfileState = profile
+                    } label: {
+                        Text("Save Changes")
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(theme.accentColor.opacity(isSaveHovered ? 0.9 : 1.0))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .shadow(color: theme.accentColor.opacity(isSaveHovered ? 0.3 : 0.0), radius: 8, x: 0, y: 4)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.plain)
                     .keyboardShortcut(.defaultAction)
+                    .onHover { isSaveHovered = $0 }
+                    .scaleEffect(isSaveHovered ? 1.02 : 1.0)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSaveHovered)
                 }
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else {
                 Text("All changes saved")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
             }
         }
     }
@@ -664,7 +712,7 @@ struct AgentConfigDetailView: View {
                     .fontWeight(.medium)
                 Text("Optional override for custom gateways.")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
             }
             
             Spacer(minLength: 16)
@@ -681,20 +729,20 @@ struct AgentConfigDetailView: View {
                         isEditingBaseURL = false
                     }) {
                         Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                             .help("Reset to Default")
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 4)
                 } else {
                     Text(defaultBaseURL(for: provider))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 5)
                         .padding(.horizontal, 8)
-                        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                        .background(theme.secondaryBackground.opacity(0.5))
                         .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.dividerColor, lineWidth: 1))
                     
                     Button("Edit") {
                         isEditingBaseURL = true
@@ -788,7 +836,7 @@ struct AgentConfigDetailView: View {
                 if currentApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Enter a valid API Key to select a model.")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 } else {
                     if providerConfig.wrappedValue.apiProvider == .google {
                         GeminiModelPickerView(

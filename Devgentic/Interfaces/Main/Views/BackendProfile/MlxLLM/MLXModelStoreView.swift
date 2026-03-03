@@ -10,6 +10,7 @@ import SwiftUI
 struct MLXModelStoreView: View {
     @StateObject private var viewModel = MLXModelStoreViewModel()
     @Environment(\.dismiss) var dismiss
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         NavigationStack {
@@ -22,7 +23,7 @@ struct MLXModelStoreView: View {
                         // Search Field
                         HStack {
                             Image(systemName: "magnifyingglass")
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                             
                             TextField(
                                 viewModel.isRemoteSearchEnabled ? "Search Hugging Face..." : "Filter fetched models...",
@@ -42,7 +43,7 @@ struct MLXModelStoreView: View {
                                 }
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(viewModel.isRemoteSearchEnabled ? Color.accentColor.opacity(0.1) : Color.secondary.opacity(0.1))
+                                .background(viewModel.isRemoteSearchEnabled ? Color.accentColor.opacity(0.1) : theme.dividerColor)
                                 .cornerRadius(6)
                                 .foregroundColor(viewModel.isRemoteSearchEnabled ? .accentColor : .primary)
                             }
@@ -50,11 +51,11 @@ struct MLXModelStoreView: View {
                             .help(viewModel.isRemoteSearchEnabled ? "Switch to Local Filter" : "Switch to Remote Search")
                         }
                         .padding(10)
-                        .background(Color(nsColor: .controlBackgroundColor))
+                        .background(theme.secondaryBackground)
                         .cornerRadius(8)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                                .stroke(theme.dividerColor, lineWidth: 1)
                         )
                         
                         // Sort Menu
@@ -68,11 +69,11 @@ struct MLXModelStoreView: View {
                             Image(systemName: "arrow.up.arrow.down")
                                 .font(.body)
                                 .frame(width: 40, height: 38) // Match search bar height approx
-                                .background(Color(nsColor: .controlBackgroundColor))
+                                .background(theme.secondaryBackground)
                                 .cornerRadius(8)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                                        .stroke(theme.dividerColor, lineWidth: 1)
                                 )
                         }
                         .menuStyle(.borderlessButton)
@@ -95,8 +96,8 @@ struct MLXModelStoreView: View {
                     }
                 }
                 .padding()
-                .background(Color(nsColor: .windowBackgroundColor))
-                .overlay(Rectangle().frame(height: 1).foregroundColor(Color.secondary.opacity(0.1)), alignment: .bottom)
+                .background(theme.primaryBackground)
+                .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .bottom)
                 
                 // MARK: - Main Content Area
                 ZStack {
@@ -105,7 +106,7 @@ struct MLXModelStoreView: View {
                             ProgressView()
                                 .controlSize(.large)
                             Text("Fetching \(viewModel.selectedCategory.rawValue) models...")
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         
@@ -113,14 +114,14 @@ struct MLXModelStoreView: View {
                         VStack(spacing: 12) {
                             Image(systemName: viewModel.selectedCategory == .installed ? "externaldrive" : "magnifyingglass")
                                 .font(.system(size: 48))
-                                .foregroundColor(.secondary.opacity(0.5))
+                                .foregroundColor(theme.secondaryText.opacity(0.5))
                             
                             if viewModel.selectedCategory == .installed {
                                 Text("No installed models")
                                     .font(.title3)
                                     .fontWeight(.medium)
                                 Text("Download models from the 'All' or specific category tabs.")
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(theme.secondaryText)
                             } else {
                                 Text("No models found")
                                     .font(.title3)
@@ -211,7 +212,7 @@ struct MLXModelStoreView: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title2)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
                 .buttonStyle(.plain)
                 .help("Cancel Download")
@@ -231,6 +232,7 @@ struct ModelCardView: View {
     let model: MLXDisplayModel
     @ObservedObject var viewModel: MLXModelStoreViewModel
     @State private var showingDeleteAlert = false // Local state for delete confirmation
+    @Environment(\.appTheme) private var theme
     
     var isInstalled: Bool {
         viewModel.isInstalled(model)
@@ -240,12 +242,12 @@ struct ModelCardView: View {
         HStack(alignment: .top, spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.secondary.opacity(0.1))
+                    .fill(theme.dividerColor)
                     .frame(width: 52, height: 52)
                 
                 Image(systemName: "cube.fill")
                     .font(.title)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
             }
             
             VStack(alignment: .leading, spacing: 6) {
@@ -257,7 +259,7 @@ struct ModelCardView: View {
                     if !model.organization.isEmpty {
                         Text(model.organization)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                     }
                 }
                 
@@ -285,7 +287,7 @@ struct ModelCardView: View {
                     }
                 }
                 .font(.caption2)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
             }
             
             Spacer()
@@ -338,11 +340,11 @@ struct ModelCardView: View {
             }
         }
         .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(theme.secondaryBackground)
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                .stroke(theme.dividerColor, lineWidth: 1)
         )
     }
 }
@@ -352,6 +354,7 @@ struct CategoryTabButton: View {
     let category: MLXModelStoreViewModel.StoreCategory
     let isSelected: Bool
     let action: () -> Void
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         Button(action: action) {
@@ -362,7 +365,7 @@ struct CategoryTabButton: View {
             .font(.subheadline.weight(isSelected ? .semibold : .regular))
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
-            .background(isSelected ? Color.accentColor : Color.secondary.opacity(0.1))
+            .background(isSelected ? Color.accentColor : theme.dividerColor)
             .foregroundColor(isSelected ? .white : .primary)
             .cornerRadius(20)
         }

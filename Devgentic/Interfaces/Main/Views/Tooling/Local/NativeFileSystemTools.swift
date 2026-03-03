@@ -12,12 +12,8 @@ import Foundation
 
 struct ListDirectoryTool: DevgenticTool {
     let name = "list_directory"
-    let description = """
-    [PURPOSE]: Lists the filenames and subdirectories within a specific folder.
-    [WHEN TO USE]: Use when you need to explore the file structure or verify if a file exists before reading it.
-    [INPUT]: { "path": "~/Documents" }
-    [OUTPUT]: A list of filenames or an empty status.
-    """
+    let category = "File System"
+    let description = "Lists files and subdirectories within a specified folder."
     
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -129,12 +125,8 @@ struct ListDirectoryTool: DevgenticTool {
 
 struct ReadFileTool: DevgenticTool {
     let name = "read_file"
-    let description = """
-    [PURPOSE]: Reads the plain text content of a file.
-    [WHEN TO USE]: Use to inspect code, logs, or text documents. Do not use for binary files (images/apps).
-    [INPUT]: { "path": "~/Documents/notes.txt" }
-    [OUTPUT]: The full string content of the file.
-    """
+    let category = "File System"
+    let description = "Reads the plain text content of a file. Best for code, logs, and documents."
     
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -213,12 +205,8 @@ struct ReadFileTool: DevgenticTool {
 
 struct WriteFileTool: DevgenticTool {
     let name = "write_file"
-    let description = """
-    [PURPOSE]: Writes text data to a file. Can create new files or append to existing ones.
-    [WHEN TO USE]: Use for creating scripts, saving notes, or logging data.
-    [INPUT]: { "path": "~/tmp/log.txt", "content": "Entry 1", "append": true }
-    [OUTPUT]: Success or Error message.
-    """
+    let category = "File System"
+    let description = "Writes text to a file. Supports creating new files and appending to existing ones."
     
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -339,12 +327,8 @@ struct WriteFileTool: DevgenticTool {
 
 struct DeleteFileTool: DevgenticTool {
     let name = "delete_file"
-    let description = """
-    [PURPOSE]: Permanently deletes a file or folder from the file system.
-    [WHEN TO USE]: Use only when explicitly requested by the user or when cleaning up temporary files created by you.
-    [INPUT]: { "path": "~/tmp/old_data" }
-    [OUTPUT]: Success or Error message.
-    """
+    let category = "File System"
+    let description = "Permanently deletes a file or folder from the file system."
 
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -419,12 +403,8 @@ struct DeleteFileTool: DevgenticTool {
 
 struct MoveFileTool: DevgenticTool {
     let name = "move_file"
-    let description = """
-    [PURPOSE]: Moves or renames a file/folder.
-    [WHEN TO USE]: Use to organize files or rename items.
-    [INPUT]: { "source": "~/tmp/a.txt", "destination": "~/tmp/b.txt" }
-    [OUTPUT]: Success or Error message.
-    """
+    let category = "File System"
+    let description = "Moves or renames a file or folder."
 
     struct Arguments: Decodable, Sendable {
         let source: String
@@ -523,12 +503,8 @@ struct MoveFileTool: DevgenticTool {
 
 struct CopyFileTool: DevgenticTool {
     let name = "copy_file"
-    let description = """
-    [PURPOSE]: Duplicates a file or folder.
-    [WHEN TO USE]: Use to back up files or duplicate templates.
-    [INPUT]: { "source": "~/tmp/a.txt", "destination": "~/tmp/a_copy.txt" }
-    [OUTPUT]: Success or Error message.
-    """
+    let category = "File System"
+    let description = "Duplicates a file or folder to a new destination."
 
     struct Arguments: Decodable, Sendable {
         let source: String
@@ -621,12 +597,8 @@ struct CopyFileTool: DevgenticTool {
 
 struct CreateFolderTool: DevgenticTool {
     let name = "create_folder"
-    let description = """
-    [PURPOSE]: Creates a new empty directory.
-    [WHEN TO USE]: Use to organize files or prepare for new output.
-    [INPUT]: { "path": "~/Projects/NewApp" }
-    [OUTPUT]: Success or Error message.
-    """
+    let category = "File System"
+    let description = "Creates a new empty directory."
 
     struct Arguments: Decodable, Sendable {
         let path: String

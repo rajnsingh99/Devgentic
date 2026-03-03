@@ -20,6 +20,7 @@ struct FileSuggestionView: View {
     @Binding var selectedItemID: FileSystemItem.ID?
     @Binding var multiSelectedFileIDs: Set<FileSystemItem.ID>
     @State private var hoveredItemID: FileSystemItem.ID?
+    @Environment(\.appTheme) private var theme
 
     // MARK: - Constants
     private let rowHeight: CGFloat = 44
@@ -85,7 +86,7 @@ struct FileSuggestionView: View {
         .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadiusValue)
-                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                .stroke(theme.dividerColor, lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
         .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -100,14 +101,14 @@ struct FileSuggestionView: View {
     private func emptyStateView(text: String) -> some View {
         Text(text)
             .font(.caption)
-            .foregroundColor(.secondary)
+            .foregroundColor(theme.secondaryText)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadiusValue)
-                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    .stroke(theme.dividerColor, lineWidth: 1)
             )
             .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
             .transition(.opacity)
@@ -130,7 +131,7 @@ struct FileSuggestionView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: iconSize, height: iconSize)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
                 .frame(width: 20, alignment: .center)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -141,7 +142,7 @@ struct FileSuggestionView: View {
 
                 Text(fileItem.url.deletingLastPathComponent().path)
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.head)
             }
@@ -153,9 +154,9 @@ struct FileSuggestionView: View {
         .background(
             ZStack {
                 if isSelected {
-                    Color.accentColor.opacity(0.2)
+                    theme.accentColor.opacity(0.2)
                 } else if isHovered || isFocused {
-                    Color.gray.opacity(0.15)
+                    theme.secondaryText.opacity(0.15)
                 }
             }
         )
@@ -176,7 +177,7 @@ struct FileSuggestionView: View {
 
     private func highlightedText(for fileName: String, query: String) -> AttributedString {
         var attributedString = AttributedString(fileName)
-        attributedString.foregroundColor = Color(NSColor.labelColor)
+        attributedString.foregroundColor = theme.primaryText
         if !query.isEmpty, let range = attributedString.range(of: query, options: .caseInsensitive) {
             attributedString[range].font = .system(size: 13, weight: .bold)
         }
@@ -218,6 +219,6 @@ struct FileSuggestionView_Previews: PreviewProvider {
         }
         .padding()
         .frame(width: 450)
-        .background(Color(NSColor.windowBackgroundColor))
+        .background(AppThemes.DefaultTheme().primaryBackground)
     }
 }

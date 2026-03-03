@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 28/09/25.
 //
 //  Refactored on 10/10/25 to fix local tool parameter mapping.
+//  Updated for Phase 5: Map categories for UI hierarchical grouping.
 //
 
 import Foundation
@@ -43,16 +44,41 @@ class UnifiedToolStore: ObservableObject {
     
     /// Rebuilds the `sources` array by combining local and MCP tools.
     private func refreshSources() {
-        // 1. Fetch all persisted MCP tool sources.
-        let mcpSources = mcpStore.sources
+        // 1. Fetch all persisted MCP tool sources and intelligently map their categories.
+        // For MCP tools fetched from servers, we default their category to the Server's Name to group them automatically.
+        let mcpSources = mcpStore.sources.map { source in
+            let mappedTools = source.tools.map { tool -> ToolDefinition in
+                let resolvedCategory = tool.category.isEmpty ? source.serverName : tool.category
+                return ToolDefinition(
+                    name: tool.name,
+                    description: tool.description,
+                    category: resolvedCategory,
+                    parameters: tool.parameters,
+                    requiresConfirmation: tool.requiresConfirmation,
+                    title: tool.title,
+                    icons: tool.icons,
+                    annotations: tool.annotations
+                )
+            }
+            
+            return ToolSource(
+                id: source.id,
+                type: source.type,
+                serverName: source.serverName,
+                tools: mappedTools,
+                serverDefinition: source.serverDefinition
+            )
+        }
         
         // 2. Get all available built-in tools and map them to ToolDefinition.
         // FIXED: This now correctly includes the 'parameters' from the local ExecutableTool,
         // ensuring local tools have their argument schemas available to the agent.
+        // NEW: Maps the logical category tag for hierarchical UI grouping.
         let localTools = localManager.availableTools().map {
             ToolDefinition(
                 name: $0.name,
                 description: $0.description,
+                category: $0.category,
                 parameters: $0.parameters,
                 requiresConfirmation: $0.requiresConfirmation
             )

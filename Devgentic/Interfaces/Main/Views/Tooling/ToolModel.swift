@@ -7,6 +7,7 @@
 //  Centralized on 10/10/25 to act as a single source of truth for tool-related data models.
 //  Updated for Phase 1: Security & HITL - Added requiresConfirmation to ToolDefinition
 //  Updated for Phase 2: Added requiresConfirmation to ExecutableTool protocol
+//  Updated for Phase 5: Added category property for UI grouping
 //
 
 import Foundation
@@ -64,6 +65,7 @@ struct ToolDefinition: Identifiable, Hashable, Codable {
     var id: String { name }
     let name: String
     let description: String
+    let category: String
     let parameters: ToolParameters
 
     var requiresConfirmation: Bool = true
@@ -103,6 +105,9 @@ protocol ExecutableTool {
     
     /// A user-friendly description of what the tool does, for display in the UI.
     var description: String { get }
+    
+    /// The logical category this tool belongs to, for grouping in the UI.
+    var category: String { get }
     
     /// The schema defining the tool's required input arguments.
     var parameters: ToolParameters { get }

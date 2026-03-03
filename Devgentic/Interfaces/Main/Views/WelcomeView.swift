@@ -8,6 +8,8 @@
 import SwiftUI
 
 struct WelcomeView: View {
+    @Environment(\.appTheme) private var theme
+    
     var body: some View {
         VStack(spacing: 32) {
             // MARK: - Hero Section
@@ -16,7 +18,7 @@ struct WelcomeView: View {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [.blue.opacity(0.15), .purple.opacity(0.15)],
+                                colors: [theme.accentColor.opacity(0.15), theme.accentMuted.opacity(0.15)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -30,43 +32,43 @@ struct WelcomeView: View {
                         .frame(width: 60, height: 60)
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [.blue, .purple],
+                                colors: [theme.accentColor, theme.accentMuted],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .shadow(color: .purple.opacity(0.3), radius: 10, x: 0, y: 5)
+                        .shadow(color: theme.accentMuted.opacity(0.3), radius: 10, x: 0, y: 5)
                 }
 
                 VStack(spacing: 6) {
                     Text("Devgentic")
                         .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(.primary)
+                        .foregroundColor(theme.primaryText)
                     
                     Text("Your AI Development Companion")
                         .font(.title3)
-                        .foregroundStyle(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
             }
 
             // MARK: - Shortcuts Card
             VStack(alignment: .leading, spacing: 16) {
                 ShortcutRow(keys: ["⌘", "B"], description: "Toggle Sidebar")
-                Divider().opacity(0.5)
+                Rectangle().fill(theme.dividerColor).frame(height: 1).opacity(0.5)
                 ShortcutRow(keys: ["⌘", "O"], description: "Add Context")
-                Divider().opacity(0.5)
+                Rectangle().fill(theme.dividerColor).frame(height: 1).opacity(0.5)
                 ShortcutRow(keys: ["⇧", "⌘", "C"], description: "New Conversation")
-                Divider().opacity(0.5)
+                Rectangle().fill(theme.dividerColor).frame(height: 1).opacity(0.5)
                 ShortcutRow(keys: ["⇧", "⌘", "A"], description: "Settings")
             }
             .padding(24)
             .background {
                 RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.05), radius: 15, x: 0, y: 8)
+                    .fill(theme.controlBackground)
+                    .shadow(color: theme.primaryText.opacity(0.05), radius: 15, x: 0, y: 8)
                     .overlay(
                         RoundedRectangle(cornerRadius: 16)
-                            .stroke(.white.opacity(0.2), lineWidth: 1)
+                            .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
                     )
             }
             .frame(maxWidth: 400)
@@ -80,12 +82,13 @@ struct WelcomeView: View {
 struct ShortcutRow: View {
     let keys: [String]
     let description: String
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack {
             Text(description)
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundColor(theme.secondaryText)
 
             Spacer()
 
@@ -100,21 +103,22 @@ struct ShortcutRow: View {
 
 struct KeyboardKeyView: View {
     let symbol: String
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         Text(symbol)
             .font(.system(size: 13, weight: .semibold, design: .monospaced))
-            .foregroundStyle(.primary)
+            .foregroundColor(theme.primaryText)
             .frame(minWidth: 24)
             .padding(.horizontal, 6)
             .background {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .shadow(color: .black.opacity(0.2), radius: 1, x: 0, y: 1)
+                    .fill(theme.secondaryBackground)
+                    .shadow(color: theme.primaryText.opacity(0.1), radius: 1, x: 0, y: 1)
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(.primary.opacity(0.1), lineWidth: 0.5)
+                    .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
             )
     }
 }

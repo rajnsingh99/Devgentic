@@ -13,7 +13,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 // MARK: - ChatHistoryView
 /// A standard bottom-up chat interface.
 struct ChatHistoryView: View {
-    private let verticalListPadding = UITheme.Spacing.large
+    @Environment(\.appTheme) private var theme
     
     @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
@@ -49,7 +49,7 @@ struct ChatHistoryView: View {
                                         .foregroundColor(.secondary)
                                 }
                                 .buttonStyle(.plain)
-                                .padding(.bottom, UITheme.Spacing.medium)
+                                .padding(.bottom, theme.spacingMedium)
                             }
                             
                             if mainAppViewModel.selectedConversationID != nil {
@@ -72,8 +72,8 @@ struct ChatHistoryView: View {
                         }
                         .frame(maxWidth: 1000)
                         .frame(maxWidth: .infinity)
-                        .padding(.top, UITheme.Spacing.large)
-                        .padding(.bottom, UITheme.Spacing.large)
+                        .padding(.top, theme.spacingLarge)
+                        .padding(.bottom, theme.spacingLarge)
                     }
                     // MARK: - NEW MESSAGE SCROLLING (Animated)
                     // Triggers when a new message arrives (streaming or user input).

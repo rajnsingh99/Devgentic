@@ -272,6 +272,7 @@ struct ToolLibraryView: View {
                     }
                     .width(80)
                 }
+                .alternatingRowBackgrounds(.disabled)
                 .padding(.top, 12) // Ensures the Table headers don't overlap with the search field/toolbar area
             }
             

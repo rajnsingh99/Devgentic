@@ -1,15 +1,18 @@
 // Views/Messages/ErrorMessageView.swift (Example location)
+//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
+
 import SwiftUI
 
 struct ErrorMessageView: View {
     let title: String?
     let details: String
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.octagon.fill")
                 .font(.title3)
-                .foregroundColor(.red)
+                .foregroundColor(theme.errorColor)
                 .padding(.top, 2) // Align icon nicely with text
 
             VStack(alignment: .leading, spacing: 3) {
@@ -18,12 +21,12 @@ struct ErrorMessageView: View {
                         .font(.headline)
                         .bold()
                         // Use .primary to adapt to light/dark, maybe slightly red?
-                        .foregroundColor(.primary.opacity(0.9))
+                        .foregroundColor(theme.primaryText.opacity(0.9))
                 }
                 Text(details)
                     .font(.system(size: 15)) // Increased font size for readability
                     // Use .secondary for less emphasis, but ensure readability
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .textSelection(.enabled) // Allow copying error details
             }
             // Allow VStack to expand

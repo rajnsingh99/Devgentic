@@ -149,6 +149,7 @@ actor MLXService {
     /// - Returns: An async stream of string tokens.
     func streamChat(
         messages: [[String: String]],
+        tools: [[String: Any]]? = nil,
         maxTokens: Int = 2048,
         temperature: Float = 0.6
     ) -> AsyncThrowingStream<String, Error> {
@@ -167,7 +168,12 @@ actor MLXService {
                     // Use container.perform to safely access the ModelContext (which contains model, processor, tokenizer).
                     let stream = try await container.perform { context -> AsyncStream<Generation> in
                         // A. Apply Chat Template & Tokenize
-                        let promptTokens = try context.tokenizer.applyChatTemplate(messages: messages)
+                        let mlxTools: [[String: any Sendable]]? = tools?.compactMap { $0 as? [String: any Sendable] }
+                        
+                        let promptTokens = try context.tokenizer.applyChatTemplate(
+                            messages: messages.map { $0 as [String: Any] },
+                            tools: mlxTools
+                        )
                         
                         // B. Create LMInput
                         let lmInput = LMInput(tokens: MLXArray(promptTokens))
@@ -187,7 +193,19 @@ actor MLXService {
                         switch generation {
                         case .chunk(let text):
                             continuation.yield(text)
-                        case .toolCall, .info:
+                        case .toolCall(let toolCall):
+                            let argsDict: [String: Any] = toolCall.function.arguments.mapValues { $0.anyValue }
+                            let syntheticStep: [String: Any] = [
+                                "content": "Executing tool \(toolCall.function.name)...",
+                                "tool_name": toolCall.function.name,
+                                "arguments": argsDict
+                            ]
+                            
+                            if let syntheticData = try? JSONSerialization.data(withJSONObject: syntheticStep),
+                               let syntheticString = String(data: syntheticData, encoding: .utf8) {
+                                continuation.yield(syntheticString)
+                            }
+                        case .info:
                             break
                         }
                     }

@@ -11,6 +11,7 @@ import SwiftUI
 struct MLXModelPickerView: View {
     @Binding var selectedModel: String
     @Binding var supportsNativeTools: Bool // Added binding
+    @Environment(\.appTheme) private var theme
     
     @StateObject private var service = MLXModelService.shared
     @State private var showingStore = false
@@ -24,7 +25,7 @@ struct MLXModelPickerView: View {
             Spacer()
             if service.installedModels.isEmpty {
                 Text("No models found.")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .font(.caption)
             } else {
                 Picker("Model", selection: $selectedModel) {

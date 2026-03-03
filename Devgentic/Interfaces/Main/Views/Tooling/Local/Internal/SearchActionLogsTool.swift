@@ -14,12 +14,7 @@ struct SearchActionLogsTool: DevgenticTool {
     // MARK: - Properties
     
     let name = "search_action_logs"
-    let description = """
-    [PURPOSE]: Searches the 'Evidence Locker' (audit logs) for past actions containing a specific keyword.
-    [WHEN TO USE]: Use to find out if, when, or how you performed an action previously (e.g. searching for a file you moved).
-    [INPUT]: { "keyword": "Budget.pdf" }
-    [OUTPUT]: A list of matching past actions with their Reference IDs.
-    """
+    let description = "Searches the 'Evidence Locker' (audit logs) for past actions containing a specific keyword."
     
     // MARK: - Type Definitions
     

@@ -7,13 +7,6 @@
 
 import SwiftUI
 
-extension Color {
-    static let subElementBackground = Color.white.opacity(0.1)
-    static let subElementBorder = Color.white.opacity(0.2)
-    static let modernDivider = Color.gray.opacity(0.3)
-}
-
-
 /// A view for managing Ollama server settings and local models, optimized for a sidebar.
 struct OllamaSettingsView_old: View {
     // Use the shared instance of OllamaService to interact with the Ollama server.
@@ -21,6 +14,7 @@ struct OllamaSettingsView_old: View {
     
     // Access the main view model.
     @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
+    @Environment(\.appTheme) private var theme
 
     // State to track which model is pending deletion via the confirmation alert.
     @State private var modelPendingDeletion: LocalModel?
@@ -32,8 +26,9 @@ struct OllamaSettingsView_old: View {
                 // MARK: - Server Status Section
                 serverStatusView
                 
-                // MODIFIED: Use a modern divider
-                Rectangle().frame(height: 1).foregroundColor(.modernDivider)
+                Rectangle()
+                    .fill(theme.dividerColor)
+                    .frame(height: 1)
 
                 // MARK: - Download Model Section
                 VStack(alignment: .leading, spacing: 12) {
@@ -41,15 +36,16 @@ struct OllamaSettingsView_old: View {
                     
                     Text("Enter a model name from the Ollama library (e.g., 'llama3:latest').")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                     
                     downloadControlsView
                     
                     downloadProgressView
                 }
 
-                // MODIFIED: Use a modern divider
-                Rectangle().frame(height: 1).foregroundColor(.modernDivider)
+                Rectangle()
+                    .fill(theme.dividerColor)
+                    .frame(height: 1)
 
                 // MARK: - Local Models Section
                 VStack(alignment: .leading, spacing: 12) {
@@ -65,8 +61,8 @@ struct OllamaSettingsView_old: View {
             }
             .padding()
         }
-        // Make ScrollView background clear to show the parent's material background
-        .background(Color.clear)
+        .scrollContentBackground(.hidden)
+        .background(theme.primaryBackground)
         .refreshable {
             await ollamaService.checkServerStatusAndUpdateModels()
         }
@@ -106,7 +102,7 @@ struct OllamaSettingsView_old: View {
         if ollamaService.isLoadingModels && ollamaService.localModels.isEmpty {
             HStack {
                 ProgressView().scaleEffect(0.8)
-                Text("Loading models...").foregroundColor(.secondary)
+                Text("Loading models...").foregroundColor(theme.secondaryText)
             }
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 10)
@@ -115,7 +111,7 @@ struct OllamaSettingsView_old: View {
         } else if ollamaService.serverStatus == .connected {
             if ollamaService.localModels.isEmpty {
                 Text("No local models found.")
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding()
             } else {
@@ -141,13 +137,13 @@ struct OllamaSettingsView_old: View {
             TextField("Model Name (e.g., gemma:2b)", text: $ollamaService.modelToPull)
                 .textFieldStyle(.plain)
                 .padding(8)
-                // MODIFIED: Apply new background and border style
-                .background(Color.subElementBackground)
+                .background(theme.controlBackground)
                 .cornerRadius(8)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.subElementBorder, lineWidth: 1)
+                        .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
                 )
+                .foregroundColor(theme.primaryText)
             
             DownloadButton(isDownloading: ollamaService.isPullingModel) {
                 Task {
@@ -169,13 +165,13 @@ struct OllamaSettingsView_old: View {
 
                     Button(action: { ollamaService.cancelPullModel() }) {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                     }
                     .buttonStyle(.plain)
                 }
                 Text(ollamaService.pullStatusMessage)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
             }
             .padding(.top, 4)
         }
@@ -198,6 +194,8 @@ private struct CompactModelRowView: View {
     let isBeingRemoved: Bool
     let onRequestDelete: () -> Void
     
+    @Environment(\.appTheme) private var theme
+    
     private var filteredTags: [ModelTag] {
         let allowedTagTexts = ["Tools", "Vision", "Thinking"]
         return model.tags.filter { allowedTagTexts.contains($0.text) }
@@ -208,6 +206,7 @@ private struct CompactModelRowView: View {
             Text(model.name)
                 .font(.headline)
                 .fontWeight(.semibold)
+                .foregroundColor(theme.primaryText)
                 .lineLimit(1)
             
             if isBeingRemoved {
@@ -225,12 +224,11 @@ private struct CompactModelRowView: View {
             }
         }
         .padding(12)
-        // MODIFIED: Apply new background and border style
-        .background(Color.subElementBackground)
+        .background(theme.controlBackground)
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.subElementBorder, lineWidth: 1)
+                .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
         )
         .contextMenu {
             Button(role: .destructive, action: onRequestDelete) {
@@ -240,10 +238,9 @@ private struct CompactModelRowView: View {
     }
 }
 
-// --- The rest of the helper views are unchanged but included for completeness ---
-
 private struct IconTagView: View {
     let tag: ModelTag
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         HStack {
@@ -253,7 +250,7 @@ private struct IconTagView: View {
         }
         .font(.caption2)
         .padding(5)
-        .background(tag.color.opacity(0.15))
+        .background(tag.color.opacity(theme.id == "one_light" ? 0.1 : 0.2))
         .foregroundColor(tag.color)
         .clipShape(Circle())
         .help(tag.text)
@@ -263,6 +260,7 @@ private struct IconTagView: View {
 private struct DownloadButton: View {
     var isDownloading: Bool
     let action: () -> Void
+    @Environment(\.appTheme) private var theme
     
     @State private var isAnimating = false
 
@@ -284,40 +282,44 @@ private struct DownloadButton: View {
             }
         }
         .buttonStyle(.borderedProminent)
-        .tint(.accentColor)
+        .tint(theme.accentColor)
     }
 }
 
 private struct SectionHeader: View {
     let title: String
     let systemImage: String
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage)
                 .font(.callout)
-                .foregroundColor(.accentColor)
+                .foregroundColor(theme.accentColor)
             Text(title)
                 .font(.headline)
-                .foregroundColor(.primary) // Ensure text is visible
+                .foregroundColor(theme.primaryText)
         }
     }
 }
 
 private struct StatusIndicator: View {
     let status: OllamaServerStatus
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         HStack {
             Image(systemName: status.systemImageName)
             Text("Ollama Status: ")
-            Text(status.description).fontWeight(.bold)
+                .foregroundColor(theme.primaryText)
+            Text(status.description)
+                .fontWeight(.bold)
+                .foregroundColor(status.color)
             Spacer()
         }
         .font(.subheadline)
         .padding(10)
-        .foregroundColor(status.color)
-        .background(status.color.opacity(0.2)) // Slightly increased opacity
+        .background(status.color.opacity(theme.id == "one_light" ? 0.1 : 0.2))
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
@@ -329,6 +331,7 @@ private struct StatusIndicator: View {
 private struct ErrorView: View {
     let message: String
     var showIcon: Bool = false
+    @Environment(\.appTheme) private var theme
     
     var body: some View {
         HStack(spacing: 4) {
@@ -338,13 +341,14 @@ private struct ErrorView: View {
             Text(message)
         }
         .font(.caption)
-        .foregroundColor(.red)
+        .foregroundColor(theme.errorColor)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 private struct UpdateRequiredErrorView: View {
     let message: String
+    @Environment(\.appTheme) private var theme
     private let downloadURL = URL(string: "https://ollama.com/download")!
 
     var body: some View {
@@ -354,18 +358,19 @@ private struct UpdateRequiredErrorView: View {
                 Text(message)
             }
             .font(.caption)
-            .foregroundColor(.orange)
+            .foregroundColor(theme.warningColor)
             
             Link(destination: downloadURL) {
                 Text("Download Latest Version")
                     .font(.caption)
                     .fontWeight(.bold)
+                    .foregroundColor(theme.accentColor)
                     .underline()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
-        .background(Color.orange.opacity(0.15))
+        .background(theme.warningColor.opacity(0.15))
         .cornerRadius(8)
     }
 }

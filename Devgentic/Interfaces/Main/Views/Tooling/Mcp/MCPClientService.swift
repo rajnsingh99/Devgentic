@@ -214,6 +214,7 @@ class MCPClientService: ObservableObject {
             return ToolDefinition(
                 name: mcpTool.name,
                 description: mcpTool.description ?? "",
+                category: "",
                 parameters: parameters,
                 title: displayTitle,
                 icons: icons,

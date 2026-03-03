@@ -17,15 +17,20 @@ class AdvancedPromptWindowManager {
     private var window: NSWindow?
 
     /// Spawns or brings the editor window to the front.
-    func showEditor(text: Binding<String>, agentName: String, configuredTools: Binding<[Tool]>) {
+    func showEditor(text: Binding<String>, agentName: String, configuredTools: Binding<[Tool]>, theme: Theme) {
         if let existingWindow = window, existingWindow.isVisible {
-            existingWindow.contentView = NSHostingView(rootView: AdvancedPromptEditorView(text: text, agentName: agentName, configuredTools: configuredTools))
+            existingWindow.contentView = NSHostingView(
+                rootView: AdvancedPromptEditorView(text: text, agentName: agentName, configuredTools: configuredTools)
+                    .environment(\.appTheme, theme)
+            )
             existingWindow.title = "System Instructions: \(agentName)"
+            existingWindow.backgroundColor = NSColor(theme.primaryBackground)
             existingWindow.makeKeyAndOrderFront(nil)
             return
         }
 
         let editorView = AdvancedPromptEditorView(text: text, agentName: agentName, configuredTools: configuredTools)
+            .environment(\.appTheme, theme)
         
         let newWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 750, height: 600),
@@ -41,7 +46,7 @@ class AdvancedPromptWindowManager {
         newWindow.level = .floating
         
         newWindow.isOpaque = false
-        newWindow.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.98)
+        newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
 
         self.window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
@@ -80,6 +85,7 @@ struct AdvancedPromptEditorView: View {
     @Binding var text: String
     var agentName: String
     @Binding var configuredTools: [Tool]
+    @Environment(\.appTheme) private var theme
     
     // Local state to drive real-time UI updates in the detached window
     @State private var localText: String = ""
@@ -94,7 +100,7 @@ struct AdvancedPromptEditorView: View {
                         .font(.headline)
                     Text("Defines the core persona, logic, and protocols for \(agentName).")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
                 Spacer()
                 
@@ -104,20 +110,25 @@ struct AdvancedPromptEditorView: View {
                         .monospacedDigit()
                     Text("~ \(localText.count / 4) tokens")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
             }
             .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(theme.primaryBackground)
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor)
+                .frame(height: 1)
 
             // The Core Editor
-            TokenizingTextEditor(text: $localText, configuredTools: $configuredTools)
+            TokenizingTextEditor(text: $localText, configuredTools: $configuredTools, theme: theme)
                 .padding()
-                .background(Color(nsColor: .textBackgroundColor))
+                .scrollContentBackground(.hidden)
+                .background(theme.textBackground)
 
-            Divider()
+            Rectangle()
+                .fill(theme.dividerColor)
+                .frame(height: 1)
 
             // Footer
             HStack {
@@ -125,7 +136,7 @@ struct AdvancedPromptEditorView: View {
                     .foregroundColor(.green)
                 Text("Changes sync automatically to the main window.")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                 
                 Spacer()
                 
@@ -136,9 +147,10 @@ struct AdvancedPromptEditorView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(theme.secondaryBackground)
         }
         .frame(minWidth: 500, minHeight: 400)
+        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "midnight" ? .dark : (theme.id == "dracula" ? .dark : nil)))
         .onAppear {
             // Initialize local state from the binding
             localText = text
@@ -163,6 +175,7 @@ struct AdvancedPromptEditorView: View {
 struct TokenizingTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var configuredTools: [Tool]
+    var theme: Theme
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -177,7 +190,9 @@ struct TokenizingTextEditor: NSViewRepresentable {
         let textView = NSTextView()
         textView.isRichText = false
         textView.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.autoresizingMask = [.width, .height]
+        textView.textColor = NSColor(theme.primaryText)
+        textView.backgroundColor = NSColor(theme.textBackground)
+        textView.drawsBackground = true
         
         textView.delegate = context.coordinator
         textView.textStorage?.delegate = context.coordinator
@@ -187,8 +202,6 @@ struct TokenizingTextEditor: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.allowsUndo = true
         
-        textView.backgroundColor = .clear
-        textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 8, height: 8)
 
         scrollView.documentView = textView
@@ -208,6 +221,10 @@ struct TokenizingTextEditor: NSViewRepresentable {
                 textView.setSelectedRange(selectedRange)
             }
         }
+        
+        // Ensure theme colors are applied on update
+        textView.textColor = NSColor(theme.primaryText)
+        textView.backgroundColor = NSColor(theme.textBackground)
     }
 
     @MainActor
@@ -233,7 +250,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
             
             let defaultAttributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                .foregroundColor: NSColor.textColor,
+                .foregroundColor: NSColor(parent.theme.primaryText),
                 .backgroundColor: NSColor.clear
             ]
             textStorage.setAttributes(defaultAttributes, range: fullRange)
@@ -254,8 +271,8 @@ struct TokenizingTextEditor: NSViewRepresentable {
                         if toolNames.contains(extractedName) {
                             let tokenAttributes: [NSAttributedString.Key: Any] = [
                                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .bold),
-                                .foregroundColor: NSColor.controlAccentColor,
-                                .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.15)
+                                .foregroundColor: NSColor(parent.theme.accentColor),
+                                .backgroundColor: NSColor(parent.theme.accentColor).withAlphaComponent(0.15)
                             ]
                             textStorage.addAttributes(tokenAttributes, range: match.range)
                         }
@@ -269,7 +286,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
             
             textView.typingAttributes = [
                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                .foregroundColor: NSColor.textColor,
+                .foregroundColor: NSColor(parent.theme.primaryText),
                 .backgroundColor: NSColor.clear
             ]
         }
@@ -423,12 +440,13 @@ struct TokenizingTextEditor: NSViewRepresentable {
 struct ToolMentionListView: View {
     @ObservedObject var state: MentionState
     let onSelect: (AvailableTool) -> Void
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Insert Tool")
                 .font(.caption)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             
@@ -464,12 +482,13 @@ struct ToolMentionRow: View {
     let isSelected: Bool
     let action: () -> Void
     @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         Button(action: action) {
             HStack(alignment: .top) {
                 Image(systemName: "wrench.fill")
-                    .foregroundColor(isSelected ? .white : .accentColor)
+                    .foregroundColor(isSelected ? .white : theme.accentColor)
                     .font(.caption)
                     .padding(.top, 4)
                 
@@ -477,11 +496,11 @@ struct ToolMentionRow: View {
                     Text(tool.definition.name)
                         .font(.subheadline)
                         .fontWeight(.medium)
-                        .foregroundColor(isSelected ? .white : .primary)
+                        .foregroundColor(isSelected ? .white : theme.primaryText)
                     
                     Text(tool.definition.description.split(separator: "\n").first ?? "")
                         .font(.caption)
-                        .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
+                        .foregroundColor(isSelected ? .white.opacity(0.8) : theme.secondaryText)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -489,12 +508,12 @@ struct ToolMentionRow: View {
                 // Add an indicator showing the source (Local vs MCP)
                 Text(tool.source.serverName)
                     .font(.system(size: 9))
-                    .foregroundColor(isSelected ? .white.opacity(0.6) : .secondary.opacity(0.6))
+                    .foregroundColor(isSelected ? .white.opacity(0.6) : theme.secondaryText.opacity(0.6))
                     .padding(.top, 2)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(isSelected ? Color.accentColor : (isHovered ? Color.accentColor.opacity(0.1) : Color.clear))
+            .background(isSelected ? theme.accentColor : (isHovered ? theme.accentColor.opacity(0.1) : Color.clear))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

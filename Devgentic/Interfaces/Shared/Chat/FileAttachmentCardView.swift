@@ -12,6 +12,7 @@ import SwiftUI
 struct FileAttachmentCardView: View {
     let fileName: String
     let action: () -> Void
+    @Environment(\.appTheme) private var theme
 
     /// A private struct to hold display information based on the file type.
     private struct FileTypeInfo {
@@ -26,6 +27,7 @@ struct FileAttachmentCardView: View {
     }
 
     /// Determines the icon, description, and color based on the file's extension.
+    /// NOTE: These are domain-specific file-type identity colors, intentionally not themed.
     private var fileTypeInfo: FileTypeInfo {
         let fileExtension = (fileName as NSString).pathExtension.lowercased()
         let orangeAccent = Color(red: 237/255, green: 134/255, blue: 80/255)
@@ -54,44 +56,40 @@ struct FileAttachmentCardView: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: UITheme.Spacing.small) {
+            HStack(spacing: theme.spacingSmall) {
                 Image(systemName: fileTypeInfo.iconName)
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundColor(fileTypeInfo.accentColor) // Use accent color for the icon
                     .frame(width: 24, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    // Use the new `displayName` computed property
                     Text(displayName)
-                        .font(UITheme.Fonts.footnote.weight(.bold))
-                        .foregroundColor(UITheme.Colors.primaryText)
+                        .font(theme.fontFootnote.weight(.bold))
+                        .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
                     Text(fileTypeInfo.description)
-                        .font(UITheme.Fonts.caption2)
-                        .foregroundColor(UITheme.Colors.secondaryText)
+                        .font(theme.fontCaption2)
+                        .foregroundColor(theme.secondaryText)
                 }
             }
-            .padding(.horizontal, UITheme.Spacing.medium)
-            .padding(.vertical, UITheme.Spacing.small + 2)
+            .padding(.horizontal, theme.spacingMedium)
+            .padding(.vertical, theme.spacingSmall + 2)
         }
         .buttonStyle(.plain)
-        // Set the background to match other control elements
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(UITheme.CornerRadius.medium)
-        // Add an overlay for the border using the accent color
+        .background(theme.controlBackground)
+        .cornerRadius(theme.cornerRadiusMedium)
         .overlay(
-            RoundedRectangle(cornerRadius: UITheme.CornerRadius.medium)
+            RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
                 .stroke(fileTypeInfo.accentColor, lineWidth: 1.5)
         )
-        .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
+        .shadow(color: theme.primaryText.opacity(0.05), radius: 2, y: 1)
     }
 }
 
 // MARK: - Preview Provider
 struct FileAttachmentCardView_Previews: PreviewProvider {
     static var previews: some View {
-        // Wrap in a ScrollView to demonstrate horizontal layout
         ScrollView(.horizontal, showsIndicators: false) {
             HStack {
                 FileAttachmentCardView(fileName: "MainApplicationViewModel.swift") {}
@@ -102,7 +100,7 @@ struct FileAttachmentCardView_Previews: PreviewProvider {
             .padding()
         }
         .frame(height: 100)
-        .background(Color(NSColor.windowBackgroundColor))
+        .environment(\.appTheme, AppThemes.DefaultTheme())
         .previewLayout(.sizeThatFits)
         .preferredColorScheme(.dark)
     }

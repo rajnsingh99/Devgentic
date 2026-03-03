@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 21/02/26.
 //
+//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 
 import SwiftUI
 
@@ -13,44 +14,45 @@ struct ThinkingDynamicIsland: View {
     let currentHeadline: String?
     let isStreaming: Bool
     @Binding var isExpanded: Bool
-    
+
     @State private var gradientRotation: Double = 0
-    
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button(action: { withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { isExpanded.toggle() } }) {
                 HStack(spacing: 8) {
                     ZStack {
                         Circle()
-                            .fill(isStreaming ? Color.blue.opacity(0.1) : Color.secondary.opacity(0.1))
+                            .fill(isStreaming ? theme.streamingIndicator.opacity(0.1) : theme.secondaryText.opacity(0.1))
                             .frame(width: 24, height: 24)
-                        
+
                         Image(systemName: "brain.head.profile")
                             .font(.system(size: 12))
-                            .foregroundColor(isStreaming ? .blue : .secondary)
+                            .foregroundColor(isStreaming ? theme.streamingIndicator : theme.secondaryText)
                             .symbolEffect(.pulse, options: .repeating, value: isStreaming)
                     }
-                    
+
                     if isStreaming {
                         Text(currentHeadline ?? "Reasoning...")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.primary)
+                            .foregroundColor(theme.primaryText)
                             .lineLimit(1)
                     } else {
                         Text("Thought Process")
                             .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.secondary)
-                        
+                            .foregroundColor(theme.secondaryText)
+
                         Text("• \(thoughts.count) steps")
                             .font(.caption)
-                            .foregroundColor(.secondary.opacity(0.7))
+                            .foregroundColor(theme.secondaryText.opacity(0.7))
                     }
-                    
+
                     Spacer()
-                    
+
                     Image(systemName: "chevron.down")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                         .rotationEffect(.degrees(isExpanded ? 180 : 0))
                 }
                 .padding(.horizontal, 10)
@@ -60,10 +62,10 @@ struct ThinkingDynamicIsland: View {
                 .overlay(
                     Capsule()
                         .strokeBorder(
-                            AngularGradient(gradient: Gradient(colors: isStreaming ? [.blue, .purple, .blue] : [.clear]), center: .center, angle: .degrees(gradientRotation)),
+                            AngularGradient(gradient: Gradient(colors: isStreaming ? [theme.streamingIndicator, theme.accentColor, theme.streamingIndicator] : [.clear]), center: .center, angle: .degrees(gradientRotation)),
                             lineWidth: isStreaming ? 1.5 : 0.5
                         )
-                        .foregroundColor(Color.primary.opacity(0.1))
+                        .foregroundColor(theme.primaryText.opacity(0.1))
                 )
                 .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
             }
@@ -75,16 +77,16 @@ struct ThinkingDynamicIsland: View {
                     }
                 }
             }
-            
+
             if isExpanded {
                 VStack(alignment: .leading, spacing: 6) {
                     // FIX: Iterating properly using Identifiable struct
                     ForEach(thoughts) { thought in
                         HStack(alignment: .top, spacing: 8) {
-                            Circle().fill(Color.secondary.opacity(0.3)).frame(width: 4, height: 4).padding(.top, 6)
+                            Circle().fill(theme.secondaryText.opacity(0.3)).frame(width: 4, height: 4).padding(.top, 6)
                             Text(thought.text)
                                 .font(.system(size: 12, design: .monospaced))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(theme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }

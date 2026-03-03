@@ -9,6 +9,9 @@
 
 import Foundation
 import ApplicationServices // Required for Accessibility checks
+import CoreGraphics
+import EventKit
+import Contacts
 
 /// Defines the macOS system permissions required by various tools.
 enum SystemPermission: Sendable {
@@ -16,6 +19,9 @@ enum SystemPermission: Sendable {
     case documents
     case downloads
     case accessibility
+    case screenRecording
+    case calendar
+    case contacts
 }
 
 /// A centralized manager to check and trigger macOS TCC (Transparency, Consent, and Control) prompts.
@@ -44,6 +50,14 @@ actor PermissionManager {
             // This triggers the native macOS "requires accessibility" prompt if undetermined
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             return AXIsProcessTrustedWithOptions(options)
+        case .screenRecording:
+            return CGPreflightScreenCaptureAccess()
+        case .calendar:
+            let status = EKEventStore.authorizationStatus(for: .event)
+            return status == .fullAccess || status == .authorized
+        case .contacts:
+            let status = CNContactStore.authorizationStatus(for: .contacts)
+            return status == .authorized
         }
     }
     

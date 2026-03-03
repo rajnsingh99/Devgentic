@@ -10,10 +10,14 @@ import SwiftUI
 struct ThemeSettingsView: View {
     // Access the shared ThemeManager from the environment.
     @EnvironmentObject var themeManager: ThemeManager
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         Form {
-            Section(header: Text("Appearance").font(.headline)) {
+            Section(header: Text("Appearance")
+                .font(.headline)
+                .foregroundColor(theme.primaryText)
+            ) {
                 // A Picker provides a native-looking dropdown for theme selection.
                 // The selection binding is directly tied to the current theme's ID.
                 Picker("Theme", selection: Binding(
@@ -31,11 +35,14 @@ struct ThemeSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu) // Use a dropdown menu style.
+                .foregroundColor(theme.primaryText)
             }
         }
         .formStyle(.grouped)
         .frame(maxWidth: 400)
         .padding()
+        .scrollContentBackground(.hidden)
+        .background(theme.primaryBackground)
     }
 }
 

@@ -18,6 +18,12 @@ struct BackendProfilePanelView: View {
     @State private var selectedProfileID: UUID?
     @State private var isAddingProfile = false
     
+    // Deletion State
+    @State private var showingDeleteAlert = false
+    @State private var profileToDelete: BackendProfileModel? = nil
+    
+    @Environment(\.appTheme) private var theme
+    
     // MARK: - Body
     var body: some View {
         NavigationSplitView {
@@ -27,39 +33,50 @@ struct BackendProfilePanelView: View {
             detailView
         }
         .environmentObject(profileService)
+        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
+        .configureWindow(collectionBehavior: [.canJoinAllSpaces, .fullScreenAuxiliary])
+        .alert("Delete Profile?", isPresented: $showingDeleteAlert, presenting: profileToDelete) { profile in
+            Button("Delete", role: .destructive) {
+                profileService.deleteProfile(withId: profile.id)
+                if selectedProfileID == profile.id {
+                    selectedProfileID = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { profile in
+            Text("Are you sure you want to delete '\(profile.displayName)'? This action cannot be undone.")
+        }
     }
 
     // MARK: - Subviews
     
     private var sidebarView: some View {
-        VStack(alignment: .leading) {
-            HStack {
-                Text("Profiles")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    isAddingProfile = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Add New Profile")
-            }
-            .padding([.leading, .top, .trailing])
+        VStack(alignment: .leading, spacing: 0) {
+            headerView
+                .padding([.leading, .top, .trailing])
+                .padding(.bottom, 8)
 
-            List(selection: $selectedProfileID) {
-                ForEach(profileService.profiles) { profile in
-                    ProfileRowView(profile: profile)
-                        .tag(profile.id)
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(profileService.profiles) { profile in
+                        ProfileRowView(
+                            profile: profile,
+                            isSelected: selectedProfileID == profile.id,
+                            onSelect: {
+                                selectedProfileID = profile.id
+                            },
+                            onDelete: {
+                                profileToDelete = profile
+                                showingDeleteAlert = true
+                            }
+                        )
+                    }
                 }
+                .padding(.horizontal, 8)
             }
-            .listStyle(.sidebar)
-            // Trigger diagnostic logging when a profile is selected
-            .onChange(of: selectedProfileID) { newID in
-                if let id = newID {
-                    profileService.logProfileSelection(profileID: id)
-                }
-            }
+            .scrollContentBackground(.hidden)
         }
+        .background(theme.secondaryBackground)
         .sheet(isPresented: $isAddingProfile) {
             AddBackendProfileView { newProfile in
                 profileService.saveProfile(newProfile)
@@ -68,18 +85,42 @@ struct BackendProfilePanelView: View {
         }
     }
     
+    private var headerView: some View {
+        HStack {
+            Text("Profiles")
+                .font(.headline)
+                .foregroundColor(theme.primaryText)
+            Spacer()
+            Button {
+                isAddingProfile = true
+            } label: {
+                Image(systemName: "plus")
+                    .foregroundColor(theme.accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("Add New Profile")
+        }
+    }
+    
     @ViewBuilder
     private var detailView: some View {
-        if let selectedID = selectedProfileID,
-           let selectedIndex = profileService.profiles.firstIndex(where: { $0.id == selectedID }) {
-            
-            BackendProfileDetailView(profile: $profileService.profiles[selectedIndex])
-            
-        } else {
-            Text("Select a profile to configure it.")
-                .font(.title2)
-                .foregroundColor(.secondary)
+        Group {
+            if let selectedID = selectedProfileID,
+               let selectedIndex = profileService.profiles.firstIndex(where: { $0.id == selectedID }) {
+                
+                BackendProfileDetailView(profile: $profileService.profiles[selectedIndex])
+                
+            } else {
+                VStack {
+                    Text("Select a profile to configure it.")
+                        .font(.title2)
+                        .foregroundColor(theme.secondaryText)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
+        .background(theme.primaryBackground)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -88,6 +129,7 @@ struct BackendProfilePanelView: View {
 struct BackendProfileDetailView: View {
     @Binding var profile: BackendProfileModel
     @EnvironmentObject var profileService: BackendProfileService
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         VStack {
@@ -101,6 +143,7 @@ struct BackendProfileDetailView: View {
             }
         }
         .padding()
+        .background(theme.primaryBackground)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
@@ -112,7 +155,7 @@ struct BackendProfileDetailView: View {
                 .foregroundColor(.secondary)
             Text("\(type.rawValue) configuration is not yet available.")
                 .font(.headline)
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -121,23 +164,75 @@ struct BackendProfileDetailView: View {
 // MARK: - Profile Row View
 private struct ProfileRowView: View {
     let profile: BackendProfileModel
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+    
+    @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
-        HStack {
-            Image(systemName: iconName(for: profile.profileType))
-                .font(.title3)
-                .frame(width: 25, alignment: .center)
-                .foregroundColor(color(for: profile.profileType))
+        HStack(spacing: 0) {
+            // Selection Accent
+            if isSelected {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(theme.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 8)
+                    .padding(.trailing, 8)
+                    .transition(.opacity.combined(with: .scale))
+            }
 
-            VStack(alignment: .leading) {
-                Text(profile.displayName)
-                    .fontWeight(.medium)
-                Text(profile.profileType.rawValue)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            HStack(spacing: 12) {
+                Image(systemName: iconName(for: profile.profileType))
+                    .font(.system(size: 16))
+                    .foregroundColor(color(for: profile.profileType))
+                    .frame(width: 24)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profile.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text(profile.profileType.rawValue)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                }
+                
+                Spacer()
             }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.12))
+                } else if isHovering {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.surfaceOverlay)
+                }
+            }
+        )
+        .overlay(alignment: .trailing) {
+            if isHovering {
+                HoverActionButton(
+                    icon: "trash",
+                    tint: .red.opacity(0.8),
+                    action: onDelete
+                )
+                .padding(.trailing, 8)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
     }
 
     private func iconName(for type: ProfileType) -> String {

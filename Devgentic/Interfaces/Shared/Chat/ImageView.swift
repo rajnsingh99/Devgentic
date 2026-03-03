@@ -4,6 +4,7 @@
 //
 //  Created by Raj Singh on 17/08/25.
 //
+//  THEME: Migrated to centralized AppTheme via @Environment(\.appTheme).
 
 import SwiftUI
 import os
@@ -12,9 +13,10 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct ImageView: View {
     let imageData: Data
-    
+
     @State private var isHovering = false
     @State private var didCopy = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
@@ -23,38 +25,38 @@ struct ImageView: View {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .cornerRadius(UITheme.CornerRadius.medium)
+                    .cornerRadius(theme.cornerRadiusMedium)
                     .overlay(
                         // Add a subtle border to frame the image nicely.
-                        RoundedRectangle(cornerRadius: UITheme.CornerRadius.medium)
-                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
+                            .stroke(theme.dividerColor, lineWidth: 1)
                     )
             } else {
                 // Error State: Display a placeholder if image data is invalid.
-                VStack(spacing: UITheme.Spacing.xsmall) {
+                VStack(spacing: theme.spacingXSmall) {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.largeTitle)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                     Text("Failed to load image data")
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 }
                 .frame(maxWidth: 500, minHeight: 150, alignment: .center)
-                .background(Color.gray.opacity(0.1))
-                .cornerRadius(UITheme.CornerRadius.medium)
+                .background(theme.controlBackground)
+                .cornerRadius(theme.cornerRadiusMedium)
                 .onAppear {
                     logger.error("❌ Failed to create NSImage from the provided data.")
                 }
             }
-            
+
             // Action button overlay that appears on hover.
             if isHovering {
                 // --- CHANGE: Added Copy and Generate Variations buttons ---
-                HStack(spacing: UITheme.Spacing.small) {
+                HStack(spacing: theme.spacingSmall) {
                     ActionButton(action: copyImageToClipboard) {
                         Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                     }
-                    .foregroundColor(didCopy ? .green : .white)
+                    .foregroundColor(didCopy ? theme.successColor : .white)
                     .help("Copy Image to Clipboard")
 
                     ActionButton(action: {
@@ -64,7 +66,7 @@ struct ImageView: View {
                     }
                     .foregroundColor(.white)
                     .help("Generate Variations (not implemented)")
-                    
+
                     ActionButton(action: saveImage) {
                         Image(systemName: "arrow.down.circle")
                     }
@@ -72,11 +74,11 @@ struct ImageView: View {
                     .help("Save Image")
                 }
                 .font(.system(size: 12, weight: .medium))
-                .padding(.vertical, UITheme.Spacing.xsmall)
-                .padding(.horizontal, UITheme.Spacing.small)
+                .padding(.vertical, theme.spacingXSmall)
+                .padding(.horizontal, theme.spacingSmall)
                 .background(Color.black.opacity(0.6))
-                .cornerRadius(UITheme.CornerRadius.large)
-                .padding(UITheme.Spacing.small)
+                .cornerRadius(theme.cornerRadiusLarge)
+                .padding(theme.spacingSmall)
                 .transition(.opacity.animation(.easeInOut))
             }
         }
@@ -86,34 +88,34 @@ struct ImageView: View {
             }
         }
     }
-    
+
     /// Copies the generated image to the system clipboard.
     private func copyImageToClipboard() {
         guard let nsImage = NSImage(data: imageData) else {
             logger.error("❌ Failed to create NSImage for clipboard.")
             return
         }
-        
+
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.writeObjects([nsImage])
-        
+
         logger.info("✅ Image copied to clipboard.")
-        
+
         // Provide visual feedback to the user.
         withAnimation(.easeInOut) { didCopy = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation(.easeInOut) { didCopy = false }
         }
     }
-    
+
     /// Opens an NSSavePanel to allow the user to save the image to disk.
     private func saveImage() {
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.png]
         savePanel.canCreateDirectories = true
         savePanel.nameFieldStringValue = "generated-image-\(UUID().uuidString.prefix(6)).png"
-        
+
         savePanel.begin { response in
             if response == .OK, let url = savePanel.url {
                 do {
@@ -133,6 +135,7 @@ fileprivate struct ActionButton<LabelContent: View>: View {
     @ViewBuilder let label: LabelContent
 
     @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         Button(action: action) {
@@ -141,7 +144,7 @@ fileprivate struct ActionButton<LabelContent: View>: View {
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(isHovering ? Color.gray.opacity(0.3) : Color.clear)
+                        .fill(isHovering ? theme.secondaryText.opacity(0.3) : Color.clear)
                 )
         }
         .buttonStyle(.plain)

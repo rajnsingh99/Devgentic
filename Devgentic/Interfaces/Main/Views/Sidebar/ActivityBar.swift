@@ -26,6 +26,7 @@ struct HomeButton: View {
     @Binding var isSidebarVisible: Bool
     @Binding var selectedTab: SidebarTab?
 
+    @Environment(\.appTheme) private var theme
     @State private var isHovering = false
 
     var body: some View {
@@ -44,12 +45,12 @@ struct HomeButton: View {
                 .frame(width: 38, height: 38)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+                        .fill(isHovering ? theme.surfaceOverlay : Color.clear)
                 )
                 .contentShape(Rectangle())
         }
         .buttonStyle(ScaleButtonStyle())
-        .foregroundColor(.secondary)
+        .foregroundColor(theme.secondaryText)
         .help("Home")
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
@@ -67,6 +68,7 @@ struct ActivityBarButton: View {
 
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.openWindow) var openWindow
+    @Environment(\.appTheme) private var theme
 
     @State private var isHovering = false
 
@@ -87,21 +89,21 @@ struct ActivityBarButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(ScaleButtonStyle())
-        .foregroundColor(isActive ? Color.accentColor : .secondary)
+        .foregroundColor(isActive ? theme.accentColor : theme.secondaryText)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isActive ? Color.accentColor.opacity(0.15) :
-                      isHovering ? Color.primary.opacity(0.06) : Color.clear)
+                .fill(isActive ? theme.accentColor.opacity(0.15) :
+                      isHovering ? theme.surfaceOverlay : Color.clear)
         )
         .shadow(
-            color: isActive ? Color.accentColor.opacity(0.2) :
-                   isHovering ? Color.accentColor.opacity(0.08) : Color.clear,
+            color: isActive ? theme.accentColor.opacity(0.2) :
+                   isHovering ? theme.accentColor.opacity(0.08) : Color.clear,
             radius: isActive ? 6 : 4, x: 0, y: 0
         )
         .overlay(alignment: .leading) {
             if isActive {
                 Capsule()
-                    .fill(Color.accentColor)
+                    .fill(theme.accentColor)
                     .frame(width: 3, height: 24)
                     .offset(x: -5)
                     .transition(.scale.combined(with: .opacity))

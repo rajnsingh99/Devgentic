@@ -5,6 +5,7 @@
 //  Created by Raj Singh on 20/09/25.
 //  Updated on 19/02/26 to support native DevgenticTool architecture.
 //  MIGRATION: Removed OFM dependencies, simplified NativeToolWrapper.
+//  Updated for Phase 5: Bridged category grouping.
 //
 
 import Foundation
@@ -29,6 +30,18 @@ struct NativeToolWrapper<T: DevgenticTool>: ExecutableTool {
     
     var description: String {
         return nativeTool.description
+    }
+    
+    // Bridge the category (Assuming you add 'var category: String { get }' to DevgenticTool)
+    // Alternatively, you can default to "System Automation" if not defined.
+    var category: String {
+        // Using Reflection guarantees this compiles right now as a drop-in replacement,
+        // even before the DevgenticTool protocol and tools are updated in Step 3.
+        let mirror = Mirror(reflecting: nativeTool)
+        if let cat = mirror.children.first(where: { $0.label == "category" })?.value as? String {
+            return cat
+        }
+        return "System Automation"
     }
     
     /// Natively bridges the parameter schema without JSON hacks!
@@ -104,6 +117,21 @@ final class LocalToolManager {
         registerNative(SmartSearchTool())
         registerNative(ReadMetadataTool())
         registerNative(OrganizeBatchTool())
+        
+        // Register Vision & Workspace Tools
+        registerNative(ReadScreenStateTool())
+        registerNative(ClickUIElementTool())
+        registerNative(ManageWindowsTool())
+        registerNative(ManageClipboardTool())
+        registerNative(PushLocalNotificationTool())
+        
+        // Register Action & Automations
+        registerNative(RunMacShortcutTool())
+        
+        // Register Native PIM Tools
+        registerNative(ManageCalendarTool())
+        registerNative(ManageRemindersTool())
+        registerNative(ReadContactsTool())
         
         logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")
     }

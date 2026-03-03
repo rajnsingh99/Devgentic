@@ -12,114 +12,81 @@ struct ExplorerSidebarView: View {
 
     @EnvironmentObject var viewModel: ExplorerViewModel
     @EnvironmentObject var themeManager: ThemeManager
+    @Environment(\.appTheme) private var theme
     @Environment(\.openWindow) var openWindow
     
-    @State private var isHoveringHeader = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let rootURL = viewModel.selectedRootURL {
-                // MARK: - Project Header
-                VStack(spacing: 0) {
-                    HStack {
-                        Image(systemName: "cube.box")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                        
-                        Text(rootURL.lastPathComponent.uppercased())
-                            .font(.system(size: 11, weight: .bold))
-                            .tracking(0.5)
-                            .foregroundColor(.secondary.opacity(0.9))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        
-                        Spacer()
-                        
-                        // Action buttons appear on hover
-                        if isHoveringHeader {
-                            HStack(spacing: 4) {
-                                HeaderActionButton(icon: "doc.badge.plus", help: "New File") {
-                                    // TODO: Implement New File Action
-                                }
-
-                                HeaderActionButton(icon: "folder.badge.plus", help: "New Folder") {
-                                    // TODO: Implement New Folder Action
-                                }
-                                
-                                HeaderActionButton(icon: "arrow.clockwise", help: "Refresh") {
-                                    viewModel.loadDirectoryContents(for: rootURL)
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .frame(height: 32)
-                    .background(isHoveringHeader ? Color.white.opacity(0.04) : Color.clear)
-                    .onHover { hovering in
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            isHoveringHeader = hovering
-                        }
-                    }
-                    
-                    Divider()
-                        .background(Color.white.opacity(0.1))
+            // MARK: - Header
+            SidebarHeaderView(
+                title: "Explorer",
+                buttonTitle: viewModel.selectedRootURL != nil ? "Change Folder" : "Open Folder",
+                systemImage: "folder.badge.plus",
+                onAction: {
+                    viewModel.selectRootDirectory()
                 }
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            if viewModel.selectedRootURL != nil {
+                // MARK: - Search Bar
+                SidebarSearchBarView("Search files...", text: $viewModel.searchText)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+                
+                Divider()
+                    .background(theme.surfaceOverlayStrong)
                 
                 // MARK: - File Tree
                 if let errorMessage = viewModel.errorMessage, viewModel.rootItems.isEmpty && !viewModel.isLoading {
                     // Error State
+                    SidebarEmptyStateView(
+                        title: "Load Error",
+                        subtitle: errorMessage,
+                        buttonTitle: "Retry",
+                        systemImage: "exclamationmark.triangle",
+                        onAction: {
+                            if let rootURL = viewModel.selectedRootURL {
+                                viewModel.loadDirectoryContents(for: rootURL)
+                            }
+                        }
+                    )
+                } else if viewModel.rootItems.isEmpty && viewModel.isLoading {
                     VStack {
-                        Text("Unable to load folder")
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading...")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if viewModel.filteredRootItems.isEmpty && !viewModel.searchText.isEmpty {
+                    SidebarEmptyStateView(
+                        title: "No matches",
+                        subtitle: "No files found for \"\(viewModel.searchText)\"",
+                        buttonTitle: "Clear Search",
+                        systemImage: "magnifyingglass",
+                        onAction: {
+                            viewModel.searchText = ""
+                        }
+                    )
                 } else {
                     FileOutlineView(viewModel: viewModel)
                 }
 
             } else {
                 // MARK: - Empty State
-                VStack(alignment: .center, spacing: 16) {
-                    Spacer()
-                    
-                    ZStack {
-                        Circle()
-                            .fill(Color.white.opacity(0.03))
-                            .frame(width: 80, height: 80)
-                        
-                        Image(systemName: "folder.badge.plus")
-                            .font(.system(size: 32))
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    VStack(spacing: 6) {
-                        Text("No Project Open")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-
-                        Text("Open a folder to start working with your codebase context.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 40)
-                    }
-
-                    Button {
+                SidebarEmptyStateView(
+                    title: "No Project Open",
+                    subtitle: "Open a folder to start working with your codebase context.",
+                    buttonTitle: "Open Folder",
+                    systemImage: "folder.badge.plus",
+                    onAction: {
                         viewModel.selectRootDirectory()
-                    } label: {
-                        Text("Open Folder")
-                            .font(.subheadline.weight(.medium))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.regular)
-                    .padding(.top, 8)
-                    
-                    Spacer()
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                )
             }
         }
         // Modern sidebar background (Translucent)
@@ -135,15 +102,16 @@ struct HeaderActionButton: View {
     let help: String
     let action: () -> Void
     
+    @Environment(\.appTheme) private var theme
     @State private var isHovering = false
     
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 10))
-                .foregroundColor(isHovering ? .primary : .secondary)
+                .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText)
                 .frame(width: 20, height: 20)
-                .background(isHovering ? Color.white.opacity(0.1) : Color.clear)
+                .background(isHovering ? theme.surfaceOverlay : Color.clear)
                 .cornerRadius(4)
         }
         .buttonStyle(.plain)
@@ -156,6 +124,7 @@ struct HeaderActionButton: View {
 // MARK: - NSViewRepresentable for NSOutlineView
 struct FileOutlineView: NSViewRepresentable {
     @ObservedObject var viewModel: ExplorerViewModel
+    @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.openWindow) var openWindow
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -210,32 +179,34 @@ struct FileOutlineView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self, viewModel: viewModel)
+        Coordinator(parent: self, viewModel: viewModel, themeManager: themeManager)
     }
 
     // MARK: - Coordinator
     class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         var parent: FileOutlineView
         var viewModel: ExplorerViewModel
+        var themeManager: ThemeManager
         weak var outlineView: NSOutlineView?
 
-        init(parent: FileOutlineView, viewModel: ExplorerViewModel) {
+        init(parent: FileOutlineView, viewModel: ExplorerViewModel, themeManager: ThemeManager) {
             self.parent = parent
             self.viewModel = viewModel
+            self.themeManager = themeManager
         }
 
         func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
             if let fileItem = item as? FileSystemItem {
                 return fileItem.children?.count ?? 0
             }
-            return viewModel.rootItems.count
+            return viewModel.filteredRootItems.count
         }
 
         func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
             if let fileItem = item as? FileSystemItem {
                 return fileItem.children![index]
             }
-            return viewModel.rootItems[index]
+            return viewModel.filteredRootItems[index]
         }
 
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -249,7 +220,7 @@ struct FileOutlineView: NSViewRepresentable {
             guard let fileItem = item as? FileSystemItem else { return nil }
 
             let view = ExplorerItemContentRow(item: fileItem, viewModel: viewModel)
-                .environmentObject(ThemeManager()) // Pass theme manager if needed
+                .environmentObject(themeManager) // Use injected theme manager
             let hostingView = NSHostingView(rootView: view)
             
             return hostingView
@@ -283,10 +254,12 @@ struct FileOutlineView: NSViewRepresentable {
 }
 
 // MARK: - Row View
+
 struct ExplorerItemContentRow: View {
     let item: FileSystemItem
     @ObservedObject var viewModel: ExplorerViewModel
     @EnvironmentObject var themeManager: ThemeManager
+    @Environment(\.appTheme) private var theme
     @FocusState private var isTextFieldFocused: Bool
     
     var body: some View {
@@ -312,7 +285,7 @@ struct ExplorerItemContentRow: View {
                         }
                     }
                     .padding(.horizontal, 4)
-                    .background(Color.black.opacity(0.3))
+                    .background(theme.controlBackground)
                     .cornerRadius(4)
             } else {
                 Text(item.name)
@@ -355,7 +328,7 @@ struct ExplorerSidebarView_Previews: PreviewProvider {
                 .environmentObject(ThemeManager())
                 .previewDisplayName("Active Project")
                 .frame(width: 300, height: 500)
-                .background(Color(NSColor.windowBackgroundColor))
+                .background(AppThemes.DefaultTheme().primaryBackground)
         }
     }
 }

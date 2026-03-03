@@ -15,12 +15,7 @@ struct VectorSearchTool: DevgenticTool {
     
     let name = "recall_conversation_history"
     
-    let description = """
-    [PURPOSE]: Performs a semantic search against the local vector database containing PAST CONVERSATION LOGS and UPLOADED DOCUMENTS.
-    [WHEN TO USE]: Use ONLY when the user refers to past context ("what did we just talk about?"), specific uploaded files ("summarize the PDF"), or memory. DO NOT use this for general world knowledge, facts, or writing essays about external topics.
-    [INPUT]: { "query": "summary of the uploaded contract" }
-    [OUTPUT]: Text snippets from previous messages or documents.
-    """
+    let description = "Performs a semantic search against local conversation history and uploaded documents to recall past context."
     
     let conversationID: UUID?
     
