@@ -35,8 +35,8 @@ struct SidebarHeaderView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.15))
-                .foregroundColor(.accentColor)
+                .background(theme.accentColor.opacity(0.15))
+                .foregroundColor(theme.accentColor)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -133,7 +133,7 @@ struct SidebarEmptyStateView: View {
                     .font(.system(size: 36))
                     .foregroundStyle(
                         LinearGradient(
-                            colors: [.accentColor.opacity(0.7), .purple.opacity(0.5)],
+                            colors: [theme.accentColor.opacity(0.7), Color.purple.opacity(0.5)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )

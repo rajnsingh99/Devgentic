@@ -66,6 +66,7 @@ struct DevgenticApp: App {
                 .environmentObject(mainApplicationViewModel.explorerViewModel)
                 .environmentObject(chatHistoryViewModel)
                 .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
+                .tint(themeManager.currentTheme.accentColor)
         }
         .commands {
             CommandMenu("File") {
@@ -111,6 +112,7 @@ struct DevgenticApp: App {
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
+                .tint(themeManager.currentTheme.accentColor)
         }.defaultSize(width: 1000, height: 850)
 
         // MARK: - Window Groups
@@ -119,6 +121,7 @@ struct DevgenticApp: App {
                 FileWindowViewer(fileURL: url)
                     .environmentObject(themeManager)
                     .environment(\.appTheme, themeManager.currentTheme)
+                    .tint(themeManager.currentTheme.accentColor)
             }
         }
         
@@ -129,6 +132,7 @@ struct DevgenticApp: App {
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
+                .tint(themeManager.currentTheme.accentColor)
         }.defaultSize(width: 850, height: 700)
     }
 }

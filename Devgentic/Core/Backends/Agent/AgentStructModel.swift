@@ -17,44 +17,92 @@ struct CognitiveObservation: Sendable, Codable {
     let shortObservation: String
     let heavyContent: String? 
     var isRequired: Bool
+    let metadata: [String: AnyCodable]?
 }
 
 // MARK: - Cognitive Definitions (Native Tool Calling Parity)
 
-/// The new, streamlined schema for ReAct loops, mirroring Native Tool Calling API payloads.
-/// Replaces the old, heavy CognitiveStep.
-struct LeanCognitiveStep: Sendable, Codable {
-    /// The agent's reasoning, mapped directly to Native API 'content' blocks.
-    let content: String
+/// Represents a single tool execution request from the LLM.
+struct PendingToolCall: Sendable, Codable, Equatable, Identifiable {
+    let id: String // Usually provided by the native API (e.g., Claude's tool_use id)
+    let name: String
+    let arguments: [String: AnyCodable]
+}
+
+/// The modern schema for ReAct loops, supporting parallel tool execution natively.
+struct ModernCognitiveStep: Sendable {
+    /// The agent's reasoning, internal monologue, or conversational text that is NOT the raw thought trace.
+    let reasoning: String
     
-    /// The tool to execute. If nil, empty, or "null", the loop terminates.
-    let toolName: String?
+    /// Optional: The internal reasoning trace (Thinking) from the provider.
+    /// This is separate from the 'reasoning' block which is intended for conversational text.
+    let thought: String?
     
-    /// The arguments for the tool. Required if toolName is present.
-    let arguments: [String: AnyCodable]?
-    
-    enum CodingKeys: String, CodingKey {
-        case content
-        case toolName = "tool_name"
-        case arguments
+    /// An array of tools to execute. If empty, the loop terminates.
+    let toolCalls: [PendingToolCall]
+
+    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = []) {
+        self.reasoning = reasoning
+        self.thought = thought
+        self.toolCalls = toolCalls
     }
 }
 
 // MARK: - Agent State Definitions
 
-/// Represents the high-level state of the agent in its cognitive loop.
-/// Used for tracing and UI feedback (e.g., "Thinking...", "Executing Tool...").
-enum AgentStep: String, Codable, Sendable {
-    case idle           = "Idle"
-    case thinking       = "Reasoning"      // The agent is generating thoughts
-    case deciding       = "Deciding"       // The agent is determining which tool to use
-    case acting         = "Acting"         // The agent is executing a tool
-    case observing      = "Observing"      // The agent is processing the tool output
-    case finalizing     = "Finalizing"     // The agent is generating the final answer
-    case errorRecovery  = "Recovering"     // The agent encountered an error and is self-correcting
+enum AgentStateCategory: String, Codable, Sendable {
+    case idle, thinking, acting, interaction, completed, error
+}
 
-    // [HITL] Phase 1: New State for Tool Gating
-    case requestingPermission = "Awaiting Permission" // The agent is waiting for user approval
+enum AgentState: Codable, Equatable, Sendable {
+    case idle
+    case thinking(ThinkingDetail)
+    case acting(ActingDetail)
+    case interaction(InteractionDetail)
+    case completed
+    case error(String)
+
+    enum ThinkingDetail: String, Codable, Equatable, Sendable {
+        case reasoning = "Reasoning"      // ReAct: Internal monologue
+        case planning = "Planning"       // Plan & Execute: Constructing sub-tasks
+        case reflecting = "Reflecting"    // Reflexion: Self-critique
+        case finalizing = "Finalizing"    // Finishing response
+        case errorRecovery = "Recovering" // Self-correction
+    }
+
+    enum ActingDetail: Codable, Equatable, Sendable {
+        case tool(name: String)
+        case subtask(current: Int, total: Int)
+    }
+
+    enum InteractionDetail: Codable, Equatable, Sendable {
+        case permission(toolName: String)
+        case clarification
+    }
+    
+    var category: AgentStateCategory {
+        switch self {
+        case .idle: return .idle
+        case .thinking: return .thinking
+        case .acting: return .acting
+        case .interaction: return .interaction
+        case .completed: return .completed
+        case .error: return .error
+        }
+    }
+    
+    var headline: String {
+        switch self {
+        case .idle: return "Idle"
+        case .thinking(let detail): return detail.rawValue
+        case .acting(.tool(let name)): return "Using tool: \(name)"
+        case .acting(.subtask(let c, let t)): return "Step \(c) of \(t)"
+        case .interaction(.permission(let tool)): return "Awaiting Permission: \(tool)"
+        case .interaction(.clarification): return "Awaiting Clarification"
+        case .completed: return "Completed"
+        case .error(let msg): return "Error: \(msg)"
+        }
+    }
 }
 
 
@@ -73,7 +121,8 @@ enum SchemaBuilder {
     static func object(properties: [(String, String, String)], required: [String]) -> ToolParameters {
         var propsDict: [String: ToolParameterProperty] = [:]
         for (key, type, desc) in properties {
-            propsDict[key] = ToolParameterProperty(type: type, description: desc)
+            let items = (type == "array") ? ["type": "string"] : nil
+            propsDict[key] = ToolParameterProperty(type: type, description: desc, items: items)
         }
         return ToolParameters(type: "object", properties: propsDict, required: required)
     }
@@ -257,7 +306,7 @@ struct AgentInput: Sendable {
         self.activeState = activeState
         self.recentHistory = recentHistory
 
-        self.generatorStrategy = generatorStrategy ?? NativeStructuredGenerator()
+        self.generatorStrategy = generatorStrategy ?? NativeStructuredStrategy()
         self.rateLimitCategory = rateLimitCategory
 
         self.instructions = instructions

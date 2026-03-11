@@ -25,7 +25,8 @@ struct ObservationMemoryStore: ObservationMemoryManaging {
             toolName: "system",
             shortObservation: "System Alert (Step \(currentIteration)): \(msg)",
             heavyContent: nil,
-            isRequired: true
+            isRequired: true,
+            metadata: nil
         )
         activeObservations.append(alert)
         
@@ -42,10 +43,26 @@ struct ObservationMemoryStore: ObservationMemoryManaging {
             toolName: toolName,
             shortObservation: shortObservation,
             heavyContent: heavyContent,
-            isRequired: isRequired
+            isRequired: isRequired,
+            metadata: nil
         )
         activeObservations.append(observation)
         observationIdCounter += 1
+    }
+    
+    mutating func addObservations(_ observations: [CognitiveObservation]) {
+        for obs in observations {
+            let newObs = CognitiveObservation(
+                stepId: observationIdCounter,
+                toolName: obs.toolName,
+                shortObservation: obs.shortObservation,
+                heavyContent: obs.heavyContent,
+                isRequired: obs.isRequired,
+                metadata: obs.metadata
+            )
+            activeObservations.append(newObs)
+            observationIdCounter += 1
+        }
     }
     
     // MARK: - Eviction & Hydration
@@ -81,10 +98,11 @@ struct ObservationMemoryStore: ObservationMemoryManaging {
         
         let hydrationRecord = CognitiveObservation(
             stepId: observationIdCounter,
-            toolName: ScratchpadTool.name, // Requires ScratchpadTool to be available in scope
+            toolName: "scratchpad", // Usually mapped to ScratchpadTool.name
             shortObservation: "Observation (Step \(currentIteration)): \(msg)",
             heavyContent: nil,
-            isRequired: true
+            isRequired: true,
+            metadata: nil
         )
         
         activeObservations.append(hydrationRecord)

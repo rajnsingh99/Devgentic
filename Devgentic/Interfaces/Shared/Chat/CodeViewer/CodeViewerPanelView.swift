@@ -11,26 +11,53 @@ import CodeEditLanguages
 import Combine
 import UniformTypeIdentifiers
 
-// MARK: - Theme & Color Extensions
+// MARK: - SyntaxTheme → EditorTheme Bridge
+
+extension SyntaxTheme {
+    /// Converts the app's SyntaxTheme tokens to a CodeEditSourceEditor EditorTheme.
+    var editorTheme: CodeEditSourceEditor.EditorTheme {
+        .init(
+            text: .init(color: text),
+            insertionPoint: text,
+            invisibles: .init(color: comments.withAlphaComponent(0.5)),
+            background: background,
+            lineHighlight: lineHighlight,
+            selection: selection,
+            keywords: .init(color: keywords),
+            commands: .init(color: commands),
+            types: .init(color: types),
+            attributes: .init(color: attributes),
+            variables: .init(color: variables),
+            values: .init(color: values),
+            numbers: .init(color: numbers),
+            strings: .init(color: strings),
+            characters: .init(color: characters),
+            comments: .init(color: comments)
+        )
+    }
+}
+
+// MARK: - Legacy EditorTheme Convenience (used by FileWindowViewer)
+
 extension CodeEditSourceEditor.EditorTheme {
-    public static let defaultDark: Self = .init(
-        text: .init(color: .white),
-        insertionPoint: .white,
-        invisibles: .init(color: .systemGray.withAlphaComponent(0.5)),
-        background: NSColor(hex: "#1e1e1e"), // Modern Editor Dark
+    /// Default dark editor theme, derived from the app's default SyntaxTheme tokens.
+    public static let defaultDark: Self = SyntaxTheme(
+        background: NSColor(hex: "#1e1e1e"),
         lineHighlight: NSColor(hex: "#2c2c2c"),
         selection: NSColor(hex: "#264f78"),
-        keywords: .init(color: NSColor(hex: "#569cd6")),
-        commands: .init(color: NSColor(hex: "#dcdcaa")),
-        types: .init(color: NSColor(hex: "#4ec9b0")),
-        attributes: .init(color: NSColor(hex: "#c586c0")),
-        variables: .init(color: .white),
-        values: .init(color: NSColor(hex: "#b5cea8")),
-        numbers: .init(color: NSColor(hex: "#b5cea8")),
-        strings: .init(color: NSColor(hex: "#ce9178")),
-        characters: .init(color: NSColor(hex: "#d7ba7d")),
-        comments: .init(color: NSColor(hex: "#6a9955"))
-    )
+        text: .white,
+        keywords: NSColor(hex: "#569cd6"),
+        commands: NSColor(hex: "#dcdcaa"),
+        types: NSColor(hex: "#4ec9b0"),
+        attributes: NSColor(hex: "#c586c0"),
+        variables: .white,
+        values: NSColor(hex: "#b5cea8"),
+        numbers: NSColor(hex: "#b5cea8"),
+        strings: NSColor(hex: "#ce9178"),
+        characters: NSColor(hex: "#d7ba7d"),
+        comments: NSColor(hex: "#6a9955"),
+        bracketHighlight: NSColor(hex: "#569cd6").withAlphaComponent(0.4)
+    ).editorTheme
 }
 
 extension NSColor {
@@ -54,20 +81,20 @@ struct GapBuffer {
     private var buffer: [Character]
     private var gapStart: Int
     private var gapEnd: Int
-    
+
     var string: String {
         return String(buffer[0..<gapStart] + buffer[gapEnd..<buffer.count])
     }
-    
+
     init(string: String) {
         self.buffer = Array(string)
         self.gapStart = buffer.count
         self.gapEnd = buffer.count
     }
-    
+
     mutating func moveGap(to position: Int) {
         guard position != gapStart else { return }
-        
+
         if position < gapStart {
             let distance = gapStart - position
             let gapSize = gapEnd - gapStart
@@ -81,19 +108,19 @@ struct GapBuffer {
             gapEnd = position + (gapEnd - gapStart)
         }
     }
-    
+
     mutating func insert(_ char: Character) {
         ensureGap(ofSize: 1)
         buffer[gapStart] = char
         gapStart += 1
     }
-    
+
     mutating func delete() {
         if gapStart > 0 {
             gapStart -= 1
         }
     }
-    
+
     private mutating func ensureGap(ofSize size: Int) {
         if gapEnd - gapStart < size {
             let newGapSize = max(size, 64)
@@ -136,6 +163,10 @@ class CodeDocument: ObservableObject, Equatable {
         "hpp": "cpp",
         "jsonc": "json",
         "yml": "yaml",
+        "md": "markdown",
+        "mdx": "markdown",
+        "mkd": "markdown",
+        "mdown": "markdown",
     ]
 
     init(content: String, language: String?) {
@@ -155,14 +186,35 @@ class CodeDocument: ObservableObject, Equatable {
 // MARK: - CodeViewerPanelView (Main SwiftUI View)
 struct CodeViewerPanelView: View {
     @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
+    @EnvironmentObject var themeManager: ThemeManager
+
     @State private var isHoveringOnDivider = false
     @AppStorage("codeEditFontSize") var fontSize: Double = 13
     @AppStorage("codeViewerPanelWidth") private var panelWidth: Double = 600
 
     @State private var document: CodeDocument?
     @State private var didCopy: Bool = false
-    
     @State private var currentSnippet: CodeSnippet?
+
+    // MARK: - Resolved Theme Colors (derived from Code Viewer syntax theme)
+
+    private var resolvedSyntax: SyntaxTheme {
+        themeManager.resolvedCodeViewerSyntaxTheme
+    }
+
+    private var panelBackground: Color { Color(nsColor: resolvedSyntax.background) }
+    private var headerBackground: Color { Color(nsColor: resolvedSyntax.lineHighlight) }
+    private var textColor: Color { Color(nsColor: resolvedSyntax.text) }
+    private var secondaryTextColor: Color { Color(nsColor: resolvedSyntax.comments) }
+    private var accentTint: Color { Color(nsColor: resolvedSyntax.keywords) }
+    private var selectionColor: Color { Color(nsColor: resolvedSyntax.selection) }
+
+    /// Composite identifier for detecting theme changes in the NSViewController bridge.
+    private var themeIdentifier: String {
+        "\(themeManager.currentTheme.id)|\(themeManager.codeViewerThemeOverride.rawValue)"
+    }
+
+    // MARK: - Body
 
     var body: some View {
         HStack(spacing: 0) {
@@ -171,7 +223,7 @@ struct CodeViewerPanelView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .transition(.move(edge: .trailing))
-        .shadow(radius: 10)
+        .shadow(color: .black.opacity(0.25), radius: 12, x: -4, y: 0)
         .onReceive(chatHistoryViewModel.$codeViewerContent) { newContent in
             if let content = newContent {
                 let snippet = content.snippets[content.currentIndex]
@@ -185,11 +237,13 @@ struct CodeViewerPanelView: View {
             }
         }
     }
-    
+
+    // MARK: - Resizable Divider
+
     private var resizableDivider: some View {
-        Divider()
+        Rectangle()
+            .fill(isHoveringOnDivider ? accentTint.opacity(0.6) : selectionColor.opacity(0.3))
             .frame(width: 4)
-            .background(isHoveringOnDivider ? Color.blue.opacity(0.5) : Color.clear)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 1).onChanged { value in
@@ -203,11 +257,19 @@ struct CodeViewerPanelView: View {
                 if hovering { NSCursor.resizeLeftRight.set() }
                 else { NSCursor.arrow.set() }
             }
+            .animation(.easeInOut(duration: 0.15), value: isHoveringOnDivider)
     }
-    
+
+    // MARK: - Panel Content
+
     private var panelContent: some View {
         VStack(spacing: 0) {
             panelHeader
+
+            Rectangle()
+                .fill(selectionColor.opacity(0.4))
+                .frame(height: 1)
+
             ZStack(alignment: .top) {
                 if chatHistoryViewModel.isShowingDiff,
                    let originalCode = chatHistoryViewModel.originalCodeForDiff,
@@ -217,7 +279,10 @@ struct CodeViewerPanelView: View {
                 } else if let document = document {
                     HighPerformanceCodeViewRepresentable(
                         document: document,
-                        fontSize: fontSize
+                        fontSize: fontSize,
+                        editorTheme: resolvedSyntax.editorTheme,
+                        bracketHighlightColor: resolvedSyntax.bracketHighlight,
+                        themeIdentifier: themeIdentifier
                     )
                     .id(document.id)
                     .clipped()
@@ -225,110 +290,124 @@ struct CodeViewerPanelView: View {
                 } else {
                     placeholderContent
                 }
-                Divider()
             }
         }
         .frame(width: panelWidth)
-        .background(Color(nsColor: NSColor(hex: "#1e1e1e")))
+        .background(panelBackground)
     }
-    
+
+    // MARK: - Panel Header
+
     private var panelHeader: some View {
         ZStack {
             HStack {
-                HStack(spacing: 8) {
+                // Language badge
+                HStack(spacing: 6) {
                     Image(systemName: languageIcon(for: currentSnippet?.language))
-                        .font(.system(size: 14))
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(accentTint)
 
                     Text(currentSnippet?.language?.capitalized ?? "Code Viewer")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundColor(textColor)
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(selectionColor.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                 Spacer()
 
-                HStack(spacing: 6) {
+                // Action buttons
+                HStack(spacing: 4) {
                     if chatHistoryViewModel.isShowingDiff, let snippet = currentSnippet {
-                        HeaderButton(
-                            action: {
-                                chatHistoryViewModel.applyChanges(for: snippet)
-                            },
+                        CodeViewerHeaderButton(
+                            action: { chatHistoryViewModel.applyChanges(for: snippet) },
                             icon: "checkmark.circle.fill",
                             helpText: "Apply Changes to File",
-                            color: .green
+                            foregroundColor: Color(nsColor: resolvedSyntax.strings),
+                            hoverBackground: selectionColor
                         )
                     }
 
                     if let snippet = currentSnippet, snippet.sourceFileID != nil {
-                        HeaderButton(
+                        CodeViewerHeaderButton(
                             action: {
-                                withAnimation {
-                                    chatHistoryViewModel.toggleDiffView(for: snippet)
-                                }
+                                withAnimation { chatHistoryViewModel.toggleDiffView(for: snippet) }
                             },
                             icon: chatHistoryViewModel.isShowingDiff ? "doc.text.fill" : "arrow.left.arrow.right",
                             helpText: chatHistoryViewModel.isShowingDiff ? "Show Final Code" : "Show Changes",
-                            color: chatHistoryViewModel.isShowingDiff ? .accentColor : .secondary
+                            foregroundColor: chatHistoryViewModel.isShowingDiff ? accentTint : secondaryTextColor,
+                            hoverBackground: selectionColor
                         )
                     }
-                    
-                    HeaderButton(
+
+                    CodeViewerHeaderButton(
                         action: {
                             copyCodeToClipboard()
                             didCopy = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                didCopy = false
-                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { didCopy = false }
                         },
                         icon: didCopy ? "checkmark" : "doc.on.doc",
                         helpText: "Copy code to clipboard",
-                        color: didCopy ? .green : .secondary
+                        foregroundColor: didCopy ? Color(nsColor: resolvedSyntax.strings) : secondaryTextColor,
+                        hoverBackground: selectionColor
                     )
-                    .animation(.easeInOut, value: didCopy)
+                    .animation(.easeInOut(duration: 0.2), value: didCopy)
                     .disabled(document == nil)
 
-                    HeaderButton(
+                    CodeViewerHeaderButton(
                         action: saveCodeToFile,
                         icon: "square.and.arrow.down",
                         helpText: "Save code to a file",
-                        color: .secondary
+                        foregroundColor: secondaryTextColor,
+                        hoverBackground: selectionColor
                     )
                     .disabled(document == nil)
 
-                    HeaderButton(
+                    CodeViewerHeaderButton(
                         action: chatHistoryViewModel.hideCodeViewer,
                         icon: "xmark",
                         helpText: "Close viewer",
-                        color: .secondary
+                        foregroundColor: secondaryTextColor,
+                        hoverBackground: selectionColor
                     )
                 }
             }
 
+            // Centered snippet navigator
             if let content = chatHistoryViewModel.codeViewerContent, content.snippets.count > 1 {
-                SnippetNavigatorView(
+                CodeViewerSnippetNavigator(
                     currentIndex: content.currentIndex,
                     totalCount: content.snippets.count,
                     onPrevious: chatHistoryViewModel.navigateToPreviousSnippet,
-                    onNext: chatHistoryViewModel.navigateToNextSnippet
+                    onNext: chatHistoryViewModel.navigateToNextSnippet,
+                    textColor: textColor,
+                    secondaryColor: secondaryTextColor,
+                    hoverColor: selectionColor
                 )
             }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 44)
-        .background(.ultraThinMaterial)
+        .padding(.horizontal, 14)
+        .frame(height: 42)
+        .background(headerBackground)
     }
-    
+
+    // MARK: - Placeholder
+
     private var placeholderContent: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             Image(systemName: "curlybraces.square")
-                .font(.system(size: 48))
-                .foregroundColor(.gray.opacity(0.3))
+                .font(.system(size: 40, weight: .thin))
+                .foregroundColor(secondaryTextColor.opacity(0.4))
             Text("No Code Selected")
-                .font(.headline)
-                .foregroundColor(.secondary)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(secondaryTextColor.opacity(0.6))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    // MARK: - Actions
 
     private func copyCodeToClipboard() {
         guard let snippet = currentSnippet else { return }
@@ -343,14 +422,14 @@ struct CodeViewerPanelView: View {
         let savePanel = NSSavePanel()
         savePanel.canCreateDirectories = true
         savePanel.showsTagField = false
-        
+
         let language = CodeLanguage.allLanguages.first {
             $0.id.rawValue.lowercased() == snippet.language?.lowercased()
         } ?? .default
-        
+
         savePanel.nameFieldStringValue = "snippet.\(language.extensions.first ?? "txt")"
         savePanel.title = "Save Code Snippet"
-        
+
         if let utType = UTType(tag: language.extensions.first ?? "", tagClass: .filenameExtension, conformingTo: .text) {
             savePanel.allowedContentTypes = [utType]
         } else {
@@ -367,7 +446,7 @@ struct CodeViewerPanelView: View {
             }
         }
     }
-    
+
     private func languageIcon(for languageID: String?) -> String {
         switch languageID?.lowercased() {
         case "swift": return "swift"
@@ -382,51 +461,58 @@ struct CodeViewerPanelView: View {
         case "rust": return "gearshape.2"
         case "go": return "arrow.right.arrow.left"
         case "c", "cpp", "objc": return "memorychip"
+        case "markdown", "md", "mdx": return "text.document"
         default: return "doc.text"
         }
     }
 }
 
-// MARK: - Modern Snippet Navigator View
-fileprivate struct SnippetNavigatorView: View {
+// MARK: - Snippet Navigator
+
+fileprivate struct CodeViewerSnippetNavigator: View {
     let currentIndex: Int
     let totalCount: Int
     let onPrevious: () -> Void
     let onNext: () -> Void
+    let textColor: Color
+    let secondaryColor: Color
+    let hoverColor: Color
 
     var body: some View {
-        HStack(spacing: 1) {
-            NavButton(action: onPrevious, icon: "chevron.left", enabled: currentIndex > 0)
-            
+        HStack(spacing: 2) {
+            CodeViewerNavButton(action: onPrevious, icon: "chevron.left", enabled: currentIndex > 0, textColor: textColor, hoverColor: hoverColor)
+
             Text("\(currentIndex + 1) / \(totalCount)")
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 50)
-                .padding(.horizontal, 4)
-                
-            NavButton(action: onNext, icon: "chevron.right", enabled: currentIndex < totalCount - 1)
+                .foregroundColor(secondaryColor)
+                .frame(width: 46)
+
+            CodeViewerNavButton(action: onNext, icon: "chevron.right", enabled: currentIndex < totalCount - 1, textColor: textColor, hoverColor: hoverColor)
         }
-        .padding(2)
-        .background(Color.black.opacity(0.2))
-        .cornerRadius(6)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.1), lineWidth: 0.5))
+        .padding(3)
+        .background(hoverColor.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
-fileprivate struct NavButton: View {
+// MARK: - Nav Button
+
+fileprivate struct CodeViewerNavButton: View {
     let action: () -> Void
     let icon: String
     let enabled: Bool
+    let textColor: Color
+    let hoverColor: Color
     @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(enabled ? .primary : .secondary.opacity(0.3))
+                .foregroundColor(enabled ? textColor : textColor.opacity(0.2))
                 .frame(width: 20, height: 20)
-                .background(isHovering && enabled ? Color.white.opacity(0.1) : Color.clear)
-                .cornerRadius(4)
+                .background(isHovering && enabled ? hoverColor : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -434,22 +520,25 @@ fileprivate struct NavButton: View {
     }
 }
 
-fileprivate struct HeaderButton: View {
+// MARK: - Header Button
+
+fileprivate struct CodeViewerHeaderButton: View {
     let action: () -> Void
     let icon: String
     let helpText: String
-    let color: Color
+    let foregroundColor: Color
+    let hoverBackground: Color
     @State private var isHovering = false
     @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 14))
-                .foregroundColor(isEnabled ? (isHovering ? color : .secondary) : .secondary.opacity(0.3))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(isEnabled ? (isHovering ? foregroundColor : foregroundColor.opacity(0.7)) : foregroundColor.opacity(0.2))
                 .frame(width: 28, height: 28)
-                .background(isHovering && isEnabled ? Color.gray.opacity(0.15) : Color.clear)
-                .cornerRadius(6)
+                .background(isHovering && isEnabled ? hoverBackground : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .help(helpText)
@@ -464,13 +553,27 @@ extension CodeDocument: Identifiable {}
 private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentable {
     @ObservedObject var document: CodeDocument
     var fontSize: Double
+    var editorTheme: CodeEditSourceEditor.EditorTheme
+    var bracketHighlightColor: NSColor
+    var themeIdentifier: String
 
     func makeNSViewController(context: Context) -> HighPerformanceCodeViewController {
-        return HighPerformanceCodeViewController(document: document)
+        return HighPerformanceCodeViewController(
+            document: document,
+            editorTheme: editorTheme,
+            bracketHighlightColor: bracketHighlightColor,
+            themeIdentifier: themeIdentifier
+        )
     }
 
     func updateNSViewController(_ nsViewController: HighPerformanceCodeViewController, context: Context) {
-        nsViewController.update(document: document, fontSize: fontSize)
+        nsViewController.update(
+            document: document,
+            fontSize: fontSize,
+            editorTheme: editorTheme,
+            bracketHighlightColor: bracketHighlightColor,
+            themeIdentifier: themeIdentifier
+        )
     }
 }
 
@@ -482,9 +585,15 @@ class HighPerformanceCodeViewController: NSViewController {
 
     private var hostingController: NSHostingController<SourceEditor>?
     private var currentFontSize: Double = 14
+    private var currentEditorTheme: CodeEditSourceEditor.EditorTheme
+    private var currentBracketColor: NSColor
+    private var currentThemeIdentifier: String
 
-    init(document: CodeDocument) {
+    init(document: CodeDocument, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String) {
         self.document = document
+        self.currentEditorTheme = editorTheme
+        self.currentBracketColor = bracketHighlightColor
+        self.currentThemeIdentifier = themeIdentifier
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -495,18 +604,18 @@ class HighPerformanceCodeViewController: NSViewController {
         setupEditorView()
     }
 
-    /// Builds the full SourceEditor configuration with all supported features enabled.
+    /// Builds the full SourceEditor configuration using the current theme.
     private func makeConfiguration(font: NSFont) -> SourceEditorConfiguration {
         .init(
             appearance: .init(
-                theme: .defaultDark,
+                theme: currentEditorTheme,
                 useThemeBackground: true,
                 font: font,
                 lineHeightMultiple: 1.2,
                 letterSpacing: 1.0,
                 wrapLines: true,
                 tabWidth: 4,
-                bracketPairEmphasis: .bordered(color: NSColor(hex: "#569cd6").withAlphaComponent(0.4))
+                bracketPairEmphasis: .bordered(color: currentBracketColor)
             ),
             behavior: .init(
                 isEditable: false,
@@ -586,7 +695,7 @@ class HighPerformanceCodeViewController: NSViewController {
         hostingController?.rootView = newEditorView
     }
 
-    func update(document: CodeDocument, fontSize: Double) {
+    func update(document: CodeDocument, fontSize: Double, editorTheme: CodeEditSourceEditor.EditorTheme, bracketHighlightColor: NSColor, themeIdentifier: String) {
         var needsViewUpdate = false
 
         if self.document != document {
@@ -596,6 +705,13 @@ class HighPerformanceCodeViewController: NSViewController {
 
         if self.currentFontSize != fontSize {
             self.currentFontSize = fontSize
+            needsViewUpdate = true
+        }
+
+        if self.currentThemeIdentifier != themeIdentifier {
+            self.currentThemeIdentifier = themeIdentifier
+            self.currentEditorTheme = editorTheme
+            self.currentBracketColor = bracketHighlightColor
             needsViewUpdate = true
         }
 

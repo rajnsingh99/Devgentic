@@ -16,14 +16,16 @@
 
 import Foundation
 
-// MARK: - Hybrid Search Service (Based on POC)
+// MARK: - Hybrid Search Service (Two-Phase Prefiltered)
 
 /// A Production-Grade Search Engine wrapper for macOS.
-/// Implements Raw Spotlight Query Language to solve tokenization edge cases.
+/// Uses a Two-Phase search strategy: filename matches first (high signal),
+/// then content matches as fallback (only when name matches are sparse).
+/// This prevents low-relevance content matches from drowning out filename hits.
 @MainActor
 class HybridSearchService {
     static let shared = HybridSearchService()
-    
+
     // Pre-fetching attributes prevents disk I/O during result mapping
     private let requiredAttributes = [
         NSMetadataItemPathKey,
@@ -31,10 +33,10 @@ class HybridSearchService {
         NSMetadataItemFSNameKey,
         kMDItemKind as String
     ]
-    
+
     // Toggle this to true to explicitly hide system-heavy noise folders
     private let filterSystemPaths = true
-    
+
     /// Checks permission for all primary root-level user directories.
     /// This acts as the "Manual Trigger" to prompt TCC if needed and gathers available scopes.
     private func checkPermissionsAndGetScopes() -> [URL] {
@@ -47,13 +49,11 @@ class HybridSearchService {
             .musicDirectory,
             .picturesDirectory
         ]
-        
+
         var availableScopes: [URL] = []
-        
+
         for folder in foldersToCheck {
             if let url = fileManager.urls(for: folder, in: .userDomainMask).first {
-                // Non-intrusive check: isReadableFile will return false if TCC block is active.
-                // Attempting to read it often triggers the OS permission prompt if not yet determined.
                 if fileManager.isReadableFile(atPath: url.path) {
                     availableScopes.append(url)
                 }
@@ -61,128 +61,173 @@ class HybridSearchService {
         }
         return availableScopes
     }
-    
-    /// Performs the search using the POC raw query logic.
-    func search(term: String, scope: String?) async throws -> [String] {
+
+    // MARK: - Two-Phase Search
+
+    /// Performs a two-phase search: filename matches first, content matches as fallback.
+    /// Returns a `SearchResult` with categorized matches for structured output.
+    func search(term: String, scope: String?) async throws -> SearchResult {
         // 1. Scope Resolution & Permission Check
         var searchScopes: [Any] = []
         var permissionNote: String? = nil
-        
-        // Safety Check: If scope is the string "null" or empty, treat as Global
+
         let cleanScope = (scope == "null" || scope == "") ? nil : scope
-        
+
         if let specificScope = cleanScope {
-            // User requested specific scope
             if FileManager.default.isReadableFile(atPath: specificScope) {
                 searchScopes = [URL(fileURLWithPath: specificScope)]
             } else {
-                return ["Error: Permission denied or path does not exist for scope: \(specificScope). Please grant access."]
+                return SearchResult(error: "Error: Permission denied or path does not exist for scope: \(specificScope). Please grant access.")
             }
         } else {
-            // Global Search: Use validated user directories from POC logic
             let validUserScopes = checkPermissionsAndGetScopes()
-            
             if !validUserScopes.isEmpty {
                 searchScopes = validUserScopes
             } else {
-                // Fallback to Home if we are still waiting for initial user interaction/permissions
                 searchScopes = [NSMetadataQueryUserHomeScope]
                 permissionNote = "[Note: Limited access to user directories. Results might be incomplete until permissions are granted.]"
             }
         }
-        
+
+        // Phase 1: Filename-only query (high signal)
+        let nameQuery = buildNameOnlyQuery(from: term)
+        let nameResults = await runQuery(rawQuery: nameQuery, scopes: searchScopes, limit: 10)
+
+        // Phase 2: Content-only query (lower signal) — only runs if name matches are sparse
+        var contentResults: [String] = []
+        if nameResults.count < 5 {
+            let contentQuery = buildContentOnlyQuery(from: term)
+            let rawContentResults = await runQuery(rawQuery: contentQuery, scopes: searchScopes, limit: 5)
+            // Deduplicate: remove any paths already found in name results
+            let nameSet = Set(nameResults)
+            contentResults = rawContentResults.filter { !nameSet.contains($0) }
+        }
+
+        return SearchResult(
+            nameMatches: nameResults,
+            contentMatches: contentResults,
+            permissionNote: permissionNote
+        )
+    }
+
+    // MARK: - Reusable Query Executor
+
+    /// Runs a single NSMetadataQuery with the given raw query string and returns paths up to `limit`.
+    private func runQuery(rawQuery: String, scopes: [Any], limit: Int) async -> [String] {
+        guard !rawQuery.isEmpty else { return [] }
+
         return await withCheckedContinuation { continuation in
             let query = NSMetadataQuery()
-            
-            // Logic from POC: Setup
             query.sortDescriptors = [
                 NSSortDescriptor(key: NSMetadataItemLastUsedDateKey, ascending: false),
                 NSSortDescriptor(key: NSMetadataItemDisplayNameKey, ascending: true)
             ]
             query.valueListAttributes = requiredAttributes
-            
-            // Logic from POC: Raw Query Construction
-            let rawQueryString = buildRawQuery(from: term)
-            
-            if let predicate = NSPredicate(fromMetadataQueryString: rawQueryString) {
-                query.predicate = predicate
-            } else {
-                continuation.resume(returning: ["Error: Failed to compile search query."])
+
+            guard let predicate = NSPredicate(fromMetadataQueryString: rawQuery) else {
+                continuation.resume(returning: [])
                 return
             }
-            
-            query.searchScopes = searchScopes
-            
-            // Notification Observer
+            query.predicate = predicate
+            query.searchScopes = scopes
+
             var observer: NSObjectProtocol?
-            
-            func finish(results: [String]) {
+            var hasResumed = false
+
+            func finish(_ results: [String]) {
+                guard !hasResumed else { return }
+                hasResumed = true
                 if let obs = observer { NotificationCenter.default.removeObserver(obs) }
                 query.stop()
-                
-                var finalOutput = results
-                if let note = permissionNote {
-                    finalOutput.append(note)
-                }
-                continuation.resume(returning: finalOutput)
+                continuation.resume(returning: Array(results.prefix(limit)))
             }
-            
-            observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { notification in
+
+            observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { _ in
                 query.disableUpdates()
-                
-                let foundItems = query.results as? [NSMetadataItem] ?? []
-                var paths: [String] = []
-                
-                for item in foundItems {
-                    if let path = item.value(forAttribute: NSMetadataItemPathKey) as? String {
-                        paths.append(path)
-                    }
+                let paths = (query.results as? [NSMetadataItem] ?? []).compactMap {
+                    $0.value(forAttribute: NSMetadataItemPathKey) as? String
                 }
-                
-                // Return all results (Tool wrapper handles truncation if needed)
-                finish(results: paths)
+                finish(paths)
             }
-            
-            // Start Search
+
             query.start()
-            
-            // Timeout Safety: 4.0s max
+
+            // Timeout Safety: 4.0s max per query phase
             DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
                 if query.isGathering {
-                    // Force finish with whatever we have so far
                     query.disableUpdates()
-                    let foundItems = query.results as? [NSMetadataItem] ?? []
-                    let paths = foundItems.compactMap { $0.value(forAttribute: NSMetadataItemPathKey) as? String }
-                    finish(results: paths)
+                    let paths = (query.results as? [NSMetadataItem] ?? []).compactMap {
+                        $0.value(forAttribute: NSMetadataItemPathKey) as? String
+                    }
+                    finish(paths)
                 }
             }
         }
     }
-    
-    // Logic from POC: Raw Query Builder
-    private func buildRawQuery(from input: String) -> String {
+
+    // MARK: - Query Builders
+
+    /// Phase 1: Searches only filenames (DisplayName + FSName). High signal, low noise.
+    private func buildNameOnlyQuery(from input: String) -> String {
         let tokens = input.split(separator: " ")
         guard !tokens.isEmpty else { return "" }
-        
+
         let subQueries = tokens.map { token -> String in
             let escaped = String(token).replacingOccurrences(of: "\"", with: "\\\"")
-            // Search DisplayName, FSName (Filename), and Content with 'cdw' modifiers (Case, Diacritic, Word-based)
-            // UPDATE: Added kMDItemFSName to ensure exact filename matches are found (e.g. Folders)
-            return "((kMDItemDisplayName == \"*\(escaped)*\"cdw) || (kMDItemFSName == \"*\(escaped)*\"cdw) || (kMDItemTextContent == \"\(escaped)\"cdw))"
+            return "((kMDItemDisplayName == \"*\(escaped)*\"cdw) || (kMDItemFSName == \"*\(escaped)*\"cdw))"
         }
-        
-        var finalQuery = subQueries.joined(separator: " && ")
-        
-        if filterSystemPaths {
-            let exclusions = [
-                "*/Library/*",
-                "*/.Trash/*"
-            ]
-            let exclusionQuery = exclusions.map { "kMDItemPath != \"\($0)\"" }.joined(separator: " && ")
-            finalQuery = "(\(finalQuery)) && (\(exclusionQuery))"
+
+        return applyExclusions(to: subQueries.joined(separator: " && "))
+    }
+
+    /// Phase 2: Searches only file content (TextContent). Broader reach, higher noise.
+    private func buildContentOnlyQuery(from input: String) -> String {
+        let tokens = input.split(separator: " ")
+        guard !tokens.isEmpty else { return "" }
+
+        let subQueries = tokens.map { token -> String in
+            let escaped = String(token).replacingOccurrences(of: "\"", with: "\\\"")
+            return "(kMDItemTextContent == \"\(escaped)\"cdw)"
         }
-        
-        return finalQuery
+
+        return applyExclusions(to: subQueries.joined(separator: " && "))
+    }
+
+    /// Appends system path exclusions (Library, Trash) to a query string.
+    private func applyExclusions(to query: String) -> String {
+        guard filterSystemPaths else { return query }
+        let exclusions = ["*/Library/*", "*/.Trash/*"]
+        let exclusionQuery = exclusions.map { "kMDItemPath != \"\($0)\"" }.joined(separator: " && ")
+        return "(\(query)) && (\(exclusionQuery))"
+    }
+
+    // MARK: - Search Result Model
+
+    /// Structured result from a two-phase search, categorizing matches by relevance tier.
+    struct SearchResult {
+        let nameMatches: [String]
+        let contentMatches: [String]
+        let permissionNote: String?
+        let error: String?
+
+        /// Total number of results across all categories.
+        var totalCount: Int { nameMatches.count + contentMatches.count }
+        var isEmpty: Bool { nameMatches.isEmpty && contentMatches.isEmpty }
+        var hasError: Bool { error != nil }
+
+        init(nameMatches: [String] = [], contentMatches: [String] = [], permissionNote: String? = nil, error: String? = nil) {
+            self.nameMatches = nameMatches
+            self.contentMatches = contentMatches
+            self.permissionNote = permissionNote
+            self.error = error
+        }
+
+        init(error: String) {
+            self.nameMatches = []
+            self.contentMatches = []
+            self.permissionNote = nil
+            self.error = error
+        }
     }
 }
 
@@ -264,39 +309,41 @@ struct SmartSearchTool: DevgenticTool {
             ]
         )
         // -------------------------------
-        
+
         do {
-            let paths = try await HybridSearchService.shared.search(
+            let result = try await HybridSearchService.shared.search(
                 term: arguments.search_term,
                 scope: arguments.search_scope
             )
-            
-            // Check for explicit error messages
-            if let first = paths.first, first.starts(with: "Error:") {
-                return "\(first) (Audit Ref: \(logID))"
+
+            // Check for explicit error
+            if let error = result.error {
+                return "\(error) (Audit Ref: \(logID))"
             }
-            
-            if paths.isEmpty {
+
+            if result.isEmpty {
                 return "No results found matching '\(arguments.search_term)'. (Audit Ref: \(logID))"
             }
-            
-            // Check for permission warning
-            let warning = paths.first(where: { $0.starts(with: "[Note:") })
-            let filePaths = paths.filter { !$0.starts(with: "[Note:") }
-            
-            if filePaths.isEmpty {
-                 return "No files found matching '\(arguments.search_term)'. \(warning ?? "") (Audit Ref: \(logID))"
+
+            // Build structured output with relevance tiers
+            var output = "Search Results for '\(arguments.search_term)' (\(result.totalCount) items):\n"
+
+            if !result.nameMatches.isEmpty {
+                output += "\n📁 Name Matches (\(result.nameMatches.count)):\n"
+                output += result.nameMatches.joined(separator: "\n")
             }
-            
-            let limitedPaths = filePaths.prefix(20)
-            var output = "Found \(filePaths.count) items (showing top 20):\n" + limitedPaths.joined(separator: "\n")
-            if let note = warning {
+
+            if !result.contentMatches.isEmpty {
+                output += "\n\n📄 Content Matches (\(result.contentMatches.count)):\n"
+                output += result.contentMatches.joined(separator: "\n")
+            }
+
+            if let note = result.permissionNote {
                 output += "\n\n\(note)"
             }
-            
-            // FIX: Explicitly label the search action results
-            return "🔍 Search Results for '\(arguments.search_term)':\n\(output)\n(Audit Ref: \(logID))"
-            
+
+            return "\(output)\n(Audit Ref: \(logID))"
+
         } catch {
             return "Search failed: \(error.localizedDescription) (Audit Ref: \(logID))"
         }
@@ -458,9 +505,9 @@ struct OrganizeBatchTool: DevgenticTool {
     
     var parameterSchema: ToolParameters {
         let props: [String: ToolParameterProperty] = [
-            "sourcePaths": ToolParameterProperty(type: "array", description: "Array of full file paths to move."),
-            "destinationFolder": ToolParameterProperty(type: "string", description: "The target folder path."),
-            "dryRun": ToolParameterProperty(type: "boolean", description: "If true, simulates the move.")
+            "sourcePaths": ToolParameterProperty(type: "array", description: "Array of full file paths to move.", items: ["type": "string"]),
+            "destinationFolder": ToolParameterProperty(type: "string", description: "The target folder path.", items: nil),
+            "dryRun": ToolParameterProperty(type: "boolean", description: "If true, simulates the move.", items: nil)
         ]
         return ToolParameters(type: "object", properties: props, required: ["sourcePaths", "destinationFolder"])
     }

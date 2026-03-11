@@ -16,36 +16,40 @@ private func fsEventsCallback(
     eventFlags: UnsafePointer<FSEventStreamEventFlags>,
     eventIds: UnsafePointer<FSEventStreamEventId>
 ) {
-    // Retrieve the FileSystemMonitor instance from the context info.
     guard let clientCallBackInfo = clientCallBackInfo else { return }
     let monitor = Unmanaged<FileSystemMonitor>.fromOpaque(clientCallBackInfo).takeUnretainedValue()
     
-    // Call an instance method on the monitor to handle the event.
-    // This avoids capturing context in the C callback itself.
-    monitor.handleEvents()
+    // When kFSEventStreamCreateFlagUseCFTypes is used, eventPaths is a CFArrayRef
+    let paths = unsafeBitCast(eventPaths, to: CFArray.self)
+    var changedURLs: [URL] = []
+    
+    for i in 0..<numEvents {
+        if let path = CFArrayGetValueAtIndex(paths, i) {
+            let pathString = unsafeBitCast(path, to: CFString.self) as String
+            changedURLs.append(URL(fileURLWithPath: pathString))
+        }
+    }
+    
+    monitor.handleEvents(changedURLs: changedURLs)
 }
 
 
 class FileSystemMonitor {
     private var stream: FSEventStreamRef?
-    private let callback: (URL) -> Void // A callback that passes the root URL back.
+    private let callback: ([URL]) -> Void // Updated to pass specific changed URLs
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "FileSystemMonitor")
     
-    // Store the URL being monitored to pass to the callback.
     private var monitoringURL: URL?
 
-    init(callback: @escaping (URL) -> Void) {
+    init(callback: @escaping ([URL]) -> Void) {
         self.callback = callback
     }
 
-    func start(path: String) {
-        // Ensure any existing stream is stopped before starting a new one.
+    func start(path: String, excludedPaths: [String] = []) {
         stop()
         
         self.monitoringURL = URL(fileURLWithPath: path)
         
-        // The context passes a pointer to `self` (the FileSystemMonitor instance)
-        // to the C callback function.
         var context = FSEventStreamContext(
             version: 0,
             info: Unmanaged.passUnretained(self).toOpaque(),
@@ -58,34 +62,33 @@ class FileSystemMonitor {
         
         stream = FSEventStreamCreate(
             nil,
-            fsEventsCallback, // Pass the global C function as the callback.
+            fsEventsCallback,
             &context,
             pathsToWatch,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            1.0, // Latency in seconds
+            1.0, // Latency
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagIgnoreSelf)
         )
 
         if let stream = stream {
+            // Apply exclusion paths if provided
+            if !excludedPaths.isEmpty {
+                FSEventStreamSetExclusionPaths(stream, excludedPaths as CFArray)
+                logger.info("Set \(excludedPaths.count) exclusion paths for monitoring.")
+            }
+            
             FSEventStreamSetDispatchQueue(stream, DispatchQueue.global(qos: .background))
             if FSEventStreamStart(stream) {
                 logger.info("FSEventStream started successfully for path: \(path)")
             } else {
                 logger.error("Failed to start FSEventStream for path: \(path)")
-                // Clean up if starting fails.
                 self.stream = nil
             }
         }
     }
     
-    /// This instance method is called by the global `fsEventsCallback` function.
-    fileprivate func handleEvents() {
-        guard let url = monitoringURL else {
-            logger.warning("handleEvents called but monitoringURL is nil.")
-            return
-        }
-        // Execute the callback with the root URL.
-        callback(url)
+    fileprivate func handleEvents(changedURLs: [URL]) {
+        callback(changedURLs)
     }
 
     func stop() {

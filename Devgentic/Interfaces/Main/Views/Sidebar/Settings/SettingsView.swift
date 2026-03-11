@@ -10,7 +10,6 @@ import SwiftUI
 /// Enum to represent the different settings categories for easier navigation and management.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
-    case ollama = "Ollama"
     case theme = "Theme"
     case about = "About"
 
@@ -21,8 +20,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             return "gear"
-        case .ollama:
-            return "cpu"
         case .theme:
             return "paintbrush"
         case .about:
@@ -35,17 +32,19 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     var destination: some View {
         switch self {
         case .general:
-            // Use the new dedicated view for general settings
             GeneralSettingsView()
-        case .ollama:
-            // Use the new dedicated view for Ollama settings
-            OllamaSettingsView_old()
         case .theme:
             ThemeSettingsView()
         case .about:
-            Text("About Devgentic")
-                .font(.title2)
-                .foregroundColor(.secondary)
+            VStack(spacing: 16) {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.blue)
+                Text("Devgentic")
+                    .font(.largeTitle.weight(.bold))
+                Text("Version 1.0.0")
+                    .foregroundColor(.secondary)
+            }
         }
     }
 }
@@ -61,11 +60,19 @@ struct SettingsView: View {
         NavigationSplitView {
             List(SettingsCategory.allCases, selection: $selectedCategory) { category in
                 NavigationLink(value: category) {
-                    Label(category.rawValue, systemImage: category.iconName)
+                    Label {
+                        Text(category.rawValue)
+                            .font(.system(size: 14, weight: .medium))
+                    } icon: {
+                        Image(systemName: category.iconName)
+                            .foregroundStyle(theme.accentColor)
+                    }
                 }
+                .padding(.vertical, 4)
             }
+            .listStyle(.sidebar)
             .navigationTitle("Settings")
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220)
             .scrollContentBackground(.hidden)
             .background(theme.secondaryBackground)
         } detail: {
@@ -83,9 +90,9 @@ struct SettingsView: View {
                 }
             }
         }
-        .frame(minWidth: 700, minHeight: 550)
-        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
+        .frame(minWidth: 750, minHeight: 600)
+        .tint(theme.accentColor)
+        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" || theme.id == "one_dark" ? .dark : nil))
         .configureWindow(collectionBehavior: [.canJoinAllSpaces, .fullScreenAuxiliary])
     }
 }
-

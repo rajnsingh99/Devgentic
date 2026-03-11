@@ -17,23 +17,13 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 /// Extensions to `ConversationEntity` to provide stable, computed properties for the UI.
 extension ConversationEntity {
     
-    /// Provides a stable, chronologically sorted array of messages from the unordered NSSet.
-    /// - Returns: An array of `ChatMessageEntity` sorted by timestamp (oldest to newest).
-    var messagesArray: [ChatMessageEntity] {
-        let set = messages as? Set<ChatMessageEntity> ?? []
-        return set.sorted {
-            ($0.timestamp ?? Date.distantPast) < ($1.timestamp ?? Date.distantPast)
-        }
-    }
-
     /// Computes a user-friendly display title for the conversation.
-    /// It prioritizes a user-defined title. If not available, it falls back to the text
-    /// of the first message, or defaults to "New Conversation".
+    /// It prioritizes a user-defined title or defaults to "New Conversation".
     var displayTitle: String {
         if let userTitle = userDefinedTitle, !userTitle.isEmpty {
             return userTitle
         }
-        return messagesArray.first?.text_content ?? "New Conversation"
+        return "New Conversation"
     }
 }
 
@@ -43,12 +33,10 @@ extension ConversationEntity {
 /// Displayed when there are no conversations available.
 
 // MARK: - Sidebar Group Header View
-/// A custom disclosure group header representing time-based categories (e.g., "Today", "Previous 7 Days").
+/// A custom disclosure group header representing categories (e.g., "Pinned").
 struct SidebarGroupHeaderView: View {
     let title: String
     let count: Int
-    
-    /// Binding determining if the group's contents are visible.
     @Binding var isExpanded: Bool
     
     @State private var isHovering = false
@@ -100,6 +88,7 @@ struct SidebarGroupHeaderView: View {
     }
 }
 
+
 /// Wrapper around `ConversationRowView` that specifically handles sidebar behaviors
 /// such as context menus (pinning, renaming, deleting) and inline state preparation.
 struct ConversationSidebarRow: View {
@@ -116,6 +105,10 @@ struct ConversationSidebarRow: View {
     @Binding var conversationToDelete: ConversationEntity?
     @Binding var showingDeleteAlert: Bool
 
+    // Batch Selection
+    @Binding var isSelectionMode: Bool
+    @Binding var selectedIDs: Set<UUID>
+
     var body: some View {
         ConversationRowView(
             // Assuming toConversationStruct() maps the entity to a UI model
@@ -125,7 +118,7 @@ struct ConversationSidebarRow: View {
             editableName: $editableConversationName,
             isRenameFieldFocused: isRenameFieldFocused,
             onSelect: {
-                viewModel.selectedConversationID = conversation.id
+                handleSelection()
             },
             onCommitRename: {
                 if let id = renamingConversationID {
@@ -138,16 +131,65 @@ struct ConversationSidebarRow: View {
             },
             onDelete: {
                 triggerDelete()
-            }
+            },
+            isSelectionMode: isSelectionMode,
+            isBatchSelected: (conversation.id != nil) ? selectedIDs.contains(conversation.id!) : false
         )
         .contextMenu {
             contextMenuContent
         }
+        .onLongPressGesture(minimumDuration: 0.5) {
+            enterSelectionMode()
+        }
+    }
+
+    private func handleSelection() {
+        if isSelectionMode {
+            toggleBatchSelection()
+        } else {
+            viewModel.selectedConversationID = conversation.id
+        }
+    }
+
+    private func toggleBatchSelection() {
+        guard let id = conversation.id else { return }
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+        
+        // Auto-exit if nothing selected? No, let user cancel.
+    }
+
+    private func enterSelectionMode() {
+        guard let id = conversation.id else { return }
+        isSelectionMode = true
+        selectedIDs.insert(id)
     }
 
     // MARK: - Context Menu
     @ViewBuilder
     private var contextMenuContent: some View {
+        if isSelectionMode {
+            Button {
+                toggleBatchSelection()
+            } label: {
+                Label(
+                    selectedIDs.contains(conversation.id ?? UUID()) ? "Deselect" : "Select",
+                    systemImage: selectedIDs.contains(conversation.id ?? UUID()) ? "minus.circle" : "checkmark.circle"
+                )
+            }
+        } else {
+            Button {
+                enterSelectionMode()
+            } label: {
+                Label("Select", systemImage: "checkmark.circle")
+            }
+        }
+
+        Divider()
+
         Button {
             viewModel.togglePinStatus(for: conversation.id ?? UUID())
         } label: {
@@ -217,9 +259,11 @@ struct ConversationSidebarView: View {
     @State private var editableConversationName: String = ""
     @FocusState private var isRenameFieldFocused: Bool
 
-    // Group Expansion Persistence
-    @State private var expandedGroups: Set<String> = []
-    private let expandedGroupsKey = "sidebarExpandedGroups"
+    @State private var isPinnedExpanded: Bool = true
+
+    // Batch Selection State
+    @State private var selectedConversationIDs: Set<UUID> = []
+    @State private var isSelectionMode: Bool = false
 
     // MARK: - Body
     var body: some View {
@@ -239,6 +283,13 @@ struct ConversationSidebarView: View {
             SidebarSearchBarView("Search conversations...", text: $searchText)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
+
+            if isSelectionMode {
+                batchSelectionToolbar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+            }
 
             if conversations.isEmpty && searchText.isEmpty {
                 SidebarEmptyStateView(
@@ -260,15 +311,11 @@ struct ConversationSidebarView: View {
                 }
             }
         }
-        .onChange(of: viewModel.selectedConversationID) { _ in
-            expandGroupForSelection()
-        }
-        .onChange(of: expandedGroups) { _ in
-            saveExpandedGroupsState()
-        }
         .onAppear {
-            loadExpandedGroupsState()
-            expandGroupForSelection()
+            isPinnedExpanded = UserDefaults.standard.object(forKey: "sidebarPinnedExpanded_v2") as? Bool ?? true
+        }
+        .onChange(of: isPinnedExpanded) { newValue in
+            UserDefaults.standard.set(newValue, forKey: "sidebarPinnedExpanded_v2")
         }
     }
     
@@ -276,20 +323,30 @@ struct ConversationSidebarView: View {
     private var conversationList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                ForEach(sortedGroupKeys, id: \.self) { groupKey in
-                    if let conversationsInGroup = groupedConversations[groupKey], !conversationsInGroup.isEmpty {
+                // Pinned Section
+                if !pinnedConversations.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        SidebarGroupHeaderView(
+                            title: "Pinned",
+                            count: pinnedConversations.count,
+                            isExpanded: $isPinnedExpanded
+                        )
                         
-                        VStack(alignment: .leading, spacing: 2) {
-                            SidebarGroupHeaderView(
-                                title: groupKey,
-                                count: conversationsInGroup.count,
-                                isExpanded: bindingForGroup(groupKey)
-                            )
-
-                            if expandedGroups.contains(groupKey) {
-                                groupContent(for: conversationsInGroup)
+                        if isPinnedExpanded {
+                            VStack(spacing: 2) {
+                                ForEach(pinnedConversations) { conversation in
+                                    row(for: conversation)
+                                }
                             }
+                            .padding(.leading, 12)
                         }
+                    }
+                }
+
+                // Others Section (Flat)
+                VStack(spacing: 2) {
+                    ForEach(otherConversations) { conversation in
+                        row(for: conversation)
                     }
                 }
             }
@@ -298,134 +355,109 @@ struct ConversationSidebarView: View {
             .padding(.bottom, 20)
         }
     }
-    
+
     @ViewBuilder
-    private func groupContent(for group: [ConversationEntity]) -> some View {
-        VStack(spacing: 2) {
-            ForEach(group) { conversation in
-                ConversationSidebarRow(
-                    conversation: conversation,
-                    viewModel: viewModel,
-                    renamingConversationID: $renamingConversationID,
-                    editableConversationName: $editableConversationName,
-                    isRenameFieldFocused: $isRenameFieldFocused,
-                    conversationToDelete: $conversationToDelete,
-                    showingDeleteAlert: $showingDeleteAlert
-                )
-                .transition(.asymmetric(
-                    insertion: .opacity.combined(with: .scale(scale: 0.95)),
-                    removal: .opacity.combined(with: .scale(scale: 0.95))
-                ))
-            }
-        }
-        .transition(.opacity.combined(with: .move(edge: .top)).animation(.easeInOut(duration: 0.2)))
+    private func row(for conversation: ConversationEntity) -> some View {
+        ConversationSidebarRow(
+            conversation: conversation,
+            viewModel: viewModel,
+            renamingConversationID: $renamingConversationID,
+            editableConversationName: $editableConversationName,
+            isRenameFieldFocused: $isRenameFieldFocused,
+            conversationToDelete: $conversationToDelete,
+            showingDeleteAlert: $showingDeleteAlert,
+            isSelectionMode: $isSelectionMode,
+            selectedIDs: $selectedConversationIDs
+        )
+        .transition(.asymmetric(
+            insertion: .opacity.combined(with: .scale(scale: 0.95)),
+            removal: .opacity.combined(with: .scale(scale: 0.95))
+        ))
     }
 
-    // MARK: - Grouping Logic
-    
-    /// Filters and groups conversations based on search text and timestamp/pin status.
-    private var groupedConversations: [String: [ConversationEntity]] {
-        let filteredConversations = conversations.filter { conversation in
+    // MARK: - Filtering Logic
+
+    /// All filtered conversations.
+    private var filteredConversations: [ConversationEntity] {
+        conversations.filter { conversation in
             guard !searchText.isEmpty else { return true }
-            
-            let titleMatch = conversation.displayTitle.localizedCaseInsensitiveContains(searchText)
-            let messageMatch = conversation.messagesArray.contains { message in
-                message.text_content?.localizedCaseInsensitiveContains(searchText) ?? false
-            }
-            return titleMatch || messageMatch
-        }
-
-        return Dictionary(grouping: filteredConversations) { conversation in
-            if conversation.isPinned { return "Pinned" }
-            return timeBasedGroupKey(for: conversation.timestamp ?? Date())
+            return conversation.displayTitle.localizedCaseInsensitiveContains(searchText)
         }
     }
 
-    /// Provides a sorted array of the keys present in `groupedConversations`.
-    private var sortedGroupKeys: [String] {
-        let keys = groupedConversations.keys
-        let sortOrder = ["Pinned", "Today", "Yesterday", "Previous 7 Days", "Previous 30 Days"]
-
-        return keys.sorted { key1, key2 in
-            let index1 = sortOrder.firstIndex(of: key1)
-            let index2 = sortOrder.firstIndex(of: key2)
-
-            if let i1 = index1, let i2 = index2 { return i1 < i2 }
-            if index1 != nil { return true }
-            if index2 != nil { return false }
-
-            // Fallback for custom month sorting
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateFormat = "MMMM yyyy"
-            if let date1 = dateFormatter.date(from: key1), let date2 = dateFormatter.date(from: key2) {
-                return date1 > date2
-            }
-            return key1 > key2
-        }
+    /// Conversations that are pinned.
+    private var pinnedConversations: [ConversationEntity] {
+        filteredConversations.filter { $0.isPinned }
     }
 
-    // MARK: - Helpers
-
-    /// Classifies a Date into a string categorization bucket.
-    private func timeBasedGroupKey(for date: Date) -> String {
-        let now = Date()
-        let calendar = Calendar.current
-
-        if calendar.isDateInToday(date) { return "Today" }
-        if calendar.isDateInYesterday(date) { return "Yesterday" }
-
-        if let sevenDaysAgo = calendar.date(byAdding: .day, value: -7, to: now), date > sevenDaysAgo {
-            return "Previous 7 Days"
-        }
-
-        if let thirtyDaysAgo = calendar.date(byAdding: .day, value: -30, to: now), date > thirtyDaysAgo {
-            return "Previous 30 Days"
-        }
-
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM yyyy"
-        return formatter.string(from: date)
+    /// Conversations that are NOT pinned.
+    private var otherConversations: [ConversationEntity] {
+        filteredConversations.filter { !$0.isPinned }
     }
 
-    /// Provides a binding for a specific disclosure group key to animate and store its expansion state.
-    private func bindingForGroup(_ groupKey: String) -> Binding<Bool> {
-        return Binding(
-            get: { self.expandedGroups.contains(groupKey) },
-            set: { isExpanding in
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    if isExpanding { self.expandedGroups.insert(groupKey) }
-                    else { self.expandedGroups.remove(groupKey) }
+    // MARK: - Batch Selection Components
+    @ViewBuilder
+    private var batchSelectionToolbar: some View {
+        HStack {
+            Button(role: .destructive) {
+                deleteSelectedConversations()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Delete (\(selectedConversationIDs.count))")
+                        .font(.system(size: 11, weight: .bold))
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.red.opacity(0.1))
+                .foregroundColor(.red)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
+            .buttonStyle(.plain)
+            .disabled(selectedConversationIDs.isEmpty)
+
+            Spacer()
+
+            Button {
+                cancelSelectionMode()
+            } label: {
+                Text("Cancel")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.primary.opacity(0.03))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
+                )
         )
     }
 
-    /// Automatically expands the group containing the currently selected conversation.
-    private func expandGroupForSelection() {
-        guard let selectedID = viewModel.selectedConversationID,
-              let selectedConv = conversations.first(where: { $0.id == selectedID }) else {
-            return
-        }
-
-        let key = selectedConv.isPinned ? "Pinned" : timeBasedGroupKey(for: selectedConv.timestamp ?? Date())
-        if !expandedGroups.contains(key) {
-            expandedGroups.insert(key)
-        }
+    private func deleteSelectedConversations() {
+        guard !selectedConversationIDs.isEmpty else { return }
+        
+        let count = selectedConversationIDs.count
+        viewModel.deleteMultipleConversations(ids: selectedConversationIDs)
+        
+        // Success notification or just exit mode
+        cancelSelectionMode()
+        logger.info("Deleted \(count) conversations in batch.")
     }
 
-    // MARK: - Persistence
-    
-    private func loadExpandedGroupsState() {
-        let savedGroups = UserDefaults.standard.stringArray(forKey: expandedGroupsKey)
-        if let savedGroups = savedGroups {
-            self.expandedGroups = Set(savedGroups)
-        } else {
-            // Default groups open on first load
-            self.expandedGroups = ["Pinned", "Today", "Previous 7 Days"]
+    private func cancelSelectionMode() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isSelectionMode = false
+            selectedConversationIDs.removeAll()
         }
-    }
-
-    private func saveExpandedGroupsState() {
-        UserDefaults.standard.set(Array(self.expandedGroups), forKey: expandedGroupsKey)
     }
 }

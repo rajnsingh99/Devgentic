@@ -220,24 +220,37 @@ struct OpenAIModelPickerView: View {
 // MARK: - Ollama Model Picker View
 struct OllamaModelPickerView: View {
     @Binding var selectedModel: String
-    @Binding var supportsNativeTools: Bool
-    
+    @Binding var cognitiveCapability: ModelCognitiveCapability
+    @Binding var modelDialect: ModelDialect
+    @Binding var modelMetadata: ModelMetadata?
+
     let baseURL: String
-    
-    /// If true, only models that support Tool Calling (Agents) will be displayed.
+
+    /// If true, incompatible models will be disabled/dimmed (Agents). If false, all are available (Bots).
     var filterForTools: Bool = false
 
+    @State private var showingStore: Bool = false
     @State private var models: [String] = []
     @State private var loadedLocalModels: [LocalModel] = [] // Cache to look up capabilities
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
     
+    // Alert state for unsupported model selection
+    @State private var showUnsupportedAlert: Bool = false
+    
     var body: some View {
         HStack {
+            Button("Manage Models") {
+                showingStore = true
+            }
+            .fixedSize()
+            
+            Spacer()
+            
             if isLoading {
                 ProgressView()
                     .controlSize(.small)
-                Text(filterForTools ? "Finding agent-ready models..." : "Loading models...")
+                Text("Loading models...")
                     .foregroundColor(.secondary)
             } else if let errorMessage = errorMessage {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -245,32 +258,42 @@ struct OllamaModelPickerView: View {
                 Text(errorMessage)
                     .foregroundColor(.secondary)
                     .font(.caption)
-            } else if models.isEmpty {
-                 Text(filterForTools ? "No agent-capable models found." : "No models found.")
+            } else if loadedLocalModels.isEmpty {
+                 Text("No models found.")
                     .foregroundColor(.secondary)
                     .font(.caption)
             } else {
                 Picker("Available Models", selection: $selectedModel) {
-                    ForEach(models, id: \.self) { modelName in
-                        Text(modelName).tag(modelName)
+                    // Iterate over the detailed local models instead of strings
+                    ForEach(loadedLocalModels, id: \.name) { model in
+                        
+                        // Single Source of Truth check
+                        let isUnsupported = filterForTools && model.cognitiveCapability == .none
+                        
+                        // macOS native pickers strip strikethroughs, so we append descriptive text
+                        // and use the native .disabled() modifier to dim the item visually
+                        Text(isUnsupported ? "\(model.name) (Chat Only)" : model.name)
+                            .tag(model.name)
+                            .disabled(isUnsupported)
                     }
                 }
+                .labelsHidden()
             }
-
-            Spacer()
-
-            Button(action: fetchModels) {
-                Image(systemName: "arrow.clockwise")
-            }
-            .help("Refresh models")
-            .disabled(isLoading)
         }
         .onAppear(perform: fetchModels)
         .onChange(of: baseURL) {
             fetchModels()
         }
-        .onChange(of: selectedModel) {
-            updateCapabilityFlag(for: selectedModel)
+        .onChange(of: selectedModel) { newValue in
+            handleSelectionChange(newValue: newValue)
+        }
+        .sheet(isPresented: $showingStore) {
+            OllamaModelStoreView()
+        }
+        .alert("Unsupported Model", isPresented: $showUnsupportedAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("You have selected a Chat-Only model. Agent profiles require models with Tool Calling capabilities. Please select a supported model.")
         }
     }
 
@@ -308,27 +331,46 @@ struct OllamaModelPickerView: View {
                     }
                 }
                 
-                let sortedModels = fetchedDetails.sorted { $0.name < $1.name }
-                let validModels = filterForTools ? sortedModels.filter { $0.supportsNativeTools } : sortedModels
-                let fetchedNames = validModels.map { $0.name }
+                // Sort models: If in Agent mode, put valid models first, chat-only at the bottom.
+                // Then sort alphabetically within those respective groups.
+                let sortedModels = fetchedDetails.sorted { m1, m2 in
+                    if filterForTools {
+                        let m1Supported = m1.cognitiveCapability != .none
+                        let m2Supported = m2.cognitiveCapability != .none
+                        
+                        if m1Supported != m2Supported {
+                            return m1Supported // Supported models bubble up to the top
+                        }
+                    }
+                    // Fallback to alphabetical sorting
+                    return m1.name < m2.name
+                }
+                let fetchedNames = sortedModels.map { $0.name }
 
                 await MainActor.run {
                     self.loadedLocalModels = sortedModels
                     self.models = fetchedNames
                     
                     // Smart Selection Logic
-                    if !fetchedNames.isEmpty {
+                    if !sortedModels.isEmpty {
+                        
+                        // If the current selection is completely invalid (empty or missing), fallback to a sensible default
                         if !fetchedNames.contains(selectedModel) || selectedModel.isEmpty {
-                            self.selectedModel = fetchedNames.first!
+                            if filterForTools {
+                                // Find the first model that actually supports Agent tools
+                                self.selectedModel = sortedModels.first(where: { $0.cognitiveCapability != .none })?.name ?? fetchedNames.first!
+                            } else {
+                                self.selectedModel = fetchedNames.first!
+                            }
                         }
                     } else if self.errorMessage == nil {
                         if filterForTools {
-                            self.errorMessage = "No models support Tools. Try Llama 3.1 or Qwen 2.5."
+                            self.errorMessage = "No models available."
                         }
                     }
                     
                     // Bind the payload capability flag for the newly resolved selection
-                    updateCapabilityFlag(for: self.selectedModel)
+                    updateCapabilityLevel(for: self.selectedModel)
                     
                     self.isLoading = false
                 }
@@ -342,9 +384,28 @@ struct OllamaModelPickerView: View {
         }
     }
     
-    private func updateCapabilityFlag(for modelName: String) {
+    /// Validates the user's selection and throws an alert if they pick an incompatible model
+    private func handleSelectionChange(newValue: String) {
+        // Prevent validating if we haven't loaded models yet
+        guard !loadedLocalModels.isEmpty else { return }
+        
+        let currentModel = loadedLocalModels.first(where: { $0.name == newValue })
+        let isUnsupported = filterForTools && (currentModel?.cognitiveCapability == .none)
+        
+        if isUnsupported {
+            // Trigger the alert immediately, but let the user keep their selection
+            self.showUnsupportedAlert = true
+        }
+        
+        // Update the capability level and dialect immediately to remain the Single Source of Truth
+        updateCapabilityLevel(for: newValue)
+    }
+    
+    private func updateCapabilityLevel(for modelName: String) {
         if let matchedModel = loadedLocalModels.first(where: { $0.name == modelName }) {
-            self.supportsNativeTools = matchedModel.supportsNativeTools
+            self.cognitiveCapability = matchedModel.cognitiveCapability
+            self.modelDialect = matchedModel.modelDialect
+            self.modelMetadata = matchedModel.cognitiveProfile.metadata
         }
     }
 }

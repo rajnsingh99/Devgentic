@@ -24,7 +24,7 @@ enum AgentStreamEvent: Sendable {
     
     /// The agent is reasoning. Use this to update a "Thinking..." UI component.
     /// Wrapped with a stable ID to fix SwiftUI ForEach layout jumps.
-    case thought(id: UUID = UUID(), _ message: String)
+    case thought(_ message: String, id: UUID = UUID())
     
     /// The agent is about to execute a tool.
     /// - name: The tool name (e.g., "list_directory")

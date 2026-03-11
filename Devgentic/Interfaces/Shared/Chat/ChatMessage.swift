@@ -29,7 +29,19 @@ struct AgentResponse: Codable, Equatable {
     var generationAttempts: Int = 1
 }
 
-class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
+enum TimelineEvent: Codable, Equatable, Identifiable {
+    case thought(id: UUID, text: String)
+    case toolExecution(id: UUID, name: String, params: String, output: String?, isSuccess: Bool?, isExecuting: Bool)
+    
+    var id: UUID {
+        switch self {
+        case .thought(let id, _): return id
+        case .toolExecution(let id, _, _, _, _, _): return id
+        }
+    }
+}
+
+class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecked Sendable {
     let id: UUID
     let conversationId: UUID
     let timestamp: Date
@@ -41,12 +53,30 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
-    @Published var thoughts: [AgentThought] = []
-    @Published var artifacts: [ToolOutput] = []
+    // These properties derive chronological reasoning steps and tool outputs from timelineEvents.
+    var thoughts: [AgentThought] {
+        timelineEvents.compactMap { event in
+            if case .thought(let id, let text) = event {
+                return AgentThought(id: id, text: text)
+            }
+            return nil
+        }
+    }
+    
+    var artifacts: [ToolOutput] {
+        timelineEvents.compactMap { event in
+            if case .toolExecution(_, let name, _, let output, let isSuccess, let isExecuting) = event, !isExecuting {
+                return ToolOutput(toolName: name, output: output ?? "", isSuccess: isSuccess ?? false)
+            }
+            return nil
+        }
+    }
+
+    @Published var timelineEvents: [TimelineEvent] = []
     
     // MARK: - Transient UI State (Not Persisted)
     @Published var thinkingHeadline: String? = nil
-    @Published var agentState: AgentStep = .idle
+    @Published var agentState: AgentState = .idle
     @Published var isThinkingExpanded: Bool = false // UI toggle for the accordion
     
     // [HITL] New Property for Permission Card
@@ -141,7 +171,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        case thoughts, artifacts
+        case timelineEvents, thoughts, artifacts, agentState // Added agentState to keys
     }
 
     // Manual Decodable conformance
@@ -158,14 +188,19 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
         
-        // Decode Glass Box Data (With fallback for older string-based thoughts)
-        if let oldThoughts = try? container.decodeIfPresent([String].self, forKey: .thoughts) {
-            self.thoughts = oldThoughts.map { AgentThought(text: $0) }
-        } else {
-            self.thoughts = try container.decodeIfPresent([AgentThought].self, forKey: .thoughts) ?? []
-        }
+        self.timelineEvents = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
+        self.agentState = try container.decodeIfPresent(AgentState.self, forKey: .agentState) ?? .idle
         
-        self.artifacts = try container.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
+        // Migration logic: If no timelineEvents but legacy data exists, reconstruct timeline
+        if self.timelineEvents.isEmpty {
+            let legacyThoughts = try container.decodeIfPresent([AgentThought].self, forKey: .thoughts) ?? []
+            let legacyArtifacts = try container.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
+            
+            // Note: Since we don't know the exact order of legacy data, we append thoughts then artifacts.
+            // This is a one-time migration for old local data.
+            self.timelineEvents = legacyThoughts.map { .thought(id: $0.id, text: $0.text) }
+            self.timelineEvents.append(contentsOf: legacyArtifacts.map { .toolExecution(id: UUID(), name: $0.toolName, params: "", output: $0.output, isSuccess: $0.isSuccess, isExecuting: false) })
+        }
         
         // Transient properties initialize to default
         self.thinkingHeadline = nil
@@ -189,8 +224,9 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable {
         try container.encodeIfPresent(attachedTextFiles, forKey: .attachedTextFiles)
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
         
-        try container.encode(thoughts, forKey: .thoughts)
-        try container.encode(artifacts, forKey: .artifacts)
+        try container.encode(timelineEvents, forKey: .timelineEvents)
+        try container.encode(agentState, forKey: .agentState)
+        // Note: thoughts and artifacts are now computed and NOT encoded.
     }
 }
 

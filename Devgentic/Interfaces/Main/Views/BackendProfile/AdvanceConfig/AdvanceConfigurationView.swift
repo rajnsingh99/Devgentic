@@ -200,7 +200,7 @@ struct OllamaSettingsView: View {
             // Seed
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Random Seed").fontWeight(.medium)
+                    Text("Fixed Seed").fontWeight(.medium)
                     Text("Set a specific seed for reproducible outputs.").font(.caption).foregroundColor(theme.secondaryText)
                 }
                 Spacer(minLength: 16)
@@ -208,6 +208,47 @@ struct OllamaSettingsView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 100)
             }
+            
+            Divider()
+            
+            // Repeat Penalty
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Repeat Penalty").fontWeight(.medium)
+                    Text("Prevents the model from repeating the same tokens.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.repeatPenalty.toNonOptional(defaultValue: 1.1), in: 1.0...2.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.repeatPenalty ?? 1.1, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+            
+            Divider()
+            
+            // Apply Optimal Button
+            HStack {
+                Spacer()
+                Menu {
+                    ForEach(OllamaAdvancedConfig.ModelTier.allCases) { tier in
+                        Button(tier.rawValue) {
+                            config = OllamaAdvancedConfig.preset(for: tier)
+                        }
+                    }
+                } label: {
+                    Label("Apply Optimal", systemImage: "sparkles")
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(theme.accentColor.opacity(0.1))
+                        .foregroundColor(theme.accentColor)
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 8)
         }
     }
 }

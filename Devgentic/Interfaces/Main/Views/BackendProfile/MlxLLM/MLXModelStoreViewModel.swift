@@ -23,7 +23,7 @@ class MLXModelStoreViewModel: ObservableObject {
     }
     
     /// Toggle to switch between filtering local results or fetching new results from the server
-    @Published var isRemoteSearchEnabled: Bool = false {
+    @Published var isRemoteSearchEnabled: Bool = true {
         didSet {
             refreshCategoryData()
         }

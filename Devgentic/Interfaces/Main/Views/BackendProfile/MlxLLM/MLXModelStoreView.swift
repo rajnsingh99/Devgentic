@@ -26,29 +26,28 @@ struct MLXModelStoreView: View {
                                 .foregroundColor(theme.secondaryText)
                             
                             TextField(
-                                viewModel.isRemoteSearchEnabled ? "Search Hugging Face..." : "Filter fetched models...",
+                                viewModel.selectedCategory == .installed ? "Filter fetched models..." : "Search Hugging Face...",
                                 text: $viewModel.searchText
                             )
                             .textFieldStyle(.plain)
                             .font(.body)
                             
-                            // Search Mode Toggle
-                            Button {
-                                viewModel.isRemoteSearchEnabled.toggle()
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: viewModel.isRemoteSearchEnabled ? "globe" : "text.magnifyingglass")
-                                    Text(viewModel.isRemoteSearchEnabled ? "Remote" : "Local")
-                                        .font(.caption)
+                            // Sort Menu (Moved inside Search Box)
+                            Menu {
+                                Picker("Sort By", selection: $viewModel.sortOption) {
+                                    ForEach(MLXModelStoreViewModel.SortOption.allCases) { option in
+                                        Label(option.rawValue, systemImage: option.icon).tag(option)
+                                    }
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(viewModel.isRemoteSearchEnabled ? Color.accentColor.opacity(0.1) : theme.dividerColor)
-                                .cornerRadius(6)
-                                .foregroundColor(viewModel.isRemoteSearchEnabled ? .accentColor : .primary)
+                            } label: {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .font(.body)
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.horizontal, 8)
+                                    .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
-                            .help(viewModel.isRemoteSearchEnabled ? "Switch to Local Filter" : "Switch to Remote Search")
+                            .menuStyle(.borderlessButton)
+                            .help("Sort Models")
                         }
                         .padding(10)
                         .background(theme.secondaryBackground)
@@ -57,27 +56,6 @@ struct MLXModelStoreView: View {
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
-                        
-                        // Sort Menu
-                        Menu {
-                            Picker("Sort By", selection: $viewModel.sortOption) {
-                                ForEach(MLXModelStoreViewModel.SortOption.allCases) { option in
-                                    Label(option.rawValue, systemImage: option.icon).tag(option)
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "arrow.up.arrow.down")
-                                .font(.body)
-                                .frame(width: 40, height: 38) // Match search bar height approx
-                                .background(theme.secondaryBackground)
-                                .cornerRadius(8)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(theme.dividerColor, lineWidth: 1)
-                                )
-                        }
-                        .menuStyle(.borderlessButton)
-                        .help("Sort Models")
                     }
                     
                     // Category Tabs

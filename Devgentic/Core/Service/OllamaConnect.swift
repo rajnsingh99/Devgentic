@@ -1,0 +1,350 @@
+//
+//  OllamaConnect.swift
+//  Devgentic
+//
+//  Refactored to pure API Client.
+//  Handles server status, model management, and VRAM memory lifecycle.
+//
+
+import Foundation
+import os
+
+// MARK: - Logger
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaConnect")
+
+// MARK: - Ollama Data Structures
+
+/// Represents the progress information during a model pull.
+struct ModelPullProgress {
+    let status: String
+    let total: Int64?
+    let completed: Int64?
+    let percentage: Double?
+    let error: String?
+}
+
+/// Represents the full details of a single model from the `/api/show` endpoint.
+struct OllamaShowResponse: Codable {
+    let license: String?
+    let modelfile: String?
+    let parameters: String?
+    let template: String?
+    let details: OllamaModelDetails?
+    
+    /// Evaluates the model's true capabilities by inspecting the template, family, and modelfile.
+    /// This dictates the cognitive tier of the model. (Backward-compatible accessor.)
+    var cognitiveCapability: ModelCognitiveCapability {
+        cognitiveProfile.capability
+    }
+
+    /// Returns the full CognitiveProfile (capability + dialect) by inspecting the Ollama Go template.
+    var cognitiveProfile: CognitiveProfile {
+        let templateStr = template?.lowercased() ?? ""
+        let modelfileStr = modelfile?.lowercased() ?? ""
+        let familyStr = details?.family?.lowercased() ?? ""
+        let familiesArr = details?.families?.map { $0.lowercased() } ?? []
+
+        // --- CAPABILITY DETECTION ---
+
+        // 1. High Signal: Native Go Template Integration
+        let hasNativeTemplateTools = templateStr.contains("{{ .tools }}") ||
+                                     templateStr.contains("{{.tools}}") ||
+                                     templateStr.contains("{{- if .tools }}")
+
+        // Separate check: XML-style tool markers used by some Mistral variants in Ollama
+        let hasMistralXMLMarker = templateStr.contains("<tool_call>") ||
+                                  templateStr.contains("[tool_calls]")
+
+        // [available_tools] is a ReAct-style injection marker
+        let hasReActMarker = templateStr.contains("[available_tools]")
+
+        // 2. High Signal: Known Capable Architecture Families
+        let knownParallelFamilies = ["llama3.1", "llama3.2", "qwen2", "qwen2.5", "mistral", "hermes", "command-r"]
+        let isCapableFamily = knownParallelFamilies.contains(where: { familyStr.contains($0) }) ||
+                              familiesArr.contains(where: { fam in knownParallelFamilies.contains(where: { fam.contains($0) }) })
+
+        // 3. Fallback Signal: Modelfile hints
+        let hasModelfileTools = modelfileStr.contains("tool") ||
+                                modelfileStr.contains("function calling") ||
+                                modelfileStr.contains("json_schema")
+
+        let capability: ModelCognitiveCapability
+        if hasNativeTemplateTools || hasMistralXMLMarker || hasReActMarker || isCapableFamily {
+            capability = .parallelActions
+        } else if hasModelfileTools {
+            capability = .singleAction
+        } else {
+            capability = .none
+        }
+
+        // --- DIALECT DETECTION ---
+
+        let dialect: ModelDialect
+        if capability == .none {
+            dialect = .promptedFlatJSON
+        } else if hasMistralXMLMarker {
+            // Template uses <tool_call> XML-style wrapping
+            dialect = .mistralXML
+        } else if hasReActMarker {
+            // Template uses [available_tools] ReAct-style injection
+            dialect = .reactMarkdown
+        } else if hasNativeTemplateTools || isCapableFamily {
+            // Modern {{ .Tools }} Go template: OpenAI-compatible native JSON arrays
+            dialect = .nativeJSON
+        } else {
+            // Modelfile hint only: fall back to prompted flat JSON
+            dialect = .promptedFlatJSON
+        }
+
+        // --- METADATA DETECTION ---
+        var metadata = ModelMetadata(tier: .small) // Default
+
+        if let detailObj = details {
+            // 1. Detect Tier from parameter size
+            if let size = detailObj.parameterSize {
+                let s = size.lowercased()
+                if s.contains("b") {
+                    let numPart = s.replacingOccurrences(of: "b", with: "").trimmingCharacters(in: .whitespaces)
+                    if let val = Double(numPart) {
+                        if val < 4 { metadata.tier = .tiny }
+                        else if val < 15 { metadata.tier = .small }
+                        else if val < 45 { metadata.tier = .medium }
+                        else if val < 100 { metadata.tier = .large }
+                        else { metadata.tier = .ultra }
+                    }
+                }
+            }
+
+            metadata.quantization = detailObj.quantizationLevel
+            metadata.family = detailObj.family
+            metadata.parameterCount = detailObj.parameterSize
+        }
+
+        return CognitiveProfile(capability: capability, dialect: dialect, metadata: metadata)
+    }
+}
+
+/// Represents the detailed information about a model's capabilities.
+struct OllamaModelDetails: Codable, Hashable {
+    let format: String?
+    let family: String?
+    let families: [String]?
+    let parameterSize: String?
+    let quantizationLevel: String?
+    
+    // Computed properties to determine capabilities
+    var supportsVision: Bool {
+        return family?.lowercased() == "clip" || families?.contains("clip") ?? false
+    }
+    
+    // Note: supportsToolUse was relocated to OllamaShowResponse because
+    // it requires access to the model 'template' property to accurately evaluate.
+
+    enum CodingKeys: String, CodingKey {
+        case format, family, families
+        case parameterSize = "parameter_size"
+        case quantizationLevel = "quantization_level"
+    }
+}
+
+// MARK: - API Client
+
+struct OllamaConnect {
+    
+    // MARK: - Core Server Status
+
+    static func checkOllamaServerStatus(baseURL: String) async -> Bool {
+        logger.debug("Checking Ollama server status at \(baseURL)...")
+        do {
+            let (_, response) = try await performRequest(
+                endpoint: "/api/version",
+                method: "GET",
+                baseURL: baseURL,
+                timeout: 5.0
+            )
+            return (200..<300).contains(response.statusCode)
+        } catch {
+            logger.error("Server status check failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    // MARK: - Model Management
+
+    static func fetchLocalOllamaModels(baseURL: String) async throws -> [String] {
+        let (data, response) = try await performRequest(endpoint: "/api/tags", method: "GET", baseURL: baseURL)
+        
+        guard (200..<300).contains(response.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let modelsArray = json["models"] as? [[String: Any]] else {
+            throw URLError(.cannotParseResponse)
+        }
+
+        return modelsArray.compactMap { $0["name"] as? String }
+    }
+
+    static func fetchModelDetails(name: String, baseURL: String) async throws -> OllamaShowResponse {
+        let (data, response) = try await performRequest(
+            endpoint: "/api/show",
+            method: "POST",
+            baseURL: baseURL,
+            payload: ["name": name]
+        )
+        
+        guard (200..<300).contains(response.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+
+        return try JSONDecoder().decode(OllamaShowResponse.self, from: data)
+    }
+
+    static func removeOllamaModel(name: String, baseURL: String) async throws {
+        let (data, response) = try await performRequest(
+            endpoint: "/api/delete",
+            method: "DELETE",
+            baseURL: baseURL,
+            payload: ["name": name]
+        )
+        
+        guard response.statusCode == 200 else {
+            if let errorMsg = parseOllamaErrorResponse(data: data) {
+                throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Ollama Error: \(errorMsg)"])
+            }
+            throw URLError(.badServerResponse)
+        }
+    }
+
+    // MARK: - VRAM / Lifecycle Management
+
+    static func fetchRunningModels(baseURL: String) async throws -> [String] {
+        let (data, response) = try await performRequest(endpoint: "/api/ps", method: "GET", baseURL: baseURL)
+        
+        guard (200..<300).contains(response.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        
+        // Minimal decoder for /api/ps response
+        struct ProcessResponse: Decodable {
+            struct Model: Decodable { let name: String }
+            let models: [Model]
+        }
+        
+        let processResponse = try JSONDecoder().decode(ProcessResponse.self, from: data)
+        return processResponse.models.map { $0.name }
+    }
+
+    static func unloadModel(name: String, baseURL: String) async throws {
+        let payload: [String: Any] = [
+            "model": name,
+            "keep_alive": 0
+        ]
+        
+        let (_, response) = try await performRequest(
+            endpoint: "/api/chat", // The chat endpoint handles memory lifecycle when generating is skipped
+            method: "POST",
+            baseURL: baseURL,
+            payload: payload
+        )
+        
+        guard (200..<300).contains(response.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        logger.info("Successfully sent unload request for model '\(name)'.")
+    }
+
+    // MARK: - Streaming Operations (Pull Model)
+
+    @discardableResult
+    static func pullOllamaModel(name: String, baseURL: String, progressHandler: @escaping (ModelPullProgress) -> Void) -> Task<Void, Error> {
+        return Task {
+            guard let url = URL(string: baseURL + "/api/pull") else {
+                throw URLError(.badURL)
+            }
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": true])
+
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 300.0
+            config.timeoutIntervalForResource = 1800.0
+            let session = URLSession(configuration: config)
+
+            let (bytes, response) = try await session.bytes(for: request)
+
+            guard let httpResponse = response as? HTTPURLResponse, (200..<300).contains(httpResponse.statusCode) else {
+                throw URLError(.badServerResponse)
+            }
+
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+
+                guard let data = line.data(using: .utf8),
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
+                }
+
+                let status = json["status"] as? String ?? "unknown status"
+                let total = json["total"] as? Int64 ?? json["total_bytes"] as? Int64
+                let completed = json["completed"] as? Int64
+                let errorMsg = json["error"] as? String
+
+                var percentage: Double? = nil
+                if let t = total, let c = completed, t > 0 {
+                    percentage = Double(c) / Double(t)
+                }
+
+                progressHandler(ModelPullProgress(status: status, total: total, completed: completed, percentage: percentage, error: errorMsg))
+
+                if let streamedError = errorMsg {
+                    throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: streamedError])
+                }
+            }
+        }
+    }
+
+    // MARK: - Internal Networking Helpers
+    
+    /// A central helper to reduce boilerplate for standard REST requests
+    private static func performRequest(
+        endpoint: String,
+        method: String,
+        baseURL: String,
+        payload: [String: Any]? = nil,
+        timeout: TimeInterval = 30.0
+    ) async throws -> (Data, HTTPURLResponse) {
+        
+        guard let url = URL(string: baseURL + endpoint) else {
+            logger.error("Invalid URL: \(baseURL)\(endpoint)")
+            throw URLError(.badURL)
+        }
+        
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = method
+        
+        if let payload = payload {
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        }
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "Non-HTTP Response received."])
+        }
+        
+        return (data, httpResponse)
+    }
+
+    private static func parseOllamaErrorResponse(data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = json["error"] as? String else {
+            return nil
+        }
+        return error.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}

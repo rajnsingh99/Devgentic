@@ -99,7 +99,7 @@ struct AgentTraceLog: Identifiable, Codable, Sendable {
     
     let stepNumber: Int
     let timestamp: Date
-    let state: AgentStep
+    let state: AgentState
     
     /// The content of the trace.
     let content: String
@@ -113,7 +113,7 @@ struct AgentTraceLog: Identifiable, Codable, Sendable {
         spanID: String,
         parentSpanID: String?,
         stepNumber: Int,
-        state: AgentStep,
+        state: AgentState,
         content: String,
         metadata: [String: String]? = nil
     ) {
@@ -134,6 +134,7 @@ struct AgentTraceLog: Identifiable, Codable, Sendable {
 struct AgentSessionMetrics {
     let sessionID: UUID
     var totalSteps: Int = 0
+    var totalIterations: Int = 0
     var toolCalls: Int = 0
     var parseErrors: Int = 0
     var didFinishSuccessfully: Bool = false

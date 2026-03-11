@@ -198,7 +198,7 @@ final class BackendProfileService: ObservableObject {
         str += "Base URL: \(config.baseURL ?? "Default (Not set)")\n"
         
         // Dynamic Strategy Flag Logging
-        let flagIndicator = config.supportsNativeTools ? "✅ YES -> Routes to NativeStructuredGenerator()" : "❌ NO -> Routes to PromptedJsonModeStrategy()"
+        let flagIndicator = "Capability: \(config.cognitiveCapability.rawValue)"
         str += "Supports Native Tools: \(flagIndicator)\n"
         
         if let key = config.apiKey, !key.isEmpty {

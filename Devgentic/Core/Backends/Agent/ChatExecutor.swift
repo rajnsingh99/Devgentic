@@ -29,7 +29,7 @@ actor ChatExecutor: Executor {
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
 
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream(AgentStreamEvent.self) { continuation in
             // [CRITICAL FIX] Capture the task to allow cancellation propagation
             let task = Task {
                 do {
@@ -45,7 +45,7 @@ actor ChatExecutor: Executor {
                         spanID: traceSpan.spanID,
                         parentSpanID: traceSpan.parentSpanID,
                         stepNumber: 0,
-                        state: .thinking,
+                        state: .thinking(.reasoning),
                         content: "Preparing response..."
                     ))
 
@@ -56,15 +56,40 @@ actor ChatExecutor: Executor {
                     // We combine instructions, RAG context, history, and the user query.
                     let messages = self.buildMessages(input: input)
 
-                    // 3. Stream Response
-                    // Phase 1: Added tools: nil
-                    let tokenStream = model.stream(messages: messages, tools: nil)
+                    // We need a config for streamChat, but ChatExecutor doesn't have one.
+                    // For now, create a dummy one. In the future, this might come from AgentInput.
+                    let config = LLMProviderConfig(baseURL: URL(string: "http://localhost")!, modelName: model.modelName)
 
-                    for try await chunk in tokenStream {
-                        // Explicitly check cancellation inside the loop for responsiveness
+                    onTraceUpdate(AgentTraceLog(
+                        traceID: traceSpan.traceID,
+                        spanID: traceSpan.spanID,
+                        parentSpanID: traceSpan.parentSpanID,
+                        stepNumber: 1,
+                        state: .thinking(.reasoning),
+                        content: "Processing request...",
+                        metadata: ["prompt_tokens": "\(input.chatHistory.count)"]
+                    ))
+
+                    var didSetFinalizing = false
+
+                    // Stream thoughts & content
+                    // IMPORTANT: ChatExecutor currently uses the base LLMProvider.stream method
+                    // until streamChat is formally added to the protocol.
+                    for try await chunk in model.stream(messages: messages, tools: nil) {
                         try Task.checkCancellation()
-
-                        // Stream Handling: Yield text chunks directly as content events
+                        
+                        if !didSetFinalizing {
+                             onTraceUpdate(AgentTraceLog(
+                                traceID: traceSpan.traceID,
+                                spanID: traceSpan.spanID,
+                                parentSpanID: traceSpan.parentSpanID,
+                                stepNumber: 2,
+                                state: .thinking(.finalizing),
+                                content: "Generating final answer..."
+                            ))
+                            didSetFinalizing = true
+                        }
+                        
                         continuation.yield(.content(chunk))
                     }
 
@@ -73,8 +98,8 @@ actor ChatExecutor: Executor {
                         traceID: traceSpan.traceID,
                         spanID: traceSpan.spanID,
                         parentSpanID: traceSpan.parentSpanID,
-                        stepNumber: 1,
-                        state: .finalizing,
+                        stepNumber: 3,
+                        state: .thinking(.finalizing),
                         content: "Response Complete"
                     ))
 
@@ -85,7 +110,6 @@ actor ChatExecutor: Executor {
                     continuation.finish()
                 } catch {
                     logger.error("ChatExecutor Error: \(error.localizedDescription)")
-                    // Stream Handling: Emit error event before throwing
                     continuation.yield(.error(error.localizedDescription))
                     continuation.finish(throwing: error)
                 }

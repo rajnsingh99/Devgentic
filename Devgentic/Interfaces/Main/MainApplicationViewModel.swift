@@ -211,6 +211,13 @@ class MainApplicationViewModel: ObservableObject {
             return
         }
 
+        // PERSIST TITLE: If no title exists, use the first message query
+        if targetConversationEntity.userDefinedTitle == nil || targetConversationEntity.userDefinedTitle?.isEmpty == true {
+            targetConversationEntity.userDefinedTitle = plainUserQueryFromEditor
+            persistenceService.saveContext()
+            logger.info("Auto-setting conversation title to: \(plainUserQueryFromEditor)")
+        }
+
         let filesForBackend = self.attachedFiles
         
         let userMessage = createUserMessage(

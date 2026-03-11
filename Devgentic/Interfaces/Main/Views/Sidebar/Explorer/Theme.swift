@@ -11,6 +11,142 @@
 
 import SwiftUI
 
+
+// MARK: - Accent Color Palette
+
+enum AppAccentColor: String, CaseIterable {
+    case `default` = "default"
+    case blue = "blue"
+    case green = "green"
+    case purple = "purple"
+    case orange = "orange"
+    case pink = "pink"
+    case modernSpotify = "modern_spotify"
+
+    var color: Color? {
+        switch self {
+        case .default: return nil
+        case .blue: return .blue
+        case .green: return .green
+        case .purple: return .purple
+        case .orange: return .orange
+        case .pink: return .pink
+        case .modernSpotify: return Color(hex: "#1DB954")
+        }
+    }
+
+    var nsColor: NSColor? {
+        switch self {
+        case .default: return nil
+        case .blue: return .systemBlue
+        case .green: return .systemGreen
+        case .purple: return .systemPurple
+        case .orange: return .systemOrange
+        case .pink: return .systemPink
+        case .modernSpotify: return NSColor(hex: "#1DB954")
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .default: return "Default"
+        case .blue: return "Ocean Blue"
+        case .green: return "Forest Green"
+        case .purple: return "Deep Purple"
+        case .orange: return "Sunset Orange"
+        case .pink: return "Vibrant Pink"
+        case .modernSpotify: return "Cosmic Green"
+        }
+    }
+}
+
+// MARK: - Theme Decorator (For Global Overrides)
+
+/// A decorator that wraps a base theme and overrides specific properties,
+/// such as the accent color, without modifying the base theme's definition.
+struct ThemeDecorator: Theme {
+    let base: any Theme
+    let accentColorOverride: AppAccentColor
+
+    var accentOverride: Color? { accentColorOverride.color }
+
+    // Metadata
+    var id: String { base.id }
+    var displayName: String { base.displayName }
+
+    // Tier 1 — Core Backgrounds
+    var primaryBackground: Color { base.primaryBackground }
+    var secondaryBackground: Color { base.secondaryBackground }
+    var tertiaryBackground: Color { base.tertiaryBackground }
+
+    // Tier 1 — Text
+    var primaryText: Color { base.primaryText }
+    var secondaryText: Color { base.secondaryText }
+    var tertiaryText: Color { base.tertiaryText }
+
+    // Tier 1 — Controls & Accent (The heart of the decorator)
+    var accentColor: Color { accentOverride ?? base.accentColor }
+    var dividerColor: Color { base.dividerColor }
+    var selectionColor: Color { base.selectionColor }
+
+    // Tier 1 — Semantic
+    var errorColor: Color { base.errorColor }
+    var successColor: Color { base.successColor }
+    var warningColor: Color { base.warningColor }
+
+    // Tier 2 — Extended (Defaults provided by protocol extension, but we forward base)
+    var controlBackground: Color { base.controlBackground }
+    var textBackground: Color { base.textBackground }
+    var placeholderText: Color { base.placeholderText }
+    var controlAccent: Color { accentOverride ?? base.controlAccent }
+    var userBubbleBackground: Color { accentOverride ?? base.userBubbleBackground }
+    var inlineCodeBackground: Color { base.inlineCodeBackground }
+    var inlineCodeText: Color { base.inlineCodeText }
+    var accentMuted: Color { accentColor.opacity(0.7) }
+    var codeBlockHeaderBackground: Color { base.codeBlockHeaderBackground }
+    var codeBlockEditorBackground: Color { base.codeBlockEditorBackground }
+    var surfaceOverlay: Color { base.surfaceOverlay }
+    var surfaceOverlayStrong: Color { base.surfaceOverlayStrong }
+    var streamingIndicator: Color { accentOverride ?? base.streamingIndicator }
+    var chatGPTGradientTop: Color { base.chatGPTGradientTop }
+    var chatGPTGradientBottom: Color { base.chatGPTGradientBottom }
+
+    // Tier 3 — Typography
+    var fontLargeTitle: Font { base.fontLargeTitle }
+    var fontTitle1: Font { base.fontTitle1 }
+    var fontTitle2: Font { base.fontTitle2 }
+    var fontTitle3: Font { base.fontTitle3 }
+    var fontHeadline: Font { base.fontHeadline }
+    var fontBody: Font { base.fontBody }
+    var fontCallout: Font { base.fontCallout }
+    var fontSubheadline: Font { base.fontSubheadline }
+    var fontFootnote: Font { base.fontFootnote }
+    var fontCaption: Font { base.fontCaption }
+    var fontCaption2: Font { base.fontCaption2 }
+    var fontCode: Font { base.fontCode }
+    var fontCodeCaption: Font { base.fontCodeCaption }
+
+    // Tier 3 — Spacing
+    var spacingXXSmall: CGFloat { base.spacingXXSmall }
+    var spacingXSmall: CGFloat { base.spacingXSmall }
+    var spacingSmall: CGFloat { base.spacingSmall }
+    var spacingMedium: CGFloat { base.spacingMedium }
+    var spacingLarge: CGFloat { base.spacingLarge }
+    var spacingXLarge: CGFloat { base.spacingXLarge }
+    var spacingXXLarge: CGFloat { base.spacingXXLarge }
+
+    // Tier 3 — Corner Radius
+    var cornerRadiusSmall: CGFloat { base.cornerRadiusSmall }
+    var cornerRadiusMedium: CGFloat { base.cornerRadiusMedium }
+    var cornerRadiusLarge: CGFloat { base.cornerRadiusLarge }
+
+    // Syntax Highlighting
+    var syntaxTheme: SyntaxTheme {
+        base.syntaxTheme.patched(with: accentColorOverride.nsColor)
+    }
+}
+
+
 // MARK: - Syntax Theme (for code editors)
 
 /// A set of `NSColor` tokens for syntax-highlighted code editors.
@@ -30,6 +166,28 @@ struct SyntaxTheme {
     let characters: NSColor
     let comments: NSColor
     let bracketHighlight: NSColor
+
+    /// Returns a new SyntaxTheme with the keywords and bracket highlight color overridden.
+    func patched(with accent: NSColor?) -> SyntaxTheme {
+        guard let accent = accent else { return self }
+        return SyntaxTheme(
+            background: background,
+            lineHighlight: lineHighlight,
+            selection: selection,
+            text: text,
+            keywords: accent,
+            commands: commands,
+            types: types,
+            attributes: attributes,
+            variables: variables,
+            values: values,
+            numbers: numbers,
+            strings: strings,
+            characters: characters,
+            comments: comments,
+            bracketHighlight: accent.withAlphaComponent(0.4)
+        )
+    }
 }
 
 // MARK: - Theme Protocol
@@ -386,6 +544,134 @@ extension AppThemes {
                 characters: NSColor(hex: "#50a14f"),
                 comments: NSColor(hex: "#a0a1a7"),
                 bracketHighlight: NSColor(hex: "#4078f2").withAlphaComponent(0.4)
+            )
+        }
+    }
+}
+
+
+// MARK: - One Dark Theme
+
+extension AppThemes {
+    struct OneDarkTheme: Theme {
+        let id = "one_dark"
+        let displayName = "One Dark"
+
+        // Tier 1 — Core (Atom One Dark)
+        let primaryBackground: Color = Color(hex: "#282c34")
+        let secondaryBackground: Color = Color(hex: "#21252b")
+        let tertiaryBackground: Color = Color(hex: "#2c313a")
+
+        let primaryText: Color = Color(hex: "#abb2bf")
+        let secondaryText: Color = Color(hex: "#5c6370")
+        let tertiaryText: Color = Color(hex: "#4b5263")
+
+        let accentColor: Color = Color(hex: "#61afef")
+        let dividerColor: Color = Color(hex: "#181a1f")
+        let selectionColor: Color = Color(hex: "#3e4451")
+
+        let errorColor: Color = Color(hex: "#e06c75")
+        let successColor: Color = Color(hex: "#98c379")
+        let warningColor: Color = Color(hex: "#e5c07b")
+
+        // Tier 2 — Overrides
+        var controlBackground: Color { Color(hex: "#21252b") }
+        var textBackground: Color { Color(hex: "#282c34") }
+        var placeholderText: Color { Color(hex: "#5c6370") }
+        var controlAccent: Color { Color(hex: "#61afef") }
+        var userBubbleBackground: Color { Color(hex: "#61afef") }
+        var inlineCodeBackground: Color { Color(hex: "#2c313a") }
+        var inlineCodeText: Color { Color(hex: "#abb2bf") }
+        var codeBlockHeaderBackground: Color { Color(hex: "#21252b") }
+        var codeBlockEditorBackground: Color { Color(hex: "#282c34") }
+        var surfaceOverlay: Color { Color.white.opacity(0.06) }
+        var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
+        var streamingIndicator: Color { Color(hex: "#56b6c2") }
+        var chatGPTGradientTop: Color { Color(hex: "#282c34") }
+        var chatGPTGradientBottom: Color { Color(hex: "#21252b") }
+
+        // Syntax — One Dark palette (Atom)
+        var syntaxTheme: SyntaxTheme {
+            SyntaxTheme(
+                background: NSColor(hex: "#282c34"),
+                lineHighlight: NSColor(hex: "#2c313a"),
+                selection: NSColor(hex: "#3e4451"),
+                text: NSColor(hex: "#abb2bf"),
+                keywords: NSColor(hex: "#c678dd"),
+                commands: NSColor(hex: "#61afef"),
+                types: NSColor(hex: "#e5c07b"),
+                attributes: NSColor(hex: "#d19a66"),
+                variables: NSColor(hex: "#e06c75"),
+                values: NSColor(hex: "#d19a66"),
+                numbers: NSColor(hex: "#d19a66"),
+                strings: NSColor(hex: "#98c379"),
+                characters: NSColor(hex: "#56b6c2"),
+                comments: NSColor(hex: "#5c6370"),
+                bracketHighlight: NSColor(hex: "#61afef").withAlphaComponent(0.4)
+            )
+        }
+    }
+}
+
+
+// MARK: - Cosmic Dark Theme (Spotify Inspired)
+
+extension AppThemes {
+    struct CosmicDarkTheme: Theme {
+        let id = "cosmic_dark"
+        let displayName = "Cosmic Dark"
+
+        // Tier 1 — Core (Spotify Palette)
+        let primaryBackground: Color = Color(hex: "#121212")        // Pure Spotify Dark
+        let secondaryBackground: Color = Color(hex: "#181818")      // Slightly lighter for cards/menus
+        let tertiaryBackground: Color = Color(hex: "#282828")       // Hover/Selection tint
+
+        let primaryText: Color = .white                             // Crisp white for title
+        let secondaryText: Color = Color(hex: "#b3b3b3")           // Soft gray for metadata
+        let tertiaryText: Color = Color(hex: "#535353")            // Muted text
+
+        let accentColor: Color = Color(hex: "#1DB954")              // Spotify Green
+        let dividerColor: Color = Color(hex: "#282828")
+        let selectionColor: Color = Color(hex: "#282828")
+
+        let errorColor: Color = Color(hex: "#e91429")              // Spotify error red
+        let successColor: Color = Color(hex: "#1DB954")
+        let warningColor: Color = Color(hex: "#ffa500")
+
+        // Tier 2 — Overrides
+        var controlBackground: Color { Color(hex: "#181818") }
+        var textBackground: Color { Color(hex: "#121212") }
+        var placeholderText: Color { Color(hex: "#b3b3b3") }
+        var controlAccent: Color { Color(hex: "#1DB954") }
+        var userBubbleBackground: Color { Color(hex: "#1DB954") }
+        var inlineCodeBackground: Color { Color(hex: "#282828") }
+        var inlineCodeText: Color { .white }
+        var codeBlockHeaderBackground: Color { Color(hex: "#1DB954").opacity(0.1) }
+        var codeBlockEditorBackground: Color { Color(hex: "#0c0c0c") } // Even darker for contrast
+        var surfaceOverlay: Color { Color.white.opacity(0.05) }
+        var surfaceOverlayStrong: Color { Color.white.opacity(0.1) }
+        var streamingIndicator: Color { Color(hex: "#1DB954") }
+        var chatGPTGradientTop: Color { Color(hex: "#1e1e1e") }
+        var chatGPTGradientBottom: Color { Color(hex: "#121212") }
+
+        // Syntax — Modern Dark palette
+        var syntaxTheme: SyntaxTheme {
+            SyntaxTheme(
+                background: NSColor(hex: "#0c0c0c"),
+                lineHighlight: NSColor(hex: "#181818"),
+                selection: NSColor(hex: "#282828"),
+                text: NSColor(hex: "#f8f8f2"),
+                keywords: NSColor(hex: "#1DB954"),          // Green for keywords
+                commands: NSColor(hex: "#8be9fd"),
+                types: NSColor(hex: "#50fa7b"),
+                attributes: NSColor(hex: "#ff79c6"),
+                variables: NSColor(hex: "#f8f8f2"),
+                values: NSColor(hex: "#bd93f9"),
+                numbers: NSColor(hex: "#bd93f9"),
+                strings: NSColor(hex: "#f1fa8c"),
+                characters: NSColor(hex: "#f1fa8c"),
+                comments: NSColor(hex: "#b3b3b3"),          // Gray for comments
+                bracketHighlight: NSColor(hex: "#1DB954").withAlphaComponent(0.4)
             )
         }
     }

@@ -36,6 +36,27 @@ class EvaluationLogger {
             metrics.totalSteps += 1
             
             switch log.state {
+            case .thinking(let detail):
+                if detail == .reasoning || detail == .planning {
+                    metrics.totalIterations += 1
+                }
+                if detail == .finalizing {
+                    metrics.didFinishSuccessfully = true
+                }
+                if detail == .errorRecovery {
+                    if log.content.contains("Max iterations reached") {
+                        metrics.didHitMaxIterations = true
+                    }
+                }
+                // Handle reflecting as the old 'observing' for tool metrics
+                if detail == .reflecting {
+                    if let toolName = log.metadata?["tool_name"],
+                       let successStr = log.metadata?["is_success"], // Corrected from tool_success
+                       let success = Bool(successStr) {
+                        metrics.executedTools.append((name: toolName, success: success))
+                    }
+                }
+                
             case .acting:
                 metrics.toolCalls += 1
                 // Check for hallucination or parse error in log.content
@@ -46,23 +67,18 @@ class EvaluationLogger {
                     metrics.parseErrors += 1
                 }
                 
-            case .observing:
-                // Extract tool details from metadata injected by ReActAgentExecutor
-                if let toolName = log.metadata?["tool_name"],
-                   let successStr = log.metadata?["tool_success"],
-                   let success = Bool(successStr) {
-                    metrics.executedTools.append((name: toolName, success: success))
-                }
+            case .interaction:
+                // Interactions are new, handle if needed for metrics
+                break
                 
-            case .finalizing:
+            case .completed:
                 metrics.didFinishSuccessfully = true
                 
-            case .errorRecovery:
-                if log.content.contains("Max iterations reached") {
-                    metrics.didHitMaxIterations = true
-                }
+            case .error:
+                break
                 
-            default: break
+            case .idle:
+                break
             }
             
             self.activeSessions[id] = metrics
@@ -83,9 +99,10 @@ class EvaluationLogger {
             let durationStr = self.formatDuration(metrics.duration)
             
             print("\n========== 🤖 EXECUTOR SPAN [\(metrics.sessionID)] ==========")
-            print("Latency:     \(durationStr)")
-            print("Steps Taken: \(metrics.totalSteps)")
-            print("Tool Calls:  \(metrics.toolCalls)")
+            print("Latency:      \(durationStr)")
+            print("Iterations:   \(metrics.totalIterations)")
+            print("Trace Events: \(metrics.totalSteps)")
+            print("Tool Calls:   \(metrics.toolCalls)")
             
             // Print Tool Details
             if !metrics.executedTools.isEmpty {

@@ -36,7 +36,9 @@ struct ChatInputAreaView: View {
     // MARK: - UI State (Cleaned of Business Logic)
     @State private var showingBackendSelectorPopup: Bool = false
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
+    @State private var showingToolLibrary = false
     @State private var selectedProfile: BackendProfileModel?
+    @State private var isToolsHovering = false
 
     // MARK: - Hover States
     @State private var isPlusButtonHovering: Bool = false
@@ -330,15 +332,15 @@ struct ChatInputAreaView: View {
     private var toolbarArea: some View {
         HStack(spacing: 12) {
             Button(action: openFilePicker) {
-                Image(systemName: "plus")
+                Image(systemName: "paperclip")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 14, height: 14)
-                    .foregroundColor(theme.secondaryText)
-                    .padding(6)
+                    .foregroundColor(isPlusButtonHovering ? theme.primaryText : theme.secondaryText.opacity(0.8))
+                    .padding(7)
                     .background(
                         Circle()
-                            .fill(isPlusButtonHovering ? theme.secondaryText.opacity(0.15) : Color.clear)
+                            .fill(isPlusButtonHovering ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.18))
                     )
             }
             .buttonStyle(.plain)
@@ -346,6 +348,32 @@ struct ChatInputAreaView: View {
             .help("Attach files")
             .disabled(!isInputEnabled)
             .opacity(isInputEnabled ? 1.0 : 0.5)
+
+            if selectedProfile?.profileType == .agent {
+                Button(action: { self.showingToolLibrary = true }) {
+                    Image(systemName: "hammer.fill")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 14, height: 14)
+                        .foregroundColor(isToolsHovering ? theme.primaryText : theme.secondaryText.opacity(0.8))
+                        .padding(7)
+                        .background(
+                            Circle()
+                                .fill(isToolsHovering ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.18))
+                        )
+                }
+                .buttonStyle(.plain)
+                .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isToolsHovering = hover } }
+                .help("Manage tools for this agent")
+                .disabled(!isInputEnabled)
+                .opacity(isInputEnabled ? 1.0 : 0.5)
+                .sheet(isPresented: $showingToolLibrary) {
+                    ToolLibraryView(
+                        configuredTools: toolsBinding,
+                        instructions: profileInstructions
+                    )
+                }
+            }
 
             backendPickerButton()
                 .disabled(!isInputEnabled)
@@ -645,5 +673,41 @@ struct ChatInputAreaView: View {
                   let selectedPrompt = inputViewModel.promptSuggestionState.filteredItems.first(where: { $0.id == selectedID }) else { return }
             inputViewModel.selectPrompt(selectedPrompt)
         }
+    }
+
+    // MARK: - Tool Management Helpers
+
+    private var toolsBinding: Binding<[Tool]> {
+        Binding(
+            get: {
+                if case .agent(_, _, let tools, _, _, _) = selectedProfile?.details {
+                    return tools
+                }
+                return []
+            },
+            set: { newTools in
+                guard var profile = selectedProfile else { return }
+                if case .agent(let config, let arch, _, let desc, let instr, let sources) = profile.details {
+                    profile.details = .agent(
+                        llmConfig: config,
+                        architecture: arch,
+                        tools: newTools,
+                        description: desc,
+                        instructions: instr,
+                        knowledgeSources: sources
+                    )
+                    selectedProfile = profile
+                    // Persist change via shared store
+                    BackendProfileStore.shared.saveProfile(profile)
+                }
+            }
+        )
+    }
+
+    private var profileInstructions: String {
+        if case .agent(_, _, _, _, let instructions, _) = selectedProfile?.details {
+            return instructions ?? ""
+        }
+        return ""
     }
 }

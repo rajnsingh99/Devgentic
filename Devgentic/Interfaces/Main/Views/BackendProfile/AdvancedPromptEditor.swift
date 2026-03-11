@@ -12,9 +12,14 @@ import Combine
 // MARK: - Window Manager
 
 /// Manages a floating, detached NSWindow for the advanced prompt editor.
-class AdvancedPromptWindowManager {
+class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     static let shared = AdvancedPromptWindowManager()
     private var window: NSWindow?
+    
+    /// Callbacks to communicate with the SwiftUI view
+    var checkChanges: (() -> Bool)?
+    var saveChanges: (() -> Void)?
+    var discardChanges: (() -> Void)?
 
     /// Spawns or brings the editor window to the front.
     func showEditor(text: Binding<String>, agentName: String, configuredTools: Binding<[Tool]>, theme: Theme) {
@@ -47,6 +52,7 @@ class AdvancedPromptWindowManager {
         
         newWindow.isOpaque = false
         newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
+        newWindow.delegate = self
 
         self.window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
@@ -55,6 +61,39 @@ class AdvancedPromptWindowManager {
     func closeWindow() {
         window?.close()
         window = nil
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if checkChanges?() == true {
+            let alert = NSAlert()
+            alert.messageText = "Unsaved Changes"
+            alert.informativeText = "You have unsaved changes in the system instructions. Would you like to save them before closing?"
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Don't Save")
+            
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn { // Save
+                saveChanges?()
+                return true
+            } else if response == .alertSecondButtonReturn { // Cancel
+                return false
+            } else { // Don't Save
+                discardChanges?()
+                return true
+            }
+        }
+        return true
+    }
+    
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+        // Reset callbacks
+        checkChanges = nil
+        saveChanges = nil
+        discardChanges = nil
     }
 }
 
@@ -79,6 +118,14 @@ class MentionState: ObservableObject {
     var activeTools: [AvailableTool] = []
 }
 
+/// An ObservableObject to manage the state of the active prompt popover for keyboard navigation.
+@MainActor
+class PromptMentionState: ObservableObject {
+    @Published var selectedIndex: Int = 0
+    @Published var maxIndex: Int = 0
+    var activePrompts: [DevPrompt] = []
+}
+
 // MARK: - Editor UI
 
 struct AdvancedPromptEditorView: View {
@@ -87,8 +134,21 @@ struct AdvancedPromptEditorView: View {
     @Binding var configuredTools: [Tool]
     @Environment(\.appTheme) private var theme
     
-    // Local state to drive real-time UI updates in the detached window
+    // State for supporting components
+    @StateObject private var promptLibraryVM = PromptLibraryViewModel()
+    @State private var showingSavePopover: Bool = false
+    @State private var showingGuide: Bool = false
+    
+    // Tracking for unsaved changes
     @State private var localText: String = ""
+    @State private var localTools: [Tool] = []
+    
+    @State private var initialText: String = ""
+    @State private var initialTools: [Tool] = []
+    
+    private var hasUnsavedChanges: Bool {
+        localText != initialText || localTools != initialTools
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,12 +165,14 @@ struct AdvancedPromptEditorView: View {
                 Spacer()
                 
                 VStack(alignment: .trailing) {
-                    Text("\(localText.count) characters")
-                        .font(.subheadline)
-                        .monospacedDigit()
-                    Text("~ \(localText.count / 4) tokens")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
+                    VStack(alignment: .trailing) {
+                        Text("\(localText.count) characters")
+                            .font(.subheadline)
+                            .monospacedDigit()
+                        Text("~ \(localText.count / 4) tokens")
+                            .font(.caption)
+                            .foregroundColor(theme.secondaryText)
+                    }
                 }
             }
             .padding()
@@ -120,11 +182,48 @@ struct AdvancedPromptEditorView: View {
                 .fill(theme.dividerColor)
                 .frame(height: 1)
 
-            // The Core Editor
-            TokenizingTextEditor(text: $localText, configuredTools: $configuredTools, theme: theme)
-                .padding()
-                .scrollContentBackground(.hidden)
-                .background(theme.textBackground)
+            HStack(spacing: 0) {
+                // The Core Editor
+                ZStack(alignment: .topTrailing) {
+                    TokenizingTextEditor(text: $localText, configuredTools: $localTools, theme: theme, promptLibraryVM: promptLibraryVM)
+                        .padding()
+                        .scrollContentBackground(.hidden)
+                        .background(theme.textBackground)
+                    
+                    // Floating Guide Toggle
+                    Button(action: { withAnimation { showingGuide.toggle() } }) {
+                        Image(systemName: "info.circle.fill")
+                            .font(.title3)
+                            .foregroundColor(showingGuide ? theme.accentColor : theme.secondaryText)
+                            .padding(8)
+                            .background(
+                                Circle()
+                                    .fill(theme.secondaryBackground.opacity(0.8))
+                                    .blur(radius: 0.5)
+                            )
+                            .overlay(
+                                Circle()
+                                    .stroke(theme.dividerColor, lineWidth: 0.5)
+                            )
+                            .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 16)
+                    .padding(.trailing, 32) // Increased padding to avoid scrollbar overlap
+                    .help("Explain how to write instructions and use shortcuts")
+                }
+                
+                if showingGuide {
+                    Rectangle()
+                        .fill(theme.dividerColor)
+                        .frame(width: 1)
+                    
+                    PromptGuideView()
+                        .frame(width: 280)
+                        .background(theme.secondaryBackground)
+                        .transition(.move(edge: .trailing))
+                }
+            }
 
             Rectangle()
                 .fill(theme.dividerColor)
@@ -140,11 +239,30 @@ struct AdvancedPromptEditorView: View {
                 
                 Spacer()
                 
-                Button("Done") {
-                    AdvancedPromptWindowManager.shared.closeWindow()
+                Button(action: {
+                    promptLibraryVM.prepareForCreateNewPrompt()
+                    promptLibraryVM.editablePromptText = localText
+                    showingSavePopover = true
+                }) {
+                    Label("Save to Library", systemImage: "plus.square.on.square")
                 }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .foregroundColor(theme.accentColor)
+                .padding(.horizontal, 8)
+                .popover(isPresented: $showingSavePopover, arrowEdge: .top) {
+                    CreateEditPromptView()
+                        .environmentObject(promptLibraryVM)
+                        .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
+                }
+                
+                if hasUnsavedChanges {
+                    Button("Save") {
+                        saveAndClose()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
             }
             .padding()
             .background(theme.secondaryBackground)
@@ -154,19 +272,24 @@ struct AdvancedPromptEditorView: View {
         .onAppear {
             // Initialize local state from the binding
             localText = text
+            localTools = configuredTools
+            
+            initialText = text
+            initialTools = configuredTools
+            
+            // Set up Window Manager callbacks
+            AdvancedPromptWindowManager.shared.checkChanges = { hasUnsavedChanges }
+            AdvancedPromptWindowManager.shared.saveChanges = { saveAndClose() }
+            AdvancedPromptWindowManager.shared.discardChanges = { AdvancedPromptWindowManager.shared.closeWindow() }
         }
-        .onChange(of: localText) { newValue in
-            // Push changes back to the main app binding
-            if text != newValue {
-                text = newValue
-            }
-        }
-        .onChange(of: text) { newValue in
-            // Sync if the text was changed externally while the window is open
-            if localText != newValue {
-                localText = newValue
-            }
-        }
+    }
+    
+    private func saveAndClose() {
+        // Explicitly sync back to parent bindings
+        text = localText
+        configuredTools = localTools
+        
+        AdvancedPromptWindowManager.shared.closeWindow()
     }
 }
 
@@ -176,6 +299,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var configuredTools: [Tool]
     var theme: Theme
+    @ObservedObject var promptLibraryVM: PromptLibraryViewModel
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -231,10 +355,14 @@ struct TokenizingTextEditor: NSViewRepresentable {
     class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
         var parent: TokenizingTextEditor
         var popover: NSPopover?
-        var activeMentionRange: NSRange?
+        var promptPopover: NSPopover?
         
-        // Step 2: Keyboard state tracking
+        var activeMentionRange: NSRange?
+        var activePromptRange: NSRange?
+        
+        // Keyboard state tracking
         var mentionState = MentionState()
+        var promptMentionState = PromptMentionState()
 
         init(_ parent: TokenizingTextEditor) {
             self.parent = parent
@@ -294,23 +422,42 @@ struct TokenizingTextEditor: NSViewRepresentable {
         // MARK: - Phase 2 (Enhancement Step 2): Keyboard Integration
         
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            guard popover?.isShown == true else { return false }
-            
-            if commandSelector == #selector(NSResponder.moveUp(_:)) {
-                mentionState.selectedIndex = max(0, mentionState.selectedIndex - 1)
-                return true
-            } else if commandSelector == #selector(NSResponder.moveDown(_:)) {
-                mentionState.selectedIndex = min(mentionState.maxIndex, mentionState.selectedIndex + 1)
-                return true
-            } else if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                if !mentionState.activeTools.isEmpty {
-                    let selected = mentionState.activeTools[mentionState.selectedIndex]
-                    insertTool(selected, in: textView)
+            if popover?.isShown == true {
+                if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                    mentionState.selectedIndex = max(0, mentionState.selectedIndex - 1)
+                    return true
+                } else if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                    mentionState.selectedIndex = min(mentionState.maxIndex, mentionState.selectedIndex + 1)
+                    return true
+                } else if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                    if !mentionState.activeTools.isEmpty {
+                        let selected = mentionState.activeTools[mentionState.selectedIndex]
+                        insertTool(selected, in: textView)
+                    }
+                    return true
+                } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                    closePopover()
+                    return true
                 }
-                return true
-            } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                closePopover()
-                return true
+            }
+            
+            if promptPopover?.isShown == true {
+                if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                    promptMentionState.selectedIndex = max(0, promptMentionState.selectedIndex - 1)
+                    return true
+                } else if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                    promptMentionState.selectedIndex = min(promptMentionState.maxIndex, promptMentionState.selectedIndex + 1)
+                    return true
+                } else if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                    if !promptMentionState.activePrompts.isEmpty {
+                        let selected = promptMentionState.activePrompts[promptMentionState.selectedIndex]
+                        insertPrompt(selected, in: textView)
+                    }
+                    return true
+                } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                    closePromptPopover()
+                    return true
+                }
             }
             
             return false
@@ -330,22 +477,34 @@ struct TokenizingTextEditor: NSViewRepresentable {
 
             guard selectedRange.location > 0 else {
                 closePopover()
+                closePromptPopover()
                 return
             }
 
             let textUpToCursor = textString.substring(to: selectedRange.location)
             let components = textUpToCursor.components(separatedBy: .whitespacesAndNewlines)
-
-            guard let lastWord = components.last, lastWord.hasPrefix("@") else {
+            guard let lastWord = components.last else {
                 closePopover()
+                closePromptPopover()
                 return
             }
 
-            let mentionLocation = selectedRange.location - lastWord.count
-            activeMentionRange = NSRange(location: mentionLocation, length: lastWord.count)
-
-            let query = String(lastWord.dropFirst())
-            showPopover(for: query, in: textView)
+            if lastWord.hasPrefix("@") {
+                closePromptPopover()
+                let mentionLocation = selectedRange.location - lastWord.count
+                activeMentionRange = NSRange(location: mentionLocation, length: lastWord.count)
+                let query = String(lastWord.dropFirst())
+                showPopover(for: query, in: textView)
+            } else if lastWord.hasPrefix("#") {
+                closePopover()
+                let mentionLocation = selectedRange.location - lastWord.count
+                activePromptRange = NSRange(location: mentionLocation, length: lastWord.count)
+                let query = String(lastWord.dropFirst())
+                showPromptPopover(for: query, in: textView)
+            } else {
+                closePopover()
+                closePromptPopover()
+            }
         }
 
         private func showPopover(for query: String, in textView: NSTextView) {
@@ -431,6 +590,70 @@ struct TokenizingTextEditor: NSViewRepresentable {
             }
 
             closePopover()
+        }
+
+        private func showPromptPopover(for query: String, in textView: NSTextView) {
+            let allPrompts = PromptService.shared.getAllPrompts()
+            
+            let filteredPrompts = query.isEmpty ? allPrompts : allPrompts.filter {
+                $0.title.localizedCaseInsensitiveContains(query) ||
+                $0.text.localizedCaseInsensitiveContains(query)
+            }
+
+            guard !filteredPrompts.isEmpty else {
+                closePromptPopover()
+                return
+            }
+            
+            // Sync Keyboard State
+            promptMentionState.activePrompts = filteredPrompts
+            promptMentionState.maxIndex = max(0, filteredPrompts.count - 1)
+            promptMentionState.selectedIndex = 0
+
+            let listView = PromptMentionListView(state: promptMentionState) { [weak self] selectedPrompt in
+                self?.insertPrompt(selectedPrompt, in: textView)
+            }
+            .environment(\.appTheme, parent.theme)
+
+            let controller = NSHostingController(rootView: listView)
+            
+            if promptPopover == nil {
+                promptPopover = NSPopover()
+                promptPopover?.behavior = .transient
+                promptPopover?.animates = false
+            }
+            promptPopover?.contentViewController = controller
+
+            if let range = activePromptRange,
+               let layoutManager = textView.layoutManager,
+               let textContainer = textView.textContainer {
+                
+                let rect = layoutManager.boundingRect(forGlyphRange: range, in: textContainer)
+                
+                var targetRect = rect
+                targetRect.origin.x += textView.textContainerOrigin.x
+                targetRect.origin.y += textView.textContainerOrigin.y
+                
+                promptPopover?.show(relativeTo: targetRect, of: textView, preferredEdge: .minY)
+            }
+        }
+
+        private func closePromptPopover() {
+            promptPopover?.close()
+            activePromptRange = nil
+        }
+
+        private func insertPrompt(_ prompt: DevPrompt, in textView: NSTextView) {
+            guard let range = activePromptRange else { return }
+            
+            let replacement = prompt.text
+            
+            if textView.shouldChangeText(in: range, replacementString: replacement) {
+                textView.textStorage?.replaceCharacters(in: range, with: replacement)
+                textView.didChangeText()
+            }
+            
+            closePromptPopover()
         }
     }
 }
@@ -521,6 +744,189 @@ struct ToolMentionRow: View {
         .onHover { hovered in
             isHovered = hovered
             if hovered { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+}
+
+struct PromptMentionListView: View {
+    @ObservedObject var state: PromptMentionState
+    let onSelect: (DevPrompt) -> Void
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Insert Prompt")
+                .font(.caption)
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            
+            Divider()
+            
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(state.activePrompts.enumerated()), id: \.element.id) { index, prompt in
+                            PromptMentionRow(
+                                prompt: prompt,
+                                isSelected: index == state.selectedIndex,
+                                action: { onSelect(prompt) }
+                            )
+                            .id(index)
+                            Divider()
+                        }
+                    }
+                }
+                .onChange(of: state.selectedIndex) { newIndex in
+                    withAnimation(.easeInOut(duration: 0.1)) {
+                        proxy.scrollTo(newIndex, anchor: .center)
+                    }
+                }
+            }
+        }
+        .frame(width: 320, height: min(CGFloat(state.activePrompts.count * 48 + 40), 320))
+    }
+}
+
+struct PromptMentionRow: View {
+    let prompt: DevPrompt
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top) {
+                Image(systemName: "text.quote")
+                    .foregroundColor(isSelected ? .white : theme.accentColor)
+                    .font(.caption)
+                    .padding(.top, 4)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(prompt.title)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundColor(isSelected ? .white : theme.primaryText)
+                    
+                    Text(prompt.text.split(separator: "\n").first ?? "")
+                        .font(.caption)
+                        .foregroundColor(isSelected ? .white.opacity(0.8) : theme.secondaryText)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(isSelected ? theme.accentColor : (isHovered ? theme.accentColor.opacity(0.1) : Color.clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered in
+            isHovered = hovered
+            if hovered { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+}
+
+// MARK: - Prompt Guide
+
+struct PromptGuideView: View {
+    @Environment(\.appTheme) private var theme
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Writing Instructions")
+                        .font(.headline)
+                    Text("Effective instructions define the boundaries and behavior of your agent.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                }
+                
+                guideSection(
+                    title: "1. Persona",
+                    description: "Set the identity and tone. Is the agent a software engineer, a creative writer, or a legal expert?",
+                    example: "# PERSONA\nYou are a Principal Swift Engineer specializing in clean architecture..."
+                )
+                
+                guideSection(
+                    title: "2. Strategy",
+                    description: "Outline the problem-solving steps the agent should follow.",
+                    example: "# STRATEGY\n1. Analyze the file system first.\n2. Propose changes before editing."
+                )
+                
+                guideSection(
+                    title: "3. Guardrails",
+                    description: "Specify what the agent should NEVER do to ensure safety.",
+                    example: "# GUARDRAILS\n- Never delete a folder without user confirmation."
+                )
+                
+                Divider()
+                
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Shortcuts")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                    
+                    shortcutItem(
+                        symbol: "@",
+                        label: "Mention Tools",
+                        description: "Type `@` to see and enable tools from your library. This automatically enables them for the agent."
+                    )
+                    
+                    shortcutItem(
+                        symbol: "#",
+                        label: "Prompt Templates",
+                        description: "Type `#` to search and insert reusable prompt snippets from your Prompt Library."
+                    )
+                }
+                
+                Spacer(minLength: 20)
+            }
+            .padding()
+        }
+    }
+    
+    private func guideSection(title: String, description: String, example: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.subheadline)
+                .fontWeight(.bold)
+            Text(description)
+                .font(.caption)
+                .foregroundColor(theme.secondaryText)
+            
+            Text(example)
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .padding(8)
+                .background(theme.primaryBackground.opacity(0.5))
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(theme.dividerColor, lineWidth: 0.5)
+                )
+        }
+    }
+    
+    private func shortcutItem(symbol: String, label: String, description: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(symbol)
+                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.accentColor)
+                .frame(width: 24, height: 24)
+                .background(theme.accentColor.opacity(0.1))
+                .cornerRadius(4)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption)
+                    .fontWeight(.bold)
+                Text(description)
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.secondaryText)
+            }
         }
     }
 }

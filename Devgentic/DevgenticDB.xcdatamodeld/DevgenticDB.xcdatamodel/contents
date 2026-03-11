@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="24512" systemVersion="25C56" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
     <entity name="AgentConfigEntity" representedClassName="AgentConfigEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="agentArchitecture" optional="YES" attributeType="String"/>
         <attribute name="agentDescription" optional="YES" attributeType="String"/>
         <attribute name="instructions" optional="YES" attributeType="String"/>
         <attribute name="knowledgeSources" optional="YES" attributeType="Binary"/>
@@ -54,6 +55,7 @@
         <attribute name="senderType" optional="YES" attributeType="String"/>
         <attribute name="text_content" optional="YES" attributeType="String"/>
         <attribute name="thoughts" optional="YES" attributeType="Transformable" valueTransformerName="AgentThoughtArrayTransformer"/>
+        <attribute name="timelineEvents" optional="YES" attributeType="Transformable" valueTransformerName="TimelineEventArrayTransformer"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <relationship name="attachedImageFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedImageFileEntity"/>
         <relationship name="attachedTextFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedTextFileEntity"/>

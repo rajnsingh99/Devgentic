@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ClaudeProvider")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ClaudeLLMProvider")
 
 /// Handles the official Anthropic Claude API via REST.
 /// Adapts Devgentic's standard message payloads to Claude's unique top-level system prompt
@@ -16,6 +16,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct ClaudeLLMProvider: LLMProvider {
     
     let config: LLMProviderConfig
+    var modelName: String { config.modelName }
     
     init(config: LLMProviderConfig) {
         self.config = config
@@ -23,7 +24,7 @@ struct ClaudeLLMProvider: LLMProvider {
     
     // MARK: - Agent Flow (NativeAPI Tool Interception)
     
-    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         let (systemPrompt, anthropicMessages) = translateMessages(messages)
         
         var body: [String: Any] = [
@@ -91,6 +92,78 @@ struct ClaudeLLMProvider: LLMProvider {
         
         // Otherwise, return standard text (Task Completion / User Clarification)
         return textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        let (systemPrompt, anthropicMessages) = translateMessages(messages)
+        
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": anthropicMessages,
+            "max_tokens": 4096
+        ]
+        
+        // --- NATIVE THINKING CONFIGURATION ---
+        // For Claude 3.7+ models that support extended internal reasoning.
+        // Requires 'max_tokens' to be strictly greater than 'budget_tokens'.
+        if config.modelName.contains("3-7") {
+            body["thinking"] = ["type": "enabled", "budget_tokens": 1024]
+        }
+        
+        if let systemPrompt = systemPrompt {
+            body["system"] = systemPrompt
+        }
+        
+        if let tools = tools, !tools.isEmpty {
+            body["tools"] = tools
+        }
+        
+        let url = config.baseURL.appendingPathComponent("messages")
+        var request = URLRequest(url: url, timeoutInterval: config.timeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        
+        if let apiKey = config.apiKey {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validateHTTPResponse(response, data: data)
+        
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        
+        guard let contentBlocks = json?["content"] as? [[String: Any]] else {
+            throw LLMProviderError.invalidResponse("Missing content blocks in Anthropic response.")
+        }
+        
+        var reasoning = ""
+        var thinkingTrace = ""
+        var pendingTools: [PendingToolCall] = []
+        
+        for block in contentBlocks {
+            let type = block["type"] as? String ?? ""
+            if type == "text" {
+                reasoning += (block["text"] as? String ?? "")
+            } else if type == "thinking" {
+                thinkingTrace += (block["thinking"] as? String ?? "")
+            } else if type == "tool_use" {
+                let id = block["id"] as? String ?? UUID().uuidString
+                let name = block["name"] as? String ?? "unknown_tool"
+                let input = block["input"] as? [String: Any] ?? [:]
+                
+                let arguments = input.mapValues { AnyCodable($0) }
+                pendingTools.append(PendingToolCall(id: id, name: name, arguments: arguments))
+            }
+        }
+        
+        let finalReasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
+        let fallbackReasoning = finalReasoning.isEmpty && !pendingTools.isEmpty ? "Executing \(pendingTools.count) tools..." : finalReasoning
+        
+        return ModernCognitiveStep(reasoning: fallbackReasoning, thought: finalThought, toolCalls: pendingTools)
     }
 
     // MARK: - Bot Flow (Strict Preservation)

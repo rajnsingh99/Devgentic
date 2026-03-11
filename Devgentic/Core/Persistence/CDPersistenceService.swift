@@ -58,6 +58,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
         ValueTransformer.setValueTransformer(ToolOutputArrayTransformer(), forName: NSValueTransformerName("ToolOutputArrayTransformer"))
         
         AgentThoughtArrayTransformer.register()
+        TimelineEventArrayTransformer.register()
         
         // Enable lightweight migration for schema changes (e.g., new optional attributes)
         if let description = container.persistentStoreDescriptions.first {
@@ -171,8 +172,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             
             // **FIX:** Use KVC to set transformable attributes
             newMessage.setValue(message.agentResponse, forKey: "agentResponse")
-            newMessage.setValue(message.thoughts, forKey: "thoughts")
-            newMessage.setValue(message.artifacts, forKey: "artifacts")
+            newMessage.setValue(message.timelineEvents, forKey: "timelineEvents")
             newMessage.setValue(message.isIndexedForRAG, forKey: "isIndexedForRAG")
             
             newConversation.addToMessages(newMessage)
@@ -220,13 +220,12 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 
                 // **FIX:** Use KVC to set transformable attributes
                 entityToUpdate.setValue(message.agentResponse, forKey: "agentResponse")
-                entityToUpdate.setValue(message.thoughts, forKey: "thoughts")
-                entityToUpdate.setValue(message.artifacts, forKey: "artifacts")
+                entityToUpdate.setValue(message.timelineEvents, forKey: "timelineEvents")
                 
                 // Track indexing state for background worker
                 entityToUpdate.setValue(message.isIndexedForRAG, forKey: "isIndexedForRAG")
                 
-                self.logger.info("Saving message \(message.id.uuidString) with \(message.thoughts.count) thoughts and \(message.artifacts.count) artifacts.")
+                self.logger.info("Saving message \(message.id.uuidString) with \(message.timelineEvents.count) timeline events.")
                 
                 if let textFiles = message.attachedTextFiles {
                     let textFileEntities = textFiles.map { textFile -> AttachedTextFileEntity in
@@ -451,15 +450,8 @@ extension ChatMessageEntity {
         
         chatMessage.agentResponse = finalAgentResponse
         
-        // **FIX:** Decode Glass Box Data
-        if let oldThoughts = self.value(forKey: "thoughts") as? [String] {
-            chatMessage.thoughts = oldThoughts.map { AgentThought(text: $0) }
-        } else if let thoughts = self.value(forKey: "thoughts") as? [AgentThought] {
-            chatMessage.thoughts = thoughts
-        }
-        
-        if let artifacts = self.value(forKey: "artifacts") as? [ToolOutput] {
-            chatMessage.artifacts = artifacts
+        if let timelineEvents = self.value(forKey: "timelineEvents") as? [TimelineEvent] {
+            chatMessage.timelineEvents = timelineEvents
         }
         
         // Phase 4: Decode RAG Indexing State
@@ -661,5 +653,45 @@ final class AgentThoughtArrayTransformer: ValueTransformer {
     static func register() {
         let transformer = AgentThoughtArrayTransformer()
         ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "AgentThoughtArrayTransformer"))
+    }
+}
+
+// NEW: Timeline Event Transformer
+@objc(TimelineEventArrayTransformer)
+final class TimelineEventArrayTransformer: ValueTransformer {
+
+    override class func transformedValueClass() -> AnyClass {
+        return NSData.self
+    }
+
+    override class func allowsReverseTransformation() -> Bool {
+        return true
+    }
+
+    override func transformedValue(_ value: Any?) -> Any? {
+        guard let events = value as? [TimelineEvent] else { return nil }
+        do {
+            let data = try JSONEncoder().encode(events)
+            return data as NSData
+        } catch {
+            print("Failed to encode [TimelineEvent]: \(error)")
+            return nil
+        }
+    }
+
+    override func reverseTransformedValue(_ value: Any?) -> Any? {
+        guard let data = value as? Data else { return nil }
+        do {
+            let events = try JSONDecoder().decode([TimelineEvent].self, from: data)
+            return events
+        } catch {
+            print("Failed to decode [TimelineEvent]: \(error)")
+            return nil
+        }
+    }
+    
+    static func register() {
+        let transformer = TimelineEventArrayTransformer()
+        ValueTransformer.setValueTransformer(transformer, forName: NSValueTransformerName(rawValue: "TimelineEventArrayTransformer"))
     }
 }

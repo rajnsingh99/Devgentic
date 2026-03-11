@@ -39,6 +39,10 @@ class MLXModelService: ObservableObject {
     
     // Cache for model sizes to avoid re-fetching
     @Published var modelSizes: [String: String] = [:]
+
+    // Debounce guard to prevent rapid-fire filesystem scans (e.g. init + onAppear)
+    private var lastScanTime: Date? = nil
+    private let scanDebounceInterval: TimeInterval = 2.0
     
     // MARK: - Configuration
     
@@ -64,6 +68,13 @@ class MLXModelService: ObservableObject {
     // MARK: - Local Discovery (Deep Scan)
     
     func refreshInstalledModels() {
+        // Debounce: skip if last scan was within the debounce interval (prevents init + onAppear double-fire)
+        if let lastScan = lastScanTime, Date().timeIntervalSince(lastScan) < scanDebounceInterval {
+            logger.debug("Skipping redundant Deep Scan — last scan was \(String(format: "%.1f", Date().timeIntervalSince(lastScan)))s ago.")
+            return
+        }
+        lastScanTime = Date()
+
         logger.info("Starting Deep Scan (Config-based) at: \(self.modelsDirectory.path)")
         
         var foundModels: [MLXModelItem] = []

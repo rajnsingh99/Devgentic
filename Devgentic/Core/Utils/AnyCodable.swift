@@ -14,7 +14,7 @@ import Foundation
 ///
 /// This allows you to create structs with fields like `[String: AnyCodable]`,
 /// effectively enabling "Dynamic JSON" support within Swift's strict type system.
-public struct AnyCodable: Codable, Hashable {
+public struct AnyCodable: Codable, Hashable, @unchecked Sendable {
     let value: Any
     init<T>(_ value: T?) { self.value = value ?? () }
 
@@ -42,7 +42,7 @@ public struct AnyCodable: Codable, Hashable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         switch value {
-        case is Void:
+        case is Void, is NSNull: // PATCH: Handle LLM returning "null" for properties
             try container.encodeNil()
         case let bool as Bool:
             try container.encode(bool)
@@ -63,7 +63,7 @@ public struct AnyCodable: Codable, Hashable {
     
     public static func == (lhs: AnyCodable, rhs: AnyCodable) -> Bool {
         switch (lhs.value, rhs.value) {
-        case (is Void, is Void): return true
+        case (is Void, is Void), (is NSNull, is NSNull): return true // PATCH: Handle NSNull equality
         case (let l as Bool, let r as Bool): return l == r
         case (let l as Int, let r as Int): return l == r
         case (let l as Double, let r as Double): return l == r

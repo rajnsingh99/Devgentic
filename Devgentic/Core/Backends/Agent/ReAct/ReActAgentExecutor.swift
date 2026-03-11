@@ -39,7 +39,7 @@ actor ReActAgentExecutor: Executor {
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
-        return AsyncThrowingStream<AgentStreamEvent, Error> { continuation in
+        return AsyncThrowingStream(AgentStreamEvent.self) { continuation in
             let task = Task {
                 
                 // --- Phase 2: State Component ---
@@ -77,12 +77,15 @@ actor ReActAgentExecutor: Executor {
                             logger.warning("Rate limit approaching. Throttling for \(Int(projectedWait))s.")
                             let waitMsg = "Throttling for \(Int(projectedWait))s to respect \(input.rateLimitCategory) limits..."
                             continuation.yield(.thought(waitMsg))
+                            let traceHandler: (AgentTraceLog) -> Void = { log in
+                        logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.headline)): \(log.content) (span: \(log.spanID))")
+                            }
                             onTraceUpdate(AgentTraceLog(
                                 traceID: executionTrace.traceID,
                                 spanID: executionTrace.newSpan().spanID,
                                 parentSpanID: executionTrace.parentSpanID,
                                 stepNumber: currentIteration,
-                                state: .thinking,
+                                state: .thinking(.reasoning),
                                 content: waitMsg
                             ))
                         }
@@ -103,7 +106,7 @@ actor ReActAgentExecutor: Executor {
                         let context = SemanticContext(
                             instructions: input.instructions,
                             environmentFacts: envFacts,
-                            compressedStateGraph: stateMutator.currentState.compressWithPointers(windowSize: 5), // <-- Updated to use Pointer Compression
+                            compressedStateGraph: stateMutator.currentState.compressWithPointers(windowSize: 5),
                             recentHistory: input.recentHistory,
                             originalQuery: input.userInput,
                             currentIteration: currentIteration,
@@ -119,18 +122,42 @@ actor ReActAgentExecutor: Executor {
                         try Task.checkCancellation()
 
                         // --- Structured Generation ---
-                        let step: LeanCognitiveStep
+                        let step: ModernCognitiveStep
                         do {
                             logger.info("⚡️ Invoking Strategy.generate (Attempt: \(retryStrategy.consecutiveRetries + 1))")
-                            step = try await input.generatorStrategy.generate(
+                            
+                            // --- ENHANCED VISIBILITY LOGGING ---
+                            logger.notice("--- COGNITIVE STEP [ITERATION \(currentIteration)] ---")
+                            logger.info("🤖 Active Model: \(model.modelName)")
+                            logger.info("🧠 Generator Strategy: \(String(describing: type(of: input.generatorStrategy)))")
+                            
+                            if context.activeObservations.isEmpty {
+                                logger.info("📝 Scratchpad: (Empty)")
+                            } else {
+                                logger.info("📝 Scratchpad (\(context.activeObservations.count) items):")
+                                for obs in context.activeObservations {
+                                    let status = obs.isRequired ? "REQUIRED" : "HYDRATED"
+                                    logger.info("   - [\(obs.toolName)] (\(status)): \(obs.shortObservation)")
+                                }
+                            }
+                            
+                            step = try await input.generatorStrategy.generateCognitiveStep(
                                 model: spyModel,
                                 context: context,
                                 iteration: currentIteration
                             )
+                            
+                            logger.info("📄 Model Reasoning: \(step.reasoning)")
+                            if step.toolCalls.isEmpty {
+                                logger.info("🛑 No tool calls produced.")
+                            } else {
+                                logger.info("🛠️ Produced \(step.toolCalls.count) Tool Calls: \(step.toolCalls.map { $0.name }.joined(separator: ", "))")
+                            }
+                            
                             retryStrategy.resetParseFailures()
                             
                         } catch {
-                            // --- Error Retry Handling (Phase 3 Component) ---
+                            // --- Error Retry Handling ---
                             let action = retryStrategy.handleError(error)
                             switch action {
                             case .throttle(let seconds, let message):
@@ -161,292 +188,236 @@ actor ReActAgentExecutor: Executor {
                         
                         // --- Pre-Execution Setup ---
                         memoryStore.resetObservationFlags()
-                        continuation.yield(.thought(step.content))
+                        
+                        // Yield the internal thought trace if the provider extracted one (e.g., Native Thinking)
+                        if let thought = step.thought, !thought.isEmpty {
+                            continuation.yield(.thought(thought))
+                        }
+                        
+                        // Yield the assistant monologue/reasoning text
+                        // (Avoid yielding redundant text if thought and reasoning are identical)
+                        if !step.reasoning.isEmpty && step.reasoning != step.thought {
+                            continuation.yield(.thought(step.reasoning))
+                        }
                         
                         // --- Termination Evaluation (Phase 4 Component) ---
                         let termStatus = terminationEvaluator.evaluate(step: step, currentIteration: currentIteration, maxIterations: self.maxIterations)
                         switch termStatus {
                         case .maxIterationsReached:
-                            break // Handled natively by the while-loop condition
+                            break
                         case .completed(let finalThought):
                             executionSummary.finalAgentThought = finalThought
                             break cognitiveLoop
+                        case .suspectedFormatFailure:
+                            // The LLM described tool usage in prose but didn't produce structured tool calls.
+                            // Inject a corrective system alert and retry the generation.
+                            let alert = "CRITICAL: Your last response described tool usage in plain text but did not include a structured tool call. You MUST respond with a valid JSON object containing a `tool_calls` array. Do NOT describe tool calls in prose — actually invoke them."
+                            memoryStore.addSystemAlert(alert, currentIteration: currentIteration)
+                            continuation.yield(.thought("⚠️ Format correction: model described tool intent without structured output. Retrying..."))
+                            logger.warning("🔄 Suspected format failure. Injecting corrective alert and retrying iteration \(currentIteration).")
+                            continue cognitiveLoop
                         case .proceed:
                             break
                         }
+
+                        if step.toolCalls.isEmpty { break cognitiveLoop }
+
+                        // --- PREVENT DUPLICATE TOOL CALLS ---
+                        var uniqueToolCalls: [PendingToolCall] = []
+                        var seenSignatures = Set<String>()
                         
-                        guard let toolName = step.toolName else { break cognitiveLoop }
-                        let arguments = step.arguments ?? [:]
+                        for tool in step.toolCalls {
+                            let signature = "\(tool.name)|\(self.serializeParams(tool.arguments))"
+                            if !seenSignatures.contains(signature) {
+                                seenSignatures.insert(signature)
+                                uniqueToolCalls.append(tool)
+                            } else {
+                                logger.warning("⚠️ Dropped duplicate parallel tool call: \(tool.name) with args: \(signature)")
+                                logToolExecution.warning("Duplicate tool blocked: \(tool.name)")
+                            }
+                        }
+                        
+                        logToolExecution.info("Agent requested \(step.toolCalls.count) total tools. Deduped to \(uniqueToolCalls.count) unique tools.")
 
                         onTraceUpdate(AgentTraceLog(
                             traceID: iterationSpan.traceID,
                             spanID: iterationSpan.spanID,
                             parentSpanID: iterationSpan.parentSpanID,
                             stepNumber: currentIteration,
-                            state: .thinking,
-                            content: "Analyzing...",
+                            state: .thinking(.reasoning),
+                            content: "Analyzing \((uniqueToolCalls.count)) tools...",
                             metadata: iterationMetadata
                         ))
                         
-                        iterationMetadata["tool_name"] = toolName
-
-                        // --- Handle User Clarification ---
-                        if toolName == "ask_user" {
-                            let cbAction = circuitBreaker.evaluateAskUser()
-                            switch cbAction {
-                            case .abort(let reason):
-                                executionSummary.markComplete(failureReason: reason)
-                                let response = await ResponseSynthesizer.synthesize(summary: executionSummary, model: model, personaInstructions: input.instructions, originalQuery: input.userInput)
-                                stateMutator.forceCloseActiveEpisode(status: "FAILED", outcome: response)
-                                continuation.yield(.content(response))
-                                continuation.finish()
-                                return
-                            case .intervene(let systemMessage):
-                                memoryStore.addSystemAlert(systemMessage, currentIteration: currentIteration)
-                                continue cognitiveLoop
-                            case .proceed:
-                                break
-                            }
-
-                            let question: String
-                            if let q = arguments["question"],
-                               let encoder = try? JSONEncoder().encode(q),
-                               let str = String(data: encoder, encoding: .utf8) {
-                                question = str.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                            } else {
-                                question = step.content
-                            }
-
-                            continuation.yield(.requestClarification(question: question))
-
-                            onTraceUpdate(AgentTraceLog(
-                                traceID: iterationSpan.traceID,
-                                spanID: iterationSpan.spanID,
-                                parentSpanID: iterationSpan.parentSpanID,
-                                stepNumber: currentIteration,
-                                state: .requestingPermission,
-                                content: "Waiting for user clarification: \(question)"
-                            ))
-
-                            let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: input.conversationID)
-                            let paramsStr = "{\"question\": \"\(question)\"}"
-
-                            if let response = userResponse, !response.isEmpty {
-                                let lower = response.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                                let terminalPhrases = ["stop", "cancel", "no", "leave it", "abort", "quit", "exit"]
-                                let isTerminal = terminalPhrases.contains { lower == $0 || lower.hasPrefix($0) || lower.hasPrefix("no,") }
-                                
-                                if isTerminal {
-                                    let msg = "Task cancelled as requested."
-                                    executionSummary.record(toolName: "ask_user", params: paramsStr, output: "User aborted task.", isSuccess: false)
-                                    executionSummary.markComplete(failureReason: "User manually cancelled the task.")
-                                    stateMutator.forceCloseActiveEpisode(status: "CANCELLED", outcome: msg)
-                                    continuation.yield(.content(msg))
-                                    continuation.finish()
-                                    return
-                                }
-                                
-                                let isVague = response.count < 15
-                                let clarifyAction = circuitBreaker.recordClarificationResponse(isVague: isVague)
-                                
-                                if case .intervene(let sysMsg) = clarifyAction {
-                                    memoryStore.addSystemAlert(sysMsg, currentIteration: currentIteration)
-                                    executionSummary.record(toolName: "ask_user", params: paramsStr, output: sysMsg, isSuccess: false)
-                                    continuation.yield(.toolOutput(ToolOutput(toolName: "ask_user", output: sysMsg, isSuccess: false)))
-                                } else {
-                                    latestClarification = "You asked: \"\(question)\"\nUser responded: \"\(response)\""
-                                    memoryStore.addObservation(
-                                        toolName: "ask_user",
-                                        shortObservation: "Observation (Step \(currentIteration)): [Question: \(question)] -> User Response: \(response)",
-                                        heavyContent: nil,
-                                        isRequired: true
+                        // 3. ACTING & OBSERVING PHASE (Parallel Execution)
+                        var observations: [CognitiveObservation] = []
+                        
+                        // Use a TaskGroup to execute multiple tools simultaneously
+                        try await withThrowingTaskGroup(of: CognitiveObservation.self) { group in
+                            for tool in uniqueToolCalls {
+                                group.addTask {
+                                    let toolName = tool.name
+                                    let arguments = tool.arguments
+                                    let paramsString = self.serializeParams(arguments)
+                                    
+                                    // Emit UI Event for this specific tool
+                                    continuation.yield(.toolCall(name: toolName, params: paramsString))
+                                    
+                                    // Emit Trace Event for Monitoring/Analytics
+                                    onTraceUpdate(AgentTraceLog(
+                                        traceID: iterationSpan.traceID,
+                                        spanID: iterationSpan.spanID,
+                                        parentSpanID: iterationSpan.parentSpanID,
+                                        stepNumber: currentIteration,
+                                        state: .acting(.tool(name: toolName)),
+                                        content: "Executing '\(toolName)'...",
+                                        metadata: ["tool_name": toolName]
+                                    ))
+                                    
+                                    // PATCH: Explicitly intercept "ask_user" before it hits normal dispatch
+                                    if toolName == "ask_user" {
+                                        let question = (arguments["question"]?.value as? String) ?? "Please provide clarification to proceed."
+                                        
+                                        // Yield the stream event so ActiveStreamManager can show the UI Input Card
+                                        continuation.yield(.requestClarification(question: question))
+                                        
+                                        // Suspend the execution loop and wait for the user's STRING response
+                                        // Note: Adjust 'suspendForClarification' if your service uses a different method name
+                                        let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: input.conversationID)
+                                        
+                                        let answerText = userResponse ?? "System: The user did not respond or the request timed out."
+                                        
+                                        return CognitiveObservation(
+                                            stepId: currentIteration,
+                                            toolName: toolName,
+                                            shortObservation: "User Response: \(answerText)",
+                                            heavyContent: nil,
+                                            isRequired: false,
+                                            metadata: nil
+                                        )
+                                    }
+                                    
+                                    // Dispatch and Execute the Tool (handles HITL safely within the task)
+                                    let dispatchOutcome = toolMediator.prepareDispatch(
+                                        toolName: toolName,
+                                        arguments: arguments,
+                                        availableTools: input.tools
                                     )
-                                    executionSummary.record(toolName: "ask_user", params: paramsStr, output: response, isSuccess: true)
-                                    continuation.yield(.toolOutput(ToolOutput(toolName: "ask_user", output: response, isSuccess: true)))
+                                    
+                                    switch dispatchOutcome {
+                                    case .requiresConfirmation(let ps):
+                                        continuation.yield(.requestConfirmation(toolName: toolName, params: ps))
+                                        let approved = await ExecutionSuspensionService.shared.suspend(for: input.conversationID)
+                                        if !approved {
+                                            let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
+                                            continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: denialResult.llmObservation, isSuccess: false)))
+                                            return CognitiveObservation(
+                                                stepId: currentIteration,
+                                                toolName: toolName,
+                                                shortObservation: denialResult.llmObservation,
+                                                heavyContent: nil,
+                                                isRequired: false,
+                                                metadata: nil
+                                            )
+                                        }
+                                    case .executed, .userDenied:
+                                        break
+                                    }
+                                    
+                                    let result = await toolMediator.executePreparedTool(
+                                        toolName: toolName,
+                                        arguments: arguments,
+                                        availableTools: input.tools,
+                                        parentContext: iterationSpan
+                                    )
+                                    
+                                    // Emit UI Output for this specific tool
+                                    continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: result.llmObservation, isSuccess: result.isSuccess)))
+                                    
+                                    // Emit Trace Observation for EvaluationLogger
+                                    onTraceUpdate(AgentTraceLog(
+                                        traceID: iterationSpan.traceID,
+                                        spanID: iterationSpan.spanID,
+                                        parentSpanID: iterationSpan.parentSpanID,
+                                        stepNumber: currentIteration,
+                                        state: .thinking(.reflecting),
+                                        content: result.isSuccess ? "Tool '\(toolName)' succeeded." : "Tool '\(toolName)' failed.",
+                                        metadata: [
+                                            "tool_name": toolName,
+                                            "is_success": "\(result.isSuccess)",
+                                            "tool_params": paramsString,
+                                            "tool_output": result.llmObservation
+                                        ]
+                                    ))
+                                    
+                                    return CognitiveObservation(
+                                        stepId: currentIteration,
+                                        toolName: toolName,
+                                        shortObservation: result.isSuccess ? "Tool '\(toolName)' executed successfully." : "Tool '\(toolName)' failed: \(result.llmObservation)",
+                                        heavyContent: result.isSuccess ? nil : result.llmObservation,
+                                        isRequired: !result.isSuccess,
+                                        metadata: [
+                                            "tool_name": AnyCodable(toolName),
+                                            "tool_success": AnyCodable(String(result.isSuccess)),
+                                            "tool_params": AnyCodable(paramsString),
+                                            "tool_output": AnyCodable(result.llmObservation)
+                                        ]
+                                    )
                                 }
-                            } else {
-                                let observation = "User did not provide a response. Proceed with your best judgment/tool or return tool_name: null."
-                                memoryStore.addSystemAlert(observation, currentIteration: currentIteration)
-                                executionSummary.record(toolName: "ask_user", params: paramsStr, output: observation, isSuccess: false)
-                                continuation.yield(.toolOutput(ToolOutput(toolName: "ask_user", output: observation, isSuccess: false)))
-                            }
-                            continue cognitiveLoop
-                        }
-
-                        // --- Handle Memory Hydration ---
-                        if toolName == ScratchpadTool.name {
-                            let hydrateAction = circuitBreaker.evaluateMemoryHydration()
-                            if case .abort(let reason) = hydrateAction {
-                                executionSummary.markComplete(failureReason: reason)
-                                let response = await ResponseSynthesizer.synthesize(summary: executionSummary, model: model, personaInstructions: input.instructions, originalQuery: input.userInput)
-                                stateMutator.forceCloseActiveEpisode(status: "FAILED", outcome: response)
-                                continuation.yield(.content(response))
-                                continuation.finish()
-                                return
                             }
                             
-                            let targetIds = ScratchpadTool.extractStepIDs(from: arguments)
-                            let paramsStr = self.serializeParams(arguments)
+                            // Collect all parallel observations
+                            for try await observation in group {
+                                observations.append(observation)
+                            }
+                        }
+                        
+                        let outcomesOverview = observations.map { "[\($0.toolName): \($0.shortObservation)]" }.joined(separator: ", ")
+                        logToolExecution.debug("Agent evaluated \(observations.count) parallel outcomes: \(outcomesOverview)")
+                        
+                        // Commit observations to memory and handle side-effects sequentially
+                        memoryStore.addObservations(observations)
+                        
+                        var shouldAbort = false
+                        var abortReason = ""
+                        
+                        for obs in observations {
+                            let isSuccess = !obs.isRequired
+                            let params = obs.metadata?["tool_params"] as? String ?? "n/a"
+                            let output = obs.metadata?["tool_output"] as? String ?? obs.shortObservation
+                            executionSummary.record(toolName: obs.toolName, params: params, output: output, isSuccess: isSuccess)
                             
-                            if targetIds.isEmpty {
-                                let msg = "System Error: scratchpad_tool requires a 'step_ids' array of integers."
-                                memoryStore.addSystemAlert(msg, currentIteration: currentIteration)
-                                executionSummary.record(toolName: ScratchpadTool.name, params: paramsStr, output: msg, isSuccess: false)
-                                continuation.yield(.toolOutput(ToolOutput(toolName: ScratchpadTool.name, output: msg, isSuccess: false)))
-                            } else {
-                                let result = memoryStore.hydrateObservations(targetIds: targetIds, currentIteration: currentIteration)
-                                executionSummary.record(toolName: ScratchpadTool.name, params: paramsStr, output: result.msg, isSuccess: true)
-                                continuation.yield(.toolOutput(ToolOutput(toolName: ScratchpadTool.name, output: result.msg, isSuccess: true)))
+                            let resultAction = circuitBreaker.recordToolResult(isSuccess: isSuccess)
+                            if case .abort(let reason) = resultAction {
+                                shouldAbort = true
+                                abortReason = reason
                             }
-                            continue cognitiveLoop
-                        }
-
-                        // --- Validate Arguments ---
-                        if let toolDef = input.tools.first(where: { $0.name == toolName }),
-                           !toolDef.parameters.required.isEmpty,
-                           arguments.isEmpty {
-                            let requiredKeys = toolDef.parameters.required.joined(separator: ", ")
-                            let msg = "System Error: Tool '\(toolName)' requires parameters [\(requiredKeys)] but received an empty arguments object {}. You MUST include an 'arguments' key in your JSON with the required parameters."
-                            memoryStore.addSystemAlert(msg, currentIteration: currentIteration)
-                            logger.warning("⚠️ Argument validation failed for '\(toolName)': empty arguments, requires [\(requiredKeys)]")
-                            continuation.yield(.thought("⚠️ Missing required arguments for \(toolName). Retrying..."))
-                            continue cognitiveLoop
-                        }
-
-                        // --- Ghost Protocol Check ---
-                        if let path = self.extractPath(from: arguments), stateMutator.currentState.isPathForbidden(path) {
-                            let violationMsg = "🚫 GHOST PROTOCOL: Access to '\(path)' is FORBIDDEN by Negative Constraints. Do not retry this path."
-                            memoryStore.addSystemAlert(violationMsg, currentIteration: currentIteration)
-                            continuation.yield(.thought(violationMsg))
-                            continue cognitiveLoop
-                        }
-
-                        // --- Ensure Tool Exists ---
-                        let allAvailableTools = input.tools.map { $0.name } + [ScratchpadTool.name, "ask_user"]
-                        if !allAvailableTools.contains(toolName) {
-                            let msg = "System Error: Tool '\(toolName)' does not exist. Choose a valid tool or return tool_name: null."
-                            memoryStore.addSystemAlert(msg, currentIteration: currentIteration)
-                            continuation.yield(.thought(msg))
-                            continue cognitiveLoop
-                        }
-
-                        // --- HITL Preparation ---
-                        let dispatchOutcome = toolMediator.prepareDispatch(toolName: toolName, arguments: arguments, availableTools: input.tools)
-                        let paramsString: String
-                        
-                        switch dispatchOutcome {
-                        case .requiresConfirmation(let ps):
-                            paramsString = ps
-                            continuation.yield(.requestConfirmation(toolName: toolName, params: paramsString))
-                            onTraceUpdate(AgentTraceLog(
-                                traceID: iterationSpan.traceID,
-                                spanID: iterationSpan.spanID,
-                                parentSpanID: iterationSpan.parentSpanID,
-                                stepNumber: currentIteration,
-                                state: .requestingPermission,
-                                content: "Waiting for user approval: \(toolName)"
-                            ))
                             
-                            let approved = await ExecutionSuspensionService.shared.suspend(for: input.conversationID)
-                            if !approved {
-                                let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
-                                memoryStore.addSystemAlert(denialResult.llmObservation, currentIteration: currentIteration)
-                                executionSummary.record(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)
-                                continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: denialResult.llmObservation, isSuccess: false)))
-                                continue cognitiveLoop
+                            if !isSuccess {
+                                circuitBreaker.recordHallucination(obs.toolName)
                             }
-                        case .executed(_, let ps):
-                            paramsString = ps
-                        case .userDenied(_, let ps):
-                            paramsString = ps
                         }
                         
-                        // User allowed execution, reset clarification/idle counters
-                        circuitBreaker.resetCountersOnSuccess()
-
-                        // --- Circuit Breaker Tool Loop Check ---
-                        let attemptAction = circuitBreaker.evaluateToolAttempt(toolName: toolName, paramsHash: paramsString.hashValue)
-                        if case .intervene(let msg) = attemptAction {
-                            memoryStore.addSystemAlert(msg, currentIteration: currentIteration)
-                            continuation.yield(.thought(msg))
-                            continue cognitiveLoop
-                        }
-                        
-                        continuation.yield(.toolCall(name: toolName, params: paramsString))
-                        onTraceUpdate(AgentTraceLog(
-                            traceID: iterationSpan.traceID,
-                            spanID: iterationSpan.spanID,
-                            parentSpanID: iterationSpan.parentSpanID,
-                            stepNumber: currentIteration,
-                            state: .acting,
-                            content: "Executing \(toolName)...",
-                            metadata: iterationMetadata
-                        ))
-                        
-                        // --- Tool Execution ---
-                        let executionResult = await toolMediator.executePreparedTool(
-                            toolName: toolName,
-                            arguments: arguments,
-                            availableTools: input.tools,
-                            parentContext: iterationSpan
-                        )
-                        
-                        let observation = executionResult.llmObservation
-                        let isSuccess = executionResult.isSuccess
-                        
-                        executionSummary.record(toolName: toolName, params: paramsString, output: observation, isSuccess: isSuccess)
-                        
-                        // --- Process Execution Side-Effects ---
-                        switch executionResult {
-                        case .success, .userDenied:
-                            break
-                        case .hallucinated(let tName, _):
-                            circuitBreaker.recordHallucination(tName)
-                        case .timedOut, .semanticFailure, .systemError:
-                            if let path = self.extractPath(from: arguments) {
-                                stateMutator.addNegativeConstraint(path)
-                            }
-                            let violationMsg = "Tool '\(toolName)' failed. If this is due to an unsupported file format (e.g., binary .docx) or missing command, DO NOT ask the user for workarounds. Return tool_name: null immediately."
-                            memoryStore.addSystemAlert(violationMsg, currentIteration: currentIteration)
-                        }
-
-                        // --- Verify Consecutive Failures ---
-                        let resultAction = circuitBreaker.recordToolResult(isSuccess: isSuccess)
-                        switch resultAction {
-                        case .abort(let reason):
-                            executionSummary.markComplete(failureReason: reason)
+                        if shouldAbort {
+                            executionSummary.markComplete(failureReason: abortReason)
                             let response = await ResponseSynthesizer.synthesize(summary: executionSummary, model: model, personaInstructions: input.instructions, originalQuery: input.userInput)
                             stateMutator.forceCloseActiveEpisode(status: "FAILED", outcome: response)
                             continuation.yield(.content(response))
                             continuation.finish()
                             return
-                        case .intervene(let msg):
-                            memoryStore.addSystemAlert(msg, currentIteration: currentIteration)
-                        case .proceed:
-                            break
                         }
                         
-                        continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: observation, isSuccess: isSuccess)))
-                        iterationMetadata["tool_success"] = String(isSuccess)
+                        circuitBreaker.resetCountersOnSuccess()
+                        
                         onTraceUpdate(AgentTraceLog(
                             traceID: iterationSpan.traceID,
                             spanID: iterationSpan.spanID,
                             parentSpanID: iterationSpan.parentSpanID,
                             stepNumber: currentIteration,
-                            state: .observing,
-                            content: observation,
+                            state: .thinking(.reflecting),
+                            content: "Observed \(observations.count) tools natively executed.",
                             metadata: iterationMetadata
                         ))
-                        
-                        let isHeavy = observation.count > 300
-                        let shortObs = isHeavy ? "Observation (Step \(currentIteration)): '\(toolName)' executed. [ scratchpad_tool $\((memoryStore.activeObservations.last?.stepId ?? 0) + 1) ]" : "Observation (Step \(currentIteration)): Tool '\(toolName)' returned: \(observation)"
-                        
-                        memoryStore.addObservation(
-                            toolName: toolName,
-                            shortObservation: shortObs,
-                            heavyContent: isHeavy ? observation : nil,
-                            isRequired: true
-                        )
                         
                     } // End While Loop
                     
@@ -464,7 +435,7 @@ actor ReActAgentExecutor: Executor {
                         model: model,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
-                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator
+                        isNativeFlow: input.generatorStrategy is NativeStructuredStrategy
                     )
                     
                     stateMutator.forceCloseActiveEpisode(status: exitStatus, outcome: response)
@@ -475,7 +446,7 @@ actor ReActAgentExecutor: Executor {
                         spanID: finalSpan.spanID,
                         parentSpanID: finalSpan.parentSpanID,
                         stepNumber: currentIteration,
-                        state: .finalizing,
+                        state: .thinking(.finalizing),
                         content: exitStatus == "COMPLETED" ? "Task completed successfully." : "Task failed or reached max iterations."
                     ))
                     
@@ -520,12 +491,18 @@ actor ReActAgentExecutor: Executor {
 private struct APISpyModel: LLMProvider {
     let inner: any LLMProvider
     let logger: Logger
+    
+    var modelName: String { inner.modelName }
 
-    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         return try await inner.generate(messages: messages, tools: tools, responseSchema: responseSchema)
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
         return inner.stream(messages: messages, tools: tools)
+    }
+
+    func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        return try await inner.generateCognitiveStep(messages: messages, tools: tools)
     }
 }

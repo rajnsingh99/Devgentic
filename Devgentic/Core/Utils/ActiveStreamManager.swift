@@ -65,10 +65,14 @@ class ActiveStreamManager: ObservableObject {
         }
         
         activeStreams[agentMessage.id] = agentMessage
-        
-        // Ensure "Thinking" UI is visible at start
-        agentMessage.agentState = .thinking
-        agentMessage.thinkingHeadline = "Processing..."
+
+        // Defer initial state mutations to the next run loop tick.
+        // This prevents "Modifying state during view update" warnings when the returned
+        // ChatMessage is immediately assigned to SwiftUI state within a view update cycle.
+        Task { @MainActor in
+            agentMessage.agentState = .thinking(.reasoning)
+            agentMessage.thinkingHeadline = "Processing..."
+        }
         
         let streamTask = Task { [weak self] in
             guard let self = self else { return }
@@ -94,20 +98,22 @@ class ActiveStreamManager: ObservableObject {
                     try Task.checkCancellation()
                     
                     switch event {
-                    case .thought(let id, let thoughtText):
+                    case .thought(let thoughtText, let id):
                         // 1. Handle Thoughts (Update Headline + Append to History using structured ID)
                         agentMessage.thinkingHeadline = thoughtText
-                        agentMessage.agentState = .thinking
-                        agentMessage.thoughts.append(AgentThought(id: id, text: thoughtText))
+                        agentMessage.agentState = .thinking(.reasoning)
+                        agentMessage.timelineEvents.append(.thought(id: id, text: thoughtText))
                         
-                    case .toolCall(let name, _):
+                    case .toolCall(let name, let params):
                         agentMessage.thinkingHeadline = "Using tool: \(name)"
-                        agentMessage.agentState = .acting
+                        agentMessage.agentState = .acting(.tool(name: name))
+                        let callId = UUID()
+                        agentMessage.timelineEvents.append(.toolExecution(id: callId, name: name, params: params, output: nil, isSuccess: nil, isExecuting: true))
                         
                     // [HITL] Phase 3: Handle Permission Requests
                     case .requestConfirmation(let toolName, let params):
                         agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
-                        agentMessage.agentState = .requestingPermission
+                        agentMessage.agentState = .interaction(.permission(toolName: toolName))
                         
                         // Populate the Pending Confirmation Data for the UI
                         agentMessage.pendingToolConfirmation = PendingToolConfirmation(
@@ -118,7 +124,7 @@ class ActiveStreamManager: ObservableObject {
                     // [ASK_USER] Handle Clarification Requests
                     case .requestClarification(let question):
                         agentMessage.thinkingHeadline = "Asking you a question..."
-                        agentMessage.agentState = .requestingPermission
+                        agentMessage.agentState = .interaction(.clarification)
 
                         // Populate the Pending Clarification Data for the UI
                         agentMessage.pendingClarification = PendingClarification(
@@ -127,9 +133,27 @@ class ActiveStreamManager: ObservableObject {
 
                     case .toolOutput(let output):
                         // 2. Handle Artifacts (File lists, etc.)
-                        agentMessage.agentState = .observing
-                        agentMessage.artifacts.append(output)
+                        agentMessage.agentState = .thinking(.reflecting)
                         agentMessage.thinkingHeadline = "Processed \(output.toolName)"
+
+                        // Update timeline event
+                        if let index = agentMessage.timelineEvents.lastIndex(where: {
+                            if case .toolExecution(_, let name, _, _, _, let isExecuting) = $0 {
+                                return name == output.toolName && isExecuting
+                            }
+                            return false
+                        }) {
+                            if case .toolExecution(let id, let name, let params, _, _, _) = agentMessage.timelineEvents[index] {
+                                agentMessage.timelineEvents[index] = .toolExecution(
+                                    id: id,
+                                    name: name,
+                                    params: params,
+                                    output: output.output,
+                                    isSuccess: output.isSuccess,
+                                    isExecuting: false
+                                )
+                            }
+                        }
 
                         // Clear pending confirmation/clarification if any (it's done now)
                         agentMessage.pendingToolConfirmation = nil
@@ -137,7 +161,11 @@ class ActiveStreamManager: ObservableObject {
                         
                     case .content(let textChunk):
                         // 3. Handle Final Text (Buffered)
-                        agentMessage.agentState = .finalizing
+                        if agentMessage.agentState != .thinking(.finalizing) {
+                            agentMessage.agentState = .thinking(.finalizing)
+                            agentMessage.thinkingHeadline = "Finalizing..."
+                        }
+                        
                         tokenBuffer += textChunk
                         
                         if -lastUpdateTime.timeIntervalSinceNow >= updateInterval || tokenBuffer.count > 50 {

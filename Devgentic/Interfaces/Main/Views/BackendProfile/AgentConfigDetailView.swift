@@ -39,6 +39,9 @@ struct AgentConfigDetailView: View {
     // Tool Library Sheet
     @State private var showingToolLibrary = false
     
+    // Prompt Library for the inline editor
+    @StateObject private var promptLibraryVM = PromptLibraryViewModel()
+    
     // Deletion State
     @State private var showingDeleteAlert = false
     
@@ -286,7 +289,8 @@ struct AgentConfigDetailView: View {
                         TokenizingTextEditor(
                             text: instructionsBinding,
                             configuredTools: toolsBinding,
-                            theme: theme
+                            theme: theme,
+                            promptLibraryVM: promptLibraryVM
                         )
                         .frame(minHeight: 120)
                         .padding(8)
@@ -344,9 +348,17 @@ struct AgentConfigDetailView: View {
                                 Spacer(minLength: 16)
                                 MLXModelPickerView(
                                     selectedModel: providerConfig.modelName,
-                                    supportsNativeTools: Binding(
-                                        get: { providerConfig.wrappedValue.supportsNativeTools },
-                                        set: { _ in } // Prevent MLX Model Picker from auto-enabling this setting
+                                    cognitiveCapability: Binding(
+                                        get: { providerConfig.wrappedValue.cognitiveCapability },
+                                        set: { newValue in providerConfig.wrappedValue.cognitiveCapability = newValue }
+                                    ),
+                                    modelDialect: Binding(
+                                        get: { providerConfig.wrappedValue.modelDialect },
+                                        set: { providerConfig.wrappedValue.modelDialect = $0 }
+                                    ),
+                                    modelMetadata: Binding(
+                                        get: { providerConfig.wrappedValue.modelMetadata },
+                                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
                                     )
                                 )
                                 .labelsHidden()
@@ -356,70 +368,34 @@ struct AgentConfigDetailView: View {
                             remoteFields
                         }
                         
-                        // ONLY show Native Tools override toggle for Local providers
-                        let isLocalProvider = providerConfig.wrappedValue.apiProvider == .mlx || providerConfig.wrappedValue.apiProvider == .ollama
+                        Divider()
+                            .padding(.vertical, 4)
                         
-                        if isLocalProvider {
-                            Divider()
-                                .padding(.vertical, 4)
-                            
-                            // Manual Override for Native Tools Flag
-                            HStack(alignment: .center) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Native Tool Calling API")
-                                        .fontWeight(.medium)
-                                    
-                                    if providerConfig.wrappedValue.apiProvider == .mlx {
-                                        Text("When enabled, tools are sent via the native API payload. Defaults to OFF for MLX models to prioritize stability.")
-                                            .font(.caption)
-                                            .foregroundColor(theme.secondaryText)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    } else {
-                                        Text("When enabled, tools are sent via the native API payload. When disabled, falls back to JSON prompt injection. (Auto-detected on model change)")
-                                            .font(.caption)
-                                            .foregroundColor(theme.secondaryText)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
-                                
-                                Spacer(minLength: 16)
-                                
-                                Toggle("", isOn: Binding(
-                                    get: { providerConfig.wrappedValue.supportsNativeTools },
-                                    set: { newValue in
-                                        withAnimation(.snappy) {
-                                            providerConfig.wrappedValue.supportsNativeTools = newValue
-                                        }
-                                    }
-                                ))
-                                .toggleStyle(.switch)
-                                .labelsHidden()
+                        // [NEW] Capability Status Badge
+                        HStack(alignment: .center) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Inference Capability")
+                                    .fontWeight(.medium)
+                                Text("Detected architectural support for complex structured reasoning.")
+                                    .font(.caption)
+                                    .foregroundColor(theme.secondaryText)
                             }
                             
-                            // WARNING BANNER (Only shows when MLX and Native Tools are both selected)
-                            if providerConfig.wrappedValue.apiProvider == .mlx && providerConfig.wrappedValue.supportsNativeTools {
-                                HStack(alignment: .top, spacing: 12) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundColor(.yellow)
-                                        .font(.title2)
-                                    
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("Experimental Feature")
-                                            .font(.subheadline)
-                                            .fontWeight(.semibold)
-                                            .foregroundColor(.primary)
-                                        Text("Many community MLX models have broken chat templates that cause the Native Parser to crash or ignore tools. If the agent fails or hallucinates, disable this to rely on the robust Legacy JSON mode.")
-                                            .font(.caption)
-                                            .foregroundColor(theme.secondaryText)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
-                                .padding(12)
-                                .background(Color.yellow.opacity(0.1))
-                                .cornerRadius(8)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.2), lineWidth: 1))
-                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            Spacer(minLength: 16)
+                            
+                            HStack(spacing: 6) {
+                                let capability = providerConfig.wrappedValue.cognitiveCapability
+                                Image(systemName: capabilityIcon(for: capability))
+                                Text(capability.rawValue)
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
                             }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 10)
+                            .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
+                            .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
                         }
                     }
                 }
@@ -602,6 +578,29 @@ struct AgentConfigDetailView: View {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }
         }
+        .onChange(of: providerConfig.wrappedValue.modelName) { newModel in
+            if providerConfig.wrappedValue.apiProvider == .ollama {
+                detectAndApplyOllamaPreset(for: newModel)
+            }
+        }
+    }
+    
+    private func detectAndApplyOllamaPreset(for modelName: String) {
+        let name = modelName.lowercased()
+        var tier: OllamaAdvancedConfig.ModelTier? = nil
+        
+        if name.contains("1b") || name.contains("3b") || name.contains("tiny") || name.contains("phi-3") {
+            tier = .tiny
+        } else if name.contains("7b") || name.contains("8b") || name.contains("14b") || name.contains("mistral") || name.contains("llama-3-8b") || name.contains("small") {
+            tier = .smallMedium
+        } else if name.contains("70b") || name.contains("72b") || name.contains("large") {
+            tier = .large
+        }
+        
+        if let tier = tier {
+            localOllamaConfig = OllamaAdvancedConfig.preset(for: tier)
+            // The onChange(of: localOllamaConfig) will update providerConfig.wrappedValue.advancedConfiguration
+        }
     }
     
     // MARK: - Subviews & Helpers
@@ -679,10 +678,12 @@ struct AgentConfigDetailView: View {
                 
                 if newValue != oldValue {
                     if [.openAI, .google, .anthropic].contains(newValue) {
-                        providerConfig.wrappedValue.supportsNativeTools = true
+                        providerConfig.wrappedValue.cognitiveCapability = .parallelActions
                     } else if newValue == .mlx {
-                        // Default to false for MLX, user must opt-in manually to prevent unstable behavior
-                        providerConfig.wrappedValue.supportsNativeTools = false
+                        // Default to singleAction for MLX, user must opt-in manually to parallelActions or auto-detect
+                        providerConfig.wrappedValue.cognitiveCapability = .singleAction
+                    } else if newValue == .ollama {
+                        providerConfig.wrappedValue.cognitiveCapability = .singleAction
                     }
                 }
             }
@@ -771,7 +772,18 @@ struct AgentConfigDetailView: View {
                 Spacer(minLength: 16)
                 OllamaModelPickerView(
                     selectedModel: providerConfig.modelName,
-                    supportsNativeTools: providerConfig.supportsNativeTools,
+                    cognitiveCapability: Binding(
+                        get: { providerConfig.wrappedValue.cognitiveCapability },
+                        set: { providerConfig.wrappedValue.cognitiveCapability = $0 }
+                    ),
+                    modelDialect: Binding(
+                        get: { providerConfig.wrappedValue.modelDialect },
+                        set: { providerConfig.wrappedValue.modelDialect = $0 }
+                    ),
+                    modelMetadata: Binding(
+                        get: { providerConfig.wrappedValue.modelMetadata },
+                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
+                    ),
                     baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
                     filterForTools: true
                 )
@@ -902,6 +914,22 @@ struct AgentConfigDetailView: View {
             ) ?? .default()
         default:
             break
+        }
+    }
+    
+    private func capabilityIcon(for capability: ModelCognitiveCapability) -> String {
+        switch capability {
+        case .none: return "text.bubble"
+        case .singleAction: return "bolt.fill"
+        case .parallelActions: return "bolt.shield.fill"
+        }
+    }
+    
+    private func capabilityColor(for capability: ModelCognitiveCapability) -> Color {
+        switch capability {
+        case .none: return theme.secondaryText
+        case .singleAction: return .orange
+        case .parallelActions: return .green
         }
     }
 }

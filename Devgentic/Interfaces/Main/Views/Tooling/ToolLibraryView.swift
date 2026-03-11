@@ -249,9 +249,9 @@ struct ToolLibraryView: View {
                         .padding(.vertical, 10)
                     }
                     
-                    // 3. Status Column (Active/Inactive)
+                    // 3. State Column (Disabled / Ask / Auto)
                     TableColumn("State") { row in
-                        ToolStatusToggle(
+                        ToolStateControl(
                             configuredTools: $configuredTools,
                             source: row.source,
                             definition: row.definition,
@@ -259,18 +259,7 @@ struct ToolLibraryView: View {
                         )
                         .padding(.vertical, 10)
                     }
-                    .width(60) // Reduced width since it's just an icon now
-                    
-                    // 4. Security Column (HITL Approval)
-                    TableColumn("Approval") { row in
-                        ToolSecurityToggle(
-                            configuredTools: $configuredTools,
-                            source: row.source,
-                            definition: row.definition
-                        )
-                        .padding(.vertical, 10)
-                    }
-                    .width(80)
+                    .width(70)
                 }
                 .alternatingRowBackgrounds(.disabled)
                 .padding(.top, 12) // Ensures the Table headers don't overlap with the search field/toolbar area
@@ -485,8 +474,9 @@ private struct ToolDetailsButton: View {
 }
 
 
-/// Manages the activation state of a tool using a semantic pill button to prevent table scroll-glitch.
-private struct ToolStatusToggle: View {
+/// A unified 3-state control for managing tool activation and HITL approval.
+/// States: Disabled -> Ask (Orange Lock) -> Auto (Green Bolt) -> Disabled
+fileprivate struct ToolStateControl: View {
     @Binding var configuredTools: [Tool]
     let source: ToolSource
     let definition: ToolDefinition
@@ -494,131 +484,122 @@ private struct ToolStatusToggle: View {
     
     @State private var showingDependencyAlert = false
     
-    var isEnabled: Binding<Bool> {
-        Binding(
-            get: {
-                configuredTools.contains { $0.name == definition.name && $0.sourceId == source.id }
-            },
-            set: { newValue in
-                if newValue {
-                    // Enable: Create the Tool and append it
-                    if !configuredTools.contains(where: { $0.name == definition.name && $0.sourceId == source.id }) {
-                        // Smart HITL default from annotations
-                        var confirmation = definition.requiresConfirmation
-                        if let annotations = definition.annotations {
-                            if annotations.destructiveHint == true {
-                                confirmation = true
-                            } else if annotations.readOnlyHint == true {
-                                confirmation = false
-                            }
-                        }
-                        let newTool = Tool(
-                            name: definition.name,
-                            description: definition.description,
-                            isEnabled: true,
-                            requiresConfirmation: confirmation,
-                            sourceId: source.id,
-                            parameters: definition.parameters
-                        )
-                        configuredTools.append(newTool)
-                    }
-                } else {
-                    // Disable: Check dependency
-                    if instructions.contains("`\(definition.name)`") {
-                        // Block disable and show alert
-                        DispatchQueue.main.async {
-                            showingDependencyAlert = true
-                        }
-                    } else {
-                        // Safe to disable: Remove from the active array
-                        configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
-                    }
-                }
-            }
-        )
+    private enum ToolControlState {
+        case disabled
+        case ask
+        case auto
+    }
+    
+    private var currentState: ToolControlState {
+        if let tool = configuredTools.first(where: { $0.name == definition.name && $0.sourceId == source.id }) {
+            return tool.requiresConfirmation ? .ask : .auto
+        }
+        return .disabled
     }
     
     var body: some View {
         Button {
-            isEnabled.wrappedValue.toggle()
+            cycleState()
         } label: {
-            Image(systemName: isEnabled.wrappedValue ? "checkmark.circle.fill" : "circle.dashed")
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 28, height: 16, alignment: .center)
-//            Image(systemName: "power")
-//                .font(.system(size: 12, weight: .bold))
-//                .contentShape(Rectangle())
+            HStack(spacing: 4) {
+                stateIcon
+                    .font(.system(size: 11, weight: .bold))
+                if currentState != .disabled {
+                    Text(stateLabel)
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            }
+            .frame(width: currentState == .disabled ? 28 : 54, height: 16, alignment: .center)
         }
         .buttonStyle(.plain)
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
-        .background(isEnabled.wrappedValue ? Color.accentColor : Color.secondary.opacity(0.15))
-        .foregroundColor(isEnabled.wrappedValue ? .white : .primary)
+        .background(stateBackground)
+        .foregroundColor(stateForeground)
         .cornerRadius(6)
-        .help(isEnabled.wrappedValue ? "Tool is ON. Click to disable." : "Tool is OFF. Click to enable.")
+        .help(helpText)
         .alert("Tool in Use", isPresented: $showingDependencyAlert) {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Cannot disable '\(definition.name)'. It is currently referenced in the System Instructions. Please remove it from the instructions first.")
         }
     }
-}
-
-/// Manages the HITL security preference using a semantic pill button.
-private struct ToolSecurityToggle: View {
-    @Binding var configuredTools: [Tool]
-    let source: ToolSource
-    let definition: ToolDefinition
     
-    var isConfigured: Bool {
-        configuredTools.contains { $0.name == definition.name && $0.sourceId == source.id }
-    }
-    
-    var requiresConfirmation: Binding<Bool> {
-        Binding(
-            get: {
-                if let existing = configuredTools.first(where: { $0.name == definition.name && $0.sourceId == source.id }) {
-                    return existing.requiresConfirmation
-                }
-                return definition.requiresConfirmation
-            },
-            set: { newValue in
-                if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
-                    configuredTools[index].requiresConfirmation = newValue
-                }
-            }
-        )
-    }
-    
-    var body: some View {
-        Button {
-            if isConfigured {
-                requiresConfirmation.wrappedValue.toggle()
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: requiresConfirmation.wrappedValue ? "lock.shield.fill" : "bolt.fill")
-                    .font(.system(size: 10))
-                Text(requiresConfirmation.wrappedValue ? "Ask" : "Auto")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .frame(width: 50, alignment: .center)
-            .contentShape(Rectangle())
+    @ViewBuilder
+    private var stateIcon: some View {
+        switch currentState {
+        case .disabled:
+            Image(systemName: "circle.dashed")
+        case .ask:
+            Image(systemName: "lock.shield.fill")
+        case .auto:
+            Image(systemName: "bolt.fill")
         }
-        .buttonStyle(.plain)
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(
-            !isConfigured ? Color.secondary.opacity(0.05) :
-            (requiresConfirmation.wrappedValue ? Color.orange : Color.green)
-        )
-        .foregroundColor(
-            !isConfigured ? .secondary.opacity(0.3) : .white
-        )
-        .cornerRadius(6)
-        .disabled(!isConfigured)
-        .help(!isConfigured ? "Enable tool first to configure security." :
-              (requiresConfirmation.wrappedValue ? "Ask Before Run: Suspends execution for your approval before running." : "Auto-Run: Tool executes automatically without asking."))
+    }
+    
+    private var stateLabel: String {
+        switch currentState {
+        case .disabled: return ""
+        case .ask: return "Ask"
+        case .auto: return "Auto"
+        }
+    }
+    
+    private var stateBackground: Color {
+        switch currentState {
+        case .disabled: return Color.secondary.opacity(0.15)
+        case .ask: return Color.orange
+        case .auto: return Color.green
+        }
+    }
+    
+    private var stateForeground: Color {
+        currentState == .disabled ? .primary : .white
+    }
+    
+    private var helpText: String {
+        switch currentState {
+        case .disabled: return "Tool is OFF. Click to enable (Ask mode)."
+        case .ask: return "Ask Before Run: Suspends execution for your approval. Click for Auto mode."
+        case .auto: return "Auto-Run: Tool executes automatically. Click to disable."
+        }
+    }
+    
+    private func cycleState() {
+        switch currentState {
+        case .disabled:
+            // Enable: Start with "Ask" (or smart default)
+            var confirmation = true // Default to Ask for safety
+            if let annotations = definition.annotations {
+                if annotations.readOnlyHint == true {
+                    confirmation = false // Auto is fine for read-only
+                }
+            }
+            
+            let newTool = Tool(
+                name: definition.name,
+                description: definition.description,
+                isEnabled: true,
+                requiresConfirmation: confirmation,
+                sourceId: source.id,
+                parameters: definition.parameters
+            )
+            configuredTools.append(newTool)
+            
+        case .ask:
+            // Switch to Auto
+            if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
+                configuredTools[index].requiresConfirmation = false
+            }
+            
+        case .auto:
+            // Attempt to disable
+            if instructions.contains("`\(definition.name)`") {
+                showingDependencyAlert = true
+            } else {
+                configuredTools.removeAll { $0.name == definition.name && $0.sourceId == source.id }
+            }
+        }
     }
 }
 

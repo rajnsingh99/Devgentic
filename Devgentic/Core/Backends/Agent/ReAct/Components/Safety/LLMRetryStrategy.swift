@@ -55,7 +55,7 @@ struct LLMRetryStrategy: LLMRetryHandling {
             return .abort(reason: "I'm having trouble processing this request right now — the model is returning responses I can't interpret. Please try rephrasing your request or switching to a different model.")
         }
         
-        let systemAlert = "Your last output failed JSON validation (attempt \(currentFailures)/\(maxFailures)). You MUST output a SINGLE VALID JSON OBJECT with keys `content` and `tool_name`. No prose, no markdown fences (```json)."
+        let systemAlert = "Your last output failed validation (attempt \(currentFailures)/\(maxFailures)). You MUST output a valid JSON response containing `reasoning` and `toolCalls` (an array of tools). No prose or markdown fences (```json)."
         
         return .parseRetry(
             systemAlert: systemAlert,

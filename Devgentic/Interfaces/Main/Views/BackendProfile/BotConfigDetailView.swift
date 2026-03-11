@@ -164,9 +164,11 @@ struct BotConfigDetailView: View {
                                 Spacer(minLength: 16)
                                 MLXModelPickerView(
                                     selectedModel: providerConfig.modelName,
-                                    supportsNativeTools: Binding(
-                                        get: { providerConfig.wrappedValue.supportsNativeTools },
-                                        set: { _ in } // Prevent MLX Model Picker from auto-enabling this setting
+                                    cognitiveCapability: .constant(.none),
+                                    modelDialect: .constant(.nativeJSON),
+                                    modelMetadata: Binding(
+                                        get: { providerConfig.wrappedValue.modelMetadata },
+                                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
                                     )
                                 )
                                 .labelsHidden()
@@ -341,12 +343,7 @@ struct BotConfigDetailView: View {
                 providerConfig.wrappedValue.apiProvider = newValue
                 
                 if newValue != oldValue {
-                    if [.openAI, .google, .anthropic].contains(newValue) {
-                        providerConfig.wrappedValue.supportsNativeTools = true
-                    } else if newValue == .mlx {
-                        // Default to false for MLX, user must opt-in manually to prevent unstable behavior
-                        providerConfig.wrappedValue.supportsNativeTools = false
-                    }
+                    providerConfig.wrappedValue.cognitiveCapability = .none
                 }
             }
         )) {
@@ -435,7 +432,12 @@ struct BotConfigDetailView: View {
                 // Standard Bot view does NOT filter models.
                 OllamaModelPickerView(
                     selectedModel: providerConfig.modelName,
-                    supportsNativeTools: providerConfig.supportsNativeTools,
+                    cognitiveCapability: .constant(.none),
+                    modelDialect: .constant(.nativeJSON),
+                    modelMetadata: Binding(
+                        get: { providerConfig.wrappedValue.modelMetadata },
+                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
+                    ),
                     baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
                     filterForTools: false
                 )

@@ -18,6 +18,7 @@ protocol ObservationMemoryManaging: Sendable {
     mutating func resetObservationFlags()
     mutating func hydrateObservations(targetIds: [Int], currentIteration: Int) -> (msg: String, hydratedCount: Int)
     mutating func addObservation(toolName: String, shortObservation: String, heavyContent: String?, isRequired: Bool)
+    mutating func addObservations(_ observations: [CognitiveObservation])
 }
 
 /// Manages interactions with the persistent `SessionGraph` via `ContextMemoryManager`.
@@ -86,11 +87,14 @@ enum TerminationStatus: Equatable, Sendable {
     case proceed
     case completed(finalThought: String)
     case maxIterationsReached
+    /// The LLM returned prose describing tool usage intent but failed to produce structured tool calls.
+    /// The executor should inject a corrective system alert and retry.
+    case suspectedFormatFailure(reasoning: String)
 }
 
 /// Analyzes cognitive steps to determine if the execution loop has reached a natural conclusion.
 protocol TerminationEvaluating: Sendable {
-    func evaluate(step: LeanCognitiveStep, currentIteration: Int, maxIterations: Int) -> TerminationStatus
+    func evaluate(step: ModernCognitiveStep, currentIteration: Int, maxIterations: Int) -> TerminationStatus
 }
 
 /// Defines the result of an attempted tool dispatch, including human-in-the-loop interactions.

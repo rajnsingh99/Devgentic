@@ -17,14 +17,14 @@ protocol CognitiveProfileFactory {
 /// Factory for cloud providers that natively support JSON Schema and Tool Arrays (e.g., OpenAI).
 struct CloudNativeProfileFactory: CognitiveProfileFactory {
     func createGenerator() -> any CognitiveGenerator {
-        return NativeStructuredGenerator(toolAdapter: NativeJSONSchemaAdapter())
+        return NativeStructuredStrategy(toolAdapter: NativeJSONSchemaAdapter())
     }
 }
 
 /// Factory for Ollama instances running modern models with native tool support.
 struct OllamaNativeProfileFactory: CognitiveProfileFactory {
     func createGenerator() -> any CognitiveGenerator {
-        return NativeStructuredGenerator(toolAdapter: NativeJSONSchemaAdapter())
+        return NativeStructuredStrategy(toolAdapter: NativeJSONSchemaAdapter())
     }
 }
 
@@ -35,9 +35,16 @@ struct LocalPromptedProfileFactory: CognitiveProfileFactory {
     }
 }
 
-/// Factory for providers like Gemini where strict JSON schema validation may occasionally fail.
-struct GeminiShadowProfileFactory: CognitiveProfileFactory {
+/// Factory for Mistral-family local models using <tool_call> XML wrapping.
+struct MistralXMLProfileFactory: CognitiveProfileFactory {
     func createGenerator() -> any CognitiveGenerator {
-        return ShadowSchemaGenerator(toolAdapter: LegacyPromptAdapter())
+        return MistralXMLGenerator()
+    }
+}
+
+/// Factory for models using the classic ReAct Thought/Action/Action Input format.
+struct LlamaReActProfileFactory: CognitiveProfileFactory {
+    func createGenerator() -> any CognitiveGenerator {
+        return LlamaReActGenerator()
     }
 }

@@ -12,12 +12,14 @@ import MLXLMCommon
 struct MLXLLMProvider: LLMProvider {
 
     let modelName: String
+    let dialect: ModelDialect
 
-    init(modelName: String) {
+    init(modelName: String, dialect: ModelDialect = .promptedFlatJSON) {
         self.modelName = modelName
+        self.dialect = dialect
     }
 
-    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: [String: Any]?) async throws -> String {
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         var fullText = ""
         let temperature: Float = 0.6
         let maxTokens = 2048
@@ -62,5 +64,13 @@ struct MLXLLMProvider: LLMProvider {
                 }
             }
         }
+    }
+    func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        let fullText = try await generate(messages: messages, tools: tools, responseSchema: nil)
+        let pipeline = CognitiveParsePipeline(
+            expectedDialect: dialect,
+            modelId: modelName
+        )
+        return pipeline.parse(raw: fullText)
     }
 }

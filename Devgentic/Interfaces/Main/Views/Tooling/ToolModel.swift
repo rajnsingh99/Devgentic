@@ -50,6 +50,7 @@ struct ToolAnnotations: Codable, Hashable {
 struct ToolParameterProperty: Codable, Hashable {
     let type: String
     let description: String?
+    let items: [String: String]? // For arrays: e.g. ["type": "string"]
 }
 
 /// Defines the JSON schema for a tool's parameters, following a standard format.

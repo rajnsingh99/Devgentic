@@ -48,10 +48,7 @@ class PromptLibraryViewModel: ObservableObject {
             self?.filterPrompts(searchText: searchText, category: category)
         }
         .store(in: &cancellables)
-        
-        // Initial load/filter
-        // FIX: Call the updated filter function with initial values.
-        filterPrompts(searchText: self.searchText, category: self.selectedCategory)
+        // Note: CombineLatest3 handles the initial emission — no manual call needed.
     }
 
     // MARK: - Filtering Logic

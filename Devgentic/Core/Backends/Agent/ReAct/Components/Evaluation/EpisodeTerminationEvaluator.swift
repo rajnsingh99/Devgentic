@@ -15,7 +15,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// or if it has exhausted its iteration budget.
 struct EpisodeTerminationEvaluator: TerminationEvaluating {
     
-    func evaluate(step: LeanCognitiveStep, currentIteration: Int, maxIterations: Int) -> TerminationStatus {
+    func evaluate(step: ModernCognitiveStep, currentIteration: Int, maxIterations: Int) -> TerminationStatus {
         
         // Condition 1: Exceeded Iteration Budget
         if currentIteration >= maxIterations {
@@ -24,13 +24,9 @@ struct EpisodeTerminationEvaluator: TerminationEvaluating {
         }
         
         // Condition 2: Agent signaled task completion by returning a null/empty tool
-        guard let toolName = step.toolName,
-              !toolName.isEmpty,
-              toolName.lowercased() != "null",
-              toolName.lowercased() != "none" else {
-            
+        if step.toolCalls.isEmpty {
             logger.info("🛑 Null-Termination Triggered. Agent signaled task completion.")
-            return .completed(finalThought: step.content)
+            return .completed(finalThought: step.reasoning)
         }
         
         // Condition 3: Proceed with the loop

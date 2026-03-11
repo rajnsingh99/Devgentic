@@ -169,6 +169,20 @@ struct KnowledgeSource: Codable, Hashable, Identifiable {
 }
 
 
+/// Represents the detected structural capability of the local LLM model.
+enum ModelCognitiveCapability: String, Codable, CaseIterable, Identifiable, Hashable {
+    /// No tool support. Must use standard conversational text.
+    case none = "None"
+    
+    /// Supports basic tool calling, but struggles with complex arrays. Needs flat JSON.
+    case singleAction = "Single Action"
+    
+    /// Natively supports complex arrays and multiple parallel tool calls.
+    case parallelActions = "Parallel Actions"
+    
+    var id: String { rawValue }
+}
+
 /// A single, unified list of all supported provider types.
 /// A single, unified list of all supported provider types.
 enum ApiProvider: String, Codable, CaseIterable, Identifiable {
@@ -204,26 +218,48 @@ struct ProviderConfig: Codable, Hashable {
     var baseURL: String?
     var advancedConfiguration: [String: AnyCodable]?
     
-    /// Indicates if the selected model explicitly supports the native tools API format.
+    /// Represents the cognitive capability of the model (e.g. tool calling support).
     /// This state drives the routing decision in AgentConnect.
-    var supportsNativeTools: Bool = false
-    
-    // Explicit memberwise initializer to support default value for supportsNativeTools
-    init(apiProvider: ApiProvider, modelName: String, apiKey: String? = nil, baseURL: String? = nil, advancedConfiguration: [String: AnyCodable]? = nil, supportsNativeTools: Bool = false) {
+    var cognitiveCapability: ModelCognitiveCapability = .none
+
+    /// The exact output dialect this model uses for tool calls.
+    /// Paired with cognitiveCapability to form a CognitiveProfile at runtime.
+    /// Defaults to .nativeJSON for cloud providers; set by analyzers for local models.
+    var modelDialect: ModelDialect = .nativeJSON
+
+    /// Rich metadata describing the model's constraints (tier, context, etc).
+    var modelMetadata: ModelMetadata?
+
+    /// Convenience: combined profile used for generator + parser routing in AgentConnect.
+    var cognitiveProfile: CognitiveProfile {
+        CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata)
+    }
+
+    // Explicit memberwise initializer to support default values
+    init(apiProvider: ApiProvider,
+         modelName: String,
+         apiKey: String? = nil,
+         baseURL: String? = nil,
+         advancedConfiguration: [String: AnyCodable]? = nil,
+         cognitiveCapability: ModelCognitiveCapability = .none,
+         modelDialect: ModelDialect = .nativeJSON,
+         modelMetadata: ModelMetadata? = nil) {
         self.apiProvider = apiProvider
         self.modelName = modelName
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.advancedConfiguration = advancedConfiguration
-        self.supportsNativeTools = supportsNativeTools
+        self.cognitiveCapability = cognitiveCapability
+        self.modelDialect = modelDialect
+        self.modelMetadata = modelMetadata
     }
-    
+
     // MARK: - Codable Conformance
-    
+
     enum CodingKeys: String, CodingKey {
-        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, supportsNativeTools
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata
     }
-    
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.apiProvider = try container.decode(ApiProvider.self, forKey: .apiProvider)
@@ -231,8 +267,38 @@ struct ProviderConfig: Codable, Hashable {
         self.apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
         self.baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL)
         self.advancedConfiguration = try container.decodeIfPresent([String: AnyCodable].self, forKey: .advancedConfiguration)
-        
-        // Safely decode the new property, defaulting to false for legacy profiles that lack this key
-        self.supportsNativeTools = try container.decodeIfPresent(Bool.self, forKey: .supportsNativeTools) ?? false
+
+        // --- COGNITIVE CAPABILITY MIGRATION LOGIC ---
+        // 1. Attempt to decode the new enum directly
+        if let capability = try container.decodeIfPresent(ModelCognitiveCapability.self, forKey: .cognitiveCapability) {
+            self.cognitiveCapability = capability
+        }
+        // 2. Fallback: decode legacy boolean and map it
+        else if let legacySupported = try container.decodeIfPresent(Bool.self, forKey: .supportsNativeTools) {
+            self.cognitiveCapability = legacySupported ? .parallelActions : .singleAction
+        }
+        // 3. Absolute fallback
+        else {
+            self.cognitiveCapability = .none
+        }
+
+        // Dialect: decode if present, otherwise default to .nativeJSON (safe for cloud providers)
+        self.modelDialect = try container.decodeIfPresent(ModelDialect.self, forKey: .modelDialect) ?? .nativeJSON
+
+        // Metadata: decode if present
+        self.modelMetadata = try container.decodeIfPresent(ModelMetadata.self, forKey: .modelMetadata)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(apiProvider, forKey: .apiProvider)
+        try container.encode(modelName, forKey: .modelName)
+        try container.encodeIfPresent(apiKey, forKey: .apiKey)
+        try container.encodeIfPresent(baseURL, forKey: .baseURL)
+        try container.encodeIfPresent(advancedConfiguration, forKey: .advancedConfiguration)
+        try container.encode(cognitiveCapability, forKey: .cognitiveCapability)
+        try container.encode(modelDialect, forKey: .modelDialect)
+        try container.encodeIfPresent(modelMetadata, forKey: .modelMetadata)
+        // We do NOT encode supportsNativeTools anymore, effectively dropping it on next save.
     }
 }

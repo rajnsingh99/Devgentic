@@ -159,21 +159,29 @@ struct FileOutlineView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         if let outlineView = nsView.documentView as? NSOutlineView {
             context.coordinator.parent = self
-            // Note: In a real app, careful diffing is better than reloadData
+            
+            // Only reload if needed or perform a lightweight update
+            // For now, let's keep it but ensure we don't redundantly expand
             outlineView.reloadData()
+            
+            // Apply expansion state from viewModel
             for item in viewModel.rootItems {
-                recursivelyExpand(item: item, in: outlineView)
+                applyExpansionState(for: item, in: outlineView)
             }
         }
     }
     
-    private func recursivelyExpand(item: FileSystemItem, in outlineView: NSOutlineView) {
-        if viewModel.expandedItemIDs.contains(item.id) {
+    private func applyExpansionState(for item: FileSystemItem, in outlineView: NSOutlineView) {
+        let isExpanded = viewModel.expandedItemIDs.contains(item.id)
+        if isExpanded && !outlineView.isItemExpanded(item) {
             outlineView.expandItem(item)
-            if let children = item.children {
-                for child in children {
-                    recursivelyExpand(item: child, in: outlineView)
-                }
+        } else if !isExpanded && outlineView.isItemExpanded(item) {
+            outlineView.collapseItem(item)
+        }
+        
+        if let children = item.children {
+            for child in children {
+                applyExpansionState(for: child, in: outlineView)
             }
         }
     }
@@ -183,6 +191,7 @@ struct FileOutlineView: NSViewRepresentable {
     }
 
     // MARK: - Coordinator
+    @MainActor
     class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         var parent: FileOutlineView
         var viewModel: ExplorerViewModel
@@ -244,7 +253,9 @@ struct FileOutlineView: NSViewRepresentable {
                   let clickedItem = outlineView.item(atRow: outlineView.clickedRow) as? FileSystemItem,
                   !clickedItem.isDirectory else { return }
             
-            parent.openWindow(id: "file-viewer-window", value: clickedItem.url)
+            Task { @MainActor in
+                viewModel.openFile(clickedItem)
+            }
         }
         
         func outlineView(_ outlineView: NSOutlineView, shouldShowOutlineCellForItem item: Any) -> Bool {

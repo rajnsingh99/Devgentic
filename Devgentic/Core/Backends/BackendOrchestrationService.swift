@@ -142,7 +142,7 @@ class BackendOrchestrationService: ObservableObject {
                         logger.notice("[ORCHESTRATOR] ⚠️ Starting Generalist Agent Execution (Direct Handoff).")
                         
                         let traceHandler: (AgentTraceLog) -> Void = { log in
-                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.rawValue)): \(log.content) (span: \(log.spanID))")
+                            logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.headline)): \(log.content) (span: \(log.spanID))")
                             aggregatedTraceUpdate(log)
                         }
                         

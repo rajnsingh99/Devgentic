@@ -20,8 +20,20 @@ struct ConversationRowView: View {
     @State private var isHovering = false
     @Environment(\.appTheme) private var theme
 
+    // Batch selection properties
+    var isSelectionMode: Bool = false
+    var isBatchSelected: Bool = false
+
     var body: some View {
         HStack(spacing: 0) {
+            if isSelectionMode {
+                Image(systemName: isBatchSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundColor(isBatchSelected ? theme.accentColor : theme.secondaryText.opacity(0.4))
+                    .padding(.leading, 8)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+
             if isRenaming {
                 // Modern renaming field that blends in
                 TextField("", text: $editableName, prompt: Text("Name this chat").foregroundColor(.secondary.opacity(0.7)))
@@ -44,7 +56,7 @@ struct ConversationRowView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         // Hover action buttons overlay
         .overlay(alignment: .trailing) {
-            if isHovering && !isRenaming {
+            if isHovering && !isRenaming && !isSelectionMode {
                 hoverActionsView
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
@@ -80,28 +92,15 @@ struct ConversationRowView: View {
                     )
                     .frame(width: 3)
                     .padding(.vertical, 4)
-                    .padding(.trailing, 6)
+                    .padding(.trailing, 4)
                     .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
+            } else {
+                // Spacer to keep layout identical when not selected
+                Spacer()
+                    .frame(width: 7)
             }
 
-            // Status indicator (streaming/error)
-            if conversation.isStreaming || conversation.hasError {
-                Group {
-                    if conversation.isStreaming {
-                        // Pulsing streaming indicator
-                        StreamingPulseIndicator()
-                    } else {
-                        Image(systemName: conversation.statusIcon)
-                            .foregroundColor(conversation.statusColor)
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                }
-                .frame(width: 16, height: 16, alignment: .center)
-                .padding(.top, 2)
-                .padding(.trailing, 6)
-            }
-
-            // Title, snippet, metadata
+            // Content Container
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
                     // Inline pin icon
@@ -118,41 +117,20 @@ struct ConversationRowView: View {
                         .lineLimit(1)
 
                     Spacer()
-
-                    // Hide timestamp when hovering (to make room for action buttons)
-                    if !isHovering {
-                        Text(conversation.relativeTimestamp)
-                            .font(.system(size: 10, weight: .regular))
-                            .foregroundColor(theme.secondaryText.opacity(0.6))
-                            .lineLimit(1)
-                            .transition(.opacity)
-                    }
                 }
 
-                HStack(spacing: 6) {
-                    Text(conversation.lastMessageSnippet)
-                        .font(.system(size: 11, weight: .regular))
-                        .foregroundColor(theme.secondaryText)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Spacer(minLength: 4)
-
-                    // Backend badge chip
-                    if let backendType = conversation.backendType, backendType != .none {
-                        Text(backendType.rawValue)
-                            .font(.system(size: 9, weight: .medium))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(badgeColor(for: backendType).opacity(0.1))
-                            .foregroundColor(badgeColor(for: backendType).opacity(0.8))
-                            .clipShape(Capsule())
-                    }
+                // Backend badge chip displayed below the title
+                if let backendType = conversation.backendType, backendType != .none {
+                    Text(backendType.rawValue)
+                        .font(.system(size: 9, weight: .medium))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(badgeColor(for: backendType).opacity(0.1))
+                        .foregroundColor(badgeColor(for: backendType).opacity(0.8))
+                        .clipShape(Capsule())
                 }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 2)
     }
 
     // MARK: - Hover Actions

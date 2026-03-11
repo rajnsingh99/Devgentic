@@ -3,6 +3,7 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 23/01/26.
+//  Updated: Enforced strict Agent vs Bot capability routing.
 //
 
 import Foundation
@@ -65,34 +66,19 @@ class AgentConnect: ObservableObject {
                     }
                     
                     // 2. Select Cognitive Strategy & Rate Limit Boundary
-                    let generatorStrategy: any CognitiveGenerator
                     let rateLimitCategory: RateLimitCategory
-                    
                     switch llmConfig.apiProvider {
-                    case .anthropic:
-                        // DYNAMIC ROUTING: Use Native API flow with the new Claude adapter
-                        generatorStrategy = NativeStructuredGenerator(toolAdapter: ClaudeToolSchemaAdapter())
-                        rateLimitCategory = .anthropic
-                        
-                    case .google:
-                        // DYNAMIC ROUTING: Use Native API flow with the new Gemini adapter
-                        generatorStrategy = NativeStructuredGenerator(toolAdapter: GeminiToolSchemaAdapter())
-                        rateLimitCategory = .geminiFlash
-                        
-                    case .openAI:
-                        generatorStrategy = NativeStructuredGenerator()
-                        rateLimitCategory = .openAI
-                        
-                    case .ollama:
-                        // DYNAMIC ROUTING: Use Native Tools if supported by the model, otherwise fallback to JsonMode.
-                        generatorStrategy = llmConfig.supportsNativeTools ? NativeStructuredGenerator() : JsonModeGenerator()
-                        rateLimitCategory = .local
-                        
-                    case .mlx:
-                        // DYNAMIC ROUTING: Use Native Tools if supported by the model, otherwise fallback to JsonMode.
-                        generatorStrategy = llmConfig.supportsNativeTools ? NativeStructuredGenerator() : JsonModeGenerator()
-                        rateLimitCategory = .local
+                    case .anthropic: rateLimitCategory = .anthropic
+                    case .google: rateLimitCategory = .geminiFlash
+                    case .openAI: rateLimitCategory = .openAI
+                    case .ollama, .mlx: rateLimitCategory = .local
                     }
+                    
+                    // Resolve Cognitive Strategy via our 2D routing matrix
+                    let generatorStrategy = try self.resolveCognitiveGenerator(
+                        llmConfig: llmConfig,
+                        isBotFlow: isBotFlow
+                    )
                     
                     // 3. Resolve Tools
                     let activeTools = await self.resolveExecutableTools(
@@ -114,6 +100,15 @@ class AgentConnect: ObservableObject {
                     
                     // 5. Initialize the Language Model (Passing isBotFlow to determine endpoint routing)
                     let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
+                    
+                    // NEW: Log Full Configuration Visibility
+                    self.logFullConfiguration(
+                        profile: profile,
+                        config: llmConfig,
+                        isBotFlow: isBotFlow,
+                        tools: activeTools,
+                        instructions: instructions
+                    )
                     
                     // 6. Instantiate the Executor
                     let executor = ExecutorFactory.create(for: profile)
@@ -151,7 +146,7 @@ class AgentConnect: ObservableObject {
                     
                     // 8. Execute & Stream
                     let traceHandler: (AgentTraceLog) -> Void = { log in
-                        logger.debug("[\(log.state.rawValue)] \(log.content) (span: \(log.spanID))")
+                        logger.debug("[\(log.state.headline)] \(log.content) (span: \(log.spanID))")
                         if !activeTools.isEmpty {
                             EvaluationLogger.shared.logStep(id: evalSessionID, log: log)
                         }
@@ -183,6 +178,65 @@ class AgentConnect: ObservableObject {
         }
     }
     
+    // MARK: - Cognitive Strategy Resolution
+    
+    /// Evaluates the model configuration and isolates the routing logic for the generator.
+    private func resolveCognitiveGenerator(
+        llmConfig: ProviderConfig,
+        isBotFlow: Bool
+    ) throws -> any CognitiveGenerator {
+        
+        switch llmConfig.apiProvider {
+        case .anthropic:
+            return NativeStructuredStrategy(toolAdapter: ClaudeToolSchemaAdapter())
+            
+        case .google:
+            return NativeStructuredStrategy(toolAdapter: GeminiToolSchemaAdapter())
+            
+        case .openAI:
+            return NativeStructuredStrategy(toolAdapter: NativeJSONSchemaAdapter())
+            
+        case .mlx, .ollama:
+            let cognitiveProfile = llmConfig.cognitiveProfile
+            
+            // Primary Routing Dimension: Structural Capability
+            switch cognitiveProfile.capability {
+            case .none:
+                // Strictly prevent chat-only models from ever executing inside an Agent loop
+                if !isBotFlow {
+                    throw NSError(
+                        domain: "AgentConnect",
+                        code: 405,
+                        userInfo: [NSLocalizedDescriptionKey: "The selected model (\(llmConfig.modelName)) is a conversational model and lacks the cognitive capabilities required for Agent tasks. Please switch to a Bot profile or select a tool-capable model."]
+                    )
+                }
+                return PromptedJsonModeStrategy()
+                
+            case .singleAction:
+                // Secondary Dimension: Dialect matching for single-action text constraints
+                switch cognitiveProfile.dialect {
+                case .mistralXML:
+                    return MistralXMLGenerator()
+                case .reactMarkdown:
+                    return LlamaReActGenerator()
+                case .nativeJSON, .promptedFlatJSON:
+                    return PromptedJsonModeStrategy()
+                }
+                
+            case .parallelActions:
+                // Models capable of parallel arrays route through native providers
+                let strategyName = (llmConfig.apiProvider == .mlx) ? "MLXNativeStructuredGenerator" : "NativeStructuredStrategy"
+                logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
+                
+                if llmConfig.apiProvider == .mlx {
+                    return MLXNativeStructuredGenerator()
+                } else {
+                    return NativeStructuredStrategy()
+                }
+            }
+        }
+    }
+    
     // MARK: - Model Initialization
     
     private func initializeModel(config llmConfig: ProviderConfig, isBotFlow: Bool) async throws -> any LLMProvider {
@@ -200,7 +254,21 @@ class AgentConnect: ObservableObject {
             guard let baseURL = URL(string: baseURLString) else {
                 throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL: \(baseURLString)"])
             }
-            let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0)
+            
+            // Extract options for Ollama
+            var options: [String: JSONValue]? = nil
+            if let advConfig = llmConfig.advancedConfiguration {
+                // Convert [String: AnyCodable] to [String: JSONValue]
+                var mappedOptions: [String: JSONValue] = [:]
+                for (key, val) in advConfig {
+                    if let jsonVal = JSONValue(val.value) {
+                        mappedOptions[key] = jsonVal
+                    }
+                }
+                options = mappedOptions
+            }
+            
+            let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
             return OllamaLLMProvider(config: config)
             
         case .openAI:
@@ -233,7 +301,7 @@ class AgentConnect: ObservableObject {
                 throw NSError(domain: "AgentConnect", code: 404, userInfo: [NSLocalizedDescriptionKey: "Local MLX model '\(modelName)' not found."])
             }
             try await MLXService.shared.loadModel(from: path)
-            return MLXLLMProvider(modelName: modelName)
+            return MLXLLMProvider(modelName: modelName, dialect: llmConfig.cognitiveProfile.dialect)
             
         default:
             throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Provider \(llmConfig.apiProvider) is not supported in the unified pipeline yet."])
@@ -360,5 +428,37 @@ class AgentConnect: ObservableObject {
             return nil
         }
         return wrapTool(DynamicMCPTool(source: source, toolDefinition: definition), requiresConfirmation: toolConfig.requiresConfirmation)
+    }
+
+    // MARK: - Logging Helper
+    
+    /// Logs the complete configuration for tracking and debugging purposes.
+    private func logFullConfiguration(
+        profile: BackendProfileModel,
+        config: ProviderConfig,
+        isBotFlow: Bool,
+        tools: [AgentTool],
+        instructions: String?
+    ) {
+        let toolNames = tools.isEmpty ? "None" : tools.map { $0.name }.joined(separator: ", ")
+        let advConfig = config.advancedConfiguration?.description ?? "None"
+        let metadata = config.modelMetadata.map { "\($0.tier.rawValue) tier, \($0.family ?? "unknown family")" } ?? "None"
+        
+        let logMsg = """
+        
+        --- 🚀 FULL REQUEST CONFIGURATION 🚀 ---
+        Profile: \(profile.displayName) (ID: \(profile.id))
+        Type: \(profile.profileType.rawValue) (BotFlow: \(isBotFlow))
+        Provider: \(config.apiProvider.rawValue)
+        Model: \(config.modelName)
+        Base URL: \(config.baseURL ?? "Default")
+        Capabilities: \(config.cognitiveCapability.rawValue) (Dialect: \(config.modelDialect.rawValue))
+        Metadata: \(metadata)
+        Advanced Options: \(advConfig)
+        Tools Enabled: [\(toolNames)]
+        System Instructions: \(instructions?.prefix(100) ?? "None")\( (instructions?.count ?? 0) > 100 ? "..." : "") (\(instructions?.count ?? 0) chars)
+        -----------------------------------------
+        """
+        logger.notice("\(logMsg)")
     }
 }

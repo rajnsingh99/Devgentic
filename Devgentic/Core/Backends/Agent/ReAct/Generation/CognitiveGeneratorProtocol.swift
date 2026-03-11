@@ -18,11 +18,11 @@ protocol CognitiveGenerator: Sendable {
     func compileMessages(from context: SemanticContext) -> [[String: String]]
     
     /// Executes the cognitive step and returns a structured response.
-    func generate(
+    func generateCognitiveStep(
         model: any LLMProvider,
         context: SemanticContext,
         iteration: Int
-    ) async throws -> LeanCognitiveStep
+    ) async throws -> ModernCognitiveStep
 }
 
 // MARK: - Default Builder Extension
@@ -32,7 +32,8 @@ extension CognitiveGenerator {
     /// Constructs the standard "Sandwich" prompt with injected data from the SemanticContext.
     func buildStandardMessages(
         context: SemanticContext,
-        dialectRules: String? = nil
+        dialectRules: String? = nil,
+        isNativeFlow: Bool = false
     ) -> [[String: String]] {
         
         var systemBlocks: [String] = []
@@ -57,19 +58,17 @@ extension CognitiveGenerator {
         \(context.recentHistory ?? "(No recent history)")
         """)
         
-        // --- 4. Cognitive Mechanics & Guardrails ---
+        // --- 4. Infrastructure Protocol ---
         var strategyBlock = """
-        # COGNITIVE STRATEGY & MECHANICS
-        ## PROTOCOL
-        1. You operate in a Think -> Act -> Observe loop.
-        2. Analyze Active Memory before deciding your next move.
-        3. If a path failed previously (Ghost Protocol), do NOT retry it.
-        4. If a tool fails, **STOP** and reflect on the error before proceeding.
-        5. **TASK COMPLETION**: If the goal is met or you need to reply to the user, you MUST output `"tool_name": null`. Do NOT hallucinate tools like 'none' or 'inform'.
-        6. **CLARIFICATION**: If you need information from the user, use the `ask_user` tool: `{"tool_name": "ask_user", "arguments": {"question": "Your question here"}}`. Do NOT invent tools like 'inform' or 'respond'.
-        7. **GRACEFUL DEGRADATION**: If the user's request requires a tool that is not available, do NOT loop. Immediately return tool_name: null explaining which capability is missing.
-        8. **UNSUPPORTED FORMATS**: If a tool fails due to an unsupported format (e.g., trying to read a binary `.docx` file), do NOT ask the user for workarounds. Output `tool_name: null` immediately explaining the limitation.
-        9. **ANTI-HALLUCINATION (ARCHIVED MEMORY)**: Do NOT guess, assume, or hallucinate the details of past events. If the user refers to an older conversation turn found in the [ARCHIVED MEMORY POINTERS], you MUST use the `conversation_history_tool` to retrieve the exact text before generating your final answer.
+        # INFRASTRUCTURE PROTOCOL
+        ## LIFECYCLE
+        1. **RE-ACT LOOP**: You operate in a `Think -> Act -> Observe` sequence. 
+        2. **MEMORY**: Review # ACTIVE MEMORY frequently to distinguish what has been done from what is remaining.
+        
+        ## EXECUTION RULES
+        1. **TASK COMPLETION**: To finalize the request or respond to the user, \(isNativeFlow ? "simply provide your final answer in plain text without any tool calls." : "you MUST return `{\"tool_name\": null}`.")
+        2. **COMMUNICATION**: To request information from the user, use the `ask_user` tool.
+        3. **FENCE**: Operate strictly within # ENVIRONMENT and # TOOLS. Do not assume or hallucinate external capabilities.
         """
         
         if !context.negativeConstraints.isEmpty {
@@ -93,43 +92,7 @@ extension CognitiveGenerator {
         let toolNames = context.availableTools.map(\.name).joined(separator: ", ")
         
         executionContext += "## TOOLS (\(context.availableTools.count) available)\n\(toolString)\n\n"
-        executionContext += "## ⚠️ CAPABILITY FENCE\nYou have EXACTLY \(context.availableTools.count) tools: \(toolNames).\nThese are the ONLY tools that exist. Do NOT invent, guess, or hallucinate tool names.\nIf the user's request requires a capability not covered by these tools, return tool_name: null explaining what is missing. Do NOT ask the user to run commands themselves."
-        
-        if !context.activeObservations.isEmpty {
-            executionContext += "\n\n## SCRATCHPAD\n"
-            let maxContextCharacters = 40_000
-            var currentLength = executionContext.count
-            var hasTruncated = false
-            
-            for obs in context.activeObservations {
-                if obs.isRequired {
-                    if let heavy = obs.heavyContent {
-                        if !hasTruncated && (currentLength + heavy.count > maxContextCharacters) {
-                            hasTruncated = true
-                            let warning = "\(obs.shortObservation)\n\n[SYSTEM ALERT: Maximum context window reached. Remaining hydrated data was truncated.]\n\n"
-                            executionContext += warning
-                            currentLength += warning.count
-                        } else if !hasTruncated {
-                            let block = "\(obs.shortObservation)\n\(heavy)\n\n"
-                            executionContext += block
-                            currentLength += block.count
-                        } else {
-                            let block = "\(obs.shortObservation)\n\n"
-                            executionContext += block
-                            currentLength += block.count
-                        }
-                    } else {
-                        let block = "\(obs.shortObservation)\n\n"
-                        executionContext += block
-                        currentLength += block.count
-                    }
-                } else {
-                    let block = "\(obs.shortObservation)\n\n"
-                    executionContext += block
-                    currentLength += block.count
-                }
-            }
-        }
+        executionContext += "## ⚠️ CAPABILITY FENCE\nYou have EXACTLY \(context.availableTools.count) tools: \(toolNames).\nThese are the ONLY tools that exist. Do NOT invent, guess, or hallucinate tool names.\nIf the user's request requires a capability not covered by these tools, \(isNativeFlow ? "explain to the user what is missing." : "return tool_name: null explaining what is missing.") Do NOT ask the user to run commands themselves."
         
         systemBlocks.append(executionContext)
         
@@ -140,9 +103,60 @@ extension CognitiveGenerator {
         
         let systemPrompt = systemBlocks.joined(separator: "\n\n")
         
-        return [
+        var messages: [[String: String]] = [
             ["role": "system", "content": systemPrompt],
             ["role": "user", "content": context.originalQuery]
         ]
+        
+        // --- 7. Multi-Turn History (Observations) ---
+        // Instead of shoving historical tool outputs into the system prompt, we explicitly recreate
+        // the past multi-turn sequence (assistant -> tool result) so the LLM doesn't forget past actions.
+        if !context.activeObservations.isEmpty {
+            let maxContextCharacters = 40_000
+            var currentLength = systemPrompt.count + context.originalQuery.count
+            var hasTruncated = false
+            
+            for obs in context.activeObservations {
+                // Determine parameter string safely (fallback if AnyCodable unpacking fails based on specific wrapper library used)
+                let dict = obs.metadata?.compactMapValues { String(describing: $0) } ?? [:]
+                let params = dict["tool_params"] ?? "{}"
+                
+                // Simulate the LLM invoking the tool
+                messages.append([
+                    "role": "assistant",
+                    "content": "I executed the tool `\(obs.toolName)` with parameters: \(params)"
+                ])
+                
+                // Simulate the observation returned to the LLM
+                var resultText = ""
+                
+                if obs.isRequired {
+                    if let heavy = obs.heavyContent {
+                        if !hasTruncated && (currentLength + heavy.count > maxContextCharacters) {
+                            hasTruncated = true
+                            resultText = "\(obs.shortObservation)\n\n[SYSTEM ALERT: Maximum context window reached. Remaining hydrated data was truncated.]"
+                        } else if !hasTruncated {
+                            resultText = "\(obs.shortObservation)\n\(heavy)"
+                        } else {
+                            resultText = obs.shortObservation
+                        }
+                    } else {
+                        resultText = obs.shortObservation
+                    }
+                } else {
+                    resultText = obs.shortObservation
+                }
+                
+                let toolMsg = "OBSERVATION from `\(obs.toolName)`:\n\(resultText)"
+                messages.append([
+                    "role": "user",
+                    "content": toolMsg
+                ])
+                
+                currentLength += toolMsg.count
+            }
+        }
+        
+        return messages
     }
 }

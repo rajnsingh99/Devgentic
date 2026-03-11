@@ -19,6 +19,8 @@ struct ChatBubbleView: View {
     @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
     @Environment(\.appTheme) private var theme
 
+    @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
+
     // MARK: - State to control the animation
     @State private var applyMinHeight: Bool = false
 
@@ -51,30 +53,29 @@ struct ChatBubbleView: View {
                 VStack(alignment: .leading, spacing: theme.spacingMedium) {
 
                     // 1. INDICATORS
-                    if message.isStreaming {
+                    if message.isStreaming || !message.thoughts.isEmpty {
                         if isAgentic {
-                            ThinkingDynamicIsland(
-                                thoughts: message.thoughts,
-                                currentHeadline: message.thinkingHeadline,
-                                isStreaming: message.isStreaming,
-                                isExpanded: $message.isThinkingExpanded
-                            )
-                        } else {
+                            if agentViewVariant == .timeline {
+                                AgentTimelineView(message: message)
+                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                            } else {
+                                ThinkingDynamicIsland(
+                                    thoughts: message.thoughts,
+                                    currentHeadline: message.isStreaming ? message.thinkingHeadline : nil,
+                                    isStreaming: message.isStreaming,
+                                    isExpanded: $message.isThinkingExpanded
+                                )
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
+                        } else if message.isStreaming {
                             if message.content.textContent?.isEmpty ?? true {
                                 SparkleLoadingView(headline: message.thinkingHeadline)
                             }
                         }
-                    } else if !message.thoughts.isEmpty {
-                        ThinkingDynamicIsland(
-                            thoughts: message.thoughts,
-                            currentHeadline: nil,
-                            isStreaming: false,
-                            isExpanded: $message.isThinkingExpanded
-                        )
                     }
 
                     // 2. ARTIFACTS
-                    if !message.artifacts.isEmpty {
+                    if !message.artifacts.isEmpty && agentViewVariant == .dynamicIsland {
                         ToolArtifactsRow(artifacts: message.artifacts)
                             .padding(.bottom, 8)
                     }

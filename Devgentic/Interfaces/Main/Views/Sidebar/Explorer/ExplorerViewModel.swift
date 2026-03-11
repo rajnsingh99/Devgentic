@@ -8,6 +8,7 @@
 import SwiftUI
 import Combine
 import os
+import UniformTypeIdentifiers
 
 @MainActor
 final class ExplorerViewModel: ObservableObject {
@@ -119,6 +120,7 @@ final class ExplorerViewModel: ObservableObject {
 
     init() {
         logger.info("ExplorerViewModel initializing.")
+        setupDebouncer()
         loadLastOpenedFolder()
     }
 
@@ -134,11 +136,19 @@ final class ExplorerViewModel: ObservableObject {
             .sink { [weak self] url in
                 guard let self = self else { return }
                 self.logger.info("Debounced file system event triggered for \(url.path). Refreshing contents.")
-                // Re-run the indexing and reload the visual tree
+                
+                // PERFORMANCE FIX: Root or Incremental?
+                // If the URL is the root, do a full reload of the visual tree.
+                // Otherwise, perform an incremental update for that specific sub-folder.
                 Task {
-                    await self.indexAllFiles(from: url)
+                    if url == self.selectedRootURL {
+                        await self.indexAllFiles(from: url)
+                        self.loadDirectoryContents(for: url)
+                    } else {
+                        // Incremental refresh for a sub-folder
+                        await self.refreshSubfolder(at: url)
+                    }
                 }
-                self.loadDirectoryContents(for: url)
             }
             .store(in: &cancellables)
     }
@@ -419,7 +429,41 @@ final class ExplorerViewModel: ObservableObject {
     }
     
     // MARK: - File Operations
-    func openFile(_ item: FileSystemItem) { logger.info("ViewModel's openFile called for: \(item.name).") }
+    func openFile(_ item: FileSystemItem) {
+        logger.info("openFile called for: \(item.name) at \(item.url.path)")
+        
+        // If it's a directory, we usually just toggle expansion, 
+        // but if specifically asked to "open", we reveal in Finder or do nothing.
+        // For files, we use NSWorkspace to open with the default app.
+        guard !item.isDirectory else {
+            logger.info("openFile: Item is a directory, skipping system open.")
+            return
+        }
+        
+        // Ensure we have access if it's security-scoped
+        let url = item.url
+        let accessStarted = url.startAccessingSecurityScopedResource()
+        if accessStarted {
+            logger.debug("Started accessing security-scoped resource for opening: \(url.path)")
+        }
+        
+        defer {
+            if accessStarted {
+                url.stopAccessingSecurityScopedResource()
+                logger.debug("Stopped accessing security-scoped resource for opening: \(url.path)")
+            }
+        }
+        
+        if NSWorkspace.shared.open(url) {
+            logger.info("Successfully opened file with system default app: \(item.name)")
+        } else {
+            logger.error("Failed to open file with system default app: \(item.name) at \(url.path)")
+            // Optionally update errorMessage if you want UI feedback for failure
+            DispatchQueue.main.async {
+                self.errorMessage = "Could not open '\(item.name)' with the system default application."
+            }
+        }
+    }
     func revealInFinder(_ item: FileSystemItem) {
         guard item.url.startAccessingSecurityScopedResource() else {
             logger.error("Could not gain access to reveal in Finder: \(item.url.path)")
@@ -517,20 +561,30 @@ final class ExplorerViewModel: ObservableObject {
     
     // MARK: - File System Monitoring
     private func startMonitoring(path: String) {
-        stopMonitoring() // Ensure any existing monitor is stopped.
-        fileSystemMonitor = FileSystemMonitor { [weak self] url in
-            self?.logger.info("File system change detected at \(url.path). Re-indexing...")
-            // For simplicity and robustness, we will re-run the full deep search.
-            Task {
-                await self?.indexAllFiles(from: url)
+        stopMonitoring()
+        
+        let excludedPaths = [
+            "\(path)/.git",
+            "\(path)/node_modules",
+            "\(path)/.build",
+            "\(path)/DerivedData",
+            "\(path)/.DS_Store"
+        ]
+        
+        fileSystemMonitor = FileSystemMonitor { [weak self] urls in
+            guard let self = self else { return }
+            
+            // Send each changed URL to the debouncer
+            // If multiple changed, the debouncer (Phase 1) will collapse them.
+            // For now, we take the most relevant common ancestor or just the first for simplicity.
+            if let firstURL = urls.first {
+                self.fileSystemEventSubject.send(firstURL)
             }
         }
-        fileSystemMonitor?.start(path: path)
-        logger.info("Started file system monitoring for path: \(path)")
+        fileSystemMonitor?.start(path: path, excludedPaths: excludedPaths)
+        logger.info("Started file system monitoring for path: \(path) with \(excludedPaths.count) exclusions.")
     }
 
-    // This method is now a standard private method isolated to the MainActor.
-    // It's no longer `nonisolated`.
     private func stopMonitoring() {
         fileSystemMonitor?.stop()
         fileSystemMonitor = nil
@@ -574,6 +628,12 @@ final class ExplorerViewModel: ObservableObject {
                 // The .skipsHiddenFiles option handles this, but a check remains for safety.
                 if resourceValues.isHidden == true { continue }
 
+                // **NEW**: Exclude video files
+                if let type = UTType(filenameExtension: fileURL.pathExtension),
+                   type.conforms(to: .movie) || type.conforms(to: .video) {
+                    continue
+                }
+
                 let name = resourceValues.name ?? fileURL.lastPathComponent
                 collectedFiles.append(FileSystemItem(id: fileURL, name: name, url: fileURL, isDirectory: false))
             }
@@ -585,5 +645,62 @@ final class ExplorerViewModel: ObservableObject {
             self.isIndexing = false
             self.logger.info("Indexing complete. Found \(allFiles.count) suggestable files.")
         }
+    }
+    
+    // MARK: - Incremental Refresh
+    private func refreshSubfolder(at url: URL) async {
+        logger.info("Starting incremental refresh for subfolder: \(url.path)")
+        
+        // Scan only the specific subfolder
+        let subfolderFiles = await fetchAllFiles(under: url)
+        
+        await MainActor.run {
+            // Remove old entries for this subfolder path
+            let subfolderPath = url.path
+            self.allSuggestableFiles.removeAll { item in
+                item.url.path.hasPrefix(subfolderPath)
+            }
+            
+            // Add new entries
+            self.allSuggestableFiles.append(contentsOf: subfolderFiles)
+            self.logger.info("Incremental refresh complete for \(url.lastPathComponent). Updated cache with \(subfolderFiles.count) files.")
+        }
+    }
+    
+    private func fetchAllFiles(under url: URL) async -> [FileSystemItem] {
+        await Task.detached(priority: .userInitiated) { () -> [FileSystemItem] in
+            var collectedFiles: [FileSystemItem] = []
+            let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .isHiddenKey]
+            let excludedDirectoryNames: Set<String> = [".git", ".build", "node_modules", "Pods", ".DS_Store"]
+
+            guard let enumerator = FileManager.default.enumerator(
+                at: url,
+                includingPropertiesForKeys: resourceKeys,
+                options: [.skipsPackageDescendants, .skipsHiddenFiles],
+                errorHandler: { _, _ in true }
+            ) else {
+                return []
+            }
+
+            for case let fileURL as URL in enumerator {
+                guard let resourceValues = try? fileURL.resourceValues(forKeys: Set(resourceKeys)) else { continue }
+                if resourceValues.isDirectory == true {
+                    if excludedDirectoryNames.contains(resourceValues.name ?? "") {
+                        enumerator.skipDescendants()
+                    }
+                    continue
+                }
+                
+                // **NEW**: Exclude video files
+                if let type = UTType(filenameExtension: fileURL.pathExtension),
+                   type.conforms(to: .movie) || type.conforms(to: .video) {
+                    continue
+                }
+
+                let name = resourceValues.name ?? fileURL.lastPathComponent
+                collectedFiles.append(FileSystemItem(id: fileURL, name: name, url: fileURL, isDirectory: false))
+            }
+            return collectedFiles
+        }.value
     }
 }

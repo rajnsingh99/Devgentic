@@ -50,9 +50,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		35FCBA8A2DB5526B00D39123 /* devgentic */ = {
+		35FCBA8A2DB5526B00D39123 /* Devgentic */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = devgentic;
+			path = Devgentic;
 			sourceTree = "<group>";
 		};
 		35FCBA9C2DB5526B00D39123 /* devgenticTests */ = {
@@ -125,7 +125,7 @@
 		35FCBA7F2DB5526B00D39123 = {
 			isa = PBXGroup;
 			children = (
-				35FCBA8A2DB5526B00D39123 /* devgentic */,
+				35FCBA8A2DB5526B00D39123 /* Devgentic */,
 				35FCBA9C2DB5526B00D39123 /* devgenticTests */,
 				35FCBAA62DB5526B00D39123 /* devgenticUITests */,
 				35DB4C1E2DC53B9D002B3BF7 /* Frameworks */,
@@ -160,7 +160,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				35FCBA8A2DB5526B00D39123 /* devgentic */,
+				35FCBA8A2DB5526B00D39123 /* Devgentic */,
 			);
 			name = devgentic;
 			packageProductDependencies = (

@@ -10,7 +10,9 @@ import SwiftUI
 
 struct MLXModelPickerView: View {
     @Binding var selectedModel: String
-    @Binding var supportsNativeTools: Bool // Added binding
+    @Binding var cognitiveCapability: ModelCognitiveCapability
+    @Binding var modelDialect: ModelDialect
+    @Binding var modelMetadata: ModelMetadata?
     @Environment(\.appTheme) private var theme
     
     @StateObject private var service = MLXModelService.shared
@@ -41,8 +43,8 @@ struct MLXModelPickerView: View {
             attemptAutoSelect()
         }
         // Listen for async updates (e.g. scan completing)
-        .onChange(of: service.installedModels) { _ in
-            attemptAutoSelect()
+        .onChange(of: selectedModel) { newValue in
+            evaluateCognitiveCapability(for: newValue)
         }
         .sheet(isPresented: $showingStore) {
             MLXModelStoreView()
@@ -60,10 +62,23 @@ struct MLXModelPickerView: View {
         if selectedModel.isEmpty || !isSelectionValid {
             DispatchQueue.main.async {
                 self.selectedModel = first.displayName
-                // DEFAULT TO SAFETY: Force Legacy JSON Mode by default for MLX.
-                // User must manually opt-in to the Native API due to Jinja parser fragility.
-                self.supportsNativeTools = false
+                self.evaluateCognitiveCapability(for: first.displayName)
             }
+        } else {
+            // Even if valid, evaluate it on load in case the user toggled it manually before and we want to sync
+            evaluateCognitiveCapability(for: selectedModel)
+        }
+    }
+    
+    private func evaluateCognitiveCapability(for modelName: String) {
+        guard let model = service.installedModels.first(where: { $0.displayName == modelName }) else { return }
+
+        let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: modelName)
+
+        DispatchQueue.main.async {
+            self.cognitiveCapability = profile.capability
+            self.modelDialect = profile.dialect
+            self.modelMetadata = profile.metadata
         }
     }
 }

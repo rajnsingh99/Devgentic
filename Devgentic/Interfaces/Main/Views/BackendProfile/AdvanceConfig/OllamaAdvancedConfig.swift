@@ -32,32 +32,74 @@ struct OllamaAdvancedConfig: Codable, Hashable {
     /// A seed for the random number generator to ensure reproducible outputs.
     var seed: Int?
     
+    /// Penalty for repeating tokens to prevent degenerate loops.
+    var repeatPenalty: Double?
+
+    /// Represents the different size tiers for Ollama models.
+    enum ModelTier: String, CaseIterable, Identifiable {
+        case tiny = "Tiny (1B-3B)"
+        case smallMedium = "Small/Medium (7B-14B)"
+        case large = "Large (70B+)"
+        
+        var id: String { self.rawValue }
+    }
+    
     /// Creates a default configuration for Ollama.
     static func `default`() -> OllamaAdvancedConfig {
-        OllamaAdvancedConfig(
-            temperature: 0.8,
-            topP: 0.9,
-            topK: 40,
-            numCtx: 2048,
-            stop: [],
-            seed: nil
-        )
+        return .preset(for: .smallMedium)
+    }
+    
+    /// Returns a preset configuration optimized for the specific model tier.
+    static func preset(for tier: ModelTier) -> OllamaAdvancedConfig {
+        switch tier {
+        case .tiny:
+            return OllamaAdvancedConfig(
+                temperature: 0.05,
+                topP: 0.2,
+                topK: 5,
+                numCtx: 4096,
+                stop: [],
+                seed: 42,
+                repeatPenalty: 1.2
+            )
+        case .smallMedium:
+            return OllamaAdvancedConfig(
+                temperature: 0.1,
+                topP: 0.6,
+                topK: 40,
+                numCtx: 8192,
+                stop: [],
+                seed: 42,
+                repeatPenalty: 1.1
+            )
+        case .large:
+            return OllamaAdvancedConfig(
+                temperature: 0.3,
+                topP: 0.8,
+                topK: 50,
+                numCtx: 16384,
+                stop: [],
+                seed: 42,
+                repeatPenalty: 1.05
+            )
+        }
     }
     
     // MARK: - Codable Implementation
     
     private enum CodingKeys: String, CodingKey {
-        case temperature, topP, topK, numCtx, stop, seed
+        case temperature, topP, topK, numCtx, stop, seed, repeatPenalty
     }
     
     // Memberwise initializer required due to custom decoder.
-    init(temperature: Double?, topP: Double?, topK: Int?, numCtx: Int?, stop: [String]?, seed: Int?) {
+    init(temperature: Double?, topP: Double?, topK: Int?, numCtx: Int?, stop: [String]?, seed: Int?, repeatPenalty: Double? = nil) {
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
         self.numCtx = numCtx
         self.stop = stop
         self.seed = seed
+        self.repeatPenalty = repeatPenalty
     }
     
     /// Custom decoder to handle cases where numeric types were incorrectly saved as Bools.
@@ -104,6 +146,14 @@ struct OllamaAdvancedConfig: Codable, Hashable {
             self.seed = seedBool ? 1 : 0
         } else {
             self.seed = try container.decodeIfPresent(Int.self, forKey: .seed)
+        }
+        
+        if let repeatPenaltyDouble = try? container.decode(Double.self, forKey: .repeatPenalty) {
+            self.repeatPenalty = repeatPenaltyDouble
+        } else if let repeatPenaltyBool = try? container.decode(Bool.self, forKey: .repeatPenalty) {
+            self.repeatPenalty = repeatPenaltyBool ? 1.0 : 0.0
+        } else {
+            self.repeatPenalty = try container.decodeIfPresent(Double.self, forKey: .repeatPenalty)
         }
         
         // Decode other properties normally
