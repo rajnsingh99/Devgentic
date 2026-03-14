@@ -79,13 +79,13 @@ struct UpdateSessionTool: DevgenticTool {
     
     func call(arguments: Arguments) async throws -> String {
         // 1. Fetch the hierarchical session graph
-        var state = ContextMemoryManager.shared.getActiveState(for: conversationID)
+        var state = SessionGraphStore.shared.getActiveState(for: conversationID)
         
         // 2. Store the project brief directly into the working memory dictionary
         state.workingMemory["project_brief"] = arguments.content
         
         // 3. Persist the mutated graph back to storage
-        ContextMemoryManager.shared.updateActiveState(conversationID: conversationID, state: state)
+        SessionGraphStore.shared.updateActiveState(conversationID: conversationID, state: state)
         
         return "Successfully updated the session context (Project Brief) in your active working memory."
     }

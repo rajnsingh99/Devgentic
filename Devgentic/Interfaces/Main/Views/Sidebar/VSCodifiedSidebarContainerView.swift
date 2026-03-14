@@ -32,8 +32,8 @@ struct VSCodifiedSidebarContainerView: View {
         .conversations: 320,
         .explorer: 300,
         .promptLibrary: 350,
-        .settings: 300,
-        .user: 300
+        .scheduler: 350,
+        .settings: 300
     ]
 
     @EnvironmentObject var viewModel: MainApplicationViewModel

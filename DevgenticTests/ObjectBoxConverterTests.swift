@@ -61,6 +61,11 @@ final class ObjectBoxConverterTests: XCTestCase {
     }
 
     // MARK: - FloatArrayConverter Tests
+    //
+    // Note: FloatArrayConverter is no longer used for `ChildChunkEntity.embedding`.
+    // As of Build 98, ObjectBox stores embeddings natively as `floatVector` via the HNSW
+    // index (property type `[Float]?`). FloatArrayConverter remains available for other
+    // use cases that require Data-backed Float storage.
 
     func testFloatArrayConverter_Roundtrip_SmallArray() {
         let original: [Float] = [1.0, 2.0, 3.0]

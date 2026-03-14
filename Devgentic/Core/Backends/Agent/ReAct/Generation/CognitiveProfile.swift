@@ -23,7 +23,13 @@ enum ModelTier: String, Codable, CaseIterable, Identifiable, Hashable {
     case ultra = "Ultra"       // > 100B (e.g. Llama-405B, GPT-4)
     
     var id: String { rawValue }
+
+    /// Returns true if the model belongs to a high-capacity tier (70B+ / GPT-4 level).
+    var isFrontier: Bool {
+        return self == .large || self == .ultra
+    }
 }
+
 
 /// Rich metadata describing the physical and logical constraints of an LLM.
 struct ModelMetadata: Codable, Hashable {

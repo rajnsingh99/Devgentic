@@ -1,5 +1,5 @@
 //
-//  AgentStructModel.swift
+//  AgentModel.swift
 //  Devgentic
 //
 //  Created by Raj Singh on 02/02/26.
@@ -7,17 +7,35 @@
 
 import Foundation
 
-// MARK: - Cognitive Context Manager (Phase 1)
 
-/// Represents a single observation step in the agent's volatile memory.
-/// Replaces the old string-based scratchpad to support hydration/eviction and prevent context overflows.
-struct CognitiveObservation: Sendable, Codable {
+/// Lightweight result container for parallel tool execution within a single ReAct iteration.
+/// Replaces the now-removed CognitiveObservation, which was coupled to ObservationMemoryStore.
+ struct ToolObservation: Sendable {
     let stepId: Int
     let toolName: String
-    let shortObservation: String
-    let heavyContent: String? 
-    var isRequired: Bool
-    let metadata: [String: AnyCodable]?
+    let result: String      // Full content fed to memoryStrategy.recordObservation
+    let summary: String     // Brief description used for logging overview
+    let isSuccess: Bool
+    let params: String      // Serialised arguments — passed to ExecutionSummary
+    let output: String      // LLM-facing output — passed to ExecutionSummary
+}
+
+struct APISpyModel: LLMProvider {
+    let inner: any LLMProvider
+    
+    var modelName: String { inner.modelName }
+
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        return try await inner.generate(messages: messages, tools: tools, responseSchema: responseSchema)
+    }
+
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
+        return inner.stream(messages: messages, tools: tools)
+    }
+
+    func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        return try await inner.generateCognitiveStep(messages: messages, tools: tools)
+    }
 }
 
 // MARK: - Cognitive Definitions (Native Tool Calling Parity)
@@ -68,6 +86,7 @@ enum AgentState: Codable, Equatable, Sendable {
         case reflecting = "Reflecting"    // Reflexion: Self-critique
         case finalizing = "Finalizing"    // Finishing response
         case errorRecovery = "Recovering" // Self-correction
+        case preparing = "Preparing"      // RAG: Context retrieval and rewriting
     }
 
     enum ActingDetail: Codable, Equatable, Sendable {
@@ -189,6 +208,25 @@ struct AgentTool: Sendable {
     }
 }
 
+// MARK: - Tool UI & Prompt Extensions
+
+extension AgentTool {
+    /// Flattens the tool schema into a concise Markdown definition for smaller models.
+    func toMarkdownDefinition() -> String {
+        var def = "### \(self.name)\n"
+        def += "- Description: \(self.description)\n"
+        
+        if !self.parameters.properties.isEmpty {
+            def += "- Arguments:\n"
+            for (key, param) in self.parameters.properties {
+                let req = self.parameters.required.contains(key) ? "required" : "optional"
+                def += "  - `\(key)` (\(param.type), \(req)): \(param.description)\n"
+            }
+        }
+        return def
+    }
+}
+
 // MARK: - Tool Execution Results
 
 /// Represents the definitive outcome of a tool execution attempt.
@@ -247,7 +285,7 @@ struct AgentInput: Sendable {
     
     let conversationID: UUID
     let tools: [AgentTool]
-    let ragContext: String?
+    let longTermMemory: any LongTermMemoryStrategy
 
     // Architecture: Split-State (Active State + History)
     let activeState: SessionGraph?
@@ -255,6 +293,7 @@ struct AgentInput: Sendable {
 
     // [Step 3 Architecture Update]
     let generatorStrategy: any CognitiveGenerator
+    let workingMemory: any WorkingMemoryStrategy
 
     // [Phase 2 Rate Limiting]
     // The specific quota profile to enforce for this execution
@@ -290,10 +329,11 @@ struct AgentInput: Sendable {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         tools: [AgentTool],
-        ragContext: String? = nil,
+        longTermMemory: any LongTermMemoryStrategy,
         activeState: SessionGraph? = nil,
         recentHistory: String? = nil,
         generatorStrategy: (any CognitiveGenerator)? = nil,
+        workingMemory: (any WorkingMemoryStrategy)? = nil,
         rateLimitCategory: RateLimitCategory = .geminiFlash, // Default to strict for safety
         instructions: String? = nil,
         traceContext: TraceContext
@@ -302,11 +342,12 @@ struct AgentInput: Sendable {
         self.chatHistory = chatHistory
         self.conversationID = conversationID
         self.tools = tools
-        self.ragContext = ragContext
+        self.longTermMemory = longTermMemory
         self.activeState = activeState
         self.recentHistory = recentHistory
 
         self.generatorStrategy = generatorStrategy ?? NativeStructuredStrategy()
+        self.workingMemory = workingMemory ?? HighContextLinearMemory()
         self.rateLimitCategory = rateLimitCategory
 
         self.instructions = instructions
@@ -329,13 +370,14 @@ struct SemanticContext: Sendable {
     let environmentFacts: EnvironmentFacts
     
     // 2. Memory & Long-Term State
+    let longTermMemory: any LongTermMemoryStrategy
     let compressedStateGraph: String
     let recentHistory: String?
     
     // 3. Current Execution State
     let originalQuery: String
     let currentIteration: Int
-    let activeObservations: [CognitiveObservation]
+    let compiledScratchpad: String
     let latestClarification: String?
     
     // 4. Guardrails & Circuit Breakers
@@ -344,4 +386,61 @@ struct SemanticContext: Sendable {
     
     // 5. Capabilities
     let availableTools: [AgentTool]
+}
+
+// MARK: - Plan & Execute Models
+
+struct SubTask: Sendable, Codable, Identifiable {
+    let id: String
+    let description: String
+    let toolHint: String?
+    var status: SubTaskStatus
+    var result: String?
+    var dependsOn: [String]?
+
+    init(id: String = UUID().uuidString, description: String, toolHint: String? = nil, status: SubTaskStatus = .pending, result: String? = nil, dependsOn: [String]? = nil) {
+        self.id = id
+        self.description = description
+        self.toolHint = toolHint
+        self.status = status
+        self.result = result
+        self.dependsOn = dependsOn
+    }
+}
+
+enum SubTaskStatus: String, Sendable, Codable {
+    case pending, inProgress, completed, failed, skipped
+}
+
+// MARK: - Reflexion Models
+
+struct ReflectionResult: Sendable {
+    let isAcceptable: Bool
+    let critique: String
+    let suggestedRevisions: String?
+    let trial: Int
+}
+
+// MARK: - Supervisor Models
+
+struct WorkerTask: Sendable, Identifiable {
+    let id: String
+    let workerRole: String
+    let instruction: String
+    let assignedTools: [AgentTool]
+
+    init(id: String = UUID().uuidString, workerRole: String, instruction: String, assignedTools: [AgentTool]) {
+        self.id = id
+        self.workerRole = workerRole
+        self.instruction = instruction
+        self.assignedTools = assignedTools
+    }
+}
+
+struct WorkerResult: Sendable {
+    let workerId: String
+    let workerRole: String
+    let output: String
+    let isSuccess: Bool
+    let toolsUsed: [String]
 }

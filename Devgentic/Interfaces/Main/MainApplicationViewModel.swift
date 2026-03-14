@@ -51,6 +51,13 @@ class MainApplicationViewModel: ObservableObject {
     @Published var webSearchAPIKey: String?
     @Published var isWebSearchActive: Bool = false
     
+    // Intelligence Core
+    @Published var isIntelligenceCoreEnabled: Bool = false
+    @Published var intelligenceCoreDownloadProgress: Double = 0.0
+    @Published var isIntelligenceCoreDownloading: Bool = false
+    @Published var intelligenceCoreError: String? = nil
+    @Published var showIntelligenceCoreDownloadPopup: Bool = false
+    
     @Published var streamingMessageID: UUID? = nil
     
     // MARK: - Query History Properties
@@ -118,6 +125,21 @@ class MainApplicationViewModel: ObservableObject {
             UserDefaults.standard.set(true, forKey: AppSettings.useStreamingResponseKey)
         }
         self.useStreamingResponse = UserDefaults.standard.bool(forKey: AppSettings.useStreamingResponseKey)
+        
+        self.isIntelligenceCoreEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+        
+        // Startup check for Intelligence Core popup
+        if self.isIntelligenceCoreEnabled {
+            Task {
+                let downloaded = await IntelligenceCoreService.shared.isDownloaded()
+                if !downloaded {
+                    DispatchQueue.main.async {
+                        self.showIntelligenceCoreDownloadPopup = true
+                    }
+                }
+            }
+        }
+        
         logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(self.useStreamingResponse)")
     }
 
@@ -130,6 +152,19 @@ class MainApplicationViewModel: ObservableObject {
             .sink { newValue in
                 UserDefaults.standard.set(newValue, forKey: AppSettings.useStreamingResponseKey)
                 logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(newValue)")
+            }
+            .store(in: &cancellables)
+
+        $isIntelligenceCoreEnabled
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                UserDefaults.standard.set(enabled, forKey: AppSettings.isIntelligenceCoreEnabledKey)
+                if enabled {
+                    self?.handleIntelligenceCoreEnablement()
+                } else {
+                    Task { await IntelligenceCoreService.shared.unload() }
+                }
             }
             .store(in: &cancellables)
             
@@ -610,6 +645,115 @@ class MainApplicationViewModel: ObservableObject {
         self.isWebSearchEnabled = false
         self.isWebSearchActive = false
         logger.info("Successfully removed web search API key from UserDefaults and disabled search.")
+    }
+
+    // MARK: - Intelligence Core Logic
+
+    func handleIntelligenceCoreEnablementManually() {
+        handleIntelligenceCoreEnablement()
+    }
+
+    private func handleIntelligenceCoreEnablement() {
+        Task {
+            let isDownloaded = await IntelligenceCoreService.shared.isDownloaded()
+            if !isDownloaded {
+                self.isIntelligenceCoreDownloading = true
+                self.intelligenceCoreError = nil
+                do {
+                    try await IntelligenceCoreService.shared.downloadIfNeeded { progress in
+                        DispatchQueue.main.async {
+                            self.intelligenceCoreDownloadProgress = progress.fractionCompleted
+                        }
+                    }
+                    self.isIntelligenceCoreDownloading = false
+                    logger.info("Intelligence Core downloaded successfully.")
+                } catch {
+                    self.intelligenceCoreError = error.localizedDescription
+                    self.isIntelligenceCoreDownloading = false
+                    self.isIntelligenceCoreEnabled = false
+                    logger.error("Failed to download Intelligence Core: \(error.localizedDescription)")
+                }
+            } else {
+                // Pre-load if already downloaded? User request says "Load and unload on immediate basis"
+                // For now, let's just ensure it's available.
+                logger.info("Intelligence Core enabled and already present.")
+            }
+        }
+    }
+
+    // MARK: - Scheduler Support
+
+    /// Create a conversation for a scheduled task without selecting it in the UI.
+    func createConversationForScheduledTask(profileID: BackendProfileModel, title: String) -> UUID {
+        let newConversation = Conversation(
+            id: UUID(),
+            messages: [],
+            timestamp: Date(),
+            userDefinedTitle: title,
+            backendType: .none,
+            backendEntityId: profileID.id
+        )
+        persistenceService.addConversation(from: newConversation)
+        updateBackendForCurrentConversation(conversationID: newConversation.id, profileID: profileID.id)
+        logger.info("Created conversation for scheduled task: \(title) (\(newConversation.id.uuidString))")
+        return newConversation.id
+    }
+
+    /// Send a message for a scheduled task without modifying the UI's selected conversation.
+    /// Returns a summary of the response (first 100 chars).
+    func sendScheduledMessage(
+        prompt: String,
+        config: BackendRequestConfig,
+        conversationID: UUID,
+        attachedFileURLs: [URL]
+    ) async -> String {
+        guard let targetEntity = persistenceService.getConversation(withId: conversationID) else {
+            logger.error("[sendScheduledMessage] Conversation \(conversationID.uuidString) not found.")
+            return "Error: conversation not found."
+        }
+
+        // Build file items from URLs
+        let fileItems: [FileSystemItem] = attachedFileURLs.compactMap { url in
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            var isDir: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+            return FileSystemItem(id: url, name: url.lastPathComponent, url: url, isDirectory: isDir.boolValue)
+        }
+
+        // Create user message
+        let userMessage = createUserMessage(conversationID: conversationID, query: prompt, files: fileItems)
+        await persistenceService.addMessage(userMessage, to: targetEntity)
+
+        // Fetch history for context
+        let history = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 50)
+
+        // Start stream and await completion.
+        // Use a box to break the forward-capture cycle: the closure captures
+        // `messageBox` (already declared), and we fill it after the call returns.
+        return await withCheckedContinuation { continuation in
+            var messageBox: ChatMessage? = nil
+            let agentMessage = activeStreamManager.startMessageStream(
+                withConfig: config,
+                conversationID: conversationID,
+                userQuery: prompt,
+                history: history,
+                files: fileItems,
+                onComplete: {
+                    // Extract summary from the completed message
+                    let summary: String
+                    switch messageBox?.content {
+                    case .plainText(let text), .markdownText(let text):
+                        summary = String(text.prefix(100))
+                    case .error(_, let details):
+                        summary = "Error: \(details)"
+                    default:
+                        summary = "Response complete."
+                    }
+                    continuation.resume(returning: summary)
+                }
+            )
+            messageBox = agentMessage // Fill the box so the closure can read it
+        }
     }
 }
 

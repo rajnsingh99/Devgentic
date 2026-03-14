@@ -52,17 +52,19 @@ enum ExecutorFactory {
             case .reAct:
                 return ReActAgentExecutor()
             case .planAndExecute:
-                return ReActAgentExecutor()
+                return PlanExecuteExecutor()
             case .reflexion:
-                return ReActAgentExecutor()
+                return ReflexionExecutor()
             case .supervisor:
+                return SupervisorExecutor()
+            case .workflow:
+                // Agent profiles should never have .workflow architecture.
+                // Fallback to ReAct if misconfigured.
                 return ReActAgentExecutor()
             }
 
         case .workflow:
-            // Future extensibility for Workflow profiles.
-            // For now, we fallback to ReAct as it is the most capable.
-            return ReActAgentExecutor()
+            return WorkflowExecutor()
 
         @unknown default:
             // Safety fallback for future enum cases

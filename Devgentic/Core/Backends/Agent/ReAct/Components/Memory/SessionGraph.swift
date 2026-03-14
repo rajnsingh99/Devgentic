@@ -92,7 +92,7 @@ struct SessionGraph: Sendable, Codable {
         if totalEpisodes <= windowSize {
             return """
             [RECENT MEMORY - LAST \(totalEpisodes) TURNS]
-            \(self.compressForPrompt())
+            \(self.generateLegacyJson())
             """
         }
         
@@ -112,7 +112,7 @@ struct SessionGraph: Sendable, Codable {
         // Build the recent JSON string by masking older episodes
         var recentGraph = self
         recentGraph.episodes = Array(recentEpisodes)
-        let recentJson = recentGraph.compressForPrompt()
+        let recentJson = recentGraph.generateLegacyJson()
         
         return """
         \(pointersBlock)
@@ -124,15 +124,18 @@ struct SessionGraph: Sendable, Codable {
     /// Generates a token-efficient JSON string representation for the LLM prompt.
     /// Strips out raw logs from COMPLETED episodes to save context window space,
     /// while keeping the full diagnostic logs for ACTIVE episodes.
+    @available(*, deprecated, message: "JSON-based memory injection is being phased out in favor of 3-Tier XML/Markdown. Use generateLegacyJson() if raw JSON is still required by legacy generators.")
     func compressForPrompt() -> String {
+        return generateLegacyJson()
+    }
+    
+    private func generateLegacyJson() -> String {
         var compressedGraph = self
         
         // Loop through episodes and strip logs for completed tasks
         for i in compressedGraph.episodes.indices {
             if compressedGraph.episodes[i].status.uppercased() == "COMPLETED" {
                 for j in compressedGraph.episodes[i].actions.indices {
-                    // Semantic Compression: The LLM only needs the intent/status of past actions,
-                    // not the raw heavy text output of the logs.
                     compressedGraph.episodes[i].actions[j].logs = []
                 }
             }
@@ -149,16 +152,59 @@ struct SessionGraph: Sendable, Codable {
     
     // MARK: - Legacy Compatibility Layer
     // These properties ensure `ReActAgentExecutor` doesn't break during the transition.
-    
+
     var primaryGoal: String {
         return episodes.last?.primaryGoal ?? "Waiting for user instruction..."
     }
-    
+
     var subTasks: [MemoryAction] {
         return episodes.last?.actions ?? []
     }
-    
+
     func isPathForbidden(_ path: String) -> Bool {
         return negativeConstraints.contains { path.contains($0) }
+    }
+
+    // MARK: - Episode Lifecycle Operations
+
+    mutating func closeActiveEpisode(status: String, outcome: String? = nil) {
+        if let idx = episodes.lastIndex(where: { $0.status == "ACTIVE" }) {
+            episodes[idx].status = status
+            if let outcome = outcome {
+                episodes[idx].finalOutcome = outcome
+            }
+            if let actIdx = episodes[idx].actions.indices.last {
+                episodes[idx].actions[actIdx].status = status
+            }
+            workingMemory["last_status"] = status
+        }
+    }
+
+    mutating func cancelActiveEpisode() {
+        workingMemory["last_status"] = "CANCELLED"
+        if let idx = episodes.lastIndex(where: { $0.status == "ACTIVE" }) {
+            episodes[idx].status = "CANCELLED"
+            if let actIdx = episodes[idx].actions.indices.last {
+                episodes[idx].actions[actIdx].status = "CANCELLED"
+            }
+        }
+    }
+}
+
+// MARK: - Session Graph Store
+
+/// In-memory cache for active SessionGraph instances, keyed by conversation ID.
+/// Replaces the legacy ContextMemoryManager.
+class SessionGraphStore {
+    static let shared = SessionGraphStore()
+    private var graphs: [UUID: SessionGraph] = [:]
+    private init() {}
+
+    func getActiveState(for conversationID: UUID) -> SessionGraph {
+        return graphs[conversationID] ?? SessionGraph(sessionID: conversationID.uuidString)
+    }
+
+    func updateActiveState(conversationID: UUID, state: SessionGraph) {
+        graphs[conversationID] = state
     }
 }

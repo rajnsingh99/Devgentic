@@ -103,7 +103,20 @@ class BackendOrchestrationService: ObservableObject {
                 // Fetch long-term memory context if applicable.
                 var ragContextString: String? = nil
                 if config.profile.profileType == .bot || config.profile.profileType == .agent {
-                    ragContextString = await self.retrieveRAGContext(for: userQuery, conversationID: conversationID, history: conversationHistory)
+                    
+                    aggregatedTraceUpdate(AgentTraceLog(
+                        traceID: context.traceID,
+                        spanID: context.newSpan().spanID,
+                        parentSpanID: context.spanID,
+                        stepNumber: 0,
+                        state: .thinking(.preparing),
+                        content: "Analyzing conversation history for context retrieval...",
+                        metadata: nil
+                    ))
+                    
+                    let rewrittenQuery = await QueryRewritingService.shared.rewriteQuery(userQuery, history: conversationHistory)
+                    
+                    ragContextString = await self.retrieveRAGContext(for: rewrittenQuery, conversationID: conversationID, history: conversationHistory)
                 }
                 
                 // Check cancellation before heavy lifting
@@ -181,6 +194,10 @@ class BackendOrchestrationService: ObservableObject {
                             case .error(let err):
                                 logger.debug("[ERROR] \(err)")
                                 continuation.yield(event)
+
+                            // Workflow orchestration events (not emitted by agent profiles, but needed for exhaustive switch)
+                            case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress:
+                                continuation.yield(event)
                             }
                         }
                         
@@ -191,7 +208,22 @@ class BackendOrchestrationService: ObservableObject {
                         continuation.finish()
                         
                     case .workflow:
-                        throw NSError(domain: "NotImplemented", code: 501, userInfo: [NSLocalizedDescriptionKey: "Streaming is not yet supported for Workflow profiles."])
+                        logger.info("Routing WORKFLOW profile '\(config.profile.displayName)' to AgentConnect.")
+
+                        let stream = agentConnect.streamAgentResponse(
+                            for: config.profile,
+                            userInput: queryForRequest,
+                            chatHistory: conversationHistory,
+                            conversationID: conversationID,
+                            ragContext: ragContextString,
+                            traceContext: context,
+                            onTraceUpdate: aggregatedTraceUpdate
+                        )
+
+                        for try await event in stream {
+                            continuation.yield(event)
+                        }
+                        continuation.finish()
                     }
                 } catch is CancellationError {
                     logger.warning("Orchestration Stream Cancelled.")

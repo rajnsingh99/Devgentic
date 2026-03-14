@@ -132,31 +132,19 @@ struct BackendProfileDetailView: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        VStack {
+        Group {
             switch profile.profileType {
             case .bot:
                 BotConfigDetailView(profile: $profile)
+                    .padding()
             case .agent:
                 AgentConfigDetailView(profile: $profile)
+                    .padding()
             case .workflow:
-                placeholderView(for: .workflow)
+                WorkflowCanvasView(profile: $profile)
             }
         }
-        .padding()
         .background(theme.primaryBackground)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-    
-    @ViewBuilder
-    private func placeholderView(for type: ProfileType) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: "hammer.fill")
-                .font(.largeTitle)
-                .foregroundColor(.secondary)
-            Text("\(type.rawValue) configuration is not yet available.")
-                .font(.headline)
-                .foregroundColor(theme.secondaryText)
-        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

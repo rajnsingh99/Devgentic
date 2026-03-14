@@ -39,6 +39,9 @@ struct ChatInputAreaView: View {
     @State private var showingToolLibrary = false
     @State private var selectedProfile: BackendProfileModel?
     @State private var isToolsHovering = false
+    @State private var showingSchedulePopover = false
+    @State private var isScheduleButtonHovering = false
+    @State private var showingFullScheduleCreator = false
 
     // MARK: - Hover States
     @State private var isPlusButtonHovering: Bool = false
@@ -206,6 +209,9 @@ struct ChatInputAreaView: View {
         .animation(.spring(), value: mainViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
         .fixedSize(horizontal: false, vertical: true)
+        .sheet(isPresented: $showingFullScheduleCreator) {
+            CreateScheduledTaskView(prefillPrompt: inputViewModel.userInput)
+        }
     }
     
     private func refreshFileSuggestions(query: String) {
@@ -375,11 +381,40 @@ struct ChatInputAreaView: View {
                 }
             }
 
+            // Schedule button
+            Button(action: { showingSchedulePopover = true }) {
+                Image(systemName: "calendar")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+                    .foregroundColor(isScheduleButtonHovering ? theme.primaryText : theme.secondaryText.opacity(0.8))
+                    .padding(7)
+                    .background(
+                        Circle()
+                            .fill(isScheduleButtonHovering ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.18))
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isScheduleButtonHovering = hover } }
+            .help("Schedule this message")
+            .disabled(!isInputEnabled)
+            .opacity(isInputEnabled ? 1.0 : 0.5)
+            .popover(isPresented: $showingSchedulePopover, arrowEdge: .bottom) {
+                QuickSchedulePopoverView(
+                    promptText: inputViewModel.userInput,
+                    selectedProfileID: backendConfiguration.selectedProfileID,
+                    isPresented: $showingSchedulePopover,
+                    onCustomSchedule: {
+                        self.showingFullScheduleCreator = true
+                    }
+                )
+            }
+
+            Spacer()
+
             backendPickerButton()
                 .disabled(!isInputEnabled)
                 .opacity(isInputEnabled ? 1.0 : 0.5)
-
-            Spacer()
 
             dynamicActionButton
         }

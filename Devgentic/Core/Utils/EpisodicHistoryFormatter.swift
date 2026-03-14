@@ -1,5 +1,5 @@
 //
-//  ChatHistoryAdapter.swift
+//  EpisodicHistoryFormatter.swift
 //  Devgentic
 //
 //  Created for Memory Architecture Migration.
@@ -10,7 +10,7 @@ import Foundation
 
 /// Adapts the visual UI chat history into the cognitive SessionGraph state.
 /// Dynamically computes the agent's memory graph per-request, eliminating database bloat.
-struct ChatHistoryAdapter {
+struct EpisodicHistoryFormatter {
     
     /// Builds the ephemeral SessionGraph dynamically from the chat history.
     ///
@@ -96,11 +96,11 @@ struct ChatHistoryAdapter {
     ///   - history: The array of previous ChatMessages.
     ///   - limit: The maximum number of recent messages to include (default is 10).
     /// - Returns: A formatted string block of recent interactions.
-    static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 10) -> String {
+    static func buildRecentHistoryString(from history: [ChatMessage], limit: Int = 4) -> String {
         let recentMessages = history.suffix(limit)
         
         if recentMessages.isEmpty {
-            return "(No recent history)"
+            return "No recent history."
         }
         
         var historyLines: [String] = []
@@ -110,12 +110,13 @@ struct ChatHistoryAdapter {
                 continue
             }
             
-            let role = (msg.sender == .user) ? "User" : "Agent"
-            historyLines.append("\(role): \(text)")
+            // Use Markdown headers for strict boundary definition
+            let roleHeader = (msg.sender == .user) ? "### User" : "### Assistant"
+            historyLines.append("\(roleHeader)\n\(text)")
         }
         
         if historyLines.isEmpty {
-            return "(No recent history)"
+            return "No recent history."
         }
         
         return historyLines.joined(separator: "\n\n")

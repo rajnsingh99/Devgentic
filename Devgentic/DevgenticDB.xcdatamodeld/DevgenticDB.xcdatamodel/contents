@@ -16,6 +16,7 @@
         <attribute name="name" optional="YES" attributeType="String"/>
         <attribute name="size" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="url" optional="YES" attributeType="String"/>
+        <relationship name="chatMessage" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="attachedImageFiles" inverseEntity="ChatMessageEntity"/>
     </entity>
     <entity name="AttachedTextFileEntity" representedClassName="AttachedTextFileEntity" syncable="YES" codeGenerationType="class">
         <attribute name="content" optional="YES" attributeType="String"/>
@@ -24,6 +25,7 @@
         <attribute name="name" optional="YES" attributeType="String"/>
         <attribute name="size" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="url" optional="YES" attributeType="String"/>
+        <relationship name="chatMessage" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="attachedTextFiles" inverseEntity="ChatMessageEntity"/>
     </entity>
     <entity name="BackendProfileEntity" representedClassName="BackendProfileEntity" syncable="YES" codeGenerationType="class">
         <attribute name="displayName" optional="YES" attributeType="String"/>
@@ -50,15 +52,14 @@
         <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="image_data" optional="YES" attributeType="Binary"/>
         <attribute name="image_url" optional="YES" attributeType="String"/>
-        <attribute name="isIndexedForRAG" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
         <attribute name="messageType" optional="YES" attributeType="String"/>
         <attribute name="senderType" optional="YES" attributeType="String"/>
         <attribute name="text_content" optional="YES" attributeType="String"/>
         <attribute name="thoughts" optional="YES" attributeType="Transformable" valueTransformerName="AgentThoughtArrayTransformer"/>
         <attribute name="timelineEvents" optional="YES" attributeType="Transformable" valueTransformerName="TimelineEventArrayTransformer"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <relationship name="attachedImageFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedImageFileEntity"/>
-        <relationship name="attachedTextFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedTextFileEntity"/>
+        <relationship name="attachedImageFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedImageFileEntity" inverseName="chatMessage" inverseEntity="AttachedImageFileEntity"/>
+        <relationship name="attachedTextFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedTextFileEntity" inverseName="chatMessage" inverseEntity="AttachedTextFileEntity"/>
         <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ConversationEntity" inverseName="messages" inverseEntity="ConversationEntity"/>
     </entity>
     <entity name="ConversationEntity" representedClassName="ConversationEntity" syncable="YES" codeGenerationType="class">
@@ -121,6 +122,26 @@
         <attribute name="mcpConfig" optional="YES" attributeType="Binary"/>
         <attribute name="serverName" optional="YES" attributeType="String"/>
         <relationship name="tools" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="MCPToolEntity" inverseName="toolItem" inverseEntity="MCPToolEntity"/>
+    </entity>
+    <entity name="ScheduledTaskEntity" representedClassName="ScheduledTaskEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="attachedFileURLsJSON" optional="YES" attributeType="String"/>
+        <attribute name="contextWindowMode" optional="YES" attributeType="String"/>
+        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="cronExpression" optional="YES" attributeType="String"/>
+        <attribute name="displayName" optional="YES" attributeType="String"/>
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="isEnabled" optional="YES" attributeType="Boolean" defaultValueString="YES" usesScalarValueType="YES"/>
+        <attribute name="isPaused" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="lastRunAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="lastRunSummary" optional="YES" attributeType="String"/>
+        <attribute name="linkedConversationID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="mode" optional="YES" attributeType="String"/>
+        <attribute name="nextRunAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="profileID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="promptTemplate" optional="YES" attributeType="String"/>
+        <attribute name="runCount" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="scheduledAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="status" optional="YES" attributeType="String"/>
     </entity>
     <entity name="WorkflowConfigEntity" representedClassName="WorkflowConfigEntity" syncable="YES" codeGenerationType="class">
         <attribute name="agents" optional="YES" attributeType="Binary"/>

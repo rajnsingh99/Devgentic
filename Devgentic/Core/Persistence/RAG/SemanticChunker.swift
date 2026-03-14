@@ -124,40 +124,11 @@ struct SemanticChunker {
     
     /// Splits code blocks by line breaks, never severing a single line.
     /// Prepends the language context to every chunk to aid the embedding model.
-    private func chunkCode(_ code: String, language: String) -> [String] {
-        let lines = code.components(separatedBy: .newlines)
-        var chunks: [String] = []
-        var currentChunkLines: [String] = []
-        var currentSize = 0
-        
-        let langName = language.isEmpty ? "Code" : language
-        let prefix = "[\(langName) Context]:\n"
-        let prefixSize = prefix.count
-        
-        for line in lines {
-            let lineSize = line.count + 1 // +1 for the newline character
-            
-            // If adding this line exceeds the chunk size (and we already have lines)
-            if prefixSize + currentSize + lineSize > maxChunkSize && !currentChunkLines.isEmpty {
-                // Save the current code chunk
-                chunks.append(prefix + currentChunkLines.joined(separator: "\n"))
-                
-                // Overlap: retain the last 2 lines of code to maintain structural context across chunks
-                let overlapLines = Array(currentChunkLines.suffix(2))
-                currentChunkLines = overlapLines
-                currentSize = overlapLines.reduce(0) { $0 + $1.count + 1 }
-            }
-            
-            currentChunkLines.append(line)
-            currentSize += lineSize
-        }
-        
-        // Save any remaining lines
-        if !currentChunkLines.isEmpty {
-            chunks.append(prefix + currentChunkLines.joined(separator: "\n"))
-        }
-        
-        return chunks
+    private func chunkCode(_ code: String, language: String?) -> [String] {
+        // [RAG UPGRADE] Offload to the Tree-Sitter aware chunker!
+        // This parses the AST to ensure we split at syntactically safe boundaries.
+        let treeSitterChunker = TreeSitterCodeChunker(maxChunkSize: maxChunkSize, overlap: overlap)
+        return treeSitterChunker.chunk(code: code, languageName: language ?? "")
     }
     
     // MARK: - Utility Methods

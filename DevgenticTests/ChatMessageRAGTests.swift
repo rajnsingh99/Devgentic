@@ -171,17 +171,4 @@ final class ChatMessageRAGTests: XCTestCase {
         }
         XCTAssertFalse(codeBlocks.isEmpty, "Markdown with code fence should produce a .code block")
     }
-
-    // MARK: - RAG Indexing State
-
-    func testIsIndexedForRAG_DefaultsFalse() {
-        let msg = makeMessage(content: .plainText("test"))
-        XCTAssertFalse(msg.isIndexedForRAG)
-    }
-
-    func testIsIndexedForRAG_CanBeSetTrue() {
-        let msg = makeMessage(content: .plainText("test"))
-        msg.isIndexedForRAG = true
-        XCTAssertTrue(msg.isIndexedForRAG)
-    }
 }

@@ -19,6 +19,14 @@ struct AppSettings {
     static let speechModelKey = "speechModel"
     static let speechLanguageKey = "speechLanguage"
     static let speechAutoStopOnSilenceKey = "speechAutoStopOnSilence"
+
+    // Intelligence Core
+    static let isIntelligenceCoreEnabledKey = "isIntelligenceCoreEnabled"
+
+    // Notifications
+    static let notificationsEnabledKey = "notificationsEnabled"
+    static let notificationChannelsKey = "notificationChannels"
+    static let notificationPerConversationKey = "notificationPerConversation"
 }
 
 enum AgentViewVariant: String, Codable, CaseIterable, Identifiable {

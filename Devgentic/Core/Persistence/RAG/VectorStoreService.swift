@@ -11,174 +11,173 @@ import os
 
 // MARK: - Vector Store Service
 
-/// A service for managing the vector database using ObjectBox.
+/// A service for managing the vector database using ObjectBox with a native HNSW index.
 ///
-/// This singleton class handles initializing the database, adding new text chunks,
-/// and performing vector similarity searches (nearest neighbor search) to find
-/// relevant context for RAG.
+/// Search complexity is reduced from O(N) brute-force cosine similarity to O(log N) via ObjectBox's
+/// probabilistic Hierarchical Navigable Small World graph, configured for the 384-dimensional
+/// All-MiniLM-L6-v2 embedding space.  See `ChildChunkEntity` for index hyperparameter rationale.
 class VectorStoreService {
-    
+
     // MARK: - Singleton Instance
     static let shared = VectorStoreService()
-    
+
     // MARK: - Private Properties
     private let store: Store
     private let parentBox: Box<ParentDocumentEntity>
     private let childBox: Box<ChildChunkEntity>
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "VectorStoreService")
-    
+
+    // MARK: - HNSW Search Constants
+
+    /// Cosine distance threshold (= 1 − cosine_similarity).
+    /// L2-normalised vectors from EmbeddingService ensure cosine_distance = 1 − dot_product.
+    /// Equivalent to the previous similarity threshold of 0.3 (distance ≤ 0.7 → similarity ≥ 0.3).
+    private let maximumCosineDistance: Double = 0.7
+
     // MARK: - Initialization
-    
+
     /// Private initializer to set up the ObjectBox store and entity box.
+    ///
+    /// ⚠️ HNSW migration note: If migrating a large pre-existing dataset, the ObjectBox engine
+    /// compiles the full HNSW graph on first open (O(N·log N) complexity). For >100k vectors this
+    /// should be moved to a background Task with a "Optimizing database…" UI gate to avoid an
+    /// iOS Jetsam watchdog kill. For fresh installs (and after the Phase 3 wipe below) the DB
+    /// is empty so graph compilation is instantaneous.
     private init() {
         do {
-            // Define a specific directory for the vector database to keep it separate.
-            let appSupport = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            let appSupport = try FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true)
                 .appendingPathComponent(Bundle.main.bundleIdentifier!)
                 .appendingPathComponent("vector-db")
-            
-            // --- PHASE 2: DATABASE MIGRATION (WIPE) ---
-            // Wipe the existing vector-db directory to prepare for the new Parent/Child schema.
-            // This ensures invalid vectors (from the broken tokenizer) and the old flat schema are destroyed.
-            let migrationKey = "Phase2_VectorDB_Wiped"
-            if !UserDefaults.standard.bool(forKey: migrationKey) {
-                logger.info("Phase 2 Migration: Attempting to wipe old vector database...")
-                if FileManager.default.fileExists(atPath: appSupport.path) {
-                    try FileManager.default.removeItem(at: appSupport)
-                    logger.warning("Phase 2 Migration: Successfully wiped old vector-db directory.")
-                }
-                UserDefaults.standard.set(true, forKey: migrationKey)
-            }
-            // ------------------------------------------
 
-            // --- PHASE 3: TOKENIZER UPGRADE MIGRATION (WIPE) ---
-            // The previous EmbeddingService used a broken manual tokenizer that produced
-            // garbage embeddings. Now that we use a real WordPiece tokenizer via
-            // swift-transformers, all existing vectors are invalid and must be regenerated.
-            // This one-time wipe forces a full re-index with the correct tokenizer.
-            let tokenizerMigrationKey = "Phase3_TokenizerUpgrade_Wiped"
-            if !UserDefaults.standard.bool(forKey: tokenizerMigrationKey) {
-                logger.info("Phase 3 Migration: Wiping vector database for tokenizer upgrade (broken → WordPiece)...")
+            // --- PHASE 2: DATABASE MIGRATION (WIPE) ---
+            let phase2Key = "Phase2_VectorDB_Wiped"
+            if !UserDefaults.standard.bool(forKey: phase2Key) {
+                logger.info("Phase 2 Migration: Wiping old vector database...")
                 if FileManager.default.fileExists(atPath: appSupport.path) {
                     try FileManager.default.removeItem(at: appSupport)
-                    logger.warning("Phase 3 Migration: Successfully wiped vector-db. All messages will be re-indexed.")
                 }
-                // Also reset the RAG indexing flags so all messages get re-processed
-                CoreDataPersistenceService.shared.resetAllRAGIndexingFlags()
-                UserDefaults.standard.set(true, forKey: tokenizerMigrationKey)
+                UserDefaults.standard.set(true, forKey: phase2Key)
+                logger.warning("Phase 2 Migration: Complete.")
             }
-            // ------------------------------------------
-            
+
+            // --- PHASE 3: HNSW SCHEMA MIGRATION (WIPE) ---
+            // Reason: `embedding` changes from a FloatArrayConverter (Data blob) to a native
+            // [Float]? property with an `hnswIndex` annotation.  ObjectBox cannot auto-migrate
+            // between these fundamentally different storage representations, so a clean wipe is
+            // required.  A new `conversationID: String` field is also added to ChildChunkEntity.
+            let phase3Key = "Phase3_HNSW_Schema_Migrated"
+            if !UserDefaults.standard.bool(forKey: phase3Key) {
+                logger.info("Phase 3 Migration: Wiping vector database for HNSW schema upgrade...")
+                if FileManager.default.fileExists(atPath: appSupport.path) {
+                    try FileManager.default.removeItem(at: appSupport)
+                    logger.warning("Phase 3 Migration: Old vector-db wiped. Fresh HNSW index will be built.")
+                }
+                UserDefaults.standard.set(true, forKey: phase3Key)
+            }
+
             try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: nil)
-            
-            // Initialize the ObjectBox store.
-            // This will open an existing database or create a new one if it doesn't exist.
+
             self.store = try Store(directoryPath: appSupport.path)
-            
-            // Get the boxes for our entities. (ChunkEntity has been completely removed in Phase 5)
             self.parentBox = self.store.box(for: ParentDocumentEntity.self)
             self.childBox = self.store.box(for: ChildChunkEntity.self)
-            
-            logger.info("VectorStoreService initialized successfully. DB path: \(appSupport.path)")
+
+            logger.info("VectorStoreService (HNSW) initialized. DB path: \(appSupport.path)")
         } catch {
             logger.critical("Failed to initialize VectorStoreService: \(error.localizedDescription)")
             fatalError("Could not initialize ObjectBox store: \(error)")
         }
     }
-    
+
     // MARK: - Public API
-    
+
     /// Adds a semantic parent document and its associated child chunks to the vector database.
-    /// - Parameters:
-    ///   - parent: The full ParentDocumentEntity.
-    ///   - children: An array of vectorized ChildChunkEntity objects.
+    ///
+    /// The child's `conversationID` is denormalised from the parent here so that HNSW result
+    /// post-filtering can scope by conversation without an additional relation traversal per result.
     func addSemanticDocument(parent: ParentDocumentEntity, children: [ChildChunkEntity]) {
         do {
-            // Link the child chunks to their parent.
-            // In ObjectBox, linking a ToOne relation and putting the children will automatically
-            // persist the parent if it hasn't been saved yet.
+            let convIDString = parent.conversationID.uuidString
             for child in children {
                 child.parentDocument.target = parent
+                child.conversationID = convIDString
             }
             try childBox.put(children)
-            logger.debug("Successfully added Parent Document and \(children.count) semantic child chunks.")
+            logger.debug("Indexed \(children.count) HNSW child chunks for parent \(parent.sourceMessageID.uuidString).")
         } catch {
             logger.error("Failed to add semantic document to vector store: \(error.localizedDescription)")
         }
     }
-    
-    /// Finds the most relevant parent documents in the database related to a query embedding,
-    /// optionally scoped to a specific conversation. The search evaluates child chunks but returns parents.
+
+    /// Finds the most semantically relevant parent documents using the native ObjectBox HNSW index.
+    ///
+    /// The HNSW graph reduces search from O(N) linear scan to O(log N) graph traversal.
+    /// Results are returned in ascending distance order (ObjectBox guarantee); the first result
+    /// is the closest match.  The search is optionally scoped to a single conversation via
+    /// post-filtering on the denormalised `conversationID` field.
     ///
     /// - Parameters:
-    ///   - queryEmbedding: The vector embedding of the user's query.
-    ///   - limit: The maximum number of relevant documents to return.
-    ///   - conversationID: If provided, the search will be limited to chunks within this conversation.
-    /// - Returns: An array of the most relevant `ParentDocumentEntity` objects, sorted by relevance.
+    ///   - queryEmbedding: L2-normalised 384-D vector from `EmbeddingService`.
+    ///   - limit: Maximum number of unique parent documents to return.
+    ///   - conversationID: If set, only chunks belonging to this conversation are considered.
+    /// - Returns: Relevant `ParentDocumentEntity` objects, ordered by semantic proximity.
     func findNearest(to queryEmbedding: [Float], limit: Int, conversationID: UUID?) -> [ParentDocumentEntity] {
         do {
-            let childrenToSearch: [ChildChunkEntity]
-            
-            // --- Phase 5: Conditionally filter children by their parent's conversationID ---
-            if let convID = conversationID {
-                logger.info("Scoping vector search to conversation ID: \(convID.uuidString)")
-                
-                // 1. Fetch all parent documents for this conversation
-                let parentQuery: Query<ParentDocumentEntity> = try parentBox.query {
-                    ParentDocumentEntity.conversationID.isEqual(to: convID.uuidString, caseSensitive: false)
-                }.build()
-                
-                let validParentIds = Set(try parentQuery.find().map { $0.id })
-                
-                // 2. Filter children to only those whose parent is in the valid set
-                childrenToSearch = try childBox.all().filter { child in
-                    guard let parent = child.parentDocument.target else { return false }
-                    return validParentIds.contains(parent.id)
-                }
-            } else {
-                // If no conversation ID is provided, fall back to searching all chunks.
-                logger.warning("No conversation ID provided for vector search. Searching globally.")
-                childrenToSearch = try childBox.all()
-            }
+            // Oversample candidates to compensate for conversation-scoped post-filtering.
+            // Conversation chunks are typically a fraction of the total corpus, so we cast a
+            // wider net to ensure we fill `limit` slots after filtering.
+            let candidateCount = conversationID != nil ? max(50, limit * 10) : limit * 3
 
-            if childrenToSearch.isEmpty {
-                logger.debug("No child chunks in vector store to search for the given criteria.")
+            // Build the HNSW nearest-neighbours query.  ObjectBox evaluates this entirely within
+            // the C++ engine, traversing the multi-layered HNSW graph without pulling vectors into
+            // the Swift runtime for per-vector comparison.
+            let query = try childBox.query {
+                ChildChunkEntity.embedding.nearestNeighbors(
+                    queryVector: queryEmbedding,
+                    maxCount: candidateCount
+                )
+            }.build()
+
+            // findWithScores() returns ObjectWithScore instances sorted ascending by cosine distance.
+            // score = 0.0 → identical vectors; score = 2.0 → maximally dissimilar.
+            let results: [ObjectWithScore<ChildChunkEntity>] = try query.findWithScores()
+
+            if results.isEmpty {
+                logger.debug("HNSW search returned no candidates.")
                 return []
             }
-            
-            // Create a temporary structure to hold chunks and their similarity scores.
-            let scoredChunks = childrenToSearch.map { chunk in
-                (chunk: chunk, score: VectorMath.cosineSimilarity(between: queryEmbedding, and: chunk.embedding))
-            }
-            
-            // Sort by score in descending order (higher is better).
-            let sortedChunks = scoredChunks.sorted { $0.score > $1.score }
 
-            // Apply minimum similarity threshold.
-            let minimumSimilarity: Float = 0.3
-            let qualifiedChunks = sortedChunks.filter { $0.score >= minimumSimilarity }
-            
-            // Extract unique parent documents, preserving the order of the highest-scoring children
             var uniqueParents: [ParentDocumentEntity] = []
             var seenParentIDs: Set<Id> = []
             var scoresSummary: [String] = []
-            
-            for item in qualifiedChunks {
-                if uniqueParents.count >= limit { break }
-                
-                // Traverse the ObjectBox relation to get the parent
-                if let parent = item.chunk.parentDocument.target, !seenParentIDs.contains(parent.id) {
+
+            for result in results {
+                guard uniqueParents.count < limit else { break }
+
+                // Early exit: results are sorted ascending, so once distance exceeds the threshold
+                // every subsequent result will also fail.
+                guard result.score <= maximumCosineDistance else { break }
+
+                let chunk = result.object
+
+                // Conversation scoping: post-filter using the denormalised conversationID string.
+                if let convID = conversationID {
+                    guard chunk.conversationID == convID.uuidString else { continue }
+                }
+
+                if let parent = chunk.parentDocument.target, !seenParentIDs.contains(parent.id) {
                     seenParentIDs.insert(parent.id)
                     uniqueParents.append(parent)
-                    scoresSummary.append(String(format: "%.3f", item.score))
+                    scoresSummary.append(String(format: "d=%.3f", result.score))
                 }
             }
 
-            logger.info("Found \(uniqueParents.count) relevant parent documents for query (scores: [\(scoresSummary.joined(separator: ", "))], threshold: \(minimumSimilarity)).")
+            logger.info("HNSW: \(uniqueParents.count) documents retrieved ([\(scoresSummary.joined(separator: ", "))], maxDist: \(self.maximumCosineDistance)).")
             return uniqueParents
-            
+
         } catch {
-            logger.error("Failed to fetch chunks for nearest neighbor search: \(error.localizedDescription)")
+            logger.error("HNSW vector search failed: \(error.localizedDescription)")
             return []
         }
     }

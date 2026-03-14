@@ -7,32 +7,6 @@
 
 import Foundation
 
-// MARK: - Phase 2: Memory & State Protocols
-
-/// Manages the volatile "scratchpad" memory for the ReAct loop, handling observation
-/// hydration, eviction, and system alert insertions.
-protocol ObservationMemoryManaging: Sendable {
-    var activeObservations: [CognitiveObservation] { get }
-    
-    mutating func addSystemAlert(_ msg: String, currentIteration: Int)
-    mutating func resetObservationFlags()
-    mutating func hydrateObservations(targetIds: [Int], currentIteration: Int) -> (msg: String, hydratedCount: Int)
-    mutating func addObservation(toolName: String, shortObservation: String, heavyContent: String?, isRequired: Bool)
-    mutating func addObservations(_ observations: [CognitiveObservation])
-}
-
-/// Manages interactions with the persistent `SessionGraph` via `ContextMemoryManager`.
-/// Completely decouples the executor from storage implementation details.
-protocol EpisodeStateMutating: Sendable {
-    var currentState: SessionGraph { get }
-    var currentConstraints: Set<String> { get }
-    
-    mutating func startNewEpisode(goal: String)
-    mutating func forceCloseActiveEpisode(status: String, outcome: String?)
-    mutating func addNegativeConstraint(_ path: String)
-    mutating func markAsCancelled()
-}
-
 // MARK: - Phase 3: Safety & Retry Protocols
 
 /// The resulting action the executor must take based on safety evaluations.

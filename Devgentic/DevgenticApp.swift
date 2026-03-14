@@ -11,6 +11,7 @@
 
 import SwiftUI
 import CoreData
+import UserNotifications
 
 @main
 struct DevgenticApp: App {
@@ -49,11 +50,22 @@ struct DevgenticApp: App {
         self._chatHistoryViewModel = StateObject(wrappedValue: chatHistoryVM)
         self._mainApplicationViewModel = StateObject(wrappedValue: mainVM)
 
-        // Start background RAG indexing service (processes chat messages into vector embeddings)
-        // Skip during unit tests to prevent ObjectBox/CoreData initialization crashes
-//        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
-//            RAGIndexingService.shared.start()
-//        }
+        // MARK: - Notification system bootstrap
+        // Register the local delivery channel with the dispatcher so tasks can
+        // fire macOS system notifications on completion.
+        Task {
+            let channel = LocalNotificationChannel()
+            await NotificationDispatcher.shared.register(channel)
+        }
+
+        // MARK: - Scheduler bootstrap
+        // Load persisted tasks and arm their timers so recurring / one-shot tasks
+        // survive an app restart without needing any user interaction.
+        Task { @MainActor in
+            SchedulerService.shared.mainViewModel = mainVM
+            SchedulerService.shared.loadAllTasks()
+            SchedulerService.shared.rescheduleAll()
+        }
     }
 
     var body: some Scene {
@@ -67,6 +79,10 @@ struct DevgenticApp: App {
                 .environmentObject(chatHistoryViewModel)
                 .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
                 .tint(themeManager.currentTheme.accentColor)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    // Catch up any scheduled tasks that fired while the app was in the background.
+                    SchedulerService.shared.evaluateAndFireDueTasks()
+                }
         }
         .commands {
             CommandMenu("File") {

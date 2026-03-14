@@ -157,6 +157,47 @@ struct GeneralSettingsView: View {
                             }
                     }
                 }
+
+                // 3. Intelligence Core Section
+                SettingsCard(title: "Intelligence Core", icon: "cpu.fill", theme: theme) {
+                    SettingsRow(
+                        title: "Enable Intelligence Core",
+                        description: "An isolated on-device MLX model used for background processing and intelligence tasks. Enabling this will download the model (~1.2GB) if not present.",
+                        theme: theme
+                    ) {
+                        VStack(alignment: .trailing, spacing: 12) {
+                            if viewModel.isIntelligenceCoreDownloading {
+                                HStack(spacing: 8) {
+                                    ProgressView(value: viewModel.intelligenceCoreDownloadProgress)
+                                        .progressViewStyle(.linear)
+                                        .frame(width: 100)
+                                    Text("\(Int(viewModel.intelligenceCoreDownloadProgress * 100))%")
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .foregroundColor(theme.secondaryText)
+                                }
+                            }
+                            
+                            Toggle("", isOn: $viewModel.isIntelligenceCoreEnabled)
+                                .toggleStyle(.switch)
+                                .labelsHidden()
+                                .tint(theme.accentColor)
+                                .disabled(viewModel.isIntelligenceCoreDownloading)
+                        }
+                    }
+                    
+                    if let error = viewModel.intelligenceCoreError {
+                        Divider().background(theme.dividerColor)
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(theme.warningColor)
+                            Text(error)
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.warningColor)
+                            Spacer()
+                        }
+                        .padding(16)
+                    }
+                }
             }
             .padding(24)
             .padding(.bottom, 24)

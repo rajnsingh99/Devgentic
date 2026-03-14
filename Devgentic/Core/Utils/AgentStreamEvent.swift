@@ -51,6 +51,24 @@ enum AgentStreamEvent: Sendable {
 
     /// A non-fatal warning or error message to display in the trace/debug log.
     case error(String)
+
+    // MARK: - Workflow Orchestration Events
+
+    /// A workflow node has started execution.
+    /// - nodeID: Canvas node identifier
+    /// - profileName: Display name of the profile being executed
+    /// - index: 1-based index of this node in execution order
+    /// - total: Total number of nodes in the workflow
+    case workflowNodeStarted(nodeID: UUID, profileName: String, index: Int, total: Int)
+
+    /// A workflow node has completed execution successfully.
+    case workflowNodeCompleted(nodeID: UUID, profileName: String, summary: String)
+
+    /// A workflow node has failed.
+    case workflowNodeFailed(nodeID: UUID, profileName: String, error: String)
+
+    /// Overall workflow progress update.
+    case workflowProgress(completed: Int, total: Int)
 }
 
 /// Structured output from a tool execution.

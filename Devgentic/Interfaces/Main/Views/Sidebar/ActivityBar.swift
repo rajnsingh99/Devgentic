@@ -147,7 +147,7 @@ struct ActivityBarButton: View {
             if viewModel.showSettings { viewModel.showSettings = false }
 
 
-        case .promptLibrary, .conversations, .explorer, .user:
+        case .promptLibrary, .conversations, .explorer, .scheduler:
             if selectedTab == tab {
                 isSidebarVisible.toggle()
                 logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
@@ -169,8 +169,8 @@ struct ActivityBarView: View {
     @Binding var selectedTab: SidebarTab?
     @Binding var isSidebarVisible: Bool
 
-    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .backendProfiles]
-    private let bottomTabs: [SidebarTab] = [.settings, .user]
+    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles]
+    private let bottomTabs: [SidebarTab] = [.settings]
 
 
     var body: some View {

@@ -135,12 +135,13 @@ actor ChatExecutor: Executor {
             systemTextParts.append(instructions)
         }
 
-        // If RAG context is present, we inject it into the system prompt or as a preamble.
+        // If grounding context is present, we inject it into the system prompt or as a preamble.
         // For Bots, we typically prepend it to ensure adherence.
-        if let ragContext = input.ragContext, !ragContext.isEmpty {
+        let grounding = input.longTermMemory.getStaticGrounding()
+        if !grounding.isEmpty {
             let contextBlock = """
             ### CONTEXT FROM KNOWLEDGE BASE
-            \(ragContext)
+            \(grounding)
             ### END CONTEXT
             (Please use the context above if relevant to answer the following question)
             """

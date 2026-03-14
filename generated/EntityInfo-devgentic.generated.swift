@@ -7,8 +7,183 @@ import Foundation
 
 // MARK: - Entity metadata
 
-extension ParentDocumentEntity: ObjectBox.Entity {}
 extension ChildChunkEntity: ObjectBox.Entity {}
+extension ParentDocumentEntity: ObjectBox.Entity {}
+
+extension ChildChunkEntity: ObjectBox.__EntityRelatable {
+    internal typealias EntityType = ChildChunkEntity
+
+    internal var _id: EntityId<ChildChunkEntity> {
+        return EntityId<ChildChunkEntity>(self.id.value)
+    }
+}
+
+extension ChildChunkEntity: ObjectBox.EntityInspectable {
+    internal typealias EntityBindingType = ChildChunkEntityBinding
+
+    /// Generated metadata used by ObjectBox to persist the entity.
+    internal static let entityInfo = ObjectBox.EntityInfo(name: "ChildChunkEntity", id: 3)
+
+    internal static let entityBinding = EntityBindingType()
+
+    fileprivate static func buildEntity(modelBuilder: ObjectBox.ModelBuilder) throws {
+        let entityBuilder = try modelBuilder.entityBuilder(for: ChildChunkEntity.self, id: 3, uid: 1682473059827456000)
+        try entityBuilder.addProperty(name: "id", type: PropertyType.long, flags: [.id], id: 1, uid: 8274615930285143040)
+        try entityBuilder.addProperty(name: "chunkText", type: PropertyType.string, id: 2, uid: 9163027485921738752)
+        try entityBuilder.addProperty(name: "embedding", type: PropertyType.floatVector, flags: [.indexed], id: 3, uid: 1047382956103847936, indexId: 2, indexUid: 243373707592068352)
+            .hnswParams(dimensions: 384, neighborsPerNode: 48, indexingSearchCount: 200, flags: nil, distanceType: HnswDistanceType.cosine, reparationBacklinkProbability: nil, vectorCacheHintSizeKB: 524288)
+        try entityBuilder.addProperty(name: "chunkIndex", type: PropertyType.long, id: 4, uid: 2538194607326951424)
+        try entityBuilder.addProperty(name: "conversationID", type: PropertyType.string, id: 6, uid: 2322328137919046912)
+        try entityBuilder.addToOneRelation(name: "parentDocument", targetEntityInfo: ToOne<ParentDocumentEntity>.Target.entityInfo, flags: [.indexed, .indexPartialSkipZero], id: 5, uid: 3692851740519263232, indexId: 1, indexUid: 4817293650284719104)
+
+        try entityBuilder.lastProperty(id: 6, uid: 2322328137919046912)
+    }
+}
+
+extension ChildChunkEntity {
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.id == myId }
+    internal static var id: Property<ChildChunkEntity, Id, Id> { return Property<ChildChunkEntity, Id, Id>(propertyId: 1, isPrimaryKey: true) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.chunkText.startsWith("X") }
+    internal static var chunkText: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.embedding.isGreaterThan(value) }
+    internal static var embedding: Property<ChildChunkEntity, HnswIndexPropertyType, Void> { return Property<ChildChunkEntity, HnswIndexPropertyType, Void>(propertyId: 3, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.chunkIndex > 1234 }
+    internal static var chunkIndex: Property<ChildChunkEntity, Int, Void> { return Property<ChildChunkEntity, Int, Void>(propertyId: 4, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ChildChunkEntity.conversationID.startsWith("X") }
+    internal static var conversationID: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
+    internal static var parentDocument: Property<ChildChunkEntity, EntityId<ToOne<ParentDocumentEntity>.Target>, ToOne<ParentDocumentEntity>.Target> { return Property(propertyId: 5) }
+
+
+    fileprivate func __setId(identifier: ObjectBox.Id) {
+        self.id = Id(identifier)
+    }
+}
+
+extension ObjectBox.Property where E == ChildChunkEntity {
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .id == myId }
+
+    internal static var id: Property<ChildChunkEntity, Id, Id> { return Property<ChildChunkEntity, Id, Id>(propertyId: 1, isPrimaryKey: true) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .chunkText.startsWith("X") }
+
+    internal static var chunkText: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .embedding.isNotNil() }
+
+    internal static var embedding: Property<ChildChunkEntity, HnswIndexPropertyType, Void> { return Property<ChildChunkEntity, HnswIndexPropertyType, Void>(propertyId: 3, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .chunkIndex > 1234 }
+
+    internal static var chunkIndex: Property<ChildChunkEntity, Int, Void> { return Property<ChildChunkEntity, Int, Void>(propertyId: 4, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .conversationID.startsWith("X") }
+
+    internal static var conversationID: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 6, isPrimaryKey: false) }
+
+    internal static var parentDocument: Property<ChildChunkEntity, ToOne<ParentDocumentEntity>.Target.EntityBindingType.IdType, ToOne<ParentDocumentEntity>.Target> { return Property<ChildChunkEntity, ToOne<ParentDocumentEntity>.Target.EntityBindingType.IdType, ToOne<ParentDocumentEntity>.Target>(propertyId: 5) }
+
+}
+
+
+/// Generated service type to handle persisting and reading entity data. Exposed through `ChildChunkEntity.EntityBindingType`.
+internal final class ChildChunkEntityBinding: ObjectBox.EntityBinding, Sendable {
+    internal typealias EntityType = ChildChunkEntity
+    internal typealias IdType = Id
+
+    internal required init() {}
+
+    internal func generatorBindingVersion() -> Int { 1 }
+
+    internal func setEntityIdUnlessStruct(of entity: EntityType, to entityId: ObjectBox.Id) {
+        entity.__setId(identifier: entityId)
+    }
+
+    internal func entityId(of entity: EntityType) -> ObjectBox.Id {
+        return entity.id.value
+    }
+
+    internal func collect(fromEntity entity: EntityType, id: ObjectBox.Id,
+                                  propertyCollector: ObjectBox.FlatBufferBuilder, store: ObjectBox.Store) throws {
+        let propertyOffset_chunkText = propertyCollector.prepare(string: entity.chunkText)
+        let propertyOffset_embedding = propertyCollector.prepare(values: entity.embedding)
+        let propertyOffset_conversationID = propertyCollector.prepare(string: entity.conversationID)
+
+        propertyCollector.collect(id, at: 2 + 2 * 1)
+        propertyCollector.collect(entity.chunkIndex, at: 2 + 2 * 4)
+        try propertyCollector.collect(entity.parentDocument, at: 2 + 2 * 5, store: store)
+        propertyCollector.collect(dataOffset: propertyOffset_chunkText, at: 2 + 2 * 2)
+        propertyCollector.collect(dataOffset: propertyOffset_embedding, at: 2 + 2 * 3)
+        propertyCollector.collect(dataOffset: propertyOffset_conversationID, at: 2 + 2 * 6)
+    }
+
+    internal func postPut(fromEntity entity: EntityType, id: ObjectBox.Id, store: ObjectBox.Store) throws {
+        if entityId(of: entity) == 0 {  // New object was put? Attach relations now that we have an ID.
+            entity.parentDocument.attach(to: store.box(for: ParentDocumentEntity.self))
+        }
+    }
+    internal func setToOneRelation(_ propertyId: obx_schema_id, of entity: EntityType, to entityId: ObjectBox.Id?) {
+        switch propertyId {
+            case 5:
+                entity.parentDocument.targetId = (entityId != nil) ? EntityId<ParentDocumentEntity>(entityId!) : nil
+            default:
+                fatalError("Attempt to change nonexistent ToOne relation with ID \(propertyId)")
+        }
+    }
+    internal func createEntity(entityReader: ObjectBox.FlatBufferReader, store: ObjectBox.Store) -> EntityType {
+        let entity = ChildChunkEntity()
+
+        entity.id = entityReader.read(at: 2 + 2 * 1)
+        entity.chunkText = entityReader.read(at: 2 + 2 * 2)
+        entity.embedding = entityReader.read(at: 2 + 2 * 3)
+        entity.chunkIndex = entityReader.read(at: 2 + 2 * 4)
+        entity.conversationID = entityReader.read(at: 2 + 2 * 6)
+
+        entity.parentDocument = entityReader.read(at: 2 + 2 * 5, store: store)
+        return entity
+    }
+}
+
+
 
 extension ParentDocumentEntity: ObjectBox.__EntityRelatable {
     internal typealias EntityType = ParentDocumentEntity
@@ -44,39 +219,30 @@ extension ParentDocumentEntity {
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
     ///     box.query { ParentDocumentEntity.id == myId }
-
     internal static var id: Property<ParentDocumentEntity, Id, Id> { return Property<ParentDocumentEntity, Id, Id>(propertyId: 1, isPrimaryKey: true) }
-
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
     ///     box.query { ParentDocumentEntity.sourceMessageID.startsWith("X") }
-
     internal static var sourceMessageID: Property<ParentDocumentEntity, String, Void> { return Property<ParentDocumentEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
-
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
     ///     box.query { ParentDocumentEntity.conversationID.startsWith("X") }
-
     internal static var conversationID: Property<ParentDocumentEntity, String, Void> { return Property<ParentDocumentEntity, String, Void>(propertyId: 3, isPrimaryKey: false) }
-
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
     ///     box.query { ParentDocumentEntity.fullTextContent.startsWith("X") }
-
     internal static var fullTextContent: Property<ParentDocumentEntity, String, Void> { return Property<ParentDocumentEntity, String, Void>(propertyId: 4, isPrimaryKey: false) }
-
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
     ///     box.query { ParentDocumentEntity.timestamp > 1234 }
-
     internal static var timestamp: Property<ParentDocumentEntity, Date, Void> { return Property<ParentDocumentEntity, Date, Void>(propertyId: 5, isPrimaryKey: false) }
 
     fileprivate func __setId(identifier: ObjectBox.Id) {
@@ -172,171 +338,6 @@ internal final class ParentDocumentEntityBinding: ObjectBox.EntityBinding, Senda
 }
 
 
-extension ChildChunkEntity: ObjectBox.__EntityRelatable {
-    internal typealias EntityType = ChildChunkEntity
-
-    internal var _id: EntityId<ChildChunkEntity> {
-        return EntityId<ChildChunkEntity>(self.id.value)
-    }
-}
-
-extension ChildChunkEntity: ObjectBox.EntityInspectable {
-    internal typealias EntityBindingType = ChildChunkEntityBinding
-
-    /// Generated metadata used by ObjectBox to persist the entity.
-    internal static let entityInfo = ObjectBox.EntityInfo(name: "ChildChunkEntity", id: 3)
-
-    internal static let entityBinding = EntityBindingType()
-
-    fileprivate static func buildEntity(modelBuilder: ObjectBox.ModelBuilder) throws {
-        let entityBuilder = try modelBuilder.entityBuilder(for: ChildChunkEntity.self, id: 3, uid: 1682473059827456000)
-        try entityBuilder.addProperty(name: "id", type: PropertyType.long, flags: [.id], id: 1, uid: 8274615930285143040)
-        try entityBuilder.addProperty(name: "chunkText", type: PropertyType.string, id: 2, uid: 9163027485921738752)
-        try entityBuilder.addProperty(name: "embedding", type: PropertyType.byteVector, id: 3, uid: 1047382956103847936)
-        try entityBuilder.addProperty(name: "chunkIndex", type: PropertyType.long, id: 4, uid: 2538194607326951424)
-        try entityBuilder.addToOneRelation(name: "parentDocument", targetEntityInfo: ParentDocumentEntity.entityInfo, id: 5, uid: 3692851740519263232, indexId: 1, indexUid: 4817293650284719104)
-
-        try entityBuilder.lastProperty(id: 5, uid: 3692851740519263232)
-    }
-}
-
-extension ChildChunkEntity {
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { ChildChunkEntity.id == myId }
-
-    internal static var id: Property<ChildChunkEntity, Id, Id> { return Property<ChildChunkEntity, Id, Id>(propertyId: 1, isPrimaryKey: true) }
-
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { ChildChunkEntity.chunkText.startsWith("X") }
-
-    internal static var chunkText: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
-
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { ChildChunkEntity.embedding > 1234 }
-
-    internal static var embedding: Property<ChildChunkEntity, Data, Void> { return Property<ChildChunkEntity, Data, Void>(propertyId: 3, isPrimaryKey: false) }
-
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { ChildChunkEntity.chunkIndex > 1234 }
-
-    internal static var chunkIndex: Property<ChildChunkEntity, Int, Void> { return Property<ChildChunkEntity, Int, Void>(propertyId: 4, isPrimaryKey: false) }
-
-    internal static var parentDocument: Property<ChildChunkEntity, EntityId<ParentDocumentEntity>, ParentDocumentEntity> { return Property(propertyId: 5) }
-
-    fileprivate func __setId(identifier: ObjectBox.Id) {
-        self.id = Id(identifier)
-    }
-}
-
-extension ObjectBox.Property where E == ChildChunkEntity {
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { .id == myId }
-
-    internal static var id: Property<ChildChunkEntity, Id, Id> { return Property<ChildChunkEntity, Id, Id>(propertyId: 1, isPrimaryKey: true) }
-
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { .chunkText.startsWith("X") }
-
-    internal static var chunkText: Property<ChildChunkEntity, String, Void> { return Property<ChildChunkEntity, String, Void>(propertyId: 2, isPrimaryKey: false) }
-
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { .embedding > 1234 }
-
-    internal static var embedding: Property<ChildChunkEntity, Data, Void> { return Property<ChildChunkEntity, Data, Void>(propertyId: 3, isPrimaryKey: false) }
-
-    /// Generated entity property information.
-    ///
-    /// You may want to use this in queries to specify fetch conditions, for example:
-    ///
-    ///     box.query { .chunkIndex > 1234 }
-
-    internal static var chunkIndex: Property<ChildChunkEntity, Int, Void> { return Property<ChildChunkEntity, Int, Void>(propertyId: 4, isPrimaryKey: false) }
-
-    internal static var parentDocument: Property<ChildChunkEntity, Id, ParentDocumentEntity> { return Property<ChildChunkEntity, Id, ParentDocumentEntity>(propertyId: 5) }
-
-}
-
-
-/// Generated service type to handle persisting and reading entity data. Exposed through `ChildChunkEntity.EntityBindingType`.
-internal final class ChildChunkEntityBinding: ObjectBox.EntityBinding, Sendable {
-    internal typealias EntityType = ChildChunkEntity
-    internal typealias IdType = Id
-
-    internal required init() {}
-
-    internal func generatorBindingVersion() -> Int { 1 }
-
-    internal func setEntityIdUnlessStruct(of entity: EntityType, to entityId: ObjectBox.Id) {
-        entity.__setId(identifier: entityId)
-    }
-
-    internal func entityId(of entity: EntityType) -> ObjectBox.Id {
-        return entity.id.value
-    }
-
-    internal func collect(fromEntity entity: EntityType, id: ObjectBox.Id,
-                                  propertyCollector: ObjectBox.FlatBufferBuilder, store: ObjectBox.Store) throws {
-        let propertyOffset_chunkText = propertyCollector.prepare(string: entity.chunkText)
-        let propertyOffset_embedding = propertyCollector.prepare(bytes: FloatArrayConverter.convert(entity.embedding))
-
-        propertyCollector.collect(id, at: 2 + 2 * 1)
-        propertyCollector.collect(entity.chunkIndex, at: 2 + 2 * 4)
-        try propertyCollector.collect(entity.parentDocument, at: 2 + 2 * 5, store: store)
-        propertyCollector.collect(dataOffset: propertyOffset_chunkText, at: 2 + 2 * 2)
-        propertyCollector.collect(dataOffset: propertyOffset_embedding, at: 2 + 2 * 3)
-    }
-
-    internal func postPut(fromEntity entity: EntityType, id: ObjectBox.Id, store: ObjectBox.Store) throws {
-        if entityId(of: entity) == 0 {
-            entity.parentDocument.attach(to: store.box(for: ParentDocumentEntity.self))
-        }
-    }
-
-    internal func setToOneRelation(_ propertyId: obx_schema_id, of entity: EntityType, to entityId: ObjectBox.Id?) {
-        switch propertyId {
-            case 5:
-                entity.parentDocument.targetId = (entityId != nil) ? EntityId<ParentDocumentEntity>(entityId!) : nil
-            default:
-                fatalError("Attempt to change nonexistent ToOne relation with ID \(propertyId)")
-        }
-    }
-
-    internal func createEntity(entityReader: ObjectBox.FlatBufferReader, store: ObjectBox.Store) -> EntityType {
-        let entity = ChildChunkEntity()
-
-        entity.id = entityReader.read(at: 2 + 2 * 1)
-        entity.chunkText = entityReader.read(at: 2 + 2 * 2)
-        entity.embedding = FloatArrayConverter.convert(entityReader.read(at: 2 + 2 * 3))
-        entity.chunkIndex = entityReader.read(at: 2 + 2 * 4)
-
-        entity.parentDocument = entityReader.read(at: 2 + 2 * 5, store: store)
-
-        return entity
-    }
-}
-
-
 /// Helper function that allows calling Enum(rawValue: value) with a nil value, which will return nil.
 fileprivate func optConstruct<T: RawRepresentable>(_ type: T.Type, rawValue: T.RawValue?) -> T? {
     guard let rawValue = rawValue else { return nil }
@@ -347,10 +348,10 @@ fileprivate func optConstruct<T: RawRepresentable>(_ type: T.Type, rawValue: T.R
 
 fileprivate func cModel() throws -> OpaquePointer {
     let modelBuilder = try ObjectBox.ModelBuilder()
-    try ParentDocumentEntity.buildEntity(modelBuilder: modelBuilder)
     try ChildChunkEntity.buildEntity(modelBuilder: modelBuilder)
+    try ParentDocumentEntity.buildEntity(modelBuilder: modelBuilder)
     modelBuilder.lastEntity(id: 3, uid: 1682473059827456000)
-    modelBuilder.lastIndex(id: 1, uid: 4817293650284719104)
+    modelBuilder.lastIndex(id: 2, uid: 243373707592068352)
     return modelBuilder.finish()
 }
 
@@ -358,7 +359,7 @@ extension ObjectBox.Store {
     /// A store with a fully configured model. Created by the code generator with your model's metadata in place.
     ///
     /// # In-memory database
-    /// To use a file-less in-memory database, instead of a directory path pass `memory:`
+    /// To use a file-less in-memory database, instead of a directory path pass `memory:` 
     /// together with an identifier string:
     /// ```swift
     /// let inMemoryStore = try Store(directoryPath: "memory:test-db")

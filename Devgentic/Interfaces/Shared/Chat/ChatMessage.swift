@@ -86,7 +86,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     @Published var pendingClarification: PendingClarification? = nil
     
     // MARK: - RAG Indexing State
-    var isIndexedForRAG: Bool = false
+    // No longer polled; index occurs on stream completion.
 
     /// Estimated token count for the message content.
     /// Uses a heuristic of ~4 characters per token (standard for English/code text).

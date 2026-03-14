@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import AppKit
 import os
 
 
@@ -176,6 +177,24 @@ class ActiveStreamManager: ObservableObject {
                         
                     case .error(let errorMsg):
                         logger.error("Stream Error Event: \(errorMsg)")
+
+                    // MARK: Workflow Orchestration Events
+                    case .workflowNodeStarted(_, let profileName, let idx, let total):
+                        agentMessage.thinkingHeadline = "Running \(profileName) (\(idx)/\(total))..."
+                        agentMessage.agentState = .acting(.subtask(current: idx, total: total))
+
+                    case .workflowNodeCompleted(_, let profileName, let summary):
+                        agentMessage.thinkingHeadline = "\(profileName) completed"
+                        let completedId = UUID()
+                        agentMessage.timelineEvents.append(.thought(id: completedId, text: "✅ \(profileName): \(summary)"))
+
+                    case .workflowNodeFailed(_, let profileName, let error):
+                        agentMessage.thinkingHeadline = "\(profileName) failed"
+                        let failedId = UUID()
+                        agentMessage.timelineEvents.append(.thought(id: failedId, text: "❌ \(profileName): \(error)"))
+
+                    case .workflowProgress(let completed, let total):
+                        agentMessage.thinkingHeadline = "Workflow progress: \(completed)/\(total)"
                     }
                 }
                 
@@ -195,7 +214,7 @@ class ActiveStreamManager: ObservableObject {
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
             }
             
-            await self.removeTask(for: agentMessage.id)
+            self.removeTask(for: agentMessage.id)
             onComplete()
         }
         
@@ -262,7 +281,42 @@ class ActiveStreamManager: ObservableObject {
             await persistenceService.addMessage(message, to: targetEntity)
         }
         
+        // [RAG UPGRADE] Event-Driven Vectorization
+        // Fire-and-forget: Index the final message into the vector database without blocking the UI.
+        Task.detached(priority: .background) {
+            // Brief pause to ensure UI settles and CoreData write completes
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            await RAGIndexingService.shared.indexSingleMessage(message)
+        }
+        
         activeStreams.removeValue(forKey: message.id)
+
+        // Dispatch notification if app is in background
+        let notifConversationID = conversationID
+        let hasError = error != nil
+        let summaryText: String = {
+            switch message.content {
+            case .plainText(let text), .markdownText(let text):
+                return String(text.prefix(100))
+            default:
+                return hasError ? "An error occurred." : "Response complete."
+            }
+        }()
+
+        Task.detached(priority: .utility) {
+            let isAppActive = await MainActor.run { NSApp.isActive }
+            guard !isAppActive else { return }
+
+            let config = await NotificationConfiguration.shared
+            guard await config.isNotificationEnabled(for: notifConversationID) else { return }
+
+            let payload = AppNotificationPayload(
+                title: hasError ? "Query Failed" : "Query Completed",
+                body: summaryText,
+                conversationID: notifConversationID
+            )
+            await NotificationDispatcher.shared.dispatch(payload)
+        }
     }
     
     

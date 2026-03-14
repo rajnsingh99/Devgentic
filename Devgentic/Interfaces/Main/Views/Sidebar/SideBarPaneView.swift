@@ -14,9 +14,9 @@ enum SidebarTab: CaseIterable, Identifiable {
     case conversations
     case explorer
     case promptLibrary
+    case scheduler
     case backendProfiles
     case settings
-    case user
 
     var id: Self { self }
 
@@ -24,9 +24,9 @@ enum SidebarTab: CaseIterable, Identifiable {
         switch self {
         case .conversations: return "message"
         case .promptLibrary: return "square.stack.3d.up.fill"
+        case .scheduler: return "clock.badge"
         case .backendProfiles: return "cpu"
         case .settings: return "gearshape"
-        case .user: return "person.crop.circle"
         case .explorer: return "folder"
         }
     }
@@ -35,9 +35,9 @@ enum SidebarTab: CaseIterable, Identifiable {
         switch self {
         case .conversations: return "Chats"
         case .promptLibrary: return "Prompts"
+        case .scheduler: return "Scheduler"
         case .backendProfiles: return "Profiles"
         case .settings: return "Settings"
-        case .user: return "Account"
         case .explorer: return "Explorer"
         }
     }
@@ -83,13 +83,13 @@ struct SideBarPaneView: View {
                     ConversationSidebarView()
                 case .promptLibrary:
                     PromptLibrarySidebarView()
+                case .scheduler:
+                    TaskSchedulerSidebarView()
                 case .backendProfiles:
                     // Placeholder or actual view for Profiles
                     PlaceholderSidebarView(icon: "cpu", title: "Backend Profiles", description: "Manage your AI models and agents here.")
                 case .settings:
                     PlaceholderSidebarView(icon: "gearshape", title: "Settings", description: "Application preferences coming soon.")
-                case .user:
-                    PlaceholderSidebarView(icon: "person.crop.circle", title: "Account", description: "User profile management coming soon.")
                 case .none:
                     Spacer()
                 }
@@ -104,7 +104,7 @@ struct SideBarPaneView: View {
     
     private func shouldShowGenericHeader(for tab: SidebarTab) -> Bool {
         switch tab {
-        case .explorer, .conversations, .promptLibrary:
+        case .explorer, .conversations, .promptLibrary, .scheduler:
             return false // These views have their own search bars/headers
         default:
             return true

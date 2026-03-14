@@ -4,49 +4,95 @@
   "_note3": "If you have VCS merge conflicts, you must resolve them according to ObjectBox docs.",
   "entities": [
     {
-      "id": "1:8850547422367127552",
-      "lastPropertyId": "5:27700735494270208",
-      "name": "ChunkEntity",
+      "id": "2:2945786103589142528",
+      "lastPropertyId": "5:7531926084731928576",
+      "name": "ParentDocumentEntity",
       "properties": [
         {
           "flags": 1,
-          "id": "1:7368259189620248064",
+          "id": "1:3871524690125618176",
           "name": "id",
           "type": 6
         },
         {
-          "id": "2:165968057040098560",
+          "id": "2:4208963517832046592",
           "name": "sourceMessageID",
           "type": 9
         },
         {
-          "id": "3:2038332945049212160",
-          "name": "content",
+          "id": "3:5649271038461280256",
+          "name": "conversationID",
           "type": 9
         },
         {
-          "id": "4:7150978206688453888",
-          "name": "embedding",
-          "type": 23
+          "id": "4:6102843719584372736",
+          "name": "fullTextContent",
+          "type": 9
         },
         {
-          "id": "5:27700735494270208",
+          "id": "5:7531926084731928576",
           "name": "timestamp",
           "type": 10
         }
       ],
       "relations": []
+    },
+    {
+      "id": "3:1682473059827456000",
+      "lastPropertyId": "5:3692851740519263232",
+      "name": "ChildChunkEntity",
+      "properties": [
+        {
+          "flags": 1,
+          "id": "1:8274615930285143040",
+          "name": "id",
+          "type": 6
+        },
+        {
+          "id": "2:9163027485921738752",
+          "name": "chunkText",
+          "type": 9
+        },
+        {
+          "id": "3:1047382956103847936",
+          "name": "embedding",
+          "type": 23
+        },
+        {
+          "id": "4:2538194607326951424",
+          "name": "chunkIndex",
+          "type": 6
+        },
+        {
+          "flags": 520,
+          "id": "5:3692851740519263232",
+          "indexId": "1:4817293650284719104",
+          "name": "parentDocument",
+          "relationTarget": "ParentDocumentEntity",
+          "type": 11
+        }
+      ],
+      "relations": []
     }
   ],
-  "lastEntityId": "1:8850547422367127552",
-  "lastIndexId": "0:0",
+  "lastEntityId": "3:1682473059827456000",
+  "lastIndexId": "1:4817293650284719104",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",
   "modelVersion": 5,
   "modelVersionParserMinimum": 4,
-  "retiredEntityUids": [],
+  "retiredEntityUids": [
+    8850547422367127552
+  ],
   "retiredIndexUids": [],
-  "retiredPropertyUids": [],
+  "retiredPropertyUids": [
+    7368259189620248064,
+    165968057040098560,
+    2038332945049212160,
+    7150978206688453888,
+    27700735494270208,
+    5331159051447997184
+  ],
   "retiredRelationUids": [],
   "version": 1
 }

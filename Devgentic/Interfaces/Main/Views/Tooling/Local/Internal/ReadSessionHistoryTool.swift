@@ -41,7 +41,7 @@ struct ReadSessionHistoryTool: DevgenticTool {
         // -------------------------------
 
         // 1. Fetch the raw, uncompressed state from the Twin-Store / Graph Manager
-        let uncompressedState = ContextMemoryManager.shared.getActiveState(for: conversationID)
+        let uncompressedState = SessionGraphStore.shared.getActiveState(for: conversationID)
         
         // 2. Format as pretty-printed JSON
         let encoder = JSONEncoder()

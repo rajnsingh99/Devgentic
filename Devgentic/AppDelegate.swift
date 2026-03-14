@@ -8,8 +8,9 @@
 import SwiftUI
 import os
 import HotKey
+import UserNotifications
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     
     private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AppDelegate")
     
@@ -23,12 +24,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let sessionTimeoutDuration: TimeInterval = 1800
 
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Set this delegate so UNUserNotificationCenter can deliver notifications
+        // both when the app is in the foreground AND in the background.
+        UNUserNotificationCenter.current().delegate = self
+        Self.logger.info("UNUserNotificationCenter delegate set.")
+        setupHotkey()
+        setupNotificationObserver()
+    }
+
+    /// Allow banners / sounds to appear even while the app is in the foreground.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .badge])
+    }
+
+    /// Handle user tapping a notification (e.g., to open the relevant conversation).
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let userInfo = response.notification.request.content.userInfo
+        if let conversationIDString = userInfo["conversationID"] as? String {
+            Self.logger.info("Notification tapped with conversationID: \(conversationIDString)")
+            // Post an internal notification so the UI can navigate to the conversation.
+            NotificationCenter.default.post(
+                name: NSNotification.Name("devgentic.openConversation"),
+                object: nil,
+                userInfo: ["conversationID": conversationIDString]
+            )
+        }
+        completionHandler()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate. Saving core data.")
         CoreDataPersistenceService.shared.saveContext()
-
-        // Stop the background RAG indexing service
-        RAGIndexingService.shared.stop()
         
         // 1. Terminate any active shell processes to prevent zombies
         ShellSessionManager.shared.cleanup()

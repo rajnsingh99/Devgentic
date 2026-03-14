@@ -222,4 +222,88 @@ final class VectorMathTests: XCTestCase {
         XCTAssertTrue(disqualified.contains(where: { $0.0 == "veryLow" }),
                       "Orthogonal vector should be below threshold")
     }
+
+    // MARK: - HNSW Cosine Distance
+
+    /// ObjectBox HNSW with distanceType="cosine" returns cosine *distance* (ascending, lower = better),
+    /// not cosine *similarity* (descending, higher = better).
+    ///
+    /// For L2-normalised vectors (as produced by EmbeddingService):
+    ///   cosine_distance = 1 − cosine_similarity
+    ///
+    /// The HNSW threshold in VectorStoreService (maximumCosineDistance = 0.7) is mathematically
+    /// equivalent to the old brute-force threshold (minimumSimilarity = 0.3):
+    ///   distance ≤ 0.7  ↔  similarity ≥ 0.3
+
+    func testHNSWCosineDistance_NormalizedVectors_EqualsOneMinusSimilarity() {
+        let a = VectorMath.l2Normalize([1.0, 0.5, 0.25, 0.1])
+        let b = VectorMath.l2Normalize([0.8, 0.6, 0.1, 0.4])
+
+        let similarity = VectorMath.cosineSimilarity(between: a, and: b)
+        let distance: Float = 1.0 - similarity
+
+        XCTAssertGreaterThanOrEqual(distance, 0.0, "Cosine distance must be ≥ 0")
+        XCTAssertLessThanOrEqual(distance, 2.0, "Cosine distance must be ≤ 2 for unit vectors")
+        XCTAssertEqual(1.0 - distance, similarity, accuracy: tolerance)
+    }
+
+    func testHNSWCosineDistance_IdenticalNormalizedVectors_ZeroDistance() {
+        // Identical vectors → similarity 1.0 → distance 0.0 (perfect match in HNSW)
+        let v = VectorMath.l2Normalize([1.0, 2.0, 3.0])
+        let distance: Float = 1.0 - VectorMath.cosineSimilarity(between: v, and: v)
+        XCTAssertEqual(distance, 0.0, accuracy: tolerance)
+    }
+
+    func testHNSWCosineDistance_OppositeNormalizedVectors_MaxDistance() {
+        // Opposite unit vectors → similarity −1.0 → distance 2.0 (maximum possible)
+        let a: [Float] = [1.0, 0.0]
+        let b: [Float] = [-1.0, 0.0]
+        let distance: Float = 1.0 - VectorMath.cosineSimilarity(between: a, and: b)
+        XCTAssertEqual(distance, 2.0, accuracy: tolerance)
+    }
+
+    func testHNSWCosineDistance_OrthogonalVectors_MidpointDistance() {
+        // Orthogonal vectors → similarity 0.0 → distance 1.0
+        let a: [Float] = [1.0, 0.0]
+        let b: [Float] = [0.0, 1.0]
+        let distance: Float = 1.0 - VectorMath.cosineSimilarity(between: a, and: b)
+        XCTAssertEqual(distance, 1.0, accuracy: tolerance)
+    }
+
+    func testHNSWDistanceThreshold_0_7_EquivalentToSimilarityThreshold_0_3() {
+        // VectorStoreService.maximumCosineDistance = 0.7
+        // Old brute-force minimumSimilarity = 0.3
+        // For L2-normalised vectors: distance ≤ 0.7 ↔ similarity ≥ 0.3
+        let maximumDistance: Float = 0.7
+        let equivalentMinSimilarity: Float = 1.0 - maximumDistance  // 0.3
+
+        let query = VectorMath.l2Normalize([Float](repeating: 1.0, count: 8))
+        let rawCandidates: [[Float]] = [
+            [Float](repeating: 1.0, count: 8),       // identical → distance 0
+            [1, 0, 0, 0, 0, 0, 0, 0],                // partial overlap
+            [0, 0, 0, 0, 0, 0, 0, 1],                // near-orthogonal
+            (0..<8).map { Float($0) * 0.1 + 0.01 }   // arbitrary direction
+        ]
+
+        for raw in rawCandidates {
+            let candidate = VectorMath.l2Normalize(raw)
+            let sim = VectorMath.cosineSimilarity(between: query, and: candidate)
+            let dist: Float = 1.0 - sim
+
+            XCTAssertEqual(sim >= equivalentMinSimilarity, dist <= maximumDistance,
+                "Thresholds disagree at sim=\(sim), dist=\(dist)")
+        }
+    }
+
+    func testHNSWCosineDistance_384D_NormalizedEmbedding_BoundedRange() {
+        // Verify the [0, 2] distance bounds hold for the exact dimensionality used by HNSW
+        let vecA = VectorMath.l2Normalize((0..<384).map { Float($0) * 0.001 + 0.1 })
+        let vecB = VectorMath.l2Normalize((0..<384).map { Float(383 - $0) * 0.001 + 0.1 })
+        let distance: Float = 1.0 - VectorMath.cosineSimilarity(between: vecA, and: vecB)
+
+        XCTAssertEqual(vecA.count, 384)
+        XCTAssertEqual(vecB.count, 384)
+        XCTAssertGreaterThanOrEqual(distance, 0.0)
+        XCTAssertLessThanOrEqual(distance, 2.0)
+    }
 }

@@ -36,127 +36,75 @@ extension CognitiveGenerator {
         isNativeFlow: Bool = false
     ) -> [[String: String]] {
         
-        var systemBlocks: [String] = []
+        // Tier 1: System Rules & Static RAG
+        var systemContent = """
+        <system_instructions>
+        \(context.instructions ?? "You are a helpful AI assistant.")
+        </system_instructions>
         
-        // --- 1. System Persona ---
-        if let instructions = context.instructions, !instructions.isEmpty {
-            systemBlocks.append("# SYSTEM INSTRUCTIONS\n\(instructions)")
-        }
-        
-        // --- 2. Environment Facts ---
-        systemBlocks.append("# ENVIRONMENT FACTS\n- OS: \(context.environmentFacts.osVersion)\n- Shell: \(context.environmentFacts.shellType)\n- User: \(context.environmentFacts.userName)\n- Date: \(context.environmentFacts.currentDate)")
-        
-        // --- 3. Active & Recent Memory ---
-        systemBlocks.append("""
-        # TWIN-STORE MEMORY
-        ## 🧠 ACTIVE MEMORY (RAM)
-        This is your CURRENT brain state. Trust this over history. Review past COMPLETED episodes and their `finalOutcome` to understand what you have already achieved for the user.
-        ```json
-        \(context.compressedStateGraph)
-        ```
-        ## 📜 RECENT ACTIVITY (Disk Tail)
-        \(context.recentHistory ?? "(No recent history)")
-        """)
-        
-        // --- 4. Infrastructure Protocol ---
-        var strategyBlock = """
-        # INFRASTRUCTURE PROTOCOL
-        ## LIFECYCLE
-        1. **RE-ACT LOOP**: You operate in a `Think -> Act -> Observe` sequence. 
-        2. **MEMORY**: Review # ACTIVE MEMORY frequently to distinguish what has been done from what is remaining.
-        
-        ## EXECUTION RULES
-        1. **TASK COMPLETION**: To finalize the request or respond to the user, \(isNativeFlow ? "simply provide your final answer in plain text without any tool calls." : "you MUST return `{\"tool_name\": null}`.")
-        2. **COMMUNICATION**: To request information from the user, use the `ask_user` tool.
-        3. **FENCE**: Operate strictly within # ENVIRONMENT and # TOOLS. Do not assume or hallucinate external capabilities.
+        <semantic_context>
+        \(context.longTermMemory.getStaticGrounding())
+        - OS: \(context.environmentFacts.osVersion)
+        - Shell: \(context.environmentFacts.shellType)
+        - User: \(context.environmentFacts.userName)
+        - Date: \(context.environmentFacts.currentDate)
+        </semantic_context>
         """
         
+        // Inject the specific Dialect Rules (Execution Contract) if not native
+        if !isNativeFlow, let rules = dialectRules {
+            let toolsMarkdown = context.availableTools.map { $0.toMarkdownDefinition() }.joined(separator: "\n\n")
+            systemContent += """
+            \n
+            <execution_contract>
+            \(rules)
+            </execution_contract>
+            
+            <available_tools>
+            \(toolsMarkdown)
+            </available_tools>
+            """
+        } else if isNativeFlow {
+            // Native models still need a strict capability fence
+            systemContent += "\n<capability_fence>\nYou have \(context.availableTools.count) native tools. Do not hallucinate capabilities outside this list.</capability_fence>"
+        }
+        
+        // Append Dynamic Guardrails
         if !context.negativeConstraints.isEmpty {
-            strategyBlock += "\n## 🚫 NEGATIVE CONSTRAINTS (GHOST PROTOCOL)\nFAILED PATHS:\n" + context.negativeConstraints.map { "- \($0)" }.joined(separator: "\n")
+            systemContent += "\n<negative_constraints>\nFAILED PATHS:\n" + context.negativeConstraints.map { "- \($0)" }.joined(separator: "\n") + "\n</negative_constraints>"
         }
-        
         if !context.hallucinatedTools.isEmpty {
-            strategyBlock += "\n## ⛔ HALLUCINATED TOOLS (DO NOT USE)\nYou previously attempted these tools which DO NOT EXIST:\n" + context.hallucinatedTools.sorted().map { "- `\($0)`" }.joined(separator: "\n")
+            systemContent += "\n<hallucinated_tools>\nDO NOT USE:\n" + context.hallucinatedTools.map { "- \($0)" }.joined(separator: "\n") + "\n</hallucinated_tools>"
         }
         
-        systemBlocks.append(strategyBlock)
+        var messages: [[String: String]] = [["role": "system", "content": systemContent]]
         
-        // --- 5. Context & Capabilities ---
-        var executionContext = "# EXECUTION CONTEXT\n## ORIGINAL USER REQUEST\n\"\(context.originalQuery)\"\n\n"
+        // Tier 2: Episodic History
+        if let history = context.recentHistory, !history.isEmpty {
+            messages.append(["role": "user", "content": "<episodic_history>\n\(history)\n</episodic_history>"])
+        }
+        
+        // Tier 3: Active Scratchpad & Objective
+        var activeContext = """
+        <current_objective>
+        ### User
+        \(context.originalQuery)
+        """
         
         if let clarification = context.latestClarification {
-            executionContext += "## 💡 LATEST USER CLARIFICATION\nThe context of the last interaction:\n\(clarification)\nUse this to guide your next action.\n\n"
+            activeContext += "\n### Clarification\n\(clarification)"
         }
         
-        let toolString = toolAdapter.formatForSystemPrompt(context.availableTools)
-        let toolNames = context.availableTools.map(\.name).joined(separator: ", ")
+        activeContext += """
         
-        executionContext += "## TOOLS (\(context.availableTools.count) available)\n\(toolString)\n\n"
-        executionContext += "## ⚠️ CAPABILITY FENCE\nYou have EXACTLY \(context.availableTools.count) tools: \(toolNames).\nThese are the ONLY tools that exist. Do NOT invent, guess, or hallucinate tool names.\nIf the user's request requires a capability not covered by these tools, \(isNativeFlow ? "explain to the user what is missing." : "return tool_name: null explaining what is missing.") Do NOT ask the user to run commands themselves."
+        </current_objective>
         
-        systemBlocks.append(executionContext)
+        <working_memory>
+        \(context.compiledScratchpad)
+        </working_memory>
+        """
         
-        // --- 6. Dialect & Syntax Rules ---
-        if let rules = dialectRules {
-            systemBlocks.append("# SYNTAX RULES\n\(rules)")
-        }
-        
-        let systemPrompt = systemBlocks.joined(separator: "\n\n")
-        
-        var messages: [[String: String]] = [
-            ["role": "system", "content": systemPrompt],
-            ["role": "user", "content": context.originalQuery]
-        ]
-        
-        // --- 7. Multi-Turn History (Observations) ---
-        // Instead of shoving historical tool outputs into the system prompt, we explicitly recreate
-        // the past multi-turn sequence (assistant -> tool result) so the LLM doesn't forget past actions.
-        if !context.activeObservations.isEmpty {
-            let maxContextCharacters = 40_000
-            var currentLength = systemPrompt.count + context.originalQuery.count
-            var hasTruncated = false
-            
-            for obs in context.activeObservations {
-                // Determine parameter string safely (fallback if AnyCodable unpacking fails based on specific wrapper library used)
-                let dict = obs.metadata?.compactMapValues { String(describing: $0) } ?? [:]
-                let params = dict["tool_params"] ?? "{}"
-                
-                // Simulate the LLM invoking the tool
-                messages.append([
-                    "role": "assistant",
-                    "content": "I executed the tool `\(obs.toolName)` with parameters: \(params)"
-                ])
-                
-                // Simulate the observation returned to the LLM
-                var resultText = ""
-                
-                if obs.isRequired {
-                    if let heavy = obs.heavyContent {
-                        if !hasTruncated && (currentLength + heavy.count > maxContextCharacters) {
-                            hasTruncated = true
-                            resultText = "\(obs.shortObservation)\n\n[SYSTEM ALERT: Maximum context window reached. Remaining hydrated data was truncated.]"
-                        } else if !hasTruncated {
-                            resultText = "\(obs.shortObservation)\n\(heavy)"
-                        } else {
-                            resultText = obs.shortObservation
-                        }
-                    } else {
-                        resultText = obs.shortObservation
-                    }
-                } else {
-                    resultText = obs.shortObservation
-                }
-                
-                let toolMsg = "OBSERVATION from `\(obs.toolName)`:\n\(resultText)"
-                messages.append([
-                    "role": "user",
-                    "content": toolMsg
-                ])
-                
-                currentLength += toolMsg.count
-            }
-        }
-        
+        messages.append(["role": "user", "content": activeContext])
         return messages
     }
 }

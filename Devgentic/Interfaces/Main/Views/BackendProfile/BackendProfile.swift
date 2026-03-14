@@ -120,15 +120,17 @@ enum AgentArchitecture: String, Codable, CaseIterable, Identifiable, Hashable {
     case planAndExecute = "Plan & Execute"
     case reflexion = "Reflexion"
     case supervisor = "Supervisor"
-    
+    case workflow = "Workflow"
+
     var id: String { rawValue }
-    
+
     var description: String {
         switch self {
         case .reAct: return "Reason & Action loop."
         case .planAndExecute: return "formulates a plan first, then executes it."
         case .reflexion: return "Self-reflects on past actions to improve."
         case .supervisor: return "Delegates tasks to sub-workers."
+        case .workflow: return "DAG-based multi-node pipeline orchestration."
         }
     }
 }

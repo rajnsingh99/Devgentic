@@ -61,8 +61,25 @@ class AgentConnect: ObservableObject {
                         rawTools = tools
                         isBotFlow = false
                         
-                    case .workflow:
-                        throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Workflows are not yet supported in the unified pipeline."])
+                    case .workflow(let agents):
+                        // Workflow: each node resolves its own model, tools, and generator.
+                        // Bypass the single-model pipeline entirely.
+                        let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
+                        let wfStream = workflowExecutor.executeWorkflow(
+                            agents: agents,
+                            userInput: userInput,
+                            chatHistory: chatHistory,
+                            conversationID: conversationID,
+                            ragContext: ragContext,
+                            traceContext: traceContext,
+                            onTraceUpdate: { log in onTraceUpdate?(log) }
+                        )
+
+                        for try await event in wfStream {
+                            continuation.yield(event)
+                        }
+                        continuation.finish()
+                        return
                     }
                     
                     // 2. Select Cognitive Strategy & Rate Limit Boundary
@@ -81,9 +98,28 @@ class AgentConnect: ObservableObject {
                     )
                     
                     // 3. Resolve Tools
+                    let modelTier = llmConfig.modelMetadata?.tier ?? .medium
+                    let fallbackRag = ragContext ?? "No static context provided."
+                    
+                    // Instantiate the correct Long-Term Memory Strategy
+                    let longTermMemory: any LongTermMemoryStrategy
+                    if modelTier == .tiny || modelTier == .small {
+                        longTermMemory = StaticGroundingMemory(ragContext: fallbackRag)
+                    } else {
+                        longTermMemory = ToolAugmentedMemory(
+                            ragContext: fallbackRag,
+                            memoryTools: [
+                                wrapTool(ReadActionLogTool(), requiresConfirmation: false),
+                                wrapTool(SearchActionLogsTool(), requiresConfirmation: false),
+                                wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: false)
+                            ]
+                        )
+                    }
+
                     let activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
-                        conversationID: conversationID
+                        conversationID: conversationID,
+                        longTermMemory: longTermMemory
                     )
                     
                     // 4. Initialize Evaluation Session (Metrics)
@@ -119,15 +155,20 @@ class AgentConnect: ObservableObject {
                     var activeState: SessionGraph? = nil
                     var recentHistory: String? = nil
                     
+                    // NEW: Determine Model Tier and Provision Memory Strategy
+                    let workingMemory: any WorkingMemoryStrategy = (modelTier == .tiny || modelTier == .small)
+                        ? SummarizedLinearMemory()
+                        : HighContextLinearMemory()
+                    
                     if !activeTools.isEmpty {
                         // Build the ephemeral SessionGraph from the UI history
-                        activeState = ChatHistoryAdapter.buildGraph(
+                        activeState = EpisodicHistoryFormatter.buildGraph(
                             from: chatHistory,
                             sessionID: conversationID.uuidString
                         )
                         
                         // Generate the "Recent History" text block directly from the chat history
-                        recentHistory = ChatHistoryAdapter.buildRecentHistoryString(from: chatHistory)
+                        recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(from: chatHistory)
                     }
                     
                     let input = AgentInput(
@@ -135,10 +176,11 @@ class AgentConnect: ObservableObject {
                         chatHistory: chatHistory,
                         conversationID: conversationID,
                         tools: activeTools,
-                        ragContext: ragContext,
+                        longTermMemory: longTermMemory,
                         activeState: activeState,
                         recentHistory: recentHistory,
                         generatorStrategy: generatorStrategy,
+                        workingMemory: workingMemory,
                         rateLimitCategory: rateLimitCategory,
                         instructions: instructions,
                         traceContext: traceContext
@@ -312,19 +354,28 @@ class AgentConnect: ObservableObject {
     
     private func resolveExecutableTools(
         profileTools: [Tool],
-        conversationID: UUID
+        conversationID: UUID,
+        longTermMemory: any LongTermMemoryStrategy
     ) async -> [AgentTool] {
         
         var activeTools: [AgentTool] = []
         
-        // System Tools (Always Available - Inherently Safe)
+        // -----------------------------------------------------------------
+        // 1. Core System Tools (Inherently Safe & Required for ALL models)
+        // -----------------------------------------------------------------
         activeTools.append(wrapTool(VectorSearchTool(conversationID: conversationID), requiresConfirmation: false))
-        activeTools.append(wrapTool(ReadActionLogTool(), requiresConfirmation: false))
-        activeTools.append(wrapTool(SearchActionLogsTool(), requiresConfirmation: false))
-        activeTools.append(wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: false))
         activeTools.append(wrapTool(AskUserTool(), requiresConfirmation: false))
         
-        // User-Configured Tools
+        // -----------------------------------------------------------------
+        // 2. Deep Episodic Memory (Delegated to Strategy)
+        // -----------------------------------------------------------------
+        // If it's an edge model, this array is empty.
+        // If it's a frontier model, this contains ReadActionLogTool, etc.
+        activeTools.append(contentsOf: longTermMemory.memoryCapabilities)
+        
+        // -----------------------------------------------------------------
+        // 3. User-Configured / External Tools (Standard resolution)
+        // -----------------------------------------------------------------
         let allToolSources = await UnifiedToolStore.shared.sources
         
         for toolConfig in profileTools where toolConfig.isEnabled {
