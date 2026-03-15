@@ -119,6 +119,7 @@ class BackendProfileStore: BackendProfileStoreProtocol {
             // Clean up other potential relationships
             entity.agentConfig = nil
             entity.workflowConfig = nil
+            entity.imageGenConfig = nil
             
         case .agent(let llmConfig, let architecture, let tools, let description, let instructions, let knowledgeSources):
             let agentEntity = entity.agentConfig ?? AgentConfigEntity(context: context)
@@ -143,6 +144,7 @@ class BackendProfileStore: BackendProfileStoreProtocol {
             // Clean up other potential relationships
             entity.botConfig = nil
             entity.workflowConfig = nil
+            entity.imageGenConfig = nil
 
         case .workflow(let agents):
             let workflowEntity = entity.workflowConfig ?? WorkflowConfigEntity(context: context)
@@ -151,6 +153,19 @@ class BackendProfileStore: BackendProfileStoreProtocol {
             // Clean up other potential relationships
             entity.botConfig = nil
             entity.agentConfig = nil
+            entity.imageGenConfig = nil
+
+        case .imageGen(let llmConfig, let negativePrompt, let defaultAspectRatio, let advancedSettings):
+            let imageGenEntity = entity.imageGenConfig ?? ImageGenConfigEntity(context: context)
+            imageGenEntity.llmConfig = encode(llmConfig)
+            imageGenEntity.negativePrompt = negativePrompt
+            imageGenEntity.defaultAspectRatio = defaultAspectRatio?.rawValue
+            imageGenEntity.advancedSettings = encode(advancedSettings)
+            entity.imageGenConfig = imageGenEntity
+            // Clean up other potential relationships
+            entity.botConfig = nil
+            entity.agentConfig = nil
+            entity.workflowConfig = nil
         }
     }
     
@@ -185,6 +200,9 @@ extension BackendProfileEntity {
         case .workflow:
             guard let workflowDetails = createWorkflowDetails() else { return nil }
             details = workflowDetails
+        case .imageGen:
+            guard let imageGenDetails = createImageGenDetails() else { return nil }
+            details = imageGenDetails
         }
         
         return BackendProfileModel(
@@ -241,6 +259,18 @@ extension BackendProfileEntity {
         )
     }
     
+    private func createImageGenDetails() -> ProfileDetails? {
+        guard let configEntity = self.imageGenConfig,
+              let configData = configEntity.llmConfig,
+              let llmConfig: ProviderConfig = decode(from: configData) else {
+            return nil
+        }
+        let negativePrompt = configEntity.negativePrompt
+        let aspectRatio = configEntity.defaultAspectRatio.flatMap { ImageAspectRatio(rawValue: $0) }
+        let advancedSettings: [String: JSONValue]? = decode(from: configEntity.advancedSettings)
+        return .imageGen(llmConfig: llmConfig, negativePrompt: negativePrompt, defaultAspectRatio: aspectRatio, advancedSettings: advancedSettings)
+    }
+
     private func createWorkflowDetails() -> ProfileDetails? {
         guard let configEntity = self.workflowConfig,
               let agentsData = configEntity.agents,

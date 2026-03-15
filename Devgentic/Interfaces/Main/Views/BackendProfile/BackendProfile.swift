@@ -35,6 +35,8 @@ struct BackendProfileModel: Codable, Identifiable, Hashable {
             return .agent
         case .workflow:
             return .workflow
+        case .imageGen:
+            return .imageGen
         }
     }
 
@@ -54,11 +56,13 @@ enum ProfileDetails: Codable, Hashable {
     // Updated to include architecture
     case agent(llmConfig: ProviderConfig, architecture: AgentArchitecture, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
     case workflow(agents: [BackendProfileModel])
+    case imageGen(llmConfig: ProviderConfig, negativePrompt: String?, defaultAspectRatio: ImageAspectRatio?, advancedSettings: [String: JSONValue]?)
 
     // MARK: - Manual Codable Implementation
     
     private enum CodingKeys: String, CodingKey {
         case profileType, llmConfig, architecture, tools, agents, description, instructions, knowledgeSources
+        case negativePrompt, defaultAspectRatio, advancedSettings
     }
 
     // Custom decoder to handle the different cases based on the `profileType` key.
@@ -84,6 +88,12 @@ enum ProfileDetails: Codable, Hashable {
         case .workflow:
             let agents = try container.decode([BackendProfileModel].self, forKey: .agents)
             self = .workflow(agents: agents)
+        case .imageGen:
+            let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
+            let negativePrompt = try container.decodeIfPresent(String.self, forKey: .negativePrompt)
+            let defaultAspectRatio = try container.decodeIfPresent(ImageAspectRatio.self, forKey: .defaultAspectRatio)
+            let advancedSettings = try container.decodeIfPresent([String: JSONValue].self, forKey: .advancedSettings)
+            self = .imageGen(llmConfig: llmConfig, negativePrompt: negativePrompt, defaultAspectRatio: defaultAspectRatio, advancedSettings: advancedSettings)
         }
     }
 
@@ -108,6 +118,12 @@ enum ProfileDetails: Codable, Hashable {
         case .workflow(let agents):
             try container.encode(ProfileType.workflow, forKey: .profileType)
             try container.encode(agents, forKey: .agents)
+        case .imageGen(let llmConfig, let negativePrompt, let defaultAspectRatio, let advancedSettings):
+            try container.encode(ProfileType.imageGen, forKey: .profileType)
+            try container.encode(llmConfig, forKey: .llmConfig)
+            try container.encodeIfPresent(negativePrompt, forKey: .negativePrompt)
+            try container.encodeIfPresent(defaultAspectRatio, forKey: .defaultAspectRatio)
+            try container.encodeIfPresent(advancedSettings, forKey: .advancedSettings)
         }
     }
 }
@@ -142,8 +158,43 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable {
     case bot = "Bot"
     case agent = "Agent"
     case workflow = "Workflow"
+    case imageGen = "Image Generator"
 
     var id: String { self.rawValue }
+}
+
+// MARK: - Image Generation Supporting Types
+
+/// Aspect ratio options for image generation.
+enum ImageAspectRatio: String, Codable, CaseIterable, Identifiable, Hashable {
+    case square     = "1:1"
+    case landscape  = "16:9"
+    case portrait   = "9:16"
+    case wide       = "21:9"
+    case photo      = "4:3"
+    case photoPort  = "3:4"
+
+    var id: String { rawValue }
+
+    /// Returns pixel dimensions for a given base resolution.
+    func dimensions(baseSize: Int = 1024) -> (width: Int, height: Int) {
+        switch self {
+        case .square:    return (baseSize, baseSize)
+        case .landscape: return (baseSize, Int(Double(baseSize) * 9.0 / 16.0))
+        case .portrait:  return (Int(Double(baseSize) * 9.0 / 16.0), baseSize)
+        case .wide:      return (baseSize, Int(Double(baseSize) * 9.0 / 21.0))
+        case .photo:     return (baseSize, Int(Double(baseSize) * 3.0 / 4.0))
+        case .photoPort: return (Int(Double(baseSize) * 3.0 / 4.0), baseSize)
+        }
+    }
+}
+
+/// Quality setting for image generation.
+enum ImageQuality: String, Codable, CaseIterable, Identifiable, Hashable {
+    case standard = "standard"
+    case hd = "hd"
+
+    var id: String { rawValue }
 }
 
 /// A simple representation of a tool that an agent can use.
@@ -218,7 +269,7 @@ struct ProviderConfig: Codable, Hashable {
     var modelName: String
     var apiKey: String?
     var baseURL: String?
-    var advancedConfiguration: [String: AnyCodable]?
+    var advancedConfiguration: [String: JSONValue]?
     
     /// Represents the cognitive capability of the model (e.g. tool calling support).
     /// This state drives the routing decision in AgentConnect.
@@ -242,7 +293,7 @@ struct ProviderConfig: Codable, Hashable {
          modelName: String,
          apiKey: String? = nil,
          baseURL: String? = nil,
-         advancedConfiguration: [String: AnyCodable]? = nil,
+         advancedConfiguration: [String: JSONValue]? = nil,
          cognitiveCapability: ModelCognitiveCapability = .none,
          modelDialect: ModelDialect = .nativeJSON,
          modelMetadata: ModelMetadata? = nil) {
@@ -268,7 +319,7 @@ struct ProviderConfig: Codable, Hashable {
         self.modelName = try container.decode(String.self, forKey: .modelName)
         self.apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey)
         self.baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        self.advancedConfiguration = try container.decodeIfPresent([String: AnyCodable].self, forKey: .advancedConfiguration)
+        self.advancedConfiguration = try container.decodeIfPresent([String: JSONValue].self, forKey: .advancedConfiguration)
 
         // --- COGNITIVE CAPABILITY MIGRATION LOGIC ---
         // 1. Attempt to decode the new enum directly

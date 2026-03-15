@@ -153,8 +153,8 @@ struct GeminiLLMProvider: LLMProvider {
                       let name = functionCall["name"] as? String {
                 
                 let args = functionCall["args"] as? [String: Any] ?? [:]
-                let anyCodableArgs = args.mapValues { AnyCodable($0) }
-                pendingTools.append(PendingToolCall(id: UUID().uuidString, name: name, arguments: anyCodableArgs))
+                let jsonArgs = args.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
+                pendingTools.append(PendingToolCall(id: UUID().uuidString, name: name, arguments: jsonArgs))
             }
         }
         

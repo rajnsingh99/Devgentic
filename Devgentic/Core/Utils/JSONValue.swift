@@ -95,4 +95,26 @@ public enum JSONValue: Sendable, Codable, Hashable {
         if case .object(let v) = self { return v }
         return nil
     }
+
+    public var intValue: Int? {
+        if case .number(let v) = self { return Int(exactly: v) }
+        return nil
+    }
+
+    // MARK: - AnyCodable Bridge (Phase 1B Migration)
+
+    /// Lossless conversion from AnyCodable during migration.
+    public init(anyCodable: AnyCodable) {
+        self = JSONValue(anyCodable.value) ?? .null
+    }
+
+    /// Serialize to Data for tool argument dispatch.
+    public func toJSONData() throws -> Data {
+        try JSONEncoder().encode(self)
+    }
+
+    /// Reverse bridge for incremental migration paths that still need AnyCodable.
+    public var anyCodableValue: AnyCodable {
+        AnyCodable(rawValue)
+    }
 }

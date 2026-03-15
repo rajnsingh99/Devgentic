@@ -34,6 +34,7 @@
         <attribute name="profileType" attributeType="String"/>
         <relationship name="agentConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="AgentConfigEntity" inverseName="parentProfile" inverseEntity="AgentConfigEntity"/>
         <relationship name="botConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BotConfigEntity" inverseName="parentProfile" inverseEntity="BotConfigEntity"/>
+        <relationship name="imageGenConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ImageGenConfigEntity" inverseName="parentProfile" inverseEntity="ImageGenConfigEntity"/>
         <relationship name="workflowConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="WorkflowConfigEntity" inverseName="parentProfile" inverseEntity="WorkflowConfigEntity"/>
     </entity>
     <entity name="BotConfigEntity" representedClassName="BotConfigEntity" syncable="YES" codeGenerationType="class">
@@ -71,6 +72,13 @@
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="userDefinedTitle" optional="YES" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>
+    </entity>
+    <entity name="ImageGenConfigEntity" representedClassName="ImageGenConfigEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="advancedSettings" optional="YES" attributeType="Binary"/>
+        <attribute name="defaultAspectRatio" optional="YES" attributeType="String"/>
+        <attribute name="llmConfig" optional="YES" attributeType="Binary"/>
+        <attribute name="negativePrompt" optional="YES" attributeType="String"/>
+        <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="imageGenConfig" inverseEntity="BackendProfileEntity"/>
     </entity>
     <entity name="LLMIntegrationEntity" representedClassName="LLMIntegrationEntity" syncable="YES" codeGenerationType="class">
         <attribute name="displayName" attributeType="String"/>

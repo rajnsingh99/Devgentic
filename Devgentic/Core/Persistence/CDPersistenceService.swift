@@ -301,6 +301,9 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             managedObject.messageType = "image"
             managedObject.image_url = url?.absoluteString
             managedObject.image_data = imageData
+        case .mediaArtifact(let artifact):
+            managedObject.messageType = "mediaArtifact"
+            managedObject.text_content = artifact.label ?? artifact.kind.rawValue
         }
     }
 }

@@ -31,6 +31,8 @@ struct ProfileInfo {
             self.provider = llmConfig.apiProvider
         case .workflow:
             self.provider = nil
+        case .imageGen(let llmConfig, _, _, _):
+            self.provider = llmConfig.apiProvider
         }
     }
 }

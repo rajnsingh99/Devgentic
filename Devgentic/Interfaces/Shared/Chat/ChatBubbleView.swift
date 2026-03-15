@@ -143,6 +143,17 @@ struct ChatBubbleView: View {
                             ErrorMessageView(title: "Image Not Available", details: "The image data could not be loaded.")
                                 .cardStyle()
                         }
+
+                    case .mediaArtifact(let artifact):
+                        if artifact.kind == .image {
+                            MediaArtifactImageView(artifact: artifact)
+                                .padding(.vertical, theme.spacingSmall)
+                        } else {
+                            Text("[\(artifact.kind.rawValue): \(artifact.label ?? artifact.mimeType)]")
+                                .font(theme.fontBody)
+                                .foregroundColor(theme.secondaryText)
+                                .italic()
+                        }
                     }
 
                     if !message.isStreaming && contentToDisplay.textContent != nil {

@@ -45,6 +45,9 @@ struct AgentTimelineView: View {
                 
             case .toolExecution:
                 currentActionGroup.append(event)
+
+            case .mediaGeneration:
+                currentActionGroup.append(event)
             }
         }
         

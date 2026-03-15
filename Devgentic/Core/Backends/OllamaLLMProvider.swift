@@ -115,13 +115,13 @@ struct OllamaLLMProvider: LLMProvider {
                    let toolName = function["name"] as? String {
                    
                     let id = UUID().uuidString
-                    var argumentsDict: [String: AnyCodable] = [:]
-                    
+                    var argumentsDict: [String: JSONValue] = [:]
+
                     if let argsAsDict = function["arguments"] as? [String: Any] {
-                        argumentsDict = argsAsDict.mapValues { AnyCodable($0) }
+                        argumentsDict = argsAsDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
                     } else if let argsAsString = function["arguments"] as? String,
                               let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
-                        argumentsDict = parsedDict.mapValues { AnyCodable($0) }
+                        argumentsDict = parsedDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
                     }
                     
                     pendingTools.append(PendingToolCall(id: id, name: toolName, arguments: argumentsDict))

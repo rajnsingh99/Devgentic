@@ -39,9 +39,31 @@ protocol LLMProvider: Sendable {
 
     /// Generates a strictly typed cognitive step, bypassing string parsing.
     func generateCognitiveStep(
-        messages: [[String: String]], 
+        messages: [[String: String]],
         tools: [[String: Any]]?
     ) async throws -> ModernCognitiveStep
+
+    // MARK: - Multimodal Overloads (Phase 6)
+
+    /// Generates a complete response from multimodal ProviderMessages.
+    /// Default implementation downgrades to legacy format.
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String
+
+    /// Generates a cognitive step from multimodal ProviderMessages.
+    /// Default implementation downgrades to legacy format.
+    func generateCognitiveStep(payload: [ProviderMessage], tools: [[String: Any]]?) async throws -> ModernCognitiveStep
+}
+
+extension LLMProvider {
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        let legacyMessages = payload.map { $0.toLegacyDict() }
+        return try await generate(messages: legacyMessages, tools: tools, responseSchema: responseSchema)
+    }
+
+    func generateCognitiveStep(payload: [ProviderMessage], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        let legacyMessages = payload.map { $0.toLegacyDict() }
+        return try await generateCognitiveStep(messages: legacyMessages, tools: tools)
+    }
 }
 
 // MARK: - Provider Configuration

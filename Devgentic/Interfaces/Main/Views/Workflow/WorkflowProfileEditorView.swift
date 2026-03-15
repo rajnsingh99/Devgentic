@@ -66,6 +66,9 @@ struct WorkflowProfileEditorView: View {
                 Text("Workflow configuration not supported here.")
                     .foregroundColor(theme.secondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .imageGen:
+                ImageGenConfigDetailView(profile: $draftProfile)
+                    .environmentObject(profileService)
             }
         }
         .frame(width: 800, height: 750)

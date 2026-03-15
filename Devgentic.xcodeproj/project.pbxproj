@@ -11,6 +11,8 @@
 		3516AAA22F54A01300CFA72D /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 3516AAA12F54A01300CFA72D /* Tokenizers */; };
 		35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 35243D362E26F08800602933 /* CodeEditSourceEditor */; settings = {ATTRIBUTES = (Required, ); }; };
 		355A5D9F2E882BA0007C22CC /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 355A5D9E2E882BA0007C22CC /* MCP */; };
+		35A33CE42F66F6270020A8BE /* Flux2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 35F2A0022F60000000AABB02 /* Flux2Core */; };
+		35A33CE52F66F6270020A8BE /* FluxTextEncoders in Frameworks */ = {isa = PBXBuildFile; productRef = 35F2A0032F60000000AABB03 /* FluxTextEncoders */; };
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
@@ -72,6 +74,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				35A33CE52F66F6270020A8BE /* FluxTextEncoders in Frameworks */,
+				35A33CE42F66F6270020A8BE /* Flux2Core in Frameworks */,
 				35EB3F662F32967000555A83 /* MLX in Frameworks */,
 				35EB3F682F32967000555A83 /* MLXFast in Frameworks */,
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
@@ -179,6 +183,8 @@
 				35EB3F722F329FDA00555A83 /* MLXVLM */,
 				3516A8682F519D3500CFA72D /* Markdown */,
 				3516AAA12F54A01300CFA72D /* Tokenizers */,
+				35F2A0022F60000000AABB02 /* Flux2Core */,
+				35F2A0032F60000000AABB03 /* FluxTextEncoders */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -273,6 +279,7 @@
 				35EB3F6B2F329FDA00555A83 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
 				3516A8672F519D3500CFA72D /* XCRemoteSwiftPackageReference "swift-markdown" */,
 				3516AAA02F54A01300CFA72D /* XCRemoteSwiftPackageReference "swift-transformers" */,
+				35F2A0012F60000000AABB01 /* XCRemoteSwiftPackageReference "flux-2-swift-mlx" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -715,6 +722,14 @@
 				version = 2.30.6;
 			};
 		};
+		35F2A0012F60000000AABB01 /* XCRemoteSwiftPackageReference "flux-2-swift-mlx" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/VincentGourbin/flux-2-swift-mlx.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.2.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -792,6 +807,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35EB3F6B2F329FDA00555A83 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
 			productName = MLXVLM;
+		};
+		35F2A0022F60000000AABB02 /* Flux2Core */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35F2A0012F60000000AABB01 /* XCRemoteSwiftPackageReference "flux-2-swift-mlx" */;
+			productName = Flux2Core;
+		};
+		35F2A0032F60000000AABB03 /* FluxTextEncoders */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35F2A0012F60000000AABB01 /* XCRemoteSwiftPackageReference "flux-2-swift-mlx" */;
+			productName = FluxTextEncoders;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

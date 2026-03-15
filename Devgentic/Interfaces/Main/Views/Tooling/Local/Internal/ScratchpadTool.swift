@@ -23,7 +23,7 @@ struct ScratchpadTool {
     // MARK: - Helpers
     
     /// Extracts an array of integer step IDs from the LLM's raw JSON parameters.
-    static func extractStepIDs(from parameters: [String: AnyCodable]) -> [Int] {
+    static func extractStepIDs(from parameters: [String: JSONValue]) -> [Int] {
         if let idsParam = parameters["step_ids"],
            let data = try? JSONEncoder().encode(idsParam),
            let ids = try? JSONDecoder().decode([Int].self, from: data) {

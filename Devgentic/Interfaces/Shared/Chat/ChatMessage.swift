@@ -32,11 +32,13 @@ struct AgentResponse: Codable, Equatable {
 enum TimelineEvent: Codable, Equatable, Identifiable {
     case thought(id: UUID, text: String)
     case toolExecution(id: UUID, name: String, params: String, output: String?, isSuccess: Bool?, isExecuting: Bool)
-    
+    case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
+
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
         case .toolExecution(let id, _, _, _, _, _): return id
+        case .mediaGeneration(let id, _, _, _): return id
         }
     }
 }
@@ -149,7 +151,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
             return getOrCreateMarkdownBlocks(from: text)
         case .codeBlock(let language, let code):
             return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
-        case .error, .image:
+        case .error, .image, .mediaArtifact:
             return []
         }
     }
@@ -247,9 +249,10 @@ enum MessageContent: Equatable, Codable {
     case codeBlock(language: String?, code: String)
     case error(title: String?, details: String)
     case image(url: URL?, alt: String?, imageData: Data?)
-    
+    case mediaArtifact(MediaArtifact)
+
     enum CodingKeys: String, CodingKey {
-        case type, text, language, code, title, details, imageUrl, imageAlt, imageData
+        case type, text, language, code, title, details, imageUrl, imageAlt, imageData, artifact
     }
 
     init(from decoder: Decoder) throws {
@@ -277,6 +280,9 @@ enum MessageContent: Equatable, Codable {
             let imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
             let url = urlString.flatMap { URL(string: $0) }
             self = .image(url: url, alt: alt, imageData: imageData)
+        case "mediaArtifact":
+            let artifact = try container.decode(MediaArtifact.self, forKey: .artifact)
+            self = .mediaArtifact(artifact)
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Invalid MessageContent type: \(type)")
         }
@@ -304,9 +310,12 @@ enum MessageContent: Equatable, Codable {
             try container.encodeIfPresent(url?.absoluteString, forKey: .imageUrl)
             try container.encodeIfPresent(alt, forKey: .imageAlt)
             try container.encodeIfPresent(imageData, forKey: .imageData)
+        case .mediaArtifact(let artifact):
+            try container.encode("mediaArtifact", forKey: .type)
+            try container.encode(artifact, forKey: .artifact)
         }
     }
-    
+
     var textContent: String? {
         switch self {
         case .plainText(let text): return text
@@ -314,6 +323,7 @@ enum MessageContent: Equatable, Codable {
         case .codeBlock(_, let code): return code
         case .error(let title, let details): return "\(title ?? "Error"): \(details)"
         case .image: return nil
+        case .mediaArtifact: return nil
         }
     }
 }

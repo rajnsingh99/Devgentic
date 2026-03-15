@@ -537,6 +537,8 @@ class MainApplicationViewModel: ObservableObject {
                 }
             case .workflow:
                 legacyBackendType = .none
+            case .imageGen:
+                legacyBackendType = .none
             }
         }
         

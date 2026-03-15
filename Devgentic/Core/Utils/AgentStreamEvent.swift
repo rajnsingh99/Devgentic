@@ -69,6 +69,14 @@ enum AgentStreamEvent: Sendable {
 
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
+
+    // MARK: - Multimodal Events
+
+    /// Long-running media generation progress (e.g., image generation at 45%).
+    case mediaProgress(toolName: String, percent: Double, status: String)
+
+    /// A completed media artifact ready for UI rendering.
+    case artifactProduced(MediaArtifact)
 }
 
 /// Structured output from a tool execution.

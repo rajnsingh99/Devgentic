@@ -195,6 +195,18 @@ class ActiveStreamManager: ObservableObject {
 
                     case .workflowProgress(let completed, let total):
                         agentMessage.thinkingHeadline = "Workflow progress: \(completed)/\(total)"
+
+                    // MARK: Multimodal Events
+                    case .mediaProgress(let toolName, let percent, let status):
+                        agentMessage.thinkingHeadline = "\(toolName): \(status) (\(Int(percent * 100))%)"
+
+                    case .artifactProduced(let artifact):
+                        agentMessage.timelineEvents.append(.mediaGeneration(
+                            id: UUID(),
+                            toolName: artifact.label ?? artifact.kind.rawValue,
+                            artifact: artifact,
+                            isComplete: true
+                        ))
                     }
                 }
                 

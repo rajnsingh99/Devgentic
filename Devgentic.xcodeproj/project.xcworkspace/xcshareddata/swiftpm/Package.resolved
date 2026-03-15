@@ -1,5 +1,5 @@
 {
-  "originHash" : "dade949b5713bec61b21faba812e58a4f90bdc0b657b85feb851b9b3e9843741",
+  "originHash" : "fbe69b2bb539be57a1b857a792fc11230551caef33e810932af68559409328ae",
   "pins" : [
     {
       "identity" : "codeeditlanguages",
@@ -44,6 +44,15 @@
       "state" : {
         "revision" : "a2965424a4babeb0c8e4b5ec9708c3939bc52449",
         "version" : "1.2.0"
+      }
+    },
+    {
+      "identity" : "flux-2-swift-mlx",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/VincentGourbin/flux-2-swift-mlx.git",
+      "state" : {
+        "revision" : "dcebb3d6be6010efb4f395d49450ac0238cf250b",
+        "version" : "2.2.0"
       }
     },
     {
@@ -287,6 +296,15 @@
       "state" : {
         "revision" : "664e1b5a65296cd957dfdf262cd120ca88f3b24b",
         "version" : "0.15.0"
+      }
+    },
+    {
+      "identity" : "yams",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpsim/Yams",
+      "state" : {
+        "revision" : "3d6871d5b4a5cd519adf233fbb576e0a2af71c17",
+        "version" : "5.4.0"
       }
     },
     {

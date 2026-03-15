@@ -79,6 +79,7 @@ struct ChatInputAreaView: View {
             if case .bot(let config, _) = profile.details, config.apiProvider == .ollama { return "cpu" }
             return "cloud.fill"
         case .workflow: return "square.stack.3d.up.fill"
+        case .imageGen: return "paintbrush.fill"
         }
     }
 
@@ -88,6 +89,7 @@ struct ChatInputAreaView: View {
         case .bot: return .blue
         case .agent: return .green
         case .workflow: return .purple
+        case .imageGen: return .orange
         }
     }
 
@@ -460,7 +462,7 @@ struct ChatInputAreaView: View {
             )
         }
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isBackendPickerHovering = hover } }
-        .help("Select a backend (Bot, Agent, or Workflow)")
+        .help("Select a backend (Bot, Agent, Workflow, or Image Gen)")
     }
 
     @ViewBuilder

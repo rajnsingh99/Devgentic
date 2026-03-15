@@ -39,10 +39,20 @@ final class BackendProfileService: ObservableObject {
         self.profiles = profileStore.fetchProfiles()
     }
     
-    /// Saves a given profile to the persistence layer and reloads the local array.
+    /// Saves a given profile to the persistence layer and updates the in-memory array in-place.
+    /// IMPORTANT: We do NOT call `loadProfiles()` here because that replaces the entire `profiles` array,
+    /// which breaks any live SwiftUI `$profileService.profiles[index]` bindings held by detail views.
+    /// Instead, we update the specific element in-place so the binding chain remains intact.
     func saveProfile(_ profile: BackendProfileModel) {
         profileStore.saveProfile(profile)
-        loadProfiles()
+
+        // Update in-place to preserve active bindings
+        if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+            profiles[index] = profile
+        } else {
+            // New profile — append and reload to get correct sort order
+            loadProfiles()
+        }
     }
     
     /// Deletes a profile using its ID from the persistence layer and reloads the local array.
@@ -62,6 +72,8 @@ final class BackendProfileService: ObservableObject {
         case .bot(let llmConfig, _):
             providerConfig = llmConfig
         case .agent(let llmConfig, _, _, _, _, _):
+            providerConfig = llmConfig
+        case .imageGen(let llmConfig, _, _, _):
             providerConfig = llmConfig
         case .workflow:
             // Workflows do not have a single provider config.
@@ -90,10 +102,10 @@ final class BackendProfileService: ObservableObject {
         }
     }
     
-    /// **FIXED**: Encodes a specific `Codable` model into the `[String: AnyCodable]` dictionary format.
+    /// **FIXED**: Encodes a specific `Codable` model into the `[String: JSONValue]` dictionary format.
     /// This version uses a generic constraint to correctly handle any Codable struct.
     /// - Returns: The encoded dictionary, or `nil` if encoding fails.
-    func encodeConfig<T: Codable>(from config: T) -> [String: AnyCodable]? {
+    func encodeConfig<T: Codable>(from config: T) -> [String: JSONValue]? {
         do {
             // 1. Encode the concrete struct (e.g., OllamaAdvancedConfig) to Data.
             let data = try JSONEncoder().encode(config)
@@ -102,21 +114,21 @@ final class BackendProfileService: ObservableObject {
                 print("Failed to cast JSON object to [String: Any]")
                 return nil
             }
-            // 3. Wrap each value in the dictionary with AnyCodable for storage.
-            return dictionary.mapValues { AnyCodable($0) }
+            // 3. Wrap each value in the dictionary with JSONValue for storage.
+            return dictionary.mapValues { JSONValue($0) ?? .null }
         } catch {
             print("Failed to encode advanced configuration: \(error)")
             return nil
         }
     }
     
-    /// Decodes a `[String: AnyCodable]` dictionary back into a specific `Codable` model type.
+    /// Decodes a `[String: JSONValue]` dictionary back into a specific `Codable` model type.
     /// - Returns: The decoded model, or `nil` if the dictionary is missing or decoding fails.
-    func decodeConfig<T: Codable>(from dictionary: [String: AnyCodable]?, as type: T.Type) -> T? {
+    func decodeConfig<T: Codable>(from dictionary: [String: JSONValue]?, as type: T.Type) -> T? {
         guard let dictionary = dictionary else { return nil }
-        
-        // 1. Unwrap the `AnyCodable` values to get a standard [String: Any] dictionary.
-        let unwrappedDict = dictionary.mapValues { $0.value }
+
+        // 1. Unwrap the `JSONValue` values to get a standard [String: Any] dictionary.
+        let unwrappedDict = dictionary.mapValues { $0.rawValue }
         
         do {
             // 2. Serialize the standard dictionary to JSON Data.
@@ -185,6 +197,12 @@ final class BackendProfileService: ObservableObject {
             for (index, agent) in agents.enumerated() {
                 logOutput += "  \(index + 1). \(agent.displayName) (\(agent.id))\n"
             }
+
+        case .imageGen(let llmConfig, let negativePrompt, let defaultAspectRatio, _):
+            logOutput += "🎨 [IMAGE GENERATOR CONFIGURATION]\n"
+            logOutput += formatLLMConfig(llmConfig)
+            logOutput += "Negative Prompt: \(negativePrompt ?? "None")\n"
+            logOutput += "Default Aspect Ratio: \(defaultAspectRatio?.rawValue ?? "Not set")\n"
         }
         
         logOutput += "==================================================\n\n"

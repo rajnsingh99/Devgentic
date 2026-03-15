@@ -31,6 +31,10 @@ struct AgentConfigDetailView: View {
     // Local state for editing advanced configurations
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
+
+    // Guard flag: prevents onChange(of: localOllamaConfig/localGeminiConfig) from writing
+    // back to providerConfig during initial load, which would create phantom "unsaved changes".
+    @State private var isLoadingAdvancedConfig = false
     
     // UI State for API Key Visibility and Endpoint Editing
     @State private var isApiKeyVisible: Bool = false
@@ -78,6 +82,7 @@ struct AgentConfigDetailView: View {
                 switch profile.details {
                 case .bot(let llmConfig, _): return llmConfig
                 case .agent(let llmConfig, _, _, _, _, _): return llmConfig
+                case .imageGen(let llmConfig, _, _, _): return llmConfig
                 case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
             },
@@ -548,9 +553,14 @@ struct AgentConfigDetailView: View {
                     description: d, instructions: defaultSystemPersona, knowledgeSources: k
                 )
             }
-            
-            initialProfileState = profile
+
+            // Load advanced configs FIRST (with guard flag on) so the onChange handlers
+            // don't write back to providerConfig, then snapshot the initial state AFTER.
+            isLoadingAdvancedConfig = true
             loadAdvancedConfigs()
+            isLoadingAdvancedConfig = false
+
+            initialProfileState = profile
         }
         .onDisappear {
             // Cleanup: Close the floating window if the user leaves the panel entirely
@@ -559,21 +569,29 @@ struct AgentConfigDetailView: View {
         .onChange(of: profile.id) { _ in
             // Cleanup: Close the floating window if the user switches to a different agent
             AdvancedPromptWindowManager.shared.closeWindow()
-            
-            initialProfileState = profile
+
+            isLoadingAdvancedConfig = true
             loadAdvancedConfigs()
+            isLoadingAdvancedConfig = false
+
+            initialProfileState = profile
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _ in
             // Reset edit state when switching providers
             isEditingBaseURL = false
+
+            isLoadingAdvancedConfig = true
             loadAdvancedConfigs()
+            isLoadingAdvancedConfig = false
         }
         .onChange(of: localOllamaConfig) { _ in
+            guard !isLoadingAdvancedConfig else { return }
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
             }
         }
         .onChange(of: localGeminiConfig) { _ in
+            guard !isLoadingAdvancedConfig else { return }
             if providerConfig.wrappedValue.apiProvider == .google {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }

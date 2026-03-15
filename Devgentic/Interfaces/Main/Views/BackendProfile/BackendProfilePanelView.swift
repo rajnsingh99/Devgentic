@@ -142,6 +142,9 @@ struct BackendProfileDetailView: View {
                     .padding()
             case .workflow:
                 WorkflowCanvasView(profile: $profile)
+            case .imageGen:
+                ImageGenConfigDetailView(profile: $profile)
+                    .padding()
             }
         }
         .background(theme.primaryBackground)
@@ -228,14 +231,16 @@ private struct ProfileRowView: View {
         case .bot: return "cpu"
         case .agent: return "person.fill.viewfinder"
         case .workflow: return "square.3.layers.3d.down.right"
+        case .imageGen: return "paintbrush.fill"
         }
     }
-    
+
     private func color(for type: ProfileType) -> Color {
         switch type {
         case .bot: return .blue
         case .agent: return .green
         case .workflow: return .purple
+        case .imageGen: return .orange
         }
     }
 }

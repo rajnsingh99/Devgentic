@@ -79,6 +79,12 @@ struct AddBackendProfileView: View {
                                 isSelected: selectedType == .workflow,
                                 action: { selectedType = .workflow }
                             )
+
+                            ProfileTypeCard(
+                                type: .imageGen,
+                                isSelected: selectedType == .imageGen,
+                                action: { selectedType = .imageGen }
+                            )
                         }
                     }
                 }
@@ -136,6 +142,14 @@ struct AddBackendProfileView: View {
             )
         case .workflow:
             details = .workflow(agents: [])
+        case .imageGen:
+            let imageGenConfig = ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
+            details = .imageGen(
+                llmConfig: imageGenConfig,
+                negativePrompt: nil,
+                defaultAspectRatio: .square,
+                advancedSettings: nil
+            )
         }
         
         return BackendProfileModel(displayName: displayName, details: details)
@@ -260,17 +274,19 @@ struct ProfileTypeCard: View {
         case .bot: return "cpu"
         case .agent: return "person.fill.viewfinder"
         case .workflow: return "square.3.layers.3d.down.right"
+        case .imageGen: return "paintbrush.fill"
         }
     }
-    
+
     var color: Color {
         switch type {
         case .bot: return .blue
         case .agent: return .green
         case .workflow: return .purple
+        case .imageGen: return .orange
         }
     }
-    
+
     var description: String {
         switch type {
         case .bot:
@@ -279,6 +295,8 @@ struct ProfileTypeCard: View {
             return "Autonomous system capable of using tools (File I/O, Web Search) to complete complex tasks."
         case .workflow:
             return "Orchestrate multiple agents in a defined sequence to solve multi-step problems."
+        case .imageGen:
+            return "AI-powered image generation. Text-to-Image and Image-to-Image via OpenAI, Gemini, or local MLX models."
         }
     }
 }

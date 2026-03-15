@@ -166,6 +166,7 @@ struct WorkflowNodeView: View {
         case .bot: return "cpu"
         case .agent: return "person.fill.viewfinder"
         case .workflow: return "square.3.layers.3d.down.right"
+        case .imageGen: return "paintbrush.fill"
         }
     }
 
@@ -174,6 +175,7 @@ struct WorkflowNodeView: View {
         case .bot: return .blue
         case .agent: return .green
         case .workflow: return .purple
+        case .imageGen: return .orange
         }
     }
 

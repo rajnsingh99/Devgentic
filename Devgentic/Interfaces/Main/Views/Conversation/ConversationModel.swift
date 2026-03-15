@@ -128,6 +128,8 @@ struct Conversation: Identifiable, Codable, Equatable {
             return "Image attachment"
         case .error(_, let details):
             return "Error: \(details)"
+        case .mediaArtifact(let artifact):
+            return artifact.label ?? artifact.kind.rawValue
         }
     }
 

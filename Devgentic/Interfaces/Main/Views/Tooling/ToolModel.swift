@@ -17,7 +17,7 @@ import Foundation
 /// The JSON request body sent to execute a tool.
 struct ExecuteToolRequest: Decodable {
     let name: String
-    let arguments: [String: AnyCodable]
+    let arguments: [String: JSONValue]
 }
 
 // MARK: - MCP v0.11.0 Icon & Annotation Models

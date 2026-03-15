@@ -154,7 +154,7 @@ struct ClaudeLLMProvider: LLMProvider {
                 let name = block["name"] as? String ?? "unknown_tool"
                 let input = block["input"] as? [String: Any] ?? [:]
                 
-                let arguments = input.mapValues { AnyCodable($0) }
+                let arguments = input.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
                 pendingTools.append(PendingToolCall(id: id, name: name, arguments: arguments))
             }
         }

@@ -33,15 +33,15 @@ struct DynamicMCPTool: DevgenticTool {
     
     // MARK: - Arguments Structure
     
-    /// A generic arguments structure that can decode ANY JSON object using AnyCodable.
+    /// A generic arguments structure that can decode ANY JSON object using JSONValue.
     struct Arguments: Decodable, Sendable {
-        let payload: [String: AnyCodable]
-        
+        let payload: [String: JSONValue]
+
         init(from decoder: Decoder) throws {
             let container = try decoder.singleValueContainer()
-            
+
             // Safely attempt to decode a dictionary; default to empty if the tool takes no args
-            if let dict = try? container.decode([String: AnyCodable].self) {
+            if let dict = try? container.decode([String: JSONValue].self) {
                 self.payload = dict
             } else {
                 self.payload = [:]

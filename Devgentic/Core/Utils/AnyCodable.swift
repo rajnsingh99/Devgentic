@@ -14,6 +14,7 @@ import Foundation
 ///
 /// This allows you to create structs with fields like `[String: AnyCodable]`,
 /// effectively enabling "Dynamic JSON" support within Swift's strict type system.
+@available(*, deprecated, message: "Use JSONValue instead")
 public struct AnyCodable: Codable, Hashable, @unchecked Sendable {
     let value: Any
     init<T>(_ value: T?) { self.value = value ?? () }

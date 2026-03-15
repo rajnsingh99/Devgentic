@@ -31,12 +31,16 @@ struct BackendSelectorPopup: View {
     private var workflowProfiles: [BackendProfileModel] {
         profiles.filter { $0.profileType == .workflow }.sorted { $0.displayName < $1.displayName }
     }
+    private var imageGenProfiles: [BackendProfileModel] {
+        profiles.filter { $0.profileType == .imageGen }.sorted { $0.displayName < $1.displayName }
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             let showBots = !botProfiles.isEmpty
             let showAgents = !agentProfiles.isEmpty
             let showWorkflows = !workflowProfiles.isEmpty
+            let showImageGen = !imageGenProfiles.isEmpty
 
             // Column 1: Bots
             if showBots {
@@ -53,8 +57,8 @@ struct BackendSelectorPopup: View {
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
-            
-            if showBots && (showAgents || showWorkflows) {
+
+            if showBots && (showAgents || showWorkflows || showImageGen) {
                 Divider()
             }
 
@@ -72,8 +76,8 @@ struct BackendSelectorPopup: View {
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
-            
-            if showAgents && showWorkflows {
+
+            if showAgents && (showWorkflows || showImageGen) {
                 Divider()
             }
 
@@ -88,6 +92,22 @@ struct BackendSelectorPopup: View {
                         // openWindow(id: "profile-editor", value: profileID)
                         self.isPresented = false
                     }
+                )
+                .frame(minWidth: 180, idealWidth: 200)
+            }
+
+            if showWorkflows && showImageGen {
+                Divider()
+            }
+
+            // Column 4: Image Gen
+            if showImageGen {
+                ProfileColumnView(
+                    title: "Image Gen",
+                    profiles: imageGenProfiles,
+                    configuration: configuration,
+                    onSelect: { self.isPresented = false },
+                    onEdit: { _ in self.isPresented = false }
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
@@ -152,6 +172,8 @@ private struct ItemCell: View {
             return "Agent" // Placeholder
         case .workflow:
             return "Workflow" // Placeholder
+        case .imageGen(let llmConfig, _, _, _):
+            return llmConfig.modelName
         }
     }
 

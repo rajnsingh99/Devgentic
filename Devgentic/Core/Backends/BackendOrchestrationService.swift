@@ -198,6 +198,10 @@ class BackendOrchestrationService: ObservableObject {
                             // Workflow orchestration events (not emitted by agent profiles, but needed for exhaustive switch)
                             case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress:
                                 continuation.yield(event)
+
+                            // Multimodal events
+                            case .mediaProgress, .artifactProduced:
+                                continuation.yield(event)
                             }
                         }
                         
@@ -224,6 +228,72 @@ class BackendOrchestrationService: ObservableObject {
                             continuation.yield(event)
                         }
                         continuation.finish()
+
+                    case .imageGen:
+                        logger.info("Routing IMAGE GENERATOR profile '\(config.profile.displayName)' to ImageGenExecutor.")
+
+                        guard case .imageGen(let llmConfig, _, let defaultAspectRatio, let advancedSettings) = config.profile.details else {
+                            continuation.yield(.error("Invalid ImageGen profile configuration."))
+                            continuation.finish()
+                            return
+                        }
+
+                        do {
+                            // 1. Create provider
+                            let provider = try ImageGenProviderFactory.create(for: llmConfig)
+
+                            // 2. Analyze capability
+                            let capability = ImageCapabilityAnalyzer.analyze(
+                                provider: llmConfig.apiProvider,
+                                modelName: llmConfig.modelName,
+                                modelMetadata: llmConfig.modelMetadata
+                            )
+
+                            // 3. Resolve intent
+                            // Extract attached image data from files if any are images
+                            let imageFiles = files.filter { file in
+                                let mimeType = self.fileProcessorService.getFileMimeType(for: file.url)
+                                return self.fileProcessorService.isImageFile(mimeType: mimeType, url: file.url)
+                            }
+                            let attachedImages: [Data]? = imageFiles.isEmpty ? nil : imageFiles.compactMap { file in
+                                try? Data(contentsOf: file.url)
+                            }
+
+                            let intent = await ImageIntentResolver.resolve(
+                                userQuery: userQuery,
+                                attachedImages: attachedImages,
+                                chatHistory: conversationHistory
+                            )
+
+                            // 4. Build options from profile defaults
+                            let options = ImageGenOptions(
+                                aspectRatio: defaultAspectRatio ?? .square,
+                                numberOfImages: 1,
+                                quality: .standard,
+                                advancedSettings: advancedSettings
+                            )
+
+                            // 5. Execute
+                            let executor = ImageGenExecutor()
+                            let stream = executor.execute(
+                                intent: intent,
+                                provider: provider,
+                                capability: capability,
+                                profile: config.profile,
+                                conversationID: conversationID,
+                                options: options
+                            )
+
+                            // 6. Forward stream events
+                            for try await event in stream {
+                                continuation.yield(event)
+                            }
+                            continuation.finish()
+                        } catch {
+                            logger.error("ImageGen setup error: \(error.localizedDescription)")
+                            continuation.yield(.error(error.localizedDescription))
+                            continuation.finish()
+                        }
                     }
                 } catch is CancellationError {
                     logger.warning("Orchestration Stream Cancelled.")
@@ -247,6 +317,7 @@ class BackendOrchestrationService: ObservableObject {
         switch profile.details {
         case .bot(let config, _): return config.apiProvider == .mlx
         case .agent(let config, _, _, _, _, _): return config.apiProvider == .mlx
+        case .imageGen(let config, _, _, _): return config.apiProvider == .mlx
         case .workflow: return false
         }
     }
