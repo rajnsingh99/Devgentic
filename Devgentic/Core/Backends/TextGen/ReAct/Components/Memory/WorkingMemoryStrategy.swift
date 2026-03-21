@@ -10,7 +10,7 @@ import Foundation
 /// Defines how volatile working memory is recorded and compiled for the LLM prompt.
 protocol WorkingMemoryStrategy: Sendable {
     /// Records a tool execution result with optional media artifacts.
-    mutating func recordObservation(stepId: Int, toolName: String, result: String, artifacts: [MediaArtifact])
+    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, result: String, artifacts: [MediaArtifact])
     
     /// Records a system-level alert or error.
     mutating func recordSystemAlert(msg: String)
@@ -28,10 +28,10 @@ protocol WorkingMemoryStrategy: Sendable {
 struct SummarizedLinearMemory: WorkingMemoryStrategy {
     private var logs: [String] = []
 
-    mutating func recordObservation(stepId: Int, toolName: String, result: String, artifacts: [MediaArtifact] = []) {
+    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, result: String, artifacts: [MediaArtifact] = []) {
         // Implement summarization logic: truncate if result is too long.
         let truncated = result.count > 300 ? String(result.prefix(300)) + "..." : result
-        logs.append("- [Step \(stepId)] Called `\(toolName)`. Result: \(truncated)")
+        logs.append("- [Step \(stepId)] Called `\(toolName)` (id: \(toolCallId)). Result: \(truncated)")
     }
     
     mutating func recordSystemAlert(msg: String) {
@@ -52,9 +52,9 @@ struct SummarizedLinearMemory: WorkingMemoryStrategy {
 struct HighContextLinearMemory: WorkingMemoryStrategy {
     private var logs: [String] = []
 
-    mutating func recordObservation(stepId: Int, toolName: String, result: String, artifacts: [MediaArtifact] = []) {
+    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, result: String, artifacts: [MediaArtifact] = []) {
         // High fidelity: retain full logs.
-        logs.append("- [Step \(stepId)] \(toolName):\n\(result)")
+        logs.append("- [Step \(stepId)] \(toolName) (id: \(toolCallId)):\n\(result)")
     }
     
     mutating func recordSystemAlert(msg: String) {

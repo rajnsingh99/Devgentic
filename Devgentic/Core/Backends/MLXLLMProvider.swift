@@ -13,24 +13,43 @@ struct MLXLLMProvider: LLMProvider {
 
     let modelName: String
     let dialect: ModelDialect
+    let chatTemplateSource: ChatTemplateSource
 
-    init(modelName: String, dialect: ModelDialect = .promptedFlatJSON) {
+    /// Custom stop sequences extracted from the model's tokenizer.
+    /// Turn-boundary markers that signal generation should stop immediately.
+    private let stopSequences: [String]
+
+    /// Generation parameters from user configuration.
+    /// When nil, uses MLXAdvancedConfig defaults optimized for agentic reasoning.
+    private let generationConfig: MLXAdvancedConfig
+
+    init(
+        modelName: String,
+        dialect: ModelDialect = .heuristicJson,
+        chatTemplateSource: ChatTemplateSource = .embedded,
+        stopSequences: [String] = [],
+        advancedConfig: MLXAdvancedConfig? = nil
+    ) {
         self.modelName = modelName
         self.dialect = dialect
+        self.chatTemplateSource = chatTemplateSource
+        self.stopSequences = stopSequences
+        self.generationConfig = advancedConfig ?? .default()
     }
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         var fullText = ""
-        let temperature: Float = 0.6
-        let maxTokens = 2048
 
-        // We use streamChat but collect all the output. 
-        // MLXService.streamChat will yield BOTH text chunks and synthetic JSON tool call representations.
         let stream = await MLXService.shared.streamChat(
             messages: messages,
             tools: tools,
-            maxTokens: maxTokens,
-            temperature: temperature
+            maxTokens: generationConfig.maxTokens,
+            temperature: Float(generationConfig.temperature),
+            topP: Float(generationConfig.topP),
+            repetitionPenalty: Float(generationConfig.repetitionPenalty),
+            repetitionContextSize: generationConfig.repetitionContextSize,
+            chatTemplateSource: chatTemplateSource,
+            stopSequences: stopSequences
         )
 
         for try await token in stream {
@@ -41,8 +60,10 @@ struct MLXLLMProvider: LLMProvider {
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
-        let temperature: Float = 0.6
-        let maxTokens = 2048
+        // Capture config values before entering the closure
+        let config = generationConfig
+        let templateSource = chatTemplateSource
+        let stops = stopSequences
 
         return AsyncThrowingStream { continuation in
             Task {
@@ -50,8 +71,13 @@ struct MLXLLMProvider: LLMProvider {
                     let tokenStream = await MLXService.shared.streamChat(
                         messages: messages,
                         tools: tools,
-                        maxTokens: maxTokens,
-                        temperature: temperature
+                        maxTokens: config.maxTokens,
+                        temperature: Float(config.temperature),
+                        topP: Float(config.topP),
+                        repetitionPenalty: Float(config.repetitionPenalty),
+                        repetitionContextSize: config.repetitionContextSize,
+                        chatTemplateSource: templateSource,
+                        stopSequences: stops
                     )
 
                     for try await token in tokenStream {
@@ -65,6 +91,7 @@ struct MLXLLMProvider: LLMProvider {
             }
         }
     }
+
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let fullText = try await generate(messages: messages, tools: tools, responseSchema: nil)
         let pipeline = CognitiveParsePipeline(

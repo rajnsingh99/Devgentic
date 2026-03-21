@@ -17,7 +17,7 @@ import UserNotifications
 struct DevgenticApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = false
-    @Environment(\.openWindow) var openWindow
+    @Environment(\.openWindow) var openWindow  // Retained for File Viewer window
     
     private let coreDataService = CoreDataPersistenceService.shared
     
@@ -25,6 +25,8 @@ struct DevgenticApp: App {
 
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
     @StateObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @StateObject private var mainViewRouter = MainViewRouter()
+    @StateObject private var backendProfileService = BackendProfileService()
 
     init() {
         let persistence = CoreDataPersistenceService.shared
@@ -77,6 +79,8 @@ struct DevgenticApp: App {
                 .environmentObject(mainApplicationViewModel)
                 .environmentObject(mainApplicationViewModel.explorerViewModel)
                 .environmentObject(chatHistoryViewModel)
+                .environmentObject(mainViewRouter)
+                .environmentObject(backendProfileService)
                 .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
                 .tint(themeManager.currentTheme.accentColor)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -102,36 +106,20 @@ struct DevgenticApp: App {
             }
             CommandGroup(after: .appInfo) {
                 Button("Settings...") {
-                    if let settingsWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "settings" }) {
-                        settingsWindow.makeKeyAndOrderFront(nil)
-                    } else {
-                        openWindow(id: "settings")
-                    }
+                    mainViewRouter.navigateToSettings(.general)
                 }
                 .keyboardShortcut(",", modifiers: .command)
-                
+
                 Button("Backend Profiles...") {
-                    // Safe AppKit check to bring to front if already open
-                    if let profileWindow = NSApp.windows.first(where: { $0.identifier?.rawValue == "backend-profiles" }) {
-                        profileWindow.makeKeyAndOrderFront(nil)
-                    } else {
-                        openWindow(id: "backend-profiles")
-                    }
+                    mainViewRouter.navigateToProfile(
+                        backendProfileService.profiles.first?.id ?? UUID()
+                    )
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
             }
         }
 
-        // MARK: - Settings Window
-        Window("Settings", id: "settings") {
-            SettingsView()
-                .environmentObject(mainApplicationViewModel)
-                .environmentObject(themeManager)
-                .environment(\.appTheme, themeManager.currentTheme)
-                .tint(themeManager.currentTheme.accentColor)
-        }.defaultSize(width: 1000, height: 850)
-
-        // MARK: - Window Groups
+        // MARK: - File Viewer Window
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
             if let url = fileURL {
                 FileWindowViewer(fileURL: url)
@@ -140,15 +128,5 @@ struct DevgenticApp: App {
                     .tint(themeManager.currentTheme.accentColor)
             }
         }
-        
-        // MARK: - AI Blueprints Window
-        // CHANGED: From `WindowGroup` to `Window` to enforce a single-instance lifecycle
-        Window("AI Blueprints", id: "backend-profiles") {
-            BackendProfilePanelView()
-                .environmentObject(mainApplicationViewModel)
-                .environmentObject(themeManager)
-                .environment(\.appTheme, themeManager.currentTheme)
-                .tint(themeManager.currentTheme.accentColor)
-        }.defaultSize(width: 850, height: 700)
     }
 }

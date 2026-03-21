@@ -238,46 +238,46 @@ class ChatHistoryViewModel: ObservableObject {
             currentChatMessages = []
             return
         }
-        
+
         logger.debug("Loading conversation \(selectedID.uuidString, privacy: .public), merging with active streams.")
-        
+
         isInitiallyLoadingConversation = true
-        
+
         do {
             try Task.checkCancellation()
-            
+
             // Fetch persisted messages (returns newest-to-oldest).
             let persistedMessages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
-            
+
             try Task.checkCancellation()
-            
+
             let activeStreamingMessages = activeStreamManager.activeStreams.values
                 .filter { $0.conversationId == selectedID }
-            
+
             var combinedMessages = activeStreamingMessages + persistedMessages
             let uniqueMessageIDs = Set(combinedMessages.map { $0.id })
             combinedMessages = uniqueMessageIDs.compactMap { id in
                 combinedMessages.first { $0.id == id }
             }
-            
+
             // Sort the combined list descending to ensure order.
             let sortedDescending = combinedMessages.sorted { $0.timestamp > $1.timestamp }
-            
+
             // OPTIMIZATION: Keep messages in Descending Order (Newest -> Oldest).
             // We REMOVED .reversed() here. This aligns with the View's .reversed() loop.
             self.currentChatMessages = sortedDescending
-            
+
             self.canLoadMorePages = persistedMessages.count >= initialPageSize
-            
+
             logger.info("Successfully loaded and merged \(persistedMessages.count) persisted and \(activeStreamingMessages.count) active messages.")
-            
+
             if isUserMessagesOnlyFilterActive {
                 applyUserMessagesFilter()
             }
         } catch {
             logger.info("Conversation load for \(selectedID.uuidString) was cancelled.")
         }
-        
+
         self.isInitiallyLoadingConversation = false
     }
 

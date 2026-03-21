@@ -45,7 +45,7 @@ struct ToolExecutionMediator: ToolDispatching {
         parentContext: TraceContext
     ) async -> ToolExecutionResult {
         
-        var toolSpan = parentContext.newSpan()
+        var toolSpan = parentContext
         toolSpan.addMetadata("tool_name", value: toolName)
         let startTime = Date()
         var sanitizedName = toolName
@@ -62,7 +62,7 @@ struct ToolExecutionMediator: ToolDispatching {
         if let tool = availableTools.first(where: { $0.name == sanitizedName }) {
             
             // --- PRE-FLIGHT PERMISSION CHECK ---
-            let requiredPermissions = getRequiredPermissions(for: sanitizedName)
+            let requiredPermissions = Self.getRequiredPermissions(for: sanitizedName)
             if !requiredPermissions.isEmpty {
                 let hasPermissions = await PermissionManager.shared.ensurePermissions(for: requiredPermissions)
                 
@@ -92,12 +92,11 @@ struct ToolExecutionMediator: ToolDispatching {
                 }
 
                 let toolResult = try await tool.run(paramData)
-                let trimmedOutput = toolResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                let isSemanticFailure = trimmedOutput.isEmpty || trimmedOutput.lowercased().hasPrefix("error") || trimmedOutput.count < 3 || trimmedOutput.lowercased() == "null" || trimmedOutput.lowercased() == "nil"
+                let isSemanticFailure = Self.isSemanticFailure(toolResult.output)
 
                 if isSemanticFailure {
                     result = .semanticFailure(toolName: toolName, output: toolResult.output)
-                    errorDescriptionForMetrics = trimmedOutput.isEmpty ? "Empty tool response" : toolResult.output
+                    errorDescriptionForMetrics = toolResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Empty tool response" : toolResult.output
                 } else {
                     result = .success(output: toolResult.output, artifacts: toolResult.artifacts)
                 }
@@ -125,9 +124,17 @@ struct ToolExecutionMediator: ToolDispatching {
         return result
     }
     
-    // MARK: - Private Helpers
-    
-    private func getRequiredPermissions(for toolName: String) -> [SystemPermission] {
+    // MARK: - Testable Static Helpers
+
+    static func isSemanticFailure(_ rawOutput: String) -> Bool {
+        let trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty
+            || trimmed.lowercased().hasPrefix("error")
+            || trimmed.lowercased() == "null"
+            || trimmed.lowercased() == "nil"
+    }
+
+    static func getRequiredPermissions(for toolName: String) -> [SystemPermission] {
         switch toolName {
         case "fs_smart_search", "fs_read_metadata", "fs_watch_folder", "fs_organize_batch":
             return [.desktop, .documents, .downloads]

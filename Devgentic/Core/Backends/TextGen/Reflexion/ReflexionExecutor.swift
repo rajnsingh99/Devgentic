@@ -149,6 +149,15 @@ actor ReflexionExecutor: Executor {
                                     reflexionMemory.recordSystemAlert(msg: systemAlert)
                                     continuation.yield(.thought("⚠️ Parse error. Retrying (\(attemptCount)/\(maxAttempts))..."))
                                     continue innerLoop
+                                case .modelReload(let message):
+                                    continuation.yield(.thought(message))
+                                    let reloaded = await MLXService.shared.reloadCurrentModel()
+                                    if !reloaded {
+                                        trialSummary.markComplete(failureReason: "Model unloaded and could not be reloaded.")
+                                        break innerLoop
+                                    }
+                                    innerIteration -= 1
+                                    continue innerLoop
                                 case .abort(let reason):
                                     trialSummary.markComplete(failureReason: reason)
                                     break innerLoop
@@ -197,8 +206,8 @@ actor ReflexionExecutor: Executor {
 
                             // Record observations
                             for obs in observations {
-                                reflexionMemory.recordObservation(stepId: globalStep, toolName: obs.toolName, result: obs.result)
-                                trialSummary.record(toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
+                                reflexionMemory.recordObservation(stepId: globalStep, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result)
+                                trialSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
 
                                 let resultAction = circuitBreaker.recordToolResult(isSuccess: obs.isSuccess)
                                 if case .abort(let reason) = resultAction {
@@ -274,6 +283,9 @@ actor ReflexionExecutor: Executor {
                     // SYNTHESIS
                     // =====================================================================
 
+                    // --- UI Progress: Synthesis ---
+                    continuation.yield(.thought("Composing final response…"))
+
                     let summary = bestSummary ?? ExecutionSummary(originalGoal: input.userInput)
                     let exitStatus: String
                     switch summary.completionStatus {
@@ -288,7 +300,7 @@ actor ReflexionExecutor: Executor {
                         model: model,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
-                        isNativeFlow: input.generatorStrategy is NativeStructuredStrategy
+                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator
                     )
 
                     sessionState.closeActiveEpisode(status: exitStatus, outcome: response)
@@ -311,6 +323,7 @@ actor ReflexionExecutor: Executor {
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
                     sessionState.cancelActiveEpisode()
                     SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    continuation.yield(.thought("Cancelled by user."))
                     continuation.finish()
                 } catch {
                     logger.error("Reflexion fatal error: \(error.localizedDescription)")

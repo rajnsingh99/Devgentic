@@ -56,16 +56,21 @@ struct TraceContext: Sendable {
     /// Lightweight information about the profile handling this request.
     let profileInfo: ProfileInfo
     
+    /// The ID of the ChatMessage this trace is associated with.
+    /// Set by ActiveStreamManager when the trace is created, enabling Report UI lookups.
+    var messageID: UUID?
+    
     /// Mutable metadata for attaching specific details to this span (e.g. "tool_name", "error_code").
     var metadata: [String: String] = [:]
 
     /// Initializes a new root trace context from a backend profile.
-    init(profile: BackendProfileModel) {
+    init(profile: BackendProfileModel, messageID: UUID? = nil) {
         self.traceID = UUID().uuidString
         self.spanID = UUID().uuidString
         self.parentSpanID = nil // Root spans have no parent
         self.requestStartTime = Date()
         self.profileInfo = ProfileInfo(from: profile)
+        self.messageID = messageID
     }
 
     /// Creates a new context for a child operation (a new span).

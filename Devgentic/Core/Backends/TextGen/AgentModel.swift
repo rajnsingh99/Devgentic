@@ -12,6 +12,7 @@ import Foundation
 /// Replaces the now-removed CognitiveObservation, which was coupled to ObservationMemoryStore.
  struct ToolObservation: Sendable {
     let stepId: Int
+    let toolCallId: String  // The unique ID assigned by the provider API (e.g., Claude's tool_use id, OpenAI's call id)
     let toolName: String
     let result: String      // Full content fed to memoryStrategy.recordObservation
     let summary: String     // Brief description used for logging overview
@@ -392,7 +393,7 @@ struct AgentInput: Sendable {
         self.activeState = activeState
         self.recentHistory = recentHistory
 
-        self.generatorStrategy = generatorStrategy ?? NativeStructuredStrategy()
+        self.generatorStrategy = generatorStrategy ?? NativeStructuredGenerator()
         self.workingMemory = workingMemory ?? HighContextLinearMemory()
         self.rateLimitCategory = rateLimitCategory
 

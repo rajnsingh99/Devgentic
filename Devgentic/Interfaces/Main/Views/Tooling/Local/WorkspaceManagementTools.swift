@@ -10,102 +10,195 @@ import ApplicationServices
 struct ManageWindowsTool: DevgenticTool {
     let name = "manage_windows"
     let category = "Workspace Management"
-    let description = "Resizes, moves, or minimizes application windows to organize the workspace."
-    
+    let description = "Manages application windows: tile, fullscreen, minimize, center, resize, list all windows, bring to front, close, or move to display."
+
     struct Arguments: Decodable, Sendable {
-        let bundle_id: String
         let action: String
+        let bundle_id: String?
+        let width: Int?
+        let height: Int?
+        let display_index: Int?
+
+        private struct DynamicKey: CodingKey {
+            var stringValue: String
+            init?(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { return nil }
+            init?(intValue: Int) { return nil }
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            self.action = try container.decode(String.self, forKey: DynamicKey(stringValue: "action")!)
+
+            var bid: String? = nil
+            for key in ["bundle_id", "bundleId", "app_id", "bundleID"] {
+                if let codingKey = DynamicKey(stringValue: key),
+                   let val = try? container.decode(String.self, forKey: codingKey) {
+                    bid = val
+                    break
+                }
+            }
+            self.bundle_id = bid
+            self.width = (try? container.decodeIfPresent(Int.self, forKey: DynamicKey(stringValue: "width")!))
+            self.height = (try? container.decodeIfPresent(Int.self, forKey: DynamicKey(stringValue: "height")!))
+            self.display_index = (try? container.decodeIfPresent(Int.self, forKey: DynamicKey(stringValue: "display_index")!))
+        }
     }
-    
+
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("bundle_id", "string", "The bundle identifier of the app."),
-                ("action", "string", "The action to perform (tile_left, tile_right, fullscreen, minimize, center).")
+                ("action", "string", "Action: 'tile_left', 'tile_right', 'fullscreen', 'minimize', 'center', 'resize', 'list_windows', 'bring_to_front', 'close_window', 'move_to_display'"),
+                ("bundle_id", "string", "Bundle ID of the app (required for most actions except list_windows)"),
+                ("width", "integer", "Window width in pixels (for resize)"),
+                ("height", "integer", "Window height in pixels (for resize)"),
+                ("display_index", "integer", "Target display index, 0-based (for move_to_display)")
             ],
-            required: ["bundle_id", "action"]
+            required: ["action"]
         )
     }
-    
+
     func call(arguments: Arguments) async throws -> String {
         let logID = LogManager.shared.logAction(
             toolName: self.name,
-            summary: "Managed window for \(arguments.bundle_id)",
-            operations: [
-                ["bundle_id": arguments.bundle_id, "action": arguments.action]
-            ]
+            summary: "Window action: \(arguments.action)",
+            operations: [["action": arguments.action, "bundle_id": arguments.bundle_id ?? "all"]]
         )
-        
+
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else {
             return "Error: Accessibility permission denied. (Audit Ref: \(logID))"
         }
-        
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == arguments.bundle_id }
-        guard let app = apps.first else {
-            return "Error: App with bundle ID \(arguments.bundle_id) is not running. (Audit Ref: \(logID))"
+
+        if arguments.action == "list_windows" {
+            return listAllWindows(logID: logID)
         }
-        
+
+        guard let bundleID = arguments.bundle_id else {
+            return "Error: 'bundle_id' required for action '\(arguments.action)'. (Audit Ref: \(logID))"
+        }
+
+        let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }
+        guard let app = apps.first else {
+            return "Error: App with bundle ID \(bundleID) is not running. (Audit Ref: \(logID))"
+        }
+
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        
+
         var frontWindowRef: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &frontWindowRef)
-        
-        guard result == .success, let frontWindow = frontWindowRef else {
-            var mainWindowRef: CFTypeRef?
-            let mainResult = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindowRef)
-            guard mainResult == .success, let main = mainWindowRef else {
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &frontWindowRef) != .success {
+            if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &frontWindowRef) != .success {
                 return "Error: App has no accessible windows. (Audit Ref: \(logID))"
             }
-            frontWindowRef = main
+        }
+        guard let window = frontWindowRef else {
             return "Error: App has no accessible windows. (Audit Ref: \(logID))"
         }
-        
-        let targetWindow = frontWindowRef as! AXUIElement
-        
-        guard NSScreen.main != nil else {
-            return "Error: No main screen found. (Audit Ref: \(logID))"
-        }
-        
-        let mainDisplayBounds = CGDisplayBounds(CGMainDisplayID())
-        
-        var newPosition = CGPoint.zero
-        var newSize = CGSize.zero
-        
-        let width = mainDisplayBounds.width
-        let height = mainDisplayBounds.height
-        
+        let targetWindow = window as! AXUIElement
+
         switch arguments.action {
-        case "tile_left":
-            newPosition = .zero
-            newSize = CGSize(width: width / 2, height: height)
-        case "tile_right":
-            newPosition = CGPoint(x: width / 2, y: 0)
-            newSize = CGSize(width: width / 2, height: height)
-        case "fullscreen":
-            newPosition = .zero
-            newSize = CGSize(width: width, height: height)
-        case "center":
-            let w = width * 0.7
-            let h = height * 0.7
-            newPosition = CGPoint(x: (width - w)/2, y: (height - h)/2)
-            newSize = CGSize(width: w, height: h)
+        case "bring_to_front":
+            app.activate()
+            AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
+            return "Brought \(app.localizedName ?? bundleID) to front. (Audit Ref: \(logID))"
+
+        case "close_window":
+            var closeButtonRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(targetWindow, kAXCloseButtonAttribute as CFString, &closeButtonRef) == .success, let closeButton = closeButtonRef {
+                AXUIElementPerformAction(closeButton as! AXUIElement, kAXPressAction as CFString)
+                return "Closed window. (Audit Ref: \(logID))"
+            }
+            return "Error: Could not find close button. (Audit Ref: \(logID))"
+
         case "minimize":
             let minVal = true as CFTypeRef
             AXUIElementSetAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, minVal)
-            return "Minimized window successfully. (Audit Ref: \(logID))"
+            return "Minimized window. (Audit Ref: \(logID))"
+
+        case "resize":
+            guard let w = arguments.width, let h = arguments.height else {
+                return "Error: 'width' and 'height' required for resize. (Audit Ref: \(logID))"
+            }
+            var newSize = CGSize(width: CGFloat(w), height: CGFloat(h))
+            if let sizeVal = AXValueCreate(AXValueType.cgSize, &newSize) {
+                AXUIElementSetAttributeValue(targetWindow, kAXSizeAttribute as CFString, sizeVal)
+            }
+            return "Resized window to \(w)x\(h). (Audit Ref: \(logID))"
+
+        case "move_to_display":
+            let displayIdx = arguments.display_index ?? 0
+            let screens = NSScreen.screens
+            guard displayIdx < screens.count else {
+                return "Error: Display index \(displayIdx) not found. Available: 0-\(screens.count - 1). (Audit Ref: \(logID))"
+            }
+            let targetScreen = screens[displayIdx]
+            var newPos = targetScreen.frame.origin
+            newPos.y = NSScreen.screens[0].frame.height - targetScreen.frame.origin.y - targetScreen.frame.height
+            if let posVal = AXValueCreate(AXValueType.cgPoint, &newPos) {
+                AXUIElementSetAttributeValue(targetWindow, kAXPositionAttribute as CFString, posVal)
+            }
+            return "Moved window to display \(displayIdx). (Audit Ref: \(logID))"
+
         default:
-            return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+            guard NSScreen.main != nil else {
+                return "Error: No main screen found. (Audit Ref: \(logID))"
+            }
+            let mainDisplayBounds = CGDisplayBounds(CGMainDisplayID())
+            var newPosition = CGPoint.zero
+            var newSize = CGSize.zero
+            let width = mainDisplayBounds.width
+            let height = mainDisplayBounds.height
+
+            switch arguments.action {
+            case "tile_left":
+                newPosition = .zero
+                newSize = CGSize(width: width / 2, height: height)
+            case "tile_right":
+                newPosition = CGPoint(x: width / 2, y: 0)
+                newSize = CGSize(width: width / 2, height: height)
+            case "fullscreen":
+                newPosition = .zero
+                newSize = CGSize(width: width, height: height)
+            case "center":
+                let w = width * 0.7
+                let h = height * 0.7
+                newPosition = CGPoint(x: (width - w)/2, y: (height - h)/2)
+                newSize = CGSize(width: w, height: h)
+            default:
+                return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+            }
+
+            if let sizeVal = AXValueCreate(AXValueType.cgSize, &newSize) {
+                AXUIElementSetAttributeValue(targetWindow, kAXSizeAttribute as CFString, sizeVal)
+            }
+            if let posVal = AXValueCreate(AXValueType.cgPoint, &newPosition) {
+                AXUIElementSetAttributeValue(targetWindow, kAXPositionAttribute as CFString, posVal)
+            }
+            return "Window action '\(arguments.action)' applied. (Audit Ref: \(logID))"
         }
-        
-        if let sizeVal = AXValueCreate(AXValueType.cgSize, &newSize) {
-            AXUIElementSetAttributeValue(targetWindow, kAXSizeAttribute as CFString, sizeVal)
+    }
+
+    private func listAllWindows(logID: String) -> String {
+        var windowList: [String] = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            let appElement = AXUIElementCreateApplication(app.processIdentifier)
+            var windowsRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+               let windows = windowsRef as? [AXUIElement] {
+                for (idx, window) in windows.enumerated() {
+                    var titleRef: CFTypeRef?
+                    var title = "Untitled"
+                    if AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleRef) == .success,
+                       let t = titleRef as? String, !t.isEmpty {
+                        title = t
+                    }
+                    windowList.append("[\(app.localizedName ?? "Unknown") | \(app.bundleIdentifier ?? "")] Window \(idx): \"\(title)\"")
+                }
+            }
         }
-        
-        if let posVal = AXValueCreate(AXValueType.cgPoint, &newPosition) {
-            AXUIElementSetAttributeValue(targetWindow, kAXPositionAttribute as CFString, posVal)
+        if windowList.isEmpty {
+            return "No accessible windows found. (Audit Ref: \(logID))"
         }
-        
-        return "Window action '\(arguments.action)' applied successfully. (Audit Ref: \(logID))"
+        return "Open Windows (\(windowList.count)):\n\(windowList.joined(separator: "\n"))\n(Audit Ref: \(logID))"
     }
 }

@@ -11,11 +11,11 @@ import OSLog
 
 private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
 
-// MARK: - Strategy A: Native Tool Calling Strategy (Cloud / Modern)
+// MARK: - Strategy A: Native Tool Calling Generator (Cloud / Modern)
 
 /// A cognitive strategy that utilizes the provider's native tool array mapping.
 /// Relies on the LLMProvider's native interception bridge to format responses into LeanCognitiveStep.
-struct NativeStructuredStrategy: CognitiveGenerator {
+struct NativeStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
     let dialectRules: String?
     

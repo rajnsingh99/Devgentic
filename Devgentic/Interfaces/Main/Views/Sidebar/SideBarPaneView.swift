@@ -16,6 +16,7 @@ enum SidebarTab: CaseIterable, Identifiable {
     case promptLibrary
     case scheduler
     case backendProfiles
+    case downloads
     case settings
 
     var id: Self { self }
@@ -26,6 +27,7 @@ enum SidebarTab: CaseIterable, Identifiable {
         case .promptLibrary: return "square.stack.3d.up.fill"
         case .scheduler: return "clock.badge"
         case .backendProfiles: return "cpu"
+        case .downloads: return "arrow.down.circle"
         case .settings: return "gearshape"
         case .explorer: return "folder"
         }
@@ -37,6 +39,7 @@ enum SidebarTab: CaseIterable, Identifiable {
         case .promptLibrary: return "Prompts"
         case .scheduler: return "Scheduler"
         case .backendProfiles: return "Profiles"
+        case .downloads: return "Downloads"
         case .settings: return "Settings"
         case .explorer: return "Explorer"
         }
@@ -86,10 +89,11 @@ struct SideBarPaneView: View {
                 case .scheduler:
                     TaskSchedulerSidebarView()
                 case .backendProfiles:
-                    // Placeholder or actual view for Profiles
-                    PlaceholderSidebarView(icon: "cpu", title: "Backend Profiles", description: "Manage your AI models and agents here.")
+                    ProfileSidebarListView()
+                case .downloads:
+                    DownloadSidebarView()
                 case .settings:
-                    PlaceholderSidebarView(icon: "gearshape", title: "Settings", description: "Application preferences coming soon.")
+                    SettingsSidebarListView()
                 case .none:
                     Spacer()
                 }
@@ -103,12 +107,8 @@ struct SideBarPaneView: View {
     }
     
     private func shouldShowGenericHeader(for tab: SidebarTab) -> Bool {
-        switch tab {
-        case .explorer, .conversations, .promptLibrary, .scheduler:
-            return false // These views have their own search bars/headers
-        default:
-            return true
-        }
+        // All tabs now have their own headers
+        return false
     }
 }
 

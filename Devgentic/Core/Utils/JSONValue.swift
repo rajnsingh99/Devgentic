@@ -9,7 +9,7 @@ import Foundation
 
 /// A type-safe, Sendable, and Codable representation of a JSON value.
 /// Used to replace `Any` in structures that must conform to `Sendable`.
-public enum JSONValue: Sendable, Codable, Hashable {
+public enum JSONValue: Sendable, Hashable {
     case string(String)
     case number(Double)
     case bool(Bool)
@@ -103,18 +103,73 @@ public enum JSONValue: Sendable, Codable, Hashable {
 
     // MARK: - AnyCodable Bridge (Phase 1B Migration)
 
-    /// Lossless conversion from AnyCodable during migration.
-    public init(anyCodable: AnyCodable) {
-        self = JSONValue(anyCodable.value) ?? .null
-    }
-
     /// Serialize to Data for tool argument dispatch.
     public func toJSONData() throws -> Data {
         try JSONEncoder().encode(self)
     }
+}
 
-    /// Reverse bridge for incremental migration paths that still need AnyCodable.
-    public var anyCodableValue: AnyCodable {
-        AnyCodable(rawValue)
+// MARK: - Custom Codable Implementation
+
+extension JSONValue: Codable {
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        
+        // 1. Intercept `null` explicitly before anything else fails
+        if container.decodeNil() {
+            self = .null
+            return
+        }
+        
+        // 2. Attempt decoding in order of strictness
+        if let boolVal = try? container.decode(Bool.self) {
+            self = .bool(boolVal)
+            return
+        }
+        
+        if let doubleVal = try? container.decode(Double.self) {
+            self = .number(doubleVal)
+            return
+        }
+        
+        if let stringVal = try? container.decode(String.self) {
+            self = .string(stringVal)
+            return
+        }
+        
+        if let arrayVal = try? container.decode([JSONValue].self) {
+            self = .array(arrayVal)
+            return
+        }
+        
+        if let dictVal = try? container.decode([String: JSONValue].self) {
+            self = .object(dictVal)
+            return
+        }
+        
+        throw DecodingError.dataCorruptedError(
+            in: container,
+            debugDescription: "JSONValue could not decode the payload into a recognized primitive, array, or object."
+        )
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        
+        switch self {
+        case .null:
+            try container.encodeNil()
+        case .bool(let b):
+            try container.encode(b)
+        case .number(let n):
+            try container.encode(n)
+        case .string(let s):
+            try container.encode(s)
+        case .array(let a):
+            try container.encode(a)
+        case .object(let o):
+            try container.encode(o)
+        }
     }
 }

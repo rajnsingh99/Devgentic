@@ -21,20 +21,8 @@ struct VSCodifiedSidebarContainerView: View {
     @Binding var isSidebarVisible: Bool
     @Binding var sidebarWidth: CGFloat
     
-    @State private var isHoveringOnDivider = false
-    
-    private let minSidebarWidth: CGFloat = 260 // Slightly narrower min width for modern feel
-    private let maxSidebarWidth: CGFloat = 600
+    private let fixedSidebarWidth: CGFloat = 320
     private let activityBarWidth: CGFloat = 50
-
-    // Remember preferred widths for each tab type
-    @State private var preferredWidths: [SidebarTab: CGFloat] = [
-        .conversations: 320,
-        .explorer: 300,
-        .promptLibrary: 350,
-        .scheduler: 350,
-        .settings: 300
-    ]
 
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.appTheme) private var theme
@@ -79,75 +67,20 @@ struct VSCodifiedSidebarContainerView: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(theme.surfaceOverlayStrong.opacity(0.5), lineWidth: 1)
             )
-            .overlay(alignment: .trailing) {
-                if isSidebarVisible {
-                    // Resize Handle (Overlapping the border)
-                    ZStack {
-                        // Invisible hit target area (wider than the visual line)
-                        Rectangle()
-                            .fill(Color.clear)
-                            .frame(width: 10)
-
-                        // Visual Divider Line (subtle highlight on hover)
-                        Rectangle()
-                            .fill(isHoveringOnDivider ? theme.accentColor : Color.clear)
-                            .frame(width: 1.5)
-                            .padding(.vertical, 20) // Don't touch the corners
-                    }
-                    .contentShape(Rectangle())
-                    .frame(width: 10)
-                    .offset(x: 5) // Center the 10pt hit area on the 1pt border
-                    .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .onChanged { value in
-                                let newWidth = self.sidebarWidth + value.translation.width
-                                self.sidebarWidth = min(max(newWidth, self.minSidebarWidth), self.maxSidebarWidth)
-
-                                // Save preference
-                                if let tab = selectedTab {
-                                    preferredWidths[tab] = self.sidebarWidth
-                                }
-                            }
-                    )
-                    .onHover { hovering in
-                        self.isHoveringOnDivider = hovering
-                        if hovering {
-                            NSCursor.resizeLeftRight.set()
-                        } else {
-                            NSCursor.arrow.set()
-                        }
-                    }
-                    .transition(.opacity)
-                }
-            }
             .padding(.leading, 12)
             .padding(.vertical, 12)
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
         }
         .frame(maxHeight: .infinity)
         .onChange(of: selectedTab) { newTab in
-            if let newTab = newTab {
-                if !isSidebarVisible {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        isSidebarVisible = true
-                    }
+            if newTab != nil && !isSidebarVisible {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isSidebarVisible = true
                 }
-                
-                // Restore preferred width
-                if let savedWidth = preferredWidths[newTab] {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        self.sidebarWidth = min(max(savedWidth, self.minSidebarWidth), self.maxSidebarWidth)
-                    }
-                }
-            } else {
-                // If tab selection is cleared, maybe hide sidebar?
-                // Keeping it visible but empty is also valid, but let's stick to current logic.
             }
         }
         .onAppear {
-            if let initialTab = selectedTab, let initialPreferredWidth = preferredWidths[initialTab] {
-                self.sidebarWidth = min(max(initialPreferredWidth, self.minSidebarWidth), self.maxSidebarWidth)
-            }
+            self.sidebarWidth = fixedSidebarWidth
         }
     }
 }

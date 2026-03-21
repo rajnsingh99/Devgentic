@@ -99,7 +99,7 @@ struct BotConfigDetailView: View {
             set: { newValue in
                 let val = String(newValue.prefix(5000))
                 if case .bot(let config, _) = profile.details {
-                    profile.details = .bot(llmConfig: config, instructions: val.isEmpty ? nil : val)
+                    profile.details = .bot(llmConfig: config, instructions: val)
                 }
             }
         )
@@ -107,10 +107,15 @@ struct BotConfigDetailView: View {
 
     // MARK: - Body
     var body: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                
-                // 1. Identity Header
+        VStack(spacing: 0) {
+            DynamicIslandBar {
+                actionButtons
+            }
+
+            ScrollView {
+                VStack(spacing: 24) {
+
+                    // 1. Identity Header
                 HStack(alignment: .center, spacing: 16) {
                     Image(systemName: "cpu.fill")
                         .resizable()
@@ -131,11 +136,8 @@ struct BotConfigDetailView: View {
                     }
                     Spacer()
                 }
-                .padding()
-                .background(theme.secondaryBackground)
-                .cornerRadius(12)
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.dividerColor, lineWidth: 1))
-                
+                .padding(.bottom, 8)
+
                 // 2. Inference Engine (Provider)
                 ModernSection(title: "Inference Engine", icon: "server.rack") {
                     
@@ -176,7 +178,16 @@ struct BotConfigDetailView: View {
                                     modelMetadata: Binding(
                                         get: { providerConfig.wrappedValue.modelMetadata },
                                         set: { providerConfig.wrappedValue.modelMetadata = $0 }
-                                    )
+                                    ),
+                                    chatTemplateSource: Binding(
+                                        get: { providerConfig.wrappedValue.chatTemplateSource },
+                                        set: { providerConfig.wrappedValue.chatTemplateSource = $0 }
+                                    ),
+                                    stopSequences: Binding(
+                                        get: { providerConfig.wrappedValue.stopSequences },
+                                        set: { providerConfig.wrappedValue.stopSequences = $0 }
+                                    ),
+                                    profileID: profile.id
                                 )
                                 .labelsHidden()
                                 .fixedSize()
@@ -211,16 +222,27 @@ struct BotConfigDetailView: View {
                             .buttonStyle(.link)
                         }
 
-                        TextEditor(text: instructionsBinding)
-                            .font(.system(.body, design: .monospaced))
-                            .disableAutocorrection(true)
-                            .frame(minHeight: 120)
-                            .padding(8)
-                            .scrollContentBackground(.hidden)
-                            .background(theme.textBackground)
-                            .foregroundColor(theme.primaryText)
-                            .cornerRadius(8)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
+                        ZStack(alignment: .topLeading) {
+                            TextEditor(text: instructionsBinding)
+                                .font(.system(.body, design: .monospaced))
+                                .disableAutocorrection(true)
+                                .frame(minHeight: 120)
+                                .padding(8)
+                                .scrollContentBackground(.hidden)
+                                .background(theme.textBackground)
+                                .foregroundColor(theme.primaryText)
+                                .cornerRadius(8)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
+                                
+                            if instructionsBinding.wrappedValue.isEmpty {
+                                Text("Enter system instructions for your bot here...")
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText.opacity(0.5))
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 16)
+                                    .allowsHitTesting(false)
+                            }
+                        }
 
                         Text("\(instructionsBinding.wrappedValue.count) characters · ~\(instructionsBinding.wrappedValue.count / 4) tokens")
                             .font(.caption2)
@@ -234,15 +256,10 @@ struct BotConfigDetailView: View {
                 }
             }
             .padding()
-            .padding(.bottom, 80) // Space for action bar
+            .frame(maxWidth: 1000)
+            .frame(maxWidth: .infinity)
         }
-        .background(theme.primaryBackground)
-        .safeAreaInset(edge: .bottom) {
-            actionButtons
-                .padding()
-                .background(theme.secondaryBackground)
-                .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .top)
-        }
+        } // end outer VStack
         .alert("Delete '\(profile.displayName)'?", isPresented: $showingDeleteAlert) {
             Button("Delete", role: .destructive) {
                 profileService.deleteProfile(withId: profile.id)
@@ -292,66 +309,54 @@ struct BotConfigDetailView: View {
     // MARK: - Subviews & Helpers
     
     private var actionButtons: some View {
-        HStack {
+        HStack(spacing: 8) {
+            if hasChanges {
+                Button {
+                    if let initialState = initialProfileState {
+                        profile = initialState
+                        loadAdvancedConfigs()
+                    }
+                } label: {
+                    Text("Revert")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .foregroundColor(theme.primaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(theme.surfaceOverlay))
+
+                Button {
+                    profileService.saveProfile(profile)
+                    initialProfileState = profile
+                } label: {
+                    Text("Save")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(theme.accentColor))
+            }
+
             Button(role: .destructive) {
                 showingDeleteAlert = true
             } label: {
-                Label("Delete Bot", systemImage: "trash")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(isDeleteHovered ? Color.red.opacity(0.1) : Color.clear)
-                    .cornerRadius(8)
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(isDeleteHovered ? .white : .red.opacity(0.8))
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(isDeleteHovered ? Color.red : Color.red.opacity(0.1))
+                    )
             }
             .buttonStyle(.plain)
-            .foregroundColor(.red)
-            .scaleEffect(isDeleteHovered ? 1.02 : 1.0)
             .onHover { isDeleteHovered = $0 }
-            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isDeleteHovered)
-            
-            Spacer()
-            
-            if hasChanges {
-                HStack(spacing: 12) {
-                    Button("Revert") {
-                        if let initialState = initialProfileState {
-                            profile = initialState
-                            loadAdvancedConfigs()
-                        }
-                    }
-                    .keyboardShortcut(.cancelAction)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(isRevertHovered ? theme.surfaceOverlay : Color.clear)
-                    .cornerRadius(8)
-                    .onHover { isRevertHovered = $0 }
-                    .scaleEffect(isRevertHovered ? 1.02 : 1.0)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isRevertHovered)
-                    
-                    Button {
-                        profileService.saveProfile(profile)
-                        initialProfileState = profile
-                    } label: {
-                        Text("Save Changes")
-                            .fontWeight(.semibold)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(theme.accentColor.opacity(isSaveHovered ? 0.9 : 1.0))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .shadow(color: theme.accentColor.opacity(isSaveHovered ? 0.3 : 0.0), radius: 8, x: 0, y: 4)
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.defaultAction)
-                    .onHover { isSaveHovered = $0 }
-                    .scaleEffect(isSaveHovered ? 1.02 : 1.0)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSaveHovered)
-                }
-                .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else {
-                Text("All changes saved")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
-            }
+            .animation(.easeInOut(duration: 0.15), value: isDeleteHovered)
         }
     }
     
@@ -459,6 +464,7 @@ struct BotConfigDetailView: View {
                         set: { providerConfig.wrappedValue.modelMetadata = $0 }
                     ),
                     baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
+                    profileID: profile.id,
                     filterForTools: false
                 )
                 .labelsHidden()

@@ -21,7 +21,6 @@ class MainApplicationViewModel: ObservableObject {
     
     let backendConfiguration = BackendConfiguration()
     let explorerViewModel = ExplorerViewModel()
-    let insertPromptText = PassthroughSubject<String, Never>()
     
     // Dependencies are now injected and stored.
     private let activeStreamManager: ActiveStreamManager
@@ -42,7 +41,6 @@ class MainApplicationViewModel: ObservableObject {
     @Published var conversations: [Conversation] = []
     @Published var selectedConversationID: UUID?
     @Published var isSidebarCollapsed: Bool = true
-    @Published var showSettings: Bool = false
     @Published var showContextArea: Bool = false
     @Published var activeContextFilePath: String? = nil
     @Published var attachedFiles: [FileSystemItem] = []
@@ -59,6 +57,7 @@ class MainApplicationViewModel: ObservableObject {
     @Published var showIntelligenceCoreDownloadPopup: Bool = false
     
     @Published var streamingMessageID: UUID? = nil
+    @Published var streamingMessage: ChatMessage? = nil
     
     // MARK: - Query History Properties
     @Published private(set) var queryHistory: [String] = []
@@ -213,7 +212,7 @@ class MainApplicationViewModel: ObservableObject {
     // MARK: - Message Sending Logic
     
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
-        if showSettings { showSettings = false }
+
         
         let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -282,12 +281,14 @@ class MainApplicationViewModel: ObservableObject {
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
                     self?.streamingMessageID = nil
+                    self?.streamingMessage = nil
                     logger.info("Stream completed. Resetting streamingMessageID.")
                 }
             }
         )
 
         self.streamingMessageID = agentMessage.id
+        self.streamingMessage = agentMessage
         chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
         logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
 
@@ -371,7 +372,7 @@ class MainApplicationViewModel: ObservableObject {
         agentMessage.agentResponse?.generationAttempts += 1
         agentMessage.isStreaming = true
 
-        let streamingMessage = activeStreamManager.startMessageStream(
+        let newStreamingMessage = activeStreamManager.startMessageStream(
             withConfig: config,
             conversationID: agentMessage.conversationId,
             userQuery: userQuery,
@@ -381,12 +382,14 @@ class MainApplicationViewModel: ObservableObject {
             onComplete: { [weak self] in
                 DispatchQueue.main.async {
                     self?.streamingMessageID = nil
+                    self?.streamingMessage = nil
                     logger.info("Regeneration stream completed for message \(agentMessage.id.uuidString).")
                 }
             }
         )
         
-        self.streamingMessageID = streamingMessage.id
+        self.streamingMessageID = newStreamingMessage.id
+        self.streamingMessage = newStreamingMessage
     }
     
     func cancelStreamingResponse() {
@@ -469,7 +472,7 @@ class MainApplicationViewModel: ObservableObject {
     }
     
     func startNewConversation() {
-        if showSettings { showSettings = false }
+
         clearAttachedFiles()
         let newConversationID = createAndSelectNewConversation()
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
@@ -478,7 +481,7 @@ class MainApplicationViewModel: ObservableObject {
     
     // NEW: Function to deselect conversation and return to the welcome screen
     func deselectConversationAndShowWelcome() {
-        if showSettings { showSettings = false }
+
         clearAttachedFiles()
         selectedConversationID = nil
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
@@ -487,7 +490,7 @@ class MainApplicationViewModel: ObservableObject {
 
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
-        if showSettings { showSettings = false }
+
         
         let profileID = backendConfiguration.selectedProfileID
         
@@ -582,8 +585,23 @@ class MainApplicationViewModel: ObservableObject {
         persistenceService.saveContext()
     }
 
+    // MARK: - Conversation Export (P1)
+
+    func exportConversation(conversationID: UUID) {
+        guard let entity = persistenceService.getConversation(withId: conversationID) else {
+            logger.warning("Cannot export: conversation \(conversationID.uuidString) not found.")
+            return
+        }
+        let conversation = entity.toConversationStruct()
+        let title = conversation.displayTitle
+
+        Task {
+            let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 10000)
+            ConversationExporter.exportToFile(title: title, messages: messages)
+        }
+    }
+
     func toggleSidebar() { withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() } }
-    func toggleSettings() { withAnimation { showSettings.toggle() } }
     func toggleContextArea() { withAnimation { showContextArea.toggle() } }
     
     func groupKey(for date: Date) -> String {

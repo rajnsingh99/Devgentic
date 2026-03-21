@@ -283,9 +283,19 @@ struct ProviderConfig: Codable, Hashable {
     /// Rich metadata describing the model's constraints (tier, context, etc).
     var modelMetadata: ModelMetadata?
 
+    /// Describes how to obtain the correct chat template for the model.
+    /// Set by MLXTokenizerAnalyzer during model selection; defaults to `.embedded`.
+    var chatTemplateSource: ChatTemplateSource = .embedded
+
+    /// Custom stop sequences extracted from the model's tokenizer configuration.
+    /// These are turn-boundary tokens that must be detected at the application level
+    /// during generation — if the model emits one, generation should stop immediately.
+    /// Extracted by `MLXTokenizerAnalyzer` and stored as an intrinsic model property.
+    var stopSequences: [String] = []
+
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
     var cognitiveProfile: CognitiveProfile {
-        CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata)
+        CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
     }
 
     // Explicit memberwise initializer to support default values
@@ -296,7 +306,9 @@ struct ProviderConfig: Codable, Hashable {
          advancedConfiguration: [String: JSONValue]? = nil,
          cognitiveCapability: ModelCognitiveCapability = .none,
          modelDialect: ModelDialect = .nativeJSON,
-         modelMetadata: ModelMetadata? = nil) {
+         modelMetadata: ModelMetadata? = nil,
+         chatTemplateSource: ChatTemplateSource = .embedded,
+         stopSequences: [String] = []) {
         self.apiProvider = apiProvider
         self.modelName = modelName
         self.apiKey = apiKey
@@ -305,12 +317,14 @@ struct ProviderConfig: Codable, Hashable {
         self.cognitiveCapability = cognitiveCapability
         self.modelDialect = modelDialect
         self.modelMetadata = modelMetadata
+        self.chatTemplateSource = chatTemplateSource
+        self.stopSequences = stopSequences
     }
 
     // MARK: - Codable Conformance
 
     enum CodingKeys: String, CodingKey {
-        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences
     }
 
     init(from decoder: Decoder) throws {
@@ -340,6 +354,12 @@ struct ProviderConfig: Codable, Hashable {
 
         // Metadata: decode if present
         self.modelMetadata = try container.decodeIfPresent(ModelMetadata.self, forKey: .modelMetadata)
+
+        // Chat template source: decode if present, otherwise default to .embedded (backward compat)
+        self.chatTemplateSource = try container.decodeIfPresent(ChatTemplateSource.self, forKey: .chatTemplateSource) ?? .embedded
+
+        // Stop sequences: decode if present, otherwise empty (backward compat)
+        self.stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -352,6 +372,10 @@ struct ProviderConfig: Codable, Hashable {
         try container.encode(cognitiveCapability, forKey: .cognitiveCapability)
         try container.encode(modelDialect, forKey: .modelDialect)
         try container.encodeIfPresent(modelMetadata, forKey: .modelMetadata)
+        try container.encode(chatTemplateSource, forKey: .chatTemplateSource)
+        if !stopSequences.isEmpty {
+            try container.encode(stopSequences, forKey: .stopSequences)
+        }
         // We do NOT encode supportsNativeTools anymore, effectively dropping it on next save.
     }
 }

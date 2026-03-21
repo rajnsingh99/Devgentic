@@ -16,7 +16,12 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 /// A collection of robust JSON parsing heuristics and fallback mechanisms.
 /// Designed to rescue structurally volatile responses from local or less capable models.
-struct HeuristicCognitiveParser {
+struct HeuristicCognitiveParser: CognitiveParserProtocol {
+    
+    /// Conformance to CognitiveParserProtocol.
+    func parse(rawResponse: String) -> ModernCognitiveStep {
+        return Self.parseLegacyResponse(rawResponse)
+    }
 
     /// Parses a raw string response into a LeanCognitiveStep using a tiered strategy.
     private struct LegacyArraySchema: Decodable {
@@ -60,6 +65,23 @@ struct HeuristicCognitiveParser {
         // --- 2. Outermost Object Extraction ---
         guard let jsonString = extractOutermostJSON(from: cleanText) else {
             logger.error("❌ [JSONParser] Failed to find valid JSON object. Raw text: \(rawText.prefix(500))")
+
+            // Recovery A: Lenient regex-based extraction directly on raw text.
+            // Handles truncated/bracket-mismatched JSON where the root object's braces
+            // never balance (e.g., model outputs `]` instead of `}`) but individual fields
+            // and tool call objects are still recoverable via regex.
+            if let lenient = attemptLenientExtraction(from: cleanText) {
+                logger.info("✅ [JSONParser] Lenient extraction recovered from malformed JSON (no balanced braces).")
+                return lenient
+            }
+
+            // Recovery B: Markdown-field format ("content: <text>\ntool_calls: <value>")
+            // Occurs when models wrap field names in triple backticks (```content```)
+            // which OutputSanitizer strips, leaving bare "content: ..." with no JSON braces.
+            if let recovered = extractFromMarkdownFieldFormat(cleanText) {
+                logger.info("✅ [JSONParser] Recovered reasoning from markdown-field format.")
+                return recovered
+            }
             return ModernCognitiveStep(reasoning: rawText, toolCalls: [])
         }
 
@@ -148,7 +170,26 @@ struct HeuristicCognitiveParser {
     private static func sanitizeJSON(_ json: String) -> String {
         var result = json
 
-        // 1. Trailing comma removal: {key: "val",} → {key: "val"}
+        // 1. Single-quote to double-quote normalization.
+        //    Python-trained models sometimes emit {'key': 'value'} instead of {"key": "value"}.
+        //    Only runs when the input has single quotes AND lacks valid double-quoted structure,
+        //    or when single quotes co-exist with double quotes in a mixed format.
+        result = normalizeSingleQuotes(result)
+
+        // 2. Unquoted key normalization: {key: "val"} → {"key": "val"}
+        //    JavaScript-style unquoted object keys are invalid JSON.
+        //    Matches a bare identifier after { , [ or newline in key position (before ':').
+        //    Only targets keys — values like `null`, `true`, `false` are handled by step 4.
+        if let regex = try? NSRegularExpression(
+            pattern: #"(?<=[\{\[,\n])\s*([a-zA-Z_]\w*)\s*:"#
+        ) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: " \"$1\":")
+        }
+
+        // 3. Trailing comma removal: {"key": "val",} → {"key": "val"}
         let trailingCommaPattern = #",\s*([}\]])"#
         if let regex = try? NSRegularExpression(pattern: trailingCommaPattern) {
             result = regex.stringByReplacingMatches(
@@ -158,7 +199,7 @@ struct HeuristicCognitiveParser {
             )
         }
 
-        // 2. Python-style literal normalization.
+        // 4. Python-style literal normalization.
         //    Models (especially Llama 3.1) emit Python literals instead of JSON:
         //      NULL / None → null,  True → true,  False → false,  NaN → null
         //    Safe here because sanitizeJSON() only runs on extracted JSON objects
@@ -166,7 +207,12 @@ struct HeuristicCognitiveParser {
         //    Word-boundary anchors (\b) prevent corrupting keys like "nullable".
         result = normalizePythonLiterals(result)
 
-        // 3. Strip control characters (below 0x20) except standard whitespace.
+        // 5. Unwrap stringified arguments: "arguments": "{...}" → "arguments": {...}
+        //    Some models serialize the arguments dict as a JSON string instead of an object.
+        //    Detects the pattern and unescapes the inner JSON.
+        result = unwrapStringifiedArguments(result)
+
+        // 6. Strip control characters (below 0x20) except standard whitespace.
         result = result.unicodeScalars.filter { scalar in
             scalar.value >= 0x20 || scalar == "\n" || scalar == "\r" || scalar == "\t"
         }.map { String($0) }.joined()
@@ -201,6 +247,73 @@ struct HeuristicCognitiveParser {
         return result
     }
 
+    /// Replaces single quotes used as JSON delimiters with double quotes.
+    /// Uses a state-machine approach to walk character-by-character, distinguishing
+    /// structural single quotes from apostrophes inside double-quoted strings.
+    ///
+    /// Safe because this runs only on brace-depth-extracted JSON objects, not free text.
+    /// Handles mixed quoting (some keys single-quoted, some double-quoted).
+    private static func normalizeSingleQuotes(_ json: String) -> String {
+        // Quick bail: no single quotes → nothing to do
+        guard json.contains("'") else { return json }
+
+        var result: [Character] = []
+        result.reserveCapacity(json.count)
+        var inDoubleQuote = false
+        var inSingleQuote = false
+        var prevChar: Character = "\0"
+
+        for char in json {
+            if char == "\"" && !inSingleQuote && prevChar != "\\" {
+                inDoubleQuote.toggle()
+                result.append(char)
+            } else if char == "'" && !inDoubleQuote && prevChar != "\\" {
+                // Single quote in a structural position → replace with double quote
+                inSingleQuote.toggle()
+                result.append("\"")
+            } else {
+                result.append(char)
+            }
+            prevChar = char
+        }
+
+        return String(result)
+    }
+
+    /// Detects `"arguments": "{...}"` or `"parameters": "{...}"` patterns where the model
+    /// emitted the arguments dict as a JSON-encoded string, and unwraps them to raw objects.
+    /// Example: `"arguments": "{\"path\": \"/tmp\"}"` → `"arguments": {"path": "/tmp"}`
+    private static func unwrapStringifiedArguments(_ json: String) -> String {
+        // Match "arguments" or "parameters" followed by a colon and a string that starts with {
+        let pattern = #"("(?:arguments|parameters)")\s*:\s*"(\{(?:[^"\\]|\\.)*\})""#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators) else {
+            return json
+        }
+
+        let nsString = json as NSString
+        let matches = regex.matches(in: json, range: NSRange(location: 0, length: nsString.length))
+        guard !matches.isEmpty else { return json }
+
+        var result = json
+        // Process matches in reverse to preserve ranges
+        for match in matches.reversed() {
+            guard let keyRange = Range(match.range(at: 1), in: result),
+                  let innerRange = Range(match.range(at: 2), in: result) else { continue }
+
+            // Unescape the inner JSON string: \" → ", \\ → \
+            var inner = String(result[innerRange])
+            inner = inner.replacingOccurrences(of: "\\\"", with: "\"")
+            inner = inner.replacingOccurrences(of: "\\\\", with: "\\")
+
+            // Replace the full match: "arguments": "{...}" → "arguments": {...}
+            let fullRange = Range(match.range, in: result)!
+            let key = String(result[keyRange])
+            result.replaceSubrange(fullRange, with: "\(key): \(inner)")
+        }
+
+        return result
+    }
+
     // MARK: - Lenient Field Extraction
 
     /// A fallback heuristic that attempts to extract required fields using regular expressions when standard JSON decoding fails.
@@ -212,7 +325,7 @@ struct HeuristicCognitiveParser {
                let range = Range(match.range(at: 1), in: text) {
                 return String(text[range])
             }
-            
+
             let nullPattern = #"\"\#(key)\"\s*:\s*null"#
             if let regex = try? NSRegularExpression(pattern: nullPattern, options: []),
                regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil {
@@ -225,37 +338,189 @@ struct HeuristicCognitiveParser {
             return nil
         }
 
-        let extractedTool = extractStringOrNull(forKey: "tool_name", in: json)
-        let toolName: String? = (extractedTool == "null" || extractedTool?.isEmpty == true) ? nil : extractedTool
+        // --- Strategy A: Extract individual tool objects from "tool_calls" array ---
+        // Handles malformed arrays (missing commas between elements, keys outside "arguments").
+        // Finds each `{"name": "..."}` object inside the array using brace-depth extraction.
+        var pending: [PendingToolCall] = []
 
-        var arguments: [String: JSONValue]? = nil
-        if let toolName = toolName {
-            if let argsStart = json.range(of: "\"arguments\""),
-               let extracted = extractOutermostJSON(from: String(json[argsStart.lowerBound...])) {
-                if let argsData = extracted.data(using: .utf8),
-                   let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: argsData) {
-                    arguments = decoded
+        if let arrayStart = json.range(of: "\"tool_calls\"") {
+            let arrayRegion = String(json[arrayStart.lowerBound...])
+            // Find the opening '[' of the array
+            if let bracketStart = arrayRegion.firstIndex(of: "[") {
+                let innerRegion = String(arrayRegion[bracketStart...])
+                pending = extractToolCallsFromArray(innerRegion)
+                if !pending.isEmpty {
+                    logger.info("✅ [JSONParser] Lenient array extraction recovered \(pending.count) tool call(s).")
+                }
+            }
+        }
+
+        // --- Strategy B: Legacy single-tool format ("tool_name" key) ---
+        if pending.isEmpty {
+            let extractedTool = extractStringOrNull(forKey: "tool_name", in: json)
+            let toolName: String? = (extractedTool == "null" || extractedTool?.isEmpty == true) ? nil : extractedTool
+
+            if let toolName = toolName {
+                var arguments: [String: JSONValue]? = nil
+                if let argsStart = json.range(of: "\"arguments\""),
+                   let extracted = extractOutermostJSON(from: String(json[argsStart.lowerBound...])) {
+                    if let argsData = extracted.data(using: .utf8),
+                       let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: argsData) {
+                        arguments = decoded
+                    } else {
+                        arguments = [:]
+                    }
                 } else {
                     arguments = [:]
                 }
+
+                if arguments?.isEmpty == true, !content.isEmpty {
+                    if let rescued = rescueArgumentsFromContent(toolName: toolName, content: content) {
+                        logger.info("🔧 [JSONParser] Rescued arguments from content for tool '\(toolName)'.")
+                        arguments = rescued
+                    }
+                }
+
+                pending.append(PendingToolCall(id: UUID().uuidString, name: toolName, arguments: arguments ?? [:]))
+            }
+        }
+
+        return ModernCognitiveStep(reasoning: content, toolCalls: pending)
+    }
+
+    // MARK: - Array Tool Call Extraction
+
+    /// Extracts individual tool call objects from a potentially malformed JSON array string.
+    ///
+    /// Walks through the array using brace-depth extraction to isolate each `{...}` block,
+    /// then attempts to decode each block individually. Handles:
+    /// - Missing commas between array elements
+    /// - Keys at the wrong nesting level (e.g., "search_term" outside "arguments")
+    /// - Missing "arguments" wrapper
+    ///
+    /// - Parameter arrayString: The raw string starting from `[` of the tool_calls array.
+    /// - Returns: An array of successfully parsed tool calls (may be partial if some fail).
+    private static func extractToolCallsFromArray(_ arrayString: String) -> [PendingToolCall] {
+        var results: [PendingToolCall] = []
+        var searchFrom = arrayString.startIndex
+
+        while searchFrom < arrayString.endIndex {
+            let remaining = String(arrayString[searchFrom...])
+            guard let objectJSON = extractOutermostJSON(from: remaining) else { break }
+
+            // Advance past this object for the next iteration
+            if let objRange = remaining.range(of: objectJSON) {
+                searchFrom = arrayString.index(searchFrom, offsetBy: remaining.distance(from: remaining.startIndex, to: objRange.upperBound))
             } else {
-                arguments = [:]
+                break
             }
 
-            if arguments?.isEmpty == true, !content.isEmpty {
-                if let rescued = rescueArgumentsFromContent(toolName: toolName, content: content) {
-                    logger.info("🔧 [JSONParser] Rescued arguments from content for tool '\(toolName)'.")
-                    arguments = rescued
+            // Try strict decode first
+            if let data = objectJSON.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(LegacyArraySchema.LegacyToolCall.self, from: data) {
+                results.append(PendingToolCall(id: UUID().uuidString, name: decoded.name, arguments: decoded.arguments))
+                continue
+            }
+
+            // Lenient: extract "name" via regex, then recover arguments
+            let namePattern = #"\"name\"\s*:\s*\"([^\"]+)\""#
+            guard let nameRegex = try? NSRegularExpression(pattern: namePattern),
+                  let nameMatch = nameRegex.firstMatch(in: objectJSON, range: NSRange(objectJSON.startIndex..., in: objectJSON)),
+                  let nameRange = Range(nameMatch.range(at: 1), in: objectJSON) else {
+                continue
+            }
+            let toolName = String(objectJSON[nameRange])
+
+            // Try to decode "arguments" sub-object
+            var args: [String: JSONValue] = [:]
+            if let argsStart = objectJSON.range(of: "\"arguments\""),
+               let argsJSON = extractOutermostJSON(from: String(objectJSON[argsStart.lowerBound...])),
+               let argsData = argsJSON.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: argsData) {
+                args = decoded
+            } else {
+                // Fallback: collect all string/null key-value pairs except "name" and "arguments"
+                // as flattened arguments (handles keys at wrong nesting level)
+                args = extractFlattenedArguments(from: objectJSON, excludingKeys: ["name", "arguments"])
+            }
+
+            results.append(PendingToolCall(id: UUID().uuidString, name: toolName, arguments: args))
+            logger.info("🔧 [JSONParser] Lenient recovery for tool '\(toolName)' with \(args.count) arg(s).")
+        }
+
+        return results
+    }
+
+    /// Extracts all key-value pairs from a JSON object string via regex,
+    /// excluding specified keys. Handles string values, null, numbers, and booleans.
+    /// Used when a model flattens "arguments" keys into the tool call object.
+    private static func extractFlattenedArguments(from json: String, excludingKeys: [String]) -> [String: JSONValue] {
+        var args: [String: JSONValue] = [:]
+        let excludeSet = Set(excludingKeys)
+
+        // Match "key": "stringValue"
+        let stringPattern = #"\"(\w+)\"\s*:\s*\"((?:[^\"\\]|\\.)*)\""#
+        if let regex = try? NSRegularExpression(pattern: stringPattern, options: .dotMatchesLineSeparators) {
+            let matches = regex.matches(in: json, range: NSRange(json.startIndex..., in: json))
+            for match in matches {
+                if let keyRange = Range(match.range(at: 1), in: json),
+                   let valRange = Range(match.range(at: 2), in: json) {
+                    let key = String(json[keyRange])
+                    if !excludeSet.contains(key) {
+                        args[key] = .string(String(json[valRange]))
+                    }
                 }
             }
         }
 
-        var pending: [PendingToolCall] = []
-        if let toolName = toolName {
-            pending.append(PendingToolCall(id: UUID().uuidString, name: toolName, arguments: arguments ?? [:]))
+        // Match "key": null
+        let nullPattern = #"\"(\w+)\"\s*:\s*null"#
+        if let regex = try? NSRegularExpression(pattern: nullPattern) {
+            let matches = regex.matches(in: json, range: NSRange(json.startIndex..., in: json))
+            for match in matches {
+                if let keyRange = Range(match.range(at: 1), in: json) {
+                    let key = String(json[keyRange])
+                    if !excludeSet.contains(key) && args[key] == nil {
+                        args[key] = .null
+                    }
+                }
+            }
         }
 
-        return ModernCognitiveStep(reasoning: content, toolCalls: pending)
+        // Match "key": number (integer or decimal)
+        let numPattern = #"\"(\w+)\"\s*:\s*(-?\d+\.?\d*)\b"#
+        if let regex = try? NSRegularExpression(pattern: numPattern) {
+            let matches = regex.matches(in: json, range: NSRange(json.startIndex..., in: json))
+            for match in matches {
+                if let keyRange = Range(match.range(at: 1), in: json),
+                   let valRange = Range(match.range(at: 2), in: json) {
+                    let key = String(json[keyRange])
+                    if !excludeSet.contains(key) && args[key] == nil {
+                        let numStr = String(json[valRange])
+                        if let dblVal = Double(numStr) {
+                            args[key] = .number(dblVal)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Match "key": true/false
+        let boolPattern = #"\"(\w+)\"\s*:\s*(true|false)"#
+        if let regex = try? NSRegularExpression(pattern: boolPattern) {
+            let matches = regex.matches(in: json, range: NSRange(json.startIndex..., in: json))
+            for match in matches {
+                if let keyRange = Range(match.range(at: 1), in: json),
+                   let valRange = Range(match.range(at: 2), in: json) {
+                    let key = String(json[keyRange])
+                    if !excludeSet.contains(key) && args[key] == nil {
+                        args[key] = .bool(String(json[valRange]) == "true")
+                    }
+                }
+            }
+        }
+
+        return args
     }
 
     // MARK: - Content-to-Arguments Rescue
@@ -314,5 +579,38 @@ struct HeuristicCognitiveParser {
             return String(content[range]).trimmingCharacters(in: .whitespaces)
         }
         return nil
+    }
+
+    // MARK: - Markdown-Field Format Recovery
+
+    /// Recovers content from a bare markdown-field format where the model output
+    /// `content: <reasoning text>` and optionally `tool_calls: <value>` without JSON wrapping.
+    ///
+    /// This format occurs when models wrap field names in triple backticks (e.g. `` ```content``` ``)
+    /// which the OutputSanitizer strips, leaving bare `content: ...` text with no JSON braces.
+    private static func extractFromMarkdownFieldFormat(_ text: String) -> ModernCognitiveStep? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Must start with "content" followed by optional whitespace and colon
+        guard let prefixRegex = try? NSRegularExpression(pattern: #"^content\s*:\s*"#),
+              let prefixMatch = prefixRegex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+              let prefixRange = Range(prefixMatch.range, in: trimmed) else {
+            return nil
+        }
+
+        // Extract everything after "content:"
+        var reasoning = String(trimmed[prefixRange.upperBound...])
+
+        // Strip trailing "tool_calls: <anything>" if present
+        if let toolCallsSuffix = try? NSRegularExpression(pattern: #"\n\s*tool_calls\s*:.*$"#, options: .dotMatchesLineSeparators),
+           let suffixMatch = toolCallsSuffix.firstMatch(in: reasoning, range: NSRange(reasoning.startIndex..., in: reasoning)),
+           let suffixRange = Range(suffixMatch.range, in: reasoning) {
+            reasoning = String(reasoning[..<suffixRange.lowerBound])
+        }
+
+        reasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reasoning.isEmpty else { return nil }
+
+        return ModernCognitiveStep(reasoning: reasoning, toolCalls: [])
     }
 }

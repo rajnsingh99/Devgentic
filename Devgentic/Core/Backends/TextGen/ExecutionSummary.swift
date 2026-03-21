@@ -35,6 +35,7 @@ enum CompletionStatus: Sendable {
 /// A clean, factual record of a single tool invocation within a ReAct loop.
 /// Contains no reasoning traces or system alerts — only observable data.
 struct SynthesizedToolResult: Sendable {
+    let toolCallId: String // The unique ID assigned by the provider API for correlation
     let toolName: String
     let params: String     // Serialized JSON parameters string
     let output: String     // Raw tool output string
@@ -70,8 +71,9 @@ struct ExecutionSummary: Sendable {
     // MARK: - Mutation
 
     /// Records a tool invocation result and updates the aggregate completion status unconditionally.
-    mutating func record(toolName: String, params: String, output: String, isSuccess: Bool) {
+    mutating func record(toolCallId: String, toolName: String, params: String, output: String, isSuccess: Bool) {
         toolResults.append(SynthesizedToolResult(
+            toolCallId: toolCallId,
             toolName: toolName,
             params: params,
             output: output,
@@ -84,7 +86,14 @@ struct ExecutionSummary: Sendable {
     /// Optionally records a system failure reason if the loop was aborted abruptly.
     mutating func markComplete(failureReason: String? = nil) {
         self.failureReason = failureReason
-        completionStatus = toolResults.allSatisfy(\.isSuccess) ? .success : .partialSuccess
+        if toolResults.isEmpty {
+            // No tools were executed — the agent terminated without acting.
+            // This is a partial result at best (e.g., parser dropped tool calls,
+            // or the model decided it couldn't help without tool use).
+            completionStatus = .partialSuccess
+        } else {
+            completionStatus = toolResults.allSatisfy(\.isSuccess) ? .success : .partialSuccess
+        }
     }
 
     // MARK: - Private

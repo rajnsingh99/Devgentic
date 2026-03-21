@@ -12,6 +12,8 @@ import Combine
 @MainActor
 class MLXModelStoreViewModel: ObservableObject {
     
+    let filterForTools: Bool
+    
     // MARK: - Inputs (View Actions)
     @Published var searchText: String = ""
     @Published var selectedCategory: StoreCategory = .all {
@@ -88,6 +90,14 @@ class MLXModelStoreViewModel: ObservableObject {
         }
     }
     
+    var availableCategories: [StoreCategory] {
+        if filterForTools {
+            return [.installed, .toolUse]
+        } else {
+            return StoreCategory.allCases
+        }
+    }
+    
     enum SortOption: String, CaseIterable, Identifiable {
         case popularity = "Popularity"
         case sizeSmallest = "Size (Smallest)"
@@ -106,7 +116,9 @@ class MLXModelStoreViewModel: ObservableObject {
     
     // MARK: - Initialization
     
-    init() {
+    init(filterForTools: Bool = false) {
+        self.filterForTools = filterForTools
+        self.selectedCategory = filterForTools ? .installed : .all
         setupBindings()
         refreshCategoryData()
     }
@@ -209,16 +221,47 @@ class MLXModelStoreViewModel: ObservableObject {
         // 1. Select Source
         if category == .installed {
             sourceModels = local.map { item in
-                MLXDisplayModel(
+                
+                // Fetch authentic capability from MLX Analyzer instead of hardcoding "Chat"
+                let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: item.localPath, modelName: item.displayName)
+                var caps: Set<MLXModelCapability> = []
+                
+                if profile.capability != .none {
+                    caps.insert(.toolUse)
+                }
+                
+                let lowerId = item.displayName.lowercased()
+                if lowerId.contains("reasoning") || lowerId.contains("chain-of-thought") || lowerId.contains("deepseek-r1") {
+                    caps.insert(.reasoning)
+                }
+                if lowerId.contains("coder") || lowerId.contains("code") || lowerId.contains("codellama") || lowerId.contains("qwen2.5-coder") {
+                    caps.insert(.coding)
+                }
+                if lowerId.contains("vision") || lowerId.contains("vl") || lowerId.contains("llava") || lowerId.contains("pixtral") || lowerId.contains("qwen2-vl") {
+                    caps.insert(.vision)
+                }
+                
+                // Fallback to text generation if nothing matches
+                if caps.isEmpty {
+                    caps.insert(.textGeneration)
+                }
+                
+                return MLXDisplayModel(
                     id: item.displayName,
                     size: nil,
-                    capabilities: [.textGeneration],
+                    capabilities: caps,
                     tags: ["Installed"],
                     downloads: 0,
                     likes: 0,
                     description: item.localPath.path
                 )
             }
+            
+            // Apply hard filter if we only want tool models
+            if filterForTools {
+                sourceModels = sourceModels.filter { $0.capabilities.contains(.toolUse) }
+            }
+            
         } else {
             sourceModels = remote
         }

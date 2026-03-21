@@ -1,5 +1,5 @@
 //
-//  LlamaReActGenerator.swift
+//  MarkdownStructuredGenerator.swift
 //  Devgentic
 //
 //  Step 2.2: Dialect-specific generator for the .reactMarkdown dialect.
@@ -17,13 +17,13 @@ import OSLog
 
 private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
 
-// MARK: - Strategy: Llama ReAct Generator
+// MARK: - Strategy: Markdown Structured Generator
 
 /// A cognitive strategy for models that follow the classic ReAct markdown format:
 ///   Thought: <reasoning>
 ///   Action: <tool_name>
 ///   Action Input: <json_args>
-struct LlamaReActGenerator: CognitiveGenerator {
+struct MarkdownStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
 
     private let dialectRules = """
@@ -83,7 +83,7 @@ struct LlamaReActGenerator: CognitiveGenerator {
 
         guard !responseText.isEmpty else {
             logLLMOps.error("❌ [ReActMD:\(reqId)] Empty response from model.")
-            throw NSError(domain: "LlamaReActGenerator", code: 422,
+            throw NSError(domain: "MarkdownStructuredGenerator", code: 422,
                           userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
         }
 

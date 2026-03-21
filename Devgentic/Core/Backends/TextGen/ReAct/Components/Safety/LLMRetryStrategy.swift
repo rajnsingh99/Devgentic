@@ -40,7 +40,16 @@ struct LLMRetryStrategy: LLMRetryHandling {
             logger.warning("Network timeout. Retrying request.")
             return .networkRetry(message: "⏳ Network Timeout. Retrying request...")
         }
-        
+
+        // Model was unloaded (e.g., idle timer fired during HITL suspension).
+        // Must be detected BEFORE the catch-all parse failure to avoid futile retries.
+        let isModelUnloaded = errorDesc.contains("No MLX model is currently loaded") ||
+                              errorDesc.contains("No Ollama model")
+        if isModelUnloaded {
+            logger.warning("Model was unloaded during execution. Requesting reload.")
+            return .modelReload(message: "⏳ Model was released from memory. Reloading...")
+        }
+
         // Treat as a Parse Failure (e.g., model returned malformed JSON)
         consecutiveParseFailures += 1
         

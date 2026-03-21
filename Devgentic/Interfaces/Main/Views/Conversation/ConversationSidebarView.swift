@@ -93,8 +93,9 @@ struct SidebarGroupHeaderView: View {
 /// such as context menus (pinning, renaming, deleting) and inline state preparation.
 struct ConversationSidebarRow: View {
     let conversation: ConversationEntity
-    
+
     @ObservedObject var viewModel: MainApplicationViewModel
+    @EnvironmentObject private var router: MainViewRouter
 
     // Inline Renaming State
     @Binding var renamingConversationID: UUID?
@@ -148,6 +149,10 @@ struct ConversationSidebarRow: View {
             toggleBatchSelection()
         } else {
             viewModel.selectedConversationID = conversation.id
+            // Return to chat if currently viewing a non-chat destination
+            if !router.isShowingChat {
+                router.returnToChat()
+            }
         }
     }
 
@@ -205,6 +210,14 @@ struct ConversationSidebarRow: View {
             prepareForRename()
         } label: {
             Label("Rename", systemImage: "pencil")
+        }
+
+        Button {
+            if let id = conversation.id {
+                viewModel.exportConversation(conversationID: id)
+            }
+        } label: {
+            Label("Export to Markdown", systemImage: "square.and.arrow.up")
         }
 
         Divider()
@@ -343,10 +356,19 @@ struct ConversationSidebarView: View {
                     }
                 }
 
-                // Others Section (Flat)
-                VStack(spacing: 2) {
-                    ForEach(otherConversations) { conversation in
-                        row(for: conversation)
+                // Date-Grouped Sections
+                ForEach(dateGroupedSections, id: \.title) { section in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(section.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.7))
+                            .padding(.horizontal, 8)
+                            .padding(.top, 8)
+                            .padding(.bottom, 2)
+
+                        ForEach(section.conversations) { conversation in
+                            row(for: conversation)
+                        }
                     }
                 }
             }
@@ -393,6 +415,55 @@ struct ConversationSidebarView: View {
     /// Conversations that are NOT pinned.
     private var otherConversations: [ConversationEntity] {
         filteredConversations.filter { !$0.isPinned }
+    }
+
+    // MARK: - Date Grouping
+
+    private struct DateSection: Equatable {
+        let title: String
+        let conversations: [ConversationEntity]
+
+        static func == (lhs: DateSection, rhs: DateSection) -> Bool {
+            lhs.title == rhs.title && lhs.conversations.map(\.objectID) == rhs.conversations.map(\.objectID)
+        }
+    }
+
+    private var dateGroupedSections: [DateSection] {
+        let calendar = Calendar.current
+        let now = Date()
+
+        var today: [ConversationEntity] = []
+        var yesterday: [ConversationEntity] = []
+        var thisWeek: [ConversationEntity] = []
+        var thisMonth: [ConversationEntity] = []
+        var earlier: [ConversationEntity] = []
+
+        for conversation in otherConversations {
+            guard let date = conversation.timestamp else {
+                earlier.append(conversation)
+                continue
+            }
+
+            if calendar.isDateInToday(date) {
+                today.append(conversation)
+            } else if calendar.isDateInYesterday(date) {
+                yesterday.append(conversation)
+            } else if let weekAgo = calendar.date(byAdding: .day, value: -7, to: now), date >= weekAgo {
+                thisWeek.append(conversation)
+            } else if let monthAgo = calendar.date(byAdding: .month, value: -1, to: now), date >= monthAgo {
+                thisMonth.append(conversation)
+            } else {
+                earlier.append(conversation)
+            }
+        }
+
+        var sections: [DateSection] = []
+        if !today.isEmpty { sections.append(DateSection(title: "Today", conversations: today)) }
+        if !yesterday.isEmpty { sections.append(DateSection(title: "Yesterday", conversations: yesterday)) }
+        if !thisWeek.isEmpty { sections.append(DateSection(title: "This Week", conversations: thisWeek)) }
+        if !thisMonth.isEmpty { sections.append(DateSection(title: "This Month", conversations: thisMonth)) }
+        if !earlier.isEmpty { sections.append(DateSection(title: "Earlier", conversations: earlier)) }
+        return sections
     }
 
     // MARK: - Batch Selection Components

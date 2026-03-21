@@ -21,7 +21,6 @@ struct ChatInputAreaView: View {
     @Binding var activeContextFilePath: String?
 
     let isSending: Bool
-    let showSettings: Bool
     var isInputFocused: FocusState<Bool>.Binding
 
     @ObservedObject var backendConfiguration: BackendConfiguration
@@ -31,12 +30,12 @@ struct ChatInputAreaView: View {
 
     @EnvironmentObject var explorerViewModel: ExplorerViewModel
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
+    @EnvironmentObject private var router: MainViewRouter
     @Environment(\.appTheme) private var theme
 
     // MARK: - UI State (Cleaned of Business Logic)
     @State private var showingBackendSelectorPopup: Bool = false
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
-    @State private var showingToolLibrary = false
     @State private var selectedProfile: BackendProfileModel?
     @State private var isToolsHovering = false
     @State private var showingSchedulePopover = false
@@ -56,7 +55,7 @@ struct ChatInputAreaView: View {
 
     private var isInputEnabled: Bool {
         let isQueryInProgress = isSending || mainViewModel.streamingMessageID != nil
-        return !isQueryInProgress && !showSettings
+        return !isQueryInProgress
     }
 
     // MARK: - Typography
@@ -175,7 +174,11 @@ struct ChatInputAreaView: View {
         }
         .frame(maxWidth: 1000)
         .frame(maxWidth: .infinity, alignment: .center)
-        
+        // MARK: - File Drop Zone (P1)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            handleFileDrop(providers)
+        }
+
         // MARK: - Wiring
         .onAppear {
             updateSelectedProfile(profileID: backendConfiguration.selectedProfileID)
@@ -357,8 +360,10 @@ struct ChatInputAreaView: View {
             .disabled(!isInputEnabled)
             .opacity(isInputEnabled ? 1.0 : 0.5)
 
-            if selectedProfile?.profileType == .agent {
-                Button(action: { self.showingToolLibrary = true }) {
+            if selectedProfile?.profileType == .agent, let profileID = backendConfiguration.selectedProfileID {
+                Button(action: {
+                    router.navigate(to: .toolLibrary(profileID: profileID))
+                }) {
                     Image(systemName: "hammer.fill")
                         .resizable()
                         .scaledToFit()
@@ -375,12 +380,6 @@ struct ChatInputAreaView: View {
                 .help("Manage tools for this agent")
                 .disabled(!isInputEnabled)
                 .opacity(isInputEnabled ? 1.0 : 0.5)
-                .sheet(isPresented: $showingToolLibrary) {
-                    ToolLibraryView(
-                        configuredTools: toolsBinding,
-                        instructions: profileInstructions
-                    )
-                }
             }
 
             // Schedule button
@@ -499,7 +498,7 @@ struct ChatInputAreaView: View {
             } else {
                 ZStack {
                     let canSend = mode == .send && !inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    let isDisabledBySystem = showSettings || (mode == .send && (inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording))
+                    let isDisabledBySystem = (mode == .send && (inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording))
 
                     Circle()
                         .fill(buttonBackgroundColor(for: mode, canSend: canSend, isDisabledBySystem: isDisabledBySystem))
@@ -627,11 +626,11 @@ struct ChatInputAreaView: View {
         switch mode {
         case .send:
             let isEmptyText = inputViewModel.userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            return isEmptyText || isSending || showSettings || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .finalizingSilence
-        case .stopVoice: return isSending || showSettings
+            return isEmptyText || isSending || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .finalizingSilence
+        case .stopVoice: return isSending
         case .stopStreaming: return false
         case .mic:
-            return isSending || showSettings || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence || inputViewModel.voiceInputState == .modelLoading || inputViewModel.voiceInputState == .modelPreparing
+            return isSending || inputViewModel.voiceInputState == .requestingPermissions || inputViewModel.voiceInputState == .processing || inputViewModel.voiceInputState == .recording || inputViewModel.voiceInputState == .finalizingSilence || inputViewModel.voiceInputState == .modelLoading || inputViewModel.voiceInputState == .modelPreparing
         }
     }
 
@@ -646,6 +645,36 @@ struct ChatInputAreaView: View {
     
     // MARK: - Handlers
     
+    // MARK: - File Drop Handler (P1)
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        var fileItems: [FileSystemItem] = []
+
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url = url else { return }
+                // Skip video files
+                if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+                   type.conforms(to: .video) || type.conforms(to: .movie) {
+                    return
+                }
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                    let newItem = FileSystemItem(
+                        id: url,
+                        name: url.lastPathComponent,
+                        url: url,
+                        isDirectory: isDirectory.boolValue
+                    )
+                    DispatchQueue.main.async {
+                        mainViewModel.addAttachedFile(fileItem: newItem)
+                    }
+                }
+            }
+        }
+
+        return true
+    }
+
     private func openFilePicker() {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = true

@@ -59,6 +59,7 @@
         <attribute name="thoughts" optional="YES" attributeType="Transformable" valueTransformerName="AgentThoughtArrayTransformer"/>
         <attribute name="timelineEvents" optional="YES" attributeType="Transformable" valueTransformerName="TimelineEventArrayTransformer"/>
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="traceID" optional="YES" attributeType="String"/>
         <relationship name="attachedImageFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedImageFileEntity" inverseName="chatMessage" inverseEntity="AttachedImageFileEntity"/>
         <relationship name="attachedTextFiles" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="AttachedTextFileEntity" inverseName="chatMessage" inverseEntity="AttachedTextFileEntity"/>
         <relationship name="conversation" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ConversationEntity" inverseName="messages" inverseEntity="ConversationEntity"/>

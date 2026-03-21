@@ -32,7 +32,16 @@ func preprocessStreamResilientMarkdown(_ text: String) -> String {
 }
 
 func preprocessMarkdownText(_ text: String) -> String {
-    return text.replacingOccurrences(of: "<br>", with: "\n")
+    var processed = text.replacingOccurrences(of: "<br>", with: "\n")
+    
+    // If the text looks like a list of paths but isn't properly formatted as a markdown list,
+    // we can try to force double newlines to ensure readability in the UI.
+    let lines = processed.components(separatedBy: .newlines)
+    if lines.count > 3 && lines.filter({ $0.contains("/") }).count > lines.count / 2 {
+        processed = lines.joined(separator: "\n\n")
+    }
+    
+    return processed
 }
 
 /// Step 4: swift-markdown AST Mapper

@@ -131,8 +131,28 @@ final class LocalToolManager {
         // Register Native PIM Tools
         registerNative(ManageCalendarTool())
         registerNative(ManageRemindersTool())
-        registerNative(ReadContactsTool())
-        
+        registerNative(ManageContactsTool())
+
+        // Register Coding Assistant Tools
+        registerNative(EditCodeTool())
+        registerNative(CodeSearchTool())
+        registerNative(GlobFilesTool())
+        registerNative(FindDefinitionTool())
+        registerNative(BatchCommandTool())
+        registerNative(CreateFileTool())
+        registerNative(FileOverviewTool())
+        registerNative(CodebaseMapTool())
+
+        // Register macOS Utility Tools
+        registerNative(ScreenCaptureTool())
+        registerNative(FinderTagsTool())
+        registerNative(DiskUsageTool())
+        registerNative(DisplayManagementTool())
+        registerNative(OpenSystemSettingsTool())
+        registerNative(LoginItemsTool())
+        registerNative(ExternalDevicesTool())
+        registerNative(AppleNotesTool())
+
         logger.info("LocalToolManager initialized with \(self.toolRegistry.count) native tools.")
     }
     

@@ -14,8 +14,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 // MARK: - Main View
 struct MainApplicationView: View {
     @EnvironmentObject private var viewModel: MainApplicationViewModel
-    @Environment(\.openWindow) var openWindow
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @EnvironmentObject private var router: MainViewRouter
     @Environment(\.appTheme) private var theme
 
     @FocusState private var isInputFocused: Bool
@@ -37,27 +37,22 @@ struct MainApplicationView: View {
             ChatGPTBackgroundView()
             
             ZStack {
-                VStack(spacing: 0) {
-//                    ChatHeaderView(
-//                        chatTitle: viewModel.currentConversationTitle,
-//                        isFilterActive: chatHistoryViewModel.isUserMessagesOnlyFilterActive,
-//                        onEyeButtonTapped: {
-//                            chatHistoryViewModel.toggleUserMessagesFilter()
-//                            logger.info("Header eye button tapped. Filter active: \(chatHistoryViewModel.isUserMessagesOnlyFilterActive)")
-//                        },
-//                        onTransferButtonTapped: {
-//                            viewModel.transferSelectedConversationToOverlay()
-//                        },
-//                        isConversationSelected: viewModel.selectedConversationID != nil
-//                    )
-                    
-                    chatArea
+                // LAYER 1: Chat — always alive, visibility toggled via opacity
+                chatArea
+                    .opacity(router.isShowingChat ? 1 : 0)
+                    .allowsHitTesting(router.isShowingChat)
+
+                // LAYER 2: Non-chat destinations — created on demand
+                if !router.isShowingChat {
+                    destinationView
+                        .transition(.opacity)
                 }
             }
             .padding(.leading, totalSidebarWidth)
             .frame(maxWidth: .infinity)
             .animation(.easeInOut(duration: 0.2), value: isSidebarVisible)
             .animation(.easeInOut(duration: 0.1), value: currentSidebarPaneWidth)
+            .animation(.easeInOut(duration: 0.2), value: router.activeDestination)
             
             VSCodifiedSidebarContainerView(
                 isSidebarVisible: $isSidebarVisible,
@@ -86,19 +81,19 @@ struct MainApplicationView: View {
         .frame(minWidth: 800, minHeight: 500)
         .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
         .onAppear {
-             if viewModel.selectedConversationID != nil && !viewModel.showSettings {
+             if viewModel.selectedConversationID != nil && router.isShowingChat {
                  DispatchQueue.main.async { isInputFocused = true }
              }
          }
-        .onChange(of: viewModel.showSettings) { showingSettings in
-            if !showingSettings && viewModel.selectedConversationID != nil {
+        .onChange(of: router.activeDestination) { newDestination in
+            if newDestination == .chat && viewModel.selectedConversationID != nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
-            } else if showingSettings {
+            } else if newDestination != .chat {
                 isInputFocused = false
             }
         }
         .onChange(of: chatHistoryViewModel.isSending) { isNowSending in
-            if !isNowSending && !viewModel.showSettings && viewModel.selectedConversationID != nil {
+            if !isNowSending && router.isShowingChat && viewModel.selectedConversationID != nil {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
@@ -108,7 +103,7 @@ struct MainApplicationView: View {
                     chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
                     logger.info("Reset user messages filter due to conversation change.")
                 }
-                if !viewModel.showSettings {
+                if router.isShowingChat {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         isInputFocused = true
                     }
@@ -127,6 +122,30 @@ struct MainApplicationView: View {
     // MARK: - Subviews
 
     @ViewBuilder
+    private var destinationView: some View {
+        switch router.activeDestination {
+        case .chat:
+            EmptyView()
+        case .profileDetail(let profileID):
+            ProfileDetailContainerView(profileID: profileID)
+        case .settingsDetail(let category):
+            SettingsDetailContainerView(category: category)
+        case .toolLibrary(let profileID):
+            ToolLibraryContainerView(profileID: profileID)
+        case .promptDetail(let promptID):
+            PromptDetailContainerView(promptID: promptID)
+        case .scheduledTaskDetail(let taskID):
+            ScheduledTaskDetailContainerView(taskID: taskID)
+        case .ollamaModelStore:
+            OllamaModelStoreContainerView()
+        case .mlxModelStore(_, let filterForTools):
+            MLXModelStoreContainerView(filterForTools: filterForTools)
+        case .downloadManager:
+            DownloadManagerContainerView()
+        }
+    }
+
+    @ViewBuilder
     private var chatArea: some View {
         ZStack(alignment: .bottom) {
             ChatHistoryView()
@@ -139,22 +158,55 @@ struct MainApplicationView: View {
                     }
                 }
 
-            ChatInputAreaView(
-                showContextArea: $viewModel.showContextArea,
-                activeContextFilePath: $viewModel.activeContextFilePath,
-                isSending: chatHistoryViewModel.isSending,
-                showSettings: viewModel.showSettings,
-                isInputFocused: $isInputFocused,
-                backendConfiguration: viewModel.backendConfiguration,
-                onSendMessage: viewModel.sendMessage,
-                onToggleContext: {
-                    withAnimation { viewModel.toggleContextArea() }
+            VStack(spacing: 0) {
+                // Wrapper observes the ChatMessage directly so banner reacts
+                // to pendingClarification/pendingToolConfirmation changes.
+                if let streamingMsg = viewModel.streamingMessage {
+                    StreamingMessageBannerWrapper(message: streamingMsg)
+                        .environmentObject(viewModel)
                 }
-            )
-            .padding(.horizontal)
-            .padding(.top, 4)
-            .padding(.bottom, 15)
-            .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+
+                ChatInputAreaView(
+                    showContextArea: $viewModel.showContextArea,
+                    activeContextFilePath: $viewModel.activeContextFilePath,
+                    isSending: chatHistoryViewModel.isSending,
+                    isInputFocused: $isInputFocused,
+                    backendConfiguration: viewModel.backendConfiguration,
+                    onSendMessage: viewModel.sendMessage,
+                    onToggleContext: {
+                        withAnimation { viewModel.toggleContextArea() }
+                    }
+                )
+                .padding(.horizontal)
+                .padding(.top, 4)
+                .padding(.bottom, 15)
+                .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+            }
         }
+    }
+}
+
+// MARK: - Streaming Message Banner Wrapper
+/// Holds an @ObservedObject on the ChatMessage so SwiftUI re-evaluates
+/// pending state when `pendingClarification` / `pendingToolConfirmation` change.
+/// Without this, MainApplicationView only reacts to the VM reference changing,
+/// not to @Published properties on the nested ChatMessage.
+private struct StreamingMessageBannerWrapper: View {
+    @ObservedObject var message: ChatMessage
+    @EnvironmentObject var viewModel: MainApplicationViewModel
+
+    var body: some View {
+        Group {
+            if message.pendingClarification != nil || message.pendingToolConfirmation != nil {
+                AgentInterruptBannerView(message: message)
+                    .environmentObject(viewModel)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .move(edge: .bottom).combined(with: .opacity)
+                    ))
+            }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingClarification != nil)
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingToolConfirmation != nil)
     }
 }

@@ -98,6 +98,20 @@ struct WorkerAgent: Sendable {
                 case .parseRetry(let systemAlert, _, _):
                     workerMemory.recordSystemAlert(msg: systemAlert)
                     continue workerLoop
+                case .modelReload(let message):
+                    continuation.yield(.thought("[\(task.workerRole)] \(message)"))
+                    let reloaded = await MLXService.shared.reloadCurrentModel()
+                    if !reloaded {
+                        return WorkerResult(
+                            workerId: task.id,
+                            workerRole: task.workerRole,
+                            output: "Worker aborted: Model unloaded and could not be reloaded.",
+                            isSuccess: false,
+                            toolsUsed: toolsUsed
+                        )
+                    }
+                    iteration -= 1
+                    continue workerLoop
                 case .abort(let reason):
                     return WorkerResult(
                         workerId: task.id,
@@ -147,7 +161,7 @@ struct WorkerAgent: Sendable {
             )
 
             for obs in observations {
-                workerMemory.recordObservation(stepId: iteration, toolName: obs.toolName, result: obs.result)
+                workerMemory.recordObservation(stepId: iteration, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result)
                 toolsUsed.append(obs.toolName)
                 accumulatedOutput += "\n[\(obs.toolName)]: \(obs.result)"
 

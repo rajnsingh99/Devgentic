@@ -37,7 +37,7 @@ class AgentConnect: ObservableObject {
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
-        logger.info("Routing request through AgentConnect Unified Pipeline for profile: \(profile.displayName)")
+        logger.info("Request reached TextGen Unified Pipeline for profile: \(profile.displayName)")
         
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -104,6 +104,9 @@ class AgentConnect: ObservableObject {
                         isBotFlow: isBotFlow
                     )
                     
+                    // --- UI Progress: Preparing tools ---
+                    continuation.yield(.thought("Preparing agent tools…"))
+
                     // 3. Resolve Tools
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
                     let fallbackRag = ragContext ?? "No static context provided."
@@ -141,9 +144,24 @@ class AgentConnect: ObservableObject {
                         }
                     }
                     
+                    // --- UI Progress: Model initialization ---
+                    switch llmConfig.apiProvider {
+                    case .mlx:
+                        continuation.yield(.thought("Loading local model: \(llmConfig.modelName)…"))
+                    case .ollama:
+                        continuation.yield(.thought("Connecting to Ollama: \(llmConfig.modelName)…"))
+                    default:
+                        break
+                    }
+
                     // 5. Initialize the Language Model (Passing isBotFlow to determine endpoint routing)
                     let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
                     
+                    // --- UI Progress: Model ready ---
+                    if llmConfig.apiProvider == .mlx || llmConfig.apiProvider == .ollama {
+                        continuation.yield(.thought("Model loaded. Starting execution…"))
+                    }
+
                     // NEW: Log Full Configuration Visibility
                     self.logFullConfiguration(
                         profile: profile,
@@ -206,9 +224,18 @@ class AgentConnect: ObservableObject {
                     
                     let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
                     
+                    var finalOutputAccumulator = ""
                     for try await event in stream {
+                        if case .content(let chunk) = event {
+                            finalOutputAccumulator += chunk
+                        }
                         continuation.yield(event)
                     }
+                    
+                    logger.info("--- 🏁 TEXTGEN RESPONSE COMPLETE 🏁 ---")
+                    logger.info("Model: \(llmConfig.modelName)")
+                    logger.info("Final Output: \(finalOutputAccumulator)")
+                    logger.info("---------------------------------------")
                     
                     continuation.finish()
                     
@@ -237,13 +264,13 @@ class AgentConnect: ObservableObject {
         
         switch llmConfig.apiProvider {
         case .anthropic:
-            return NativeStructuredStrategy(toolAdapter: ClaudeToolSchemaAdapter())
+            return NativeStructuredGenerator(toolAdapter: ClaudeToolSchemaAdapter())
             
         case .google:
-            return NativeStructuredStrategy(toolAdapter: GeminiToolSchemaAdapter())
+            return NativeStructuredGenerator(toolAdapter: GeminiToolSchemaAdapter())
             
         case .openAI:
-            return NativeStructuredStrategy(toolAdapter: NativeJSONSchemaAdapter())
+            return NativeStructuredGenerator(toolAdapter: NativeJSONSchemaAdapter())
             
         case .mlx, .ollama:
             let cognitiveProfile = llmConfig.cognitiveProfile
@@ -259,28 +286,30 @@ class AgentConnect: ObservableObject {
                         userInfo: [NSLocalizedDescriptionKey: "The selected model (\(llmConfig.modelName)) is a conversational model and lacks the cognitive capabilities required for Agent tasks. Please switch to a Bot profile or select a tool-capable model."]
                     )
                 }
-                return PromptedJsonModeStrategy()
+                return JsonStructuredGenerator()
                 
             case .singleAction:
                 // Secondary Dimension: Dialect matching for single-action text constraints
                 switch cognitiveProfile.dialect {
                 case .mistralXML:
-                    return MistralXMLGenerator()
+                    return XMLStructuredGenerator()
                 case .reactMarkdown:
-                    return LlamaReActGenerator()
-                case .nativeJSON, .promptedFlatJSON:
-                    return PromptedJsonModeStrategy()
+                    return MarkdownStructuredGenerator()
+                default:
+                    return JsonStructuredGenerator()
                 }
                 
             case .parallelActions:
-                // Models capable of parallel arrays route through native providers
-                let strategyName = (llmConfig.apiProvider == .mlx) ? "MLXNativeStructuredGenerator" : "NativeStructuredStrategy"
+                // Models capable of parallel tool calling are well-trained to output structured JSON natively.
+                // Dialect routing is unnecessary here — it's only needed for singleAction models
+                // which may be legacy or older architectures requiring format-specific prompting.
+                let strategyName = (llmConfig.apiProvider == .mlx) ? "MLXNativeStructuredGenerator" : "NativeStructuredGenerator"
                 logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
-                
+
                 if llmConfig.apiProvider == .mlx {
                     return MLXNativeStructuredGenerator()
                 } else {
-                    return NativeStructuredStrategy()
+                    return NativeStructuredGenerator()
                 }
             }
         }
@@ -343,7 +372,32 @@ class AgentConnect: ObservableObject {
                 throw NSError(domain: "AgentConnect", code: 404, userInfo: [NSLocalizedDescriptionKey: "Local MLX model '\(modelName)' not found."])
             }
             try await MLXService.shared.loadModel(from: path)
-            return MLXLLMProvider(modelName: modelName, dialect: llmConfig.cognitiveProfile.dialect)
+
+            // Decode MLX advanced parameters from the stored configuration.
+            // If the user hasn't customized settings, use model-aware recommended defaults
+            // based on tier and quantization (e.g., 3-bit models get stronger repetition penalty).
+            let mlxConfig: MLXAdvancedConfig = {
+                if let advDict = llmConfig.advancedConfiguration {
+                    let rawDict = advDict.mapValues { $0.rawValue }
+                    if let data = try? JSONSerialization.data(withJSONObject: rawDict),
+                       let decoded = try? JSONDecoder().decode(MLXAdvancedConfig.self, from: data) {
+                        return decoded
+                    }
+                }
+                // No user override — use dynamic defaults tuned to model characteristics
+                if let metadata = llmConfig.cognitiveProfile.metadata {
+                    return .recommended(for: metadata)
+                }
+                return .default()
+            }()
+
+            return MLXLLMProvider(
+                modelName: modelName,
+                dialect: llmConfig.cognitiveProfile.dialect,
+                chatTemplateSource: llmConfig.cognitiveProfile.chatTemplateSource,
+                stopSequences: llmConfig.cognitiveProfile.stopSequences,
+                advancedConfig: mlxConfig
+            )
             
         default:
             throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Provider \(llmConfig.apiProvider) is not supported in the unified pipeline yet."])
@@ -457,16 +511,75 @@ class AgentConnect: ObservableObject {
         case "fs_organize_batch": return wrapTool(OrganizeBatchTool(), requiresConfirmation: requiresConfirmation)
         case "read_session_history": return wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: requiresConfirmation)
             
-        // NEW MACOS SYSTEM COMMANDING TOOLS
+        // MACOS SYSTEM COMMANDING TOOLS
         case "read_screen_state": return wrapTool(ReadScreenStateTool(), requiresConfirmation: requiresConfirmation)
         case "click_ui_element": return wrapTool(ClickUIElementTool(), requiresConfirmation: requiresConfirmation)
         case "manage_windows": return wrapTool(ManageWindowsTool(), requiresConfirmation: requiresConfirmation)
         case "manage_calendar": return wrapTool(ManageCalendarTool(), requiresConfirmation: requiresConfirmation)
         case "manage_reminders": return wrapTool(ManageRemindersTool(), requiresConfirmation: requiresConfirmation)
-        case "read_contacts": return wrapTool(ReadContactsTool(), requiresConfirmation: requiresConfirmation)
+        case "read_contacts": return wrapTool(ManageContactsTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_contacts": return wrapTool(ManageContactsTool(), requiresConfirmation: requiresConfirmation)
         case "run_mac_shortcut": return wrapTool(RunMacShortcutTool(), requiresConfirmation: requiresConfirmation)
         case "manage_clipboard": return wrapTool(ManageClipboardTool(), requiresConfirmation: requiresConfirmation)
         case "push_local_notification": return wrapTool(PushLocalNotificationTool(), requiresConfirmation: requiresConfirmation)
+        case "get_focus_context": return wrapTool(GetFocusContextTool(), requiresConfirmation: requiresConfirmation)
+        case "get_power_state": return wrapTool(GetPowerStateTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_processes": return wrapTool(ManageProcessesTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_safari_tabs": return wrapTool(ManageSafariTabsTool(), requiresConfirmation: requiresConfirmation)
+        case "read_safari_bookmarks": return wrapTool(ReadSafariBookmarksTool(), requiresConfirmation: requiresConfirmation)
+        case "extract_safari_reader_view": return wrapTool(ExtractSafariReaderViewTool(), requiresConfirmation: requiresConfirmation)
+
+        // VISION INPUT TOOLS
+        case "type_text": return wrapTool(TypeTextTool(), requiresConfirmation: requiresConfirmation)
+        case "press_key_combo": return wrapTool(PressKeyComboTool(), requiresConfirmation: requiresConfirmation)
+        case "scroll_ui": return wrapTool(ScrollUITool(), requiresConfirmation: requiresConfirmation)
+        case "read_ui_element_tree": return wrapTool(ReadUIElementTreeTool(), requiresConfirmation: requiresConfirmation)
+
+        // NETWORK TOOLS
+        case "check_network_status": return wrapTool(CheckNetworkStatusTool(), requiresConfirmation: requiresConfirmation)
+        case "http_request": return wrapTool(HTTPRequestTool(), requiresConfirmation: requiresConfirmation)
+        case "dns_lookup": return wrapTool(DNSLookupTool(), requiresConfirmation: requiresConfirmation)
+
+        // AUDIO & MEDIA TOOLS
+        case "manage_audio": return wrapTool(ManageAudioTool(), requiresConfirmation: requiresConfirmation)
+        case "media_control": return wrapTool(MediaControlTool(), requiresConfirmation: requiresConfirmation)
+        case "text_to_speech": return wrapTool(TextToSpeechTool(), requiresConfirmation: requiresConfirmation)
+
+        // SYSTEM TOGGLE TOOLS
+        case "toggle_dark_mode": return wrapTool(ToggleDarkModeTool(), requiresConfirmation: requiresConfirmation)
+        case "toggle_do_not_disturb": return wrapTool(ToggleDoNotDisturbTool(), requiresConfirmation: requiresConfirmation)
+        case "get_wifi_info": return wrapTool(GetWiFiInfoTool(), requiresConfirmation: requiresConfirmation)
+        case "manage_bluetooth": return wrapTool(ManageBluetoothTool(), requiresConfirmation: requiresConfirmation)
+
+        // FILE UTILITY TOOLS
+        case "grep_files": return wrapTool(GrepFilesTool(), requiresConfirmation: requiresConfirmation)
+        case "diff_files": return wrapTool(DiffFilesTool(), requiresConfirmation: requiresConfirmation)
+        case "preview_file": return wrapTool(PreviewFileTool(), requiresConfirmation: requiresConfirmation)
+        case "get_file_hash": return wrapTool(GetFileHashTool(), requiresConfirmation: requiresConfirmation)
+
+        // GIT INTEGRATION
+        case "git_tool": return wrapTool(GitTool(), requiresConfirmation: requiresConfirmation)
+
+        // CODING ASSISTANT TOOLS
+        case "edit_code": return wrapTool(EditCodeTool(), requiresConfirmation: requiresConfirmation)
+        case "code_search": return wrapTool(CodeSearchTool(), requiresConfirmation: requiresConfirmation)
+        case "glob_files": return wrapTool(GlobFilesTool(), requiresConfirmation: requiresConfirmation)
+        case "find_definition": return wrapTool(FindDefinitionTool(), requiresConfirmation: requiresConfirmation)
+        case "batch_command": return wrapTool(BatchCommandTool(), requiresConfirmation: requiresConfirmation)
+        case "create_file": return wrapTool(CreateFileTool(), requiresConfirmation: requiresConfirmation)
+        case "file_overview": return wrapTool(FileOverviewTool(), requiresConfirmation: requiresConfirmation)
+        case "codebase_map": return wrapTool(CodebaseMapTool(), requiresConfirmation: requiresConfirmation)
+
+        // MACOS UTILITY TOOLS
+        case "screen_capture": return wrapTool(ScreenCaptureTool(), requiresConfirmation: requiresConfirmation)
+        case "finder_tags": return wrapTool(FinderTagsTool(), requiresConfirmation: requiresConfirmation)
+        case "disk_usage": return wrapTool(DiskUsageTool(), requiresConfirmation: requiresConfirmation)
+        case "display_management": return wrapTool(DisplayManagementTool(), requiresConfirmation: requiresConfirmation)
+        case "open_system_settings": return wrapTool(OpenSystemSettingsTool(), requiresConfirmation: requiresConfirmation)
+        case "login_items": return wrapTool(LoginItemsTool(), requiresConfirmation: requiresConfirmation)
+        case "external_devices": return wrapTool(ExternalDevicesTool(), requiresConfirmation: requiresConfirmation)
+        case "apple_notes": return wrapTool(AppleNotesTool(), requiresConfirmation: requiresConfirmation)
+
         default: return nil
         }
     }
@@ -492,8 +605,24 @@ class AgentConnect: ObservableObject {
         instructions: String?
     ) {
         let toolNames = tools.isEmpty ? "None" : tools.map { $0.name }.joined(separator: ", ")
-        let advConfig = config.advancedConfiguration?.description ?? "None"
-        let metadata = config.modelMetadata.map { "\($0.tier.rawValue) tier, \($0.family ?? "unknown family")" } ?? "None"
+        let metadata = config.modelMetadata.map { "\($0.tier.rawValue) tier, \($0.quantization ?? "unknown quant"), \($0.family ?? "unknown family")" } ?? "None"
+
+        // Show the effective config that will actually be used at runtime,
+        // including auto-detected defaults when no user override exists.
+        let advConfig: String = {
+            if let advDict = config.advancedConfiguration {
+                let rawDict = advDict.mapValues { $0.rawValue }
+                if let data = try? JSONSerialization.data(withJSONObject: rawDict),
+                   let decoded = try? JSONDecoder().decode(MLXAdvancedConfig.self, from: data) {
+                    return "User Override (temp: \(decoded.temperature), topP: \(decoded.topP), repPenalty: \(decoded.repetitionPenalty), repCtx: \(decoded.repetitionContextSize), maxTok: \(decoded.maxTokens))"
+                }
+            }
+            if config.apiProvider == .mlx, let meta = config.modelMetadata {
+                let rec = MLXAdvancedConfig.recommended(for: meta)
+                return "Auto-Detected (temp: \(rec.temperature), topP: \(rec.topP), repPenalty: \(rec.repetitionPenalty), repCtx: \(rec.repetitionContextSize), maxTok: \(rec.maxTokens))"
+            }
+            return "None"
+        }()
         
         let logMsg = """
         

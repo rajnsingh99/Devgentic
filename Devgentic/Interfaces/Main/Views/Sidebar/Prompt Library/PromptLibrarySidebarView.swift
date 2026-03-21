@@ -19,10 +19,15 @@ struct PromptLibrarySidebarView: View {
     @FocusState private var isSearchFieldFocused: Bool
     @Environment(\.appTheme) private var theme
     @EnvironmentObject var appViewModel: MainApplicationViewModel
-    @State private var showingEditPopover: Bool = false
+    @EnvironmentObject private var router: MainViewRouter
 
     // A list of categories for the UI.
     private let categories = ["All", "General", "Development", "Productivity", "Creativity", "Writing", "Education", "Research", "Marketing"]
+
+    private var activePromptID: UUID? {
+        if case .promptDetail(let id) = router.activeDestination { return id }
+        return nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,17 +92,12 @@ struct PromptLibrarySidebarView: View {
                         ForEach(viewModel.filteredPrompts) { prompt in
                             PromptRowView(
                                 prompt: prompt,
-                                isSelected: viewModel.selectedPrompt?.id == prompt.id,
+                                isSelected: activePromptID == prompt.id,
                                 onSelect: {
-                                    viewModel.selectPrompt(prompt)
-                                },
-                                onUse: {
-                                    appViewModel.insertPromptText.send(prompt.text)
-                                    viewModel.updatePromptUsage(prompt: prompt)
+                                    router.navigateToPrompt(prompt.id)
                                 },
                                 onEdit: {
-                                    viewModel.prepareToEditPrompt(prompt)
-                                    showingEditPopover = true
+                                    router.navigateToPrompt(prompt.id)
                                 },
                                 onDelete: {
                                     viewModel.deletePrompt(prompt)
@@ -113,11 +113,6 @@ struct PromptLibrarySidebarView: View {
         }
         .background(Color.clear)
         .frame(minWidth: 280, idealWidth: 320)
-        .popover(isPresented: $showingEditPopover, arrowEdge: .trailing) {
-            CreateEditPromptView()
-                .environmentObject(viewModel)
-                .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
-        }
     }
 }
 

@@ -100,13 +100,24 @@ struct SimplePromptEditorView: View {
                 .frame(height: 1)
 
             // The Core Editor (Standard SwiftUI TextEditor)
-            TextEditor(text: $localText)
-                .font(.system(.body, design: .monospaced))
-                .foregroundColor(theme.primaryText)
-                .disableAutocorrection(true)
-                .padding(8)
-                .scrollContentBackground(.hidden)
-                .background(theme.textBackground)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $localText)
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundColor(theme.primaryText)
+                    .disableAutocorrection(true)
+                    .padding(8)
+                    .scrollContentBackground(.hidden)
+                    .background(theme.textBackground)
+                    
+                if localText.isEmpty {
+                    Text("Enter system instructions for \(botName) here...")
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundColor(theme.secondaryText.opacity(0.5))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 16)
+                        .allowsHitTesting(false)
+                }
+            }
 
             Rectangle()
                 .fill(theme.dividerColor)

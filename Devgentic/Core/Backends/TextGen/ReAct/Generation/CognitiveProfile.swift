@@ -65,12 +65,82 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
     /// Classic ReAct markdown format (Thought / Action / Action Input).
     /// e.g. Action: ls\nAction Input: {"path": "/"}
     case reactMarkdown = "ReAct Markdown"
-
-    /// Single flat JSON object ({"tool_name": "ls", "arguments": {}}).
-    /// Used with PromptedJsonModeStrategy / PromptedFlatJSONParser.
-    case promptedFlatJSON = "Prompted Flat JSON"
+    
+    /// Heuristic JSON parsing for both flat and parallel tool calls.
+    /// Used with MLXNativeStructuredGenerator / JsonStructuredGenerator.
+    case heuristicJson = "Heuristic JSON"
 
     var id: String { rawValue }
+}
+
+// MARK: - Chat Template Family
+
+/// Identifies the chat template format a model was trained on.
+/// Used as a Layer 2 fallback when the tokenizer lacks a built-in `chat_template`
+/// and no raw Jinja string was extractable from `tokenizer_config.json`.
+///
+/// Detection is based on special tokens present in the model's tokenizer files
+/// (`added_tokens.json`, `special_tokens_map.json`, `tokenizer_config.json`).
+enum ChatTemplateFamily: String, Codable, CaseIterable, Hashable {
+    /// OpenAI ChatML format — used by Qwen, Hermes, DeepSeek, Yi, and many fine-tunes.
+    /// Markers: `<|im_start|>`, `<|im_end|>`
+    case chatML = "ChatML"
+
+    /// Meta Llama 3.x format — used by Llama 3, 3.1, 3.2, 3.3.
+    /// Markers: `<|start_header_id|>`, `<|end_header_id|>`, `<|eot_id|>`
+    case llama3 = "Llama 3"
+
+    /// Mistral Tekken (v3/v7) format — used by Mistral, Devstral, Pixtral, Ministral.
+    /// Markers: `[INST]`, `[/INST]`, `[AVAILABLE_TOOLS]`, `[TOOL_CALLS]`
+    case mistralTekken = "Mistral Tekken"
+
+    /// Google Gemma format — used by Gemma, Gemma 2, CodeGemma.
+    /// Markers: `<start_of_turn>`, `<end_of_turn>`
+    case gemma = "Gemma"
+
+    /// Microsoft Phi format — used by Phi-3, Phi-3.5, Phi-4.
+    /// Markers: `<|user|>`, `<|assistant|>`, `<|end|>`
+    case phi = "Phi"
+
+    /// Cohere Command-R format.
+    /// Markers: `<|START_OF_TURN_TOKEN|>`, `<|USER_TOKEN|>`, `<|CHATBOT_TOKEN|>`
+    case commandR = "Command-R"
+
+    /// HuggingFace Zephyr format — used by Zephyr, Starling.
+    /// Markers: `<|user|>`, `<|assistant|>` with `</s>` as turn delimiter
+    case zephyr = "Zephyr"
+
+    /// Legacy instruction-following format (Alpaca/Vicuna style).
+    /// No reliable special token markers — detected by model name heuristics.
+    case alpaca = "Alpaca"
+}
+
+// MARK: - Chat Template Source
+
+/// Describes where the chat template for an MLX model comes from at runtime.
+/// Stored in `CognitiveProfile` and used by `MLXService` during the fallback path.
+enum ChatTemplateSource: Codable, Hashable, CustomStringConvertible {
+    /// The tokenizer has a built-in chat template — no fallback needed (normal path).
+    case embedded
+
+    /// The raw Jinja template was extracted from `tokenizer_config.json` during analysis.
+    /// This is Layer 1: the model author's own template, most accurate.
+    case extracted(String)
+
+    /// The template family was detected from special tokens in the tokenizer files.
+    /// This is Layer 2: a hardcoded fallback matched to the model's token vocabulary.
+    case familyFallback(ChatTemplateFamily)
+
+    var description: String {
+        switch self {
+        case .embedded:
+            return "embedded"
+        case .extracted(let template):
+            return "extracted(\(template.count) chars)"
+        case .familyFallback(let family):
+            return "familyFallback(\(family.rawValue))"
+        }
+    }
 }
 
 // MARK: - Supported Modalities
@@ -115,21 +185,39 @@ struct CognitiveProfile: Codable, Hashable {
     /// Defaults to `.textOnly` for backward compatibility.
     var modalities: SupportedModalities
 
-    init(capability: ModelCognitiveCapability, dialect: ModelDialect = .nativeJSON, metadata: ModelMetadata? = nil, modalities: SupportedModalities = .textOnly) {
+    /// Describes how to obtain the correct chat template for this model.
+    /// `.embedded` means the tokenizer handles it natively (most models).
+    /// `.extracted` or `.familyFallback` are used when the tokenizer lacks a template.
+    /// Defaults to `.embedded` for backward compatibility.
+    var chatTemplateSource: ChatTemplateSource
+
+    /// Custom stop sequences extracted from the model's tokenizer configuration.
+    /// These are special tokens (turn markers, role markers) that the model should
+    /// never generate during a normal response. If the model emits one, it has crossed
+    /// a turn boundary and generation should stop immediately.
+    ///
+    /// Extracted by `MLXTokenizerAnalyzer` from `added_tokens.json` and `special_tokens_map.json`.
+    /// Empty array means no custom stop sequences — rely on framework EOS detection only.
+    var stopSequences: [String]
+
+    init(capability: ModelCognitiveCapability, dialect: ModelDialect = .nativeJSON, metadata: ModelMetadata? = nil, modalities: SupportedModalities = .textOnly, chatTemplateSource: ChatTemplateSource = .embedded, stopSequences: [String] = []) {
         self.capability = capability
         self.dialect = dialect
         self.metadata = metadata
         self.modalities = modalities
+        self.chatTemplateSource = chatTemplateSource
+        self.stopSequences = stopSequences
     }
 
     // MARK: - Convenience Presets
 
     /// Cloud/modern providers: native OpenAI-compatible JSON arrays with vision support.
-    static let cloudNative = CognitiveProfile(capability: .parallelActions, dialect: .nativeJSON, modalities: .visionCapable)
+    /// Cloud tokenizers always have embedded templates.
+    static let cloudNative = CognitiveProfile(capability: .parallelActions, dialect: .nativeJSON, modalities: .visionCapable, chatTemplateSource: .embedded)
 
     /// Fallback for constrained models: prompted flat JSON, text-only.
-    static let localPrompted = CognitiveProfile(capability: .singleAction, dialect: .promptedFlatJSON)
+    static let localPrompted = CognitiveProfile(capability: .singleAction, dialect: .heuristicJson, chatTemplateSource: .embedded)
 
     /// No tool capability.
-    static let noCapability = CognitiveProfile(capability: .none, dialect: .promptedFlatJSON)
+    static let noCapability = CognitiveProfile(capability: .none, dialect: .heuristicJson, chatTemplateSource: .embedded)
 }

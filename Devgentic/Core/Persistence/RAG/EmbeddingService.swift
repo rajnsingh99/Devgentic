@@ -97,7 +97,11 @@ class EmbeddingService {
             let floatArray = convertMultiArrayToFloatArray(embeddingMultiArray)
 
             // 6. L2-normalize the embedding (standard for sentence-transformers)
-            let normalizedArray = VectorMath.l2Normalize(floatArray)
+            // Use safeL2Normalize to catch zero vectors before they reach HNSW
+            guard let normalizedArray = VectorMath.safeL2Normalize(floatArray) else {
+                logger.warning("Model produced a zero vector for text: '\(text.prefix(50))...' — skipping.")
+                return nil
+            }
 
             logger.debug("Generated embedding for text (\(text.prefix(50))...).")
             return normalizedArray

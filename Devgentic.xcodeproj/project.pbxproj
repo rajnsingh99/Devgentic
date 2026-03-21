@@ -16,6 +16,7 @@
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
 		35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB0E2E2396B700A7B51B /* HotKey */; };
 		35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDCB112E2397B500A7B51B /* ObjectBox.xcframework */; };
+		35D1206E2F6B285900AF3813 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 35D1206D2F6B285900AF3813 /* GRDB */; };
 		35E68C422E313B0B00993F95 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 35E68C412E313B0B00993F95 /* WhisperKit */; };
 		35EB3F662F32967000555A83 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F652F32967000555A83 /* MLX */; };
 		35EB3F682F32967000555A83 /* MLXFast in Frameworks */ = {isa = PBXBuildFile; productRef = 35EB3F672F32967000555A83 /* MLXFast */; };
@@ -83,6 +84,7 @@
 				35CDCB122E2397B500A7B51B /* ObjectBox.xcframework in Frameworks */,
 				35CDCB0F2E2396B700A7B51B /* HotKey in Frameworks */,
 				35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */,
+				35D1206E2F6B285900AF3813 /* GRDB in Frameworks */,
 				35EB3F712F329FDA00555A83 /* MLXLMCommon in Frameworks */,
 				35EB3F732F329FDA00555A83 /* MLXVLM in Frameworks */,
 				355A5D9F2E882BA0007C22CC /* MCP in Frameworks */,
@@ -185,6 +187,7 @@
 				3516AAA12F54A01300CFA72D /* Tokenizers */,
 				35F2A0022F60000000AABB02 /* Flux2Core */,
 				35F2A0032F60000000AABB03 /* FluxTextEncoders */,
+				35D1206D2F6B285900AF3813 /* GRDB */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -280,6 +283,7 @@
 				3516A8672F519D3500CFA72D /* XCRemoteSwiftPackageReference "swift-markdown" */,
 				3516AAA02F54A01300CFA72D /* XCRemoteSwiftPackageReference "swift-transformers" */,
 				35F2A0012F60000000AABB01 /* XCRemoteSwiftPackageReference "flux-2-swift-mlx" */,
+				35D1206C2F6B285900AF3813 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -698,6 +702,14 @@
 				version = 5.2.0;
 			};
 		};
+		35D1206C2F6B285900AF3813 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift.git";
+			requirement = {
+				kind = exactVersion;
+				version = 7.10.0;
+			};
+		};
 		35E68C402E313B0B00993F95 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
@@ -767,6 +779,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 35CDCB102E2397B500A7B51B /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */;
 			productName = ObjectBox.xcframework;
+		};
+		35D1206D2F6B285900AF3813 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35D1206C2F6B285900AF3813 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
 		};
 		35E68C412E313B0B00993F95 /* WhisperKit */ = {
 			isa = XCSwiftPackageProductDependency;

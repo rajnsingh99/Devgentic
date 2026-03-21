@@ -18,9 +18,10 @@ struct MCPErrorAnalyzer {
     
     static func analyze(error: Error) -> MCPUserError {
         let rawMessage = error.localizedDescription
-        
+        let normalized = rawMessage.lowercased()
+
         // 1. Check for "Command Not Found" (Missing executables like npx, uvx)
-        if rawMessage.contains("command not found") {
+        if normalized.contains("command not found") {
             let cmd = extractCommand(from: rawMessage)
             return MCPUserError(
                 title: "Executable Not Found",
@@ -31,7 +32,7 @@ struct MCPErrorAnalyzer {
         }
         
         // 2. Check for File Not Found (Python scripts, paths)
-        if rawMessage.contains("No such file or directory") || rawMessage.contains("Errno 2") {
+        if normalized.contains("no such file or directory") || normalized.contains("errno 2") {
             return MCPUserError(
                 title: "File Path Invalid",
                 message: "The system cannot find the specified file or directory.",
@@ -41,7 +42,7 @@ struct MCPErrorAnalyzer {
         }
         
         // 3. Check for Python/UVX Package Errors
-        if rawMessage.contains("unsatisfiable") || rawMessage.contains("not found in the package registry") {
+        if normalized.contains("unsatisfiable") || normalized.contains("not found in the package registry") {
             return MCPUserError(
                 title: "Package Not Found",
                 message: "The requested Python/Node package could not be downloaded.",
@@ -51,7 +52,7 @@ struct MCPErrorAnalyzer {
         }
         
         // 4. Check for Connection Refused (Remote URLs)
-        if rawMessage.contains("Connection refused") {
+        if normalized.contains("connection refused") {
             return MCPUserError(
                 title: "Connection Refused",
                 message: "Could not connect to the remote server.",
@@ -61,7 +62,7 @@ struct MCPErrorAnalyzer {
         }
         
         // 5. Check for Timeouts
-        if rawMessage.contains("timed out") {
+        if normalized.contains("timed out") {
             return MCPUserError(
                 title: "Connection Timed Out",
                 message: "The server did not respond within the time limit.",
@@ -80,8 +81,8 @@ struct MCPErrorAnalyzer {
     }
     
     private static func extractCommand(from errorMsg: String) -> String {
-        // Tries to extract "xyz" from "command not found: xyz"
-        if let range = errorMsg.range(of: "command not found: ") {
+        // Tries to extract "xyz" from "command not found: xyz" (case-insensitive)
+        if let range = errorMsg.range(of: "command not found: ", options: .caseInsensitive) {
             let cmd = String(errorMsg[range.upperBound...])
             return cmd.trimmingCharacters(in: .whitespacesAndNewlines)
         }

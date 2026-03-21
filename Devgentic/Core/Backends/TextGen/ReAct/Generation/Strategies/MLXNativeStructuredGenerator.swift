@@ -12,46 +12,72 @@ private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.d
 
 /// A specialized cognitive strategy specifically built for local MLX models that support native tools 
 /// (like Llama-3-Groq-Tool-Use). 
-/// Unlike `NativeStructuredGenerator`, this does NOT inject heavy ReAct system prompts or 
-/// force a JSON response. It relies entirely on the model's native `applyChatTemplate` handling.
+/// This version enforces a modern JSON schema via prompting and uses the heuristic parser
+/// to handle parallel tool calls reliably.
 struct MLXNativeStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
-    let dialectRules: String?
     
-    init(toolAdapter: ToolSchemaAdapter = NativeJSONSchemaAdapter(), dialectRules: String? = nil) {
+    private let dialectRules = """
+    RESPONSE FORMAT:
+    You MUST respond using the following structured JSON format:
+    {
+      "content": "Your reasoning about what to do next",
+      "tool_calls": [
+        { "name": "tool_name", "arguments": { "key": "value" } }
+      ]
+    }
+
+    RULES:
+    1. 'content' is REQUIRED and should contain your logical "Thought".
+    2. 'tool_calls' is an array. You can call multiple tools if they are independent.
+    3. If no tool is needed, 'tool_calls' should be an empty array [].
+    4. Ensure STRICT JSON syntax. No markdown fences.
+    5. Use exact tool names from the TOOLS list.
+    """
+    
+    init(toolAdapter: ToolSchemaAdapter = PromptedMarkdownAdapter()) {
         self.toolAdapter = toolAdapter
-        self.dialectRules = dialectRules
     }
     
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: true)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: false)
     }
     
     func generateCognitiveStep(model: any LLMProvider, context: SemanticContext, iteration: Int) async throws -> ModernCognitiveStep {
         let reqId = UUID().uuidString.prefix(8)
-        logLLMOps.info("⚡️ [MLXNative:\(reqId)] Start Generation - Iteration: \(iteration)")
+        logLLMOps.info("⚡️ [MLXModern:\(reqId)] Start Generation - Iteration: \(iteration)")
 
-        let executionMessages = compileMessages(from: context)
+        var executionMessages = compileMessages(from: context)
         
-        // --- ZERO PROMPT INJECTION ---
-        // We DO NOT append arbitrary instructions like "Begin ReAct loop" or "Respond in JSON".
-        // Fine-tuned local models (e.g. Llama 3 Groq) behave extremely strictly based on their
-        // chat templates. We just provide the history, observation context, and tools.
+        let promptTrigger = (iteration == 1)
+            ? "Begin ReAct loop. Analyze Active Memory. Respond with Thought + tool_calls JSON."
+            : "Review OBSERVATION. Decide next step. Respond with Thought + tool_calls JSON."
 
-        logLLMOps.debug("📤 [MLXNative:\(reqId)] Sending request to MLX model with native tool execution...")
+        executionMessages.append(["role": "user", "content": promptTrigger])
+
+        logLLMOps.debug("📤 [MLXModern:\(reqId)] Sending request...")
         let startTime = Date()
 
-        let nativeTools = toolAdapter.formatForNativeAPI(context.availableTools)
-        
-        let step = try await model.generateCognitiveStep(
+        let responseText = try await model.generate(
             messages: executionMessages,
-            tools: nativeTools
+            tools: nil,
+            responseSchema: "json"
         )
 
         let duration = Date().timeIntervalSince(startTime)
-        logLLMOps.info("✅ [MLXNative:\(reqId)] Response received in \(String(format: "%.4f", duration))s")
-        logLLMOps.debug("📄 [MLXNative:\(reqId)] Mapped Tool Calls: \(step.toolCalls.count)")
+        logLLMOps.info("✅ [MLXModern:\(reqId)] Response received in \(String(format: "%.4f", duration))s")
+        logLLMOps.debug("📄 [MLXModern:\(reqId)] Raw LLM Response:\n\(responseText)")
 
-        return step
+        guard !responseText.isEmpty else {
+            logLLMOps.error("❌ [MLXModern:\(reqId)] Empty response from model.")
+            throw NSError(domain: "MLXModern", code: 422, userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+        }
+
+        let pipeline = CognitiveParsePipeline(
+            expectedDialect: .heuristicJson,
+            modelId: model.modelName,
+            iteration: iteration
+        )
+        return pipeline.parse(raw: responseText)
     }
 }

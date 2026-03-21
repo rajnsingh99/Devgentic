@@ -30,6 +30,40 @@ class EvaluationLogger {
     }
     
     func logStep(id: UUID, log: AgentTraceLog) {
+        
+        Task {
+            let eventType: SpanEventType
+            var severity: SpanEventSeverity = .info
+            
+            switch log.state {
+            case .thinking: eventType = .thought
+            case .acting: eventType = .toolCall
+            case .interaction: eventType = .userInteraction
+            case .completed: eventType = .stateChange
+            case .error: 
+                eventType = .error
+                severity = .error
+            case .idle: eventType = .stateChange
+            }
+            
+            var detailJSON: String? = nil
+            if let metadata = log.metadata,
+               let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]),
+               let json = String(data: data, encoding: .utf8) {
+                detailJSON = json
+            }
+            
+            await TraceRecorder.shared.emit(SpanEvent(
+                spanID: log.spanID,
+                traceID: log.traceID,
+                timestamp: log.timestamp,
+                eventType: eventType,
+                content: log.content,
+                detailJSON: detailJSON,
+                severity: severity
+            ))
+        }
+        
         queue.async {
             guard var metrics = self.activeSessions[id] else { return }
             
@@ -116,7 +150,15 @@ class EvaluationLogger {
                 print("Errors:      JSON Parse (\(metrics.parseErrors)) | Hallucinations (\(metrics.hallucinatedTools))")
             }
             
-            print("Outcome:     \(metrics.didFinishSuccessfully ? "SUCCESS ✅" : "FAIL ❌")")
+            let outcomeLabel: String
+            if metrics.didFinishSuccessfully && metrics.toolCalls == 0 {
+                outcomeLabel = "PARTIAL ⚠️"  // Completed but no tools executed
+            } else if metrics.didFinishSuccessfully {
+                outcomeLabel = "SUCCESS ✅"
+            } else {
+                outcomeLabel = "FAIL ❌"
+            }
+            print("Outcome:     \(outcomeLabel)")
             print("========================================================\n")
             
             return metrics

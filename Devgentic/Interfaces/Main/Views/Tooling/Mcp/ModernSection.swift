@@ -23,22 +23,18 @@ struct ModernSection<Content: View>: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Divider()
+                .foregroundColor(theme.dividerColor)
+
             Label(title, systemImage: icon)
                 .font(.headline)
                 .foregroundColor(theme.primaryText)
                 .padding(.horizontal, 4)
-            
+
             VStack(alignment: .leading, spacing: 16) {
                 content
             }
-            .padding()
-            .background(theme.controlBackground)
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
-            )
-            .shadow(color: theme.primaryText.opacity(0.03), radius: 2, x: 0, y: 1)
+            .padding(.vertical, 4)
         }
     }
 }

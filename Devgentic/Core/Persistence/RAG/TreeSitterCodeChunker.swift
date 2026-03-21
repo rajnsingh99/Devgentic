@@ -136,10 +136,16 @@ struct TreeSitterCodeChunker {
         if !currentChunkLines.isEmpty {
             chunks.append(prefix + currentChunkLines.joined(separator: "\n"))
         }
-        
-        return chunks
+
+        // Filter out prefix-only chunks (empty code that became just "[lang Context]:\n")
+        return chunks.filter { chunk in
+            let stripped = chunk
+                .replacingOccurrences(of: prefix, with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return !stripped.isEmpty
+        }
     }
-    
+
     /// Identical to original naive line-break method in SemanticChunker.
     private func fallbackChunkCode(_ code: String, language: String) -> [String] {
         let lines = code.components(separatedBy: .newlines)
@@ -166,7 +172,13 @@ struct TreeSitterCodeChunker {
         if !currentChunkLines.isEmpty {
             chunks.append(prefix + currentChunkLines.joined(separator: "\n"))
         }
-        
-        return chunks
+
+        // Filter out prefix-only chunks (empty code that became just "[lang Context]:\n")
+        return chunks.filter { chunk in
+            let stripped = chunk
+                .replacingOccurrences(of: prefix, with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return !stripped.isEmpty
+        }
     }
 }

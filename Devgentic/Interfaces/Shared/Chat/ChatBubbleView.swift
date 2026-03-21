@@ -6,38 +6,26 @@
 //
 
 import SwiftUI
+import AppKit
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatBubbleView")
 
-private let CODE_BLOCK_LINE_LIMIT = 50
 private let STREAMING_BUBBLE_MIN_HEIGHT: CGFloat = 550
 
 struct ChatBubbleView: View {
     @ObservedObject var message: ChatMessage
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
-    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
     @Environment(\.appTheme) private var theme
 
-    @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
-
-    // MARK: - State to control the animation
+    // MARK: - State
     @State private var applyMinHeight: Bool = false
+    @State private var resolvedIsAgentProfile: Bool = false
+    @State private var didCopyFeedback: Bool = false
 
-    // MARK: - Identity Logic
+    // MARK: - Identity Logic (P0 Fix: cached profile lookup)
     private var isAgentic: Bool {
-        if !message.thoughts.isEmpty { return true }
-
-        if let response = message.agentResponse,
-           let variant = response.variants.indices.contains(response.selectedVariantIndex) ? response.variants[response.selectedVariantIndex] : nil,
-           let entityId = variant.backendEntityId {
-
-            let profiles = BackendProfileStore.shared.fetchProfiles()
-            if let profile = profiles.first(where: { $0.id == entityId }) {
-                return profile.profileType == .agent
-            }
-        }
-        return false
+        !message.thoughts.isEmpty || resolvedIsAgentProfile
     }
 
     private var contentToDisplay: MessageContent {
@@ -50,163 +38,34 @@ struct ChatBubbleView: View {
     var body: some View {
         HStack(alignment: .top, spacing: theme.spacingMedium) {
             if message.sender == .agent {
-                VStack(alignment: .leading, spacing: theme.spacingMedium) {
-
-                    // 1. INDICATORS
-                    if message.isStreaming || !message.thoughts.isEmpty {
-                        if isAgentic {
-                            if agentViewVariant == .timeline {
-                                AgentTimelineView(message: message)
-                                    .transition(.opacity.combined(with: .move(edge: .top)))
-                            } else {
-                                ThinkingDynamicIsland(
-                                    thoughts: message.thoughts,
-                                    currentHeadline: message.isStreaming ? message.thinkingHeadline : nil,
-                                    isStreaming: message.isStreaming,
-                                    isExpanded: $message.isThinkingExpanded
-                                )
-                                .transition(.opacity.combined(with: .move(edge: .top)))
-                            }
-                        } else if message.isStreaming {
-                            if message.content.textContent?.isEmpty ?? true {
-                                SparkleLoadingView(headline: message.thinkingHeadline)
-                            }
-                        }
-                    }
-
-                    // 2. ARTIFACTS
-                    if !message.artifacts.isEmpty && agentViewVariant == .dynamicIsland {
-                        ToolArtifactsRow(artifacts: message.artifacts)
-                            .padding(.bottom, 8)
-                    }
-
-                    // 3. HITL
-                    if let confirmation = message.pendingToolConfirmation {
-                        PermissionRequestView(confirmation: confirmation, message: message)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-
-                    // 3b. CLARIFICATION
-                    if let clarification = message.pendingClarification {
-                        ClarificationRequestView(clarification: clarification, message: message)
-                            .padding(.bottom, 8)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-
-                    // 4. CONTENT
-                    switch contentToDisplay {
-                    case .plainText(let text):
-                        Text(text)
-                            .font(theme.fontBody)
-                            .foregroundColor(theme.primaryText)
-                            .textSelection(.enabled)
-                            .lineSpacing(4)
-
-                    case .markdownText(let text):
-                        if !text.isEmpty {
-                            let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
-
-                            // Phase 5: Pass isLastBlock for Cursor Placement & Use stable IDs
-                            ForEach(blocks) { block in
-                                ContentBlockView(
-                                    block: block,
-                                    message: message,
-                                    isLastBlock: block.id == blocks.last?.id
-                                )
-                                .equatable() // Explicitly enforce equatable checking for memoization
-                            }
-                        }
-
-                    case .codeBlock(let language, let code):
-                        if code.components(separatedBy: .newlines).count > CODE_BLOCK_LINE_LIMIT {
-                            CodeBlockCardView(language: language ?? "code", lineCount: code.components(separatedBy: .newlines).count, fileName: nil) {
-                                let snippet = CodeSnippet(language: language, code: code)
-                                chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
-                            }
-                        } else {
-                            CodeBlockView(language: language ?? "code", content: code)
-                                .padding(.bottom, theme.spacingMedium)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-
-                    case .error(let title, let details):
-                        ErrorMessageView(title: title, details: details)
-                            .cardStyle()
-
-                    case .image(_, _, let imageData):
-                        if let data = imageData {
-                            ImageView(imageData: data)
-                                .padding(.vertical, theme.spacingSmall)
-                                .frame(maxWidth: 500, alignment: .leading)
-                        } else {
-                            ErrorMessageView(title: "Image Not Available", details: "The image data could not be loaded.")
-                                .cardStyle()
-                        }
-
-                    case .mediaArtifact(let artifact):
-                        if artifact.kind == .image {
-                            MediaArtifactImageView(artifact: artifact)
-                                .padding(.vertical, theme.spacingSmall)
-                        } else {
-                            Text("[\(artifact.kind.rawValue): \(artifact.label ?? artifact.mimeType)]")
-                                .font(theme.fontBody)
-                                .foregroundColor(theme.secondaryText)
-                                .italic()
-                        }
-                    }
-
-                    if !message.isStreaming && contentToDisplay.textContent != nil {
-                        AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
-                            .environmentObject(chatHistoryViewModel)
-                            .opacity(0.6)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                AgentBubbleContentView(
+                    message: message,
+                    isAgentic: isAgentic,
+                    contentToDisplay: contentToDisplay
+                )
                 .frame(minHeight: applyMinHeight ? STREAMING_BUBBLE_MIN_HEIGHT : nil, alignment: .topLeading)
-
-            } else { // User
-                Spacer()
-
-                HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .trailing, spacing: theme.spacingSmall) {
-                        if let attachedTextFiles = message.attachedTextFiles, !attachedTextFiles.isEmpty {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: theme.spacingSmall) {
-                                    ForEach(attachedTextFiles) { file in
-                                        FileAttachmentCardView(
-                                            fileName: file.name,
-                                            action: {
-                                                let fileExtension = (file.name as NSString).pathExtension
-                                                chatHistoryViewModel.showCodeInViewer(language: fileExtension, code: file.content)
-                                            }
-                                        )
-                                    }
-                                }
-                                .padding(.vertical, 4)
-                                .padding(.horizontal, 4)
-                            }
-                        }
-
-                        if let textContent = message.content.textContent, !textContent.isEmpty {
-                            UserMessageView(text: textContent)
-                                .userBubbleStyle()
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .frame(maxWidth: 600, alignment: .trailing)
-
-                    Image(systemName: "person.circle.fill")
-                        .font(.system(size: 24))
-                        .foregroundColor(theme.secondaryText.opacity(0.4))
-                        .padding(.top, 4)
-                }
+            } else {
+                UserBubbleContentView(message: message)
             }
         }
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: message.sender == .agent ? .leading : .trailing)
         .animation(.easeInOut, value: message.agentResponse?.selectedVariantIndex)
+        .accessibilityElement(children: .contain)
+        // MARK: - Full-Message Copy Context Menu
+        .contextMenu {
+            if let text = contentToDisplay.textContent, !text.isEmpty {
+                Button {
+                    copyFullMessage(text)
+                } label: {
+                    Label(didCopyFeedback ? "Copied!" : "Copy Message", systemImage: didCopyFeedback ? "checkmark" : "doc.on.doc")
+                }
+            }
+        }
         .onAppear {
+            // P0 Fix: Resolve profile type once on appear, not every render
+            resolvedIsAgentProfile = resolveIsAgentProfile()
+
             if message.isStreaming && !applyMinHeight {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     applyMinHeight = true
@@ -220,6 +79,30 @@ struct ChatBubbleView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Full-Message Copy
+    private func copyFullMessage(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        didCopyFeedback = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            didCopyFeedback = false
+        }
+    }
+
+    // MARK: - Profile Resolution (runs once on appear)
+    private func resolveIsAgentProfile() -> Bool {
+        guard let response = message.agentResponse,
+              let variant = response.variants.indices.contains(response.selectedVariantIndex)
+                ? response.variants[response.selectedVariantIndex] : nil,
+              let entityId = variant.backendEntityId else {
+            return false
+        }
+
+        let profiles = BackendProfileStore.shared.fetchProfiles()
+        return profiles.first(where: { $0.id == entityId })?.profileType == .agent
     }
 }
 
@@ -242,6 +125,8 @@ struct SparkleLoadingView: View {
         }
         .padding(.vertical, 4)
         .onAppear { isAnimating = true }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(headline ?? "Generating response")
     }
 }
 
@@ -285,6 +170,7 @@ struct ToolChipView: View {
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(artifact.isSuccess ? theme.successColor.opacity(0.2) : theme.warningColor.opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(artifact.toolName), \(artifact.isSuccess ? "succeeded" : "failed")")
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
@@ -313,129 +199,112 @@ struct ToolChipView: View {
         case "execute_shell": return "terminal.fill"
         case "web_search": return "globe"
         case "fs_smart_search": return "magnifyingglass"
+        case "ask_user": return "person.fill.questionmark"
         default: return "hammer.fill"
         }
     }
 }
 
-// MARK: - Permission Request
+// MARK: - Permission Request (Read-only history record)
 struct PermissionRequestView: View {
     let confirmation: PendingToolConfirmation
     @ObservedObject var message: ChatMessage
-    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
     @Environment(\.appTheme) private var theme
-    @State private var isProcessingDecision = false
+
+    private var isResolved: Bool { message.pendingToolConfirmation == nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "lock.shield.fill").foregroundColor(theme.warningColor).font(.system(size: 14))
-                Text("Permission Required").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.primaryText)
-                Spacer()
-            }
-            Divider().background(theme.dividerColor)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("The agent wants to execute a sensitive action:").font(.caption).foregroundColor(theme.secondaryText)
-                HStack(spacing: 6) {
-                    Text(confirmation.toolName).font(.system(size: 13, weight: .bold, design: .monospaced)).foregroundColor(theme.primaryText).padding(.horizontal, 6).padding(.vertical, 2).background(theme.surfaceOverlay).cornerRadius(4)
-                }
-                if !confirmation.params.isEmpty && confirmation.params != "{}" {
-                    Text(confirmation.params).font(.system(size: 11, design: .monospaced)).foregroundColor(theme.secondaryText).lineLimit(4).padding(8).background(theme.surfaceOverlayStrong).cornerRadius(6).frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            HStack(spacing: 12) {
-                if isProcessingDecision { ProgressView().scaleEffect(0.6).frame(height: 28) }
-                else {
-                    Button(action: { submitDecision(approved: false) }) { Text("Deny").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.errorColor.opacity(0.8)).cornerRadius(6) }.buttonStyle(.plain)
-                    Button(action: { submitDecision(approved: true) }) { Text("Allow").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.successColor.opacity(0.8)).cornerRadius(6) }.buttonStyle(.plain)
-                }
-            }
-            .padding(.top, 4)
-        }
-        .padding(12).background(theme.warningColor.opacity(0.08)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.warningColor.opacity(0.2), lineWidth: 1)).frame(maxWidth: 500)
-    }
+        HStack(spacing: 8) {
+            Image(systemName: isResolved ? "checkmark.shield.fill" : "lock.shield.fill")
+                .font(.system(size: 11))
+                .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.warningColor.opacity(0.7))
 
-    private func submitDecision(approved: Bool) {
-        withAnimation { isProcessingDecision = true }
-        mainAppViewModel.submitToolApproval(conversationID: message.conversationId, approved: approved)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            withAnimation {
-                message.pendingToolConfirmation = nil
-                message.thinkingHeadline = approved ? "Permission granted. Resuming..." : "Permission denied. Reflecting..."
+            Text(confirmation.toolName)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(theme.secondaryText)
+
+            if !confirmation.params.isEmpty && confirmation.params != "{}" {
+                Text(confirmation.params)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(theme.tertiaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+
+            Spacer()
+
+            Text(isResolved ? "Resolved" : "Awaiting...")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.warningColor.opacity(0.6))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule()
+                        .fill(isResolved ? theme.successColor.opacity(0.08) : theme.warningColor.opacity(0.08))
+                )
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(theme.surfaceOverlay.opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(isResolved ? theme.successColor.opacity(0.15) : theme.warningColor.opacity(0.15), lineWidth: 1)
+        )
+        .frame(maxWidth: 500, alignment: .leading)
     }
 }
 
-
-// MARK: - Clarification Request
+// MARK: - Clarification Request (Read-only history record)
 struct ClarificationRequestView: View {
     let clarification: PendingClarification
     @ObservedObject var message: ChatMessage
-    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
     @Environment(\.appTheme) private var theme
-    @State private var userInput: String = ""
-    @State private var isSubmitting = false
+
+    private var isResolved: Bool { message.pendingClarification == nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "questionmark.bubble.fill").foregroundColor(theme.streamingIndicator).font(.system(size: 14))
-                Text("Clarification Needed").font(.system(size: 13, weight: .semibold)).foregroundColor(theme.primaryText)
-                Spacer()
-            }
-            Divider().background(theme.dividerColor)
+        HStack(spacing: 8) {
+            Image(systemName: isResolved ? "bubble.left.fill" : "questionmark.bubble.fill")
+                .font(.system(size: 11))
+                .foregroundColor(isResolved ? theme.streamingIndicator.opacity(0.7) : theme.streamingIndicator.opacity(0.7))
+
             Text(clarification.question)
-                .font(.system(size: 13))
-                .foregroundColor(theme.primaryText)
-                .fixedSize(horizontal: false, vertical: true)
-            TextField("Type your response...", text: $userInput)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
-                .onSubmit { submitResponse() }
-            HStack(spacing: 12) {
-                if isSubmitting { ProgressView().scaleEffect(0.6).frame(height: 28) }
-                else {
-                    Button(action: { submitSkip() }) {
-                        Text("Skip").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.secondaryText.opacity(0.6)).cornerRadius(6)
-                    }.buttonStyle(.plain)
-                    Button(action: { submitResponse() }) {
-                        Text("Send").font(.system(size: 12, weight: .medium)).foregroundColor(.white).padding(.horizontal, 16).padding(.vertical, 6).background(theme.streamingIndicator.opacity(0.8)).cornerRadius(6)
-                    }.buttonStyle(.plain).disabled(userInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            .padding(.top, 4)
-        }
-        .padding(12).background(theme.streamingIndicator.opacity(0.08)).cornerRadius(8).overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.streamingIndicator.opacity(0.2), lineWidth: 1)).frame(maxWidth: 500)
-    }
+                .font(.system(size: 12))
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
-    private func submitResponse() {
-        let trimmed = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        withAnimation { isSubmitting = true }
-        mainAppViewModel.submitClarificationResponse(conversationID: message.conversationId, response: trimmed)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            withAnimation {
-                message.pendingClarification = nil
-                message.thinkingHeadline = "Received your input. Resuming..."
-            }
-        }
-    }
+            Spacer()
 
-    private func submitSkip() {
-        withAnimation { isSubmitting = true }
-        mainAppViewModel.submitClarificationResponse(conversationID: message.conversationId, response: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            withAnimation {
-                message.pendingClarification = nil
-                message.thinkingHeadline = "Skipped clarification. Continuing..."
-            }
+            Text(isResolved ? "Answered" : "Awaiting...")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(isResolved ? theme.streamingIndicator.opacity(0.7) : theme.streamingIndicator.opacity(0.6))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule()
+                        .fill(theme.streamingIndicator.opacity(0.08))
+                )
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(theme.surfaceOverlay.opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(theme.streamingIndicator.opacity(0.15), lineWidth: 1)
+        )
+        .frame(maxWidth: 500, alignment: .leading)
     }
 }
 
 // MARK: - Helpers
-fileprivate struct ActionButton<LabelContent: View>: View {
+struct ChatActionButton<LabelContent: View>: View {
     let action: () -> Void
     @ViewBuilder let label: LabelContent
     var disabled: Bool = false
@@ -450,13 +319,20 @@ fileprivate struct ActionButton<LabelContent: View>: View {
     }
 }
 
-fileprivate struct AgentMessageActionsView: View {
+struct AgentMessageActionsView: View {
     @ObservedObject var message: ChatMessage
+    @ObservedObject private var speechService = SpeechService.shared
     var mainAppViewModel: MainApplicationViewModel
     @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
     @Environment(\.appTheme) private var theme
     @State private var didCopy: Bool = false
     @State private var showVariantsPopover: Bool = false
+    @State private var showReportInspector: Bool = false
+
+    /// Whether this specific message is currently being read aloud.
+    private var isSpeaking: Bool {
+        speechService.isActive && speechService.currentMessageID == message.id
+    }
 
     private var containsCode: Bool {
         guard let content = message.currentAgentContent else { return false }
@@ -472,7 +348,7 @@ fileprivate struct AgentMessageActionsView: View {
             Spacer()
             HStack(spacing: theme.spacingSmall) {
                 if !containsCode {
-                    ActionButton(action: {
+                    ChatActionButton(action: {
                         chatHistoryViewModel.copyMessageContentToClipboard(message: message)
                         withAnimation(.easeInOut) { didCopy = true }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withAnimation(.easeInOut) { didCopy = false } }
@@ -480,38 +356,85 @@ fileprivate struct AgentMessageActionsView: View {
                         Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                     }
                     .foregroundColor(didCopy ? theme.successColor : theme.secondaryText)
+                    .accessibilityLabel(didCopy ? "Copied to clipboard" : "Copy response")
                 }
 
                 if message.agentResponse?.variants.count ?? 0 > 1 {
-                    ActionButton(action: { showVariantsPopover.toggle() }) {
+                    ChatActionButton(action: { showVariantsPopover.toggle() }) {
                         Label("\(message.agentResponse?.variants.count ?? 0) Versions", systemImage: "square.3.layers.3d.down.right")
                     }
                     .foregroundColor(theme.secondaryText)
+                    .accessibilityLabel("\(message.agentResponse?.variants.count ?? 0) response versions available")
                     .popover(isPresented: $showVariantsPopover, arrowEdge: .bottom) {
                         VariantsSelectionView(message: message, isPresented: $showVariantsPopover)
                     }
                 }
 
                 let isRedoDisabled = (message.agentResponse?.generationAttempts ?? 0) >= 5
-                ActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
+                ChatActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
                     Label("Redo", systemImage: "arrow.clockwise")
                 }
                 .foregroundColor(isRedoDisabled ? theme.tertiaryText : theme.secondaryText)
+                .accessibilityLabel("Regenerate response")
 
                 if containsCode {
-                    ActionButton(action: { chatHistoryViewModel.openMessageInCodeViewer(message: message) }) {
+                    ChatActionButton(action: { chatHistoryViewModel.openMessageInCodeViewer(message: message) }) {
                         Label("Open in Editor", systemImage: "doc.text.magnifyingglass")
                     }
                     .foregroundColor(theme.secondaryText)
+                    .accessibilityLabel("Open code in editor")
                 }
+
+                if message.traceID != nil || message.agentResponse != nil {
+                    ChatActionButton(action: { showReportInspector = true }) {
+                        Label("Report", systemImage: "chart.bar.doc.horizontal")
+                    }
+                    .foregroundColor(theme.secondaryText)
+                    .help("View Execution Trace Report")
+                    .accessibilityLabel("View execution trace report")
+                }
+
+                // Read Aloud
+                ChatActionButton(action: { toggleReadAloud() }) {
+                    Label(isSpeaking ? "Stop" : "Read Aloud", systemImage: isSpeaking ? "stop.fill" : "speaker.wave.2")
+                }
+                .foregroundColor(isSpeaking ? theme.accentColor : theme.secondaryText)
+                .accessibilityLabel(isSpeaking ? "Stop reading aloud" : "Read response aloud")
             }
             .font(.system(size: 12))
             .padding(.top, theme.spacingSmall)
         }
+        .sheet(isPresented: $showReportInspector) {
+            ReportInspectorView(
+                messageID: message.id,
+                conversationID: message.conversationId,
+                traceID: message.traceID
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .speechOpenCodeViewer)) { notification in
+            guard let messageID = notification.object as? UUID, messageID == message.id,
+                  let userInfo = notification.userInfo,
+                  let code = userInfo["code"] as? String else { return }
+
+            let language = userInfo["language"] as? String
+            chatHistoryViewModel.showCodeInViewer(language: language, code: code)
+        }
+    }
+
+    // MARK: - Read Aloud
+
+    private func toggleReadAloud() {
+        if isSpeaking {
+            speechService.stop()
+        } else {
+            guard let content = message.currentAgentContent,
+                  let text = content.textContent, !text.isEmpty else { return }
+            speechService.speak(text, messageID: message.id)
+        }
     }
 }
 
-fileprivate struct VariantsSelectionView: View {
+struct VariantsSelectionView: View {
     @ObservedObject var message: ChatMessage
     @Binding var isPresented: Bool
     @Environment(\.appTheme) private var theme
@@ -533,6 +456,7 @@ fileprivate struct VariantsSelectionView: View {
                                 .padding().background(index == agentResponse.selectedVariantIndex ? theme.accentColor.opacity(0.08) : Color.clear)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel("Version \(index + 1)\(index == agentResponse.selectedVariantIndex ? ", selected" : "")")
                             if index < agentResponse.variants.count - 1 { Divider() }
                         }
                     }

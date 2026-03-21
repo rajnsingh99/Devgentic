@@ -32,8 +32,11 @@ struct ContentBlockView: View, Equatable {
     let block: ContentBlock
     let message: ChatMessage
     var isLastBlock: Bool = false
+    var searchQuery: String = ""
+    var activeHighlightIndex: Int? = nil
 
     @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.appTheme) private var theme
 
     // MARK: - Equatable Memoization
@@ -42,7 +45,9 @@ struct ContentBlockView: View, Equatable {
         return lhs.block == rhs.block &&
                lhs.isLastBlock == rhs.isLastBlock &&
                lhs.message.id == rhs.message.id &&
-               lhs.message.isStreaming == rhs.message.isStreaming
+               lhs.message.isStreaming == rhs.message.isStreaming &&
+               lhs.searchQuery == rhs.searchQuery &&
+               lhs.activeHighlightIndex == rhs.activeHighlightIndex
     }
 
     var body: some View {
@@ -71,11 +76,15 @@ struct ContentBlockView: View, Equatable {
         case .listItem(let prefix, let text, let indentation):
             HStack(alignment: .top, spacing: theme.spacingSmall) {
                 Text(prefix)
-                    .font(theme.fontBody)
+                    .font(themeManager.chatFont)
                     .foregroundColor(theme.secondaryText)
                     .frame(minWidth: 20, alignment: .leading)
 
-                renderTextView(text: text)
+                if isPathContent(text) {
+                    renderPathListItem(text: text)
+                } else {
+                    renderTextView(text: text)
+                }
             }
             .padding(.leading, CGFloat(indentation * 20))
             .padding(.bottom, theme.spacingXXSmall)
@@ -131,10 +140,10 @@ struct ContentBlockView: View, Equatable {
     /// Renders the styled text and optionally adds the blinking cursor if this is the active stream block.
     @ViewBuilder
     private func renderTextView(text: String, font: Font? = nil, weight: Font.Weight = .regular) -> some View {
-        let resolvedFont = font ?? theme.fontBody
+        let resolvedFont = font ?? themeManager.chatFont
         HStack(alignment: .bottom, spacing: 0) {
             Text(createStyledString(from: text, font: resolvedFont, weight: weight))
-                .lineSpacing(4) // Phase 4: Editorial spacing
+                .lineSpacing(themeManager.chatLineSpacing)
                 .textSelection(.enabled)
                 // Smooth out text updates slightly to avoid harsh token jitter
                 .animation(.linear(duration: 0.05), value: text.count)
@@ -148,30 +157,99 @@ struct ContentBlockView: View, Equatable {
         }
     }
 
+    private func isPathContent(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        // Check for common path prefixes or emojis we added in the tool
+        return trimmed.hasPrefix("/") || trimmed.hasPrefix("📁") || trimmed.hasPrefix("📄") || trimmed.contains("/")
+    }
+
+    @ViewBuilder
+    private func renderPathListItem(text: String) -> some View {
+        let cleanText = text.replacingOccurrences(of: "📁 ", with: "").replacingOccurrences(of: "📄 ", with: "")
+        let isFolder = text.contains("📁") || !cleanText.contains(".")
+        
+        HStack(spacing: theme.spacingXSmall) {
+            Image(systemName: isFolder ? "folder.fill" : "doc.fill")
+                .foregroundColor(theme.accentColor)
+                .font(.system(size: 11))
+            
+            renderTextView(text: cleanText)
+        }
+    }
+
     private func createStyledString(from text: String, font: Font, weight: Font.Weight) -> AttributedString {
         // Capture theme colors for use inside AttributedString manipulation
         let inlineCodeBg = theme.inlineCodeBackground
         let inlineCodeFg = theme.inlineCodeText
         let textColor = theme.primaryText
+        let inlineCodeHighlight = theme.inlineCodeHighlight
 
-        if var attributedString = try? AttributedString(markdown: text) {
+        var attributedString: AttributedString
+        if let parsed = try? AttributedString(markdown: text) {
+            attributedString = parsed
             for run in attributedString.runs {
-                if run.inlinePresentationIntent == .code {
+                let intent = run.inlinePresentationIntent ?? []
+                if intent.contains(.code) {
                     attributedString[run.range].backgroundColor = inlineCodeBg
-                    attributedString[run.range].foregroundColor = inlineCodeFg
+                    attributedString[run.range].foregroundColor = inlineCodeHighlight
                     attributedString[run.range].font = .system(.body, design: .monospaced)
+                } else if intent.contains(.stronglyEmphasized) {
+                    attributedString[run.range].font = font.weight(.semibold)
+                    attributedString[run.range].foregroundColor = textColor
                 } else {
                     attributedString[run.range].font = font.weight(weight)
                     attributedString[run.range].foregroundColor = textColor
                 }
             }
-            return attributedString
         } else {
-            var fallbackString = AttributedString(text)
-            fallbackString.font = font.weight(weight)
-            fallbackString.foregroundColor = textColor
-            return fallbackString
+            attributedString = AttributedString(text)
+            attributedString.font = font.weight(weight)
+            attributedString.foregroundColor = textColor
         }
+
+        // MARK: - Search Highlighting
+        if !searchQuery.isEmpty {
+            attributedString = applySearchHighlighting(to: attributedString, query: searchQuery)
+        }
+
+        return attributedString
+    }
+
+    /// Applies yellow/orange background highlighting to all occurrences of the search query.
+    private func applySearchHighlighting(to attrString: AttributedString, query: String) -> AttributedString {
+        var result = attrString
+        let plainText = String(result.characters)
+        let lowercasedText = plainText.lowercased()
+        let lowercasedQuery = query.lowercased()
+
+        guard !lowercasedQuery.isEmpty else { return result }
+
+        // Find all match ranges in the plain text
+        var matchRanges: [Range<String.Index>] = []
+        var searchStart = lowercasedText.startIndex
+        while searchStart < lowercasedText.endIndex,
+              let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
+            matchRanges.append(range)
+            searchStart = range.upperBound
+        }
+
+        // Apply highlighting in reverse to preserve range validity
+        let highlightColor = Color.yellow.opacity(0.4)
+        let activeHighlightColor = Color.orange.opacity(0.6)
+
+        for (index, range) in matchRanges.enumerated().reversed() {
+            // Convert String.Index range to AttributedString range
+            let startOffset = plainText.distance(from: plainText.startIndex, to: range.lowerBound)
+            let endOffset = plainText.distance(from: plainText.startIndex, to: range.upperBound)
+            let attrStart = result.index(result.startIndex, offsetByCharacters: startOffset)
+            let attrEnd = result.index(result.startIndex, offsetByCharacters: endOffset)
+            let attrRange = attrStart..<attrEnd
+
+            let isActiveMatch = (activeHighlightIndex == index)
+            result[attrRange].backgroundColor = isActiveMatch ? activeHighlightColor : highlightColor
+        }
+
+        return result
     }
 
     private func fontForHeading(level: Int) -> Font {

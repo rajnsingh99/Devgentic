@@ -37,10 +37,15 @@ struct CognitiveParsePipeline: Sendable {
     /// Optional iteration number for drift telemetry.
     let iteration: Int
 
-    init(expectedDialect: ModelDialect, modelId: String = "unknown", iteration: Int = 0) {
+    /// Known tool names from the current tool registry.
+    /// Passed to `FormatDriftDetector` for precise dynamic-tag detection (Phase B).
+    let knownToolNames: Set<String>
+
+    init(expectedDialect: ModelDialect, modelId: String = "unknown", iteration: Int = 0, knownToolNames: Set<String> = []) {
         self.expectedDialect = expectedDialect
         self.modelId = modelId
         self.iteration = iteration
+        self.knownToolNames = knownToolNames
     }
 
     // MARK: - Public API
@@ -79,7 +84,7 @@ struct CognitiveParsePipeline: Sendable {
         }
 
         // === STAGE 2: Format Drift Detection ===
-        let detector = FormatDriftDetector(excludedDialect: expectedDialect)
+        let detector = FormatDriftDetector(excludedDialect: expectedDialect, knownToolNames: knownToolNames)
 
         guard let detectedFormat = detector.detect(in: sanitized.cleaned) else {
             // No drift pattern found.
@@ -129,7 +134,7 @@ struct CognitiveParsePipeline: Sendable {
         }
 
         // Zero tool calls → check if we might be missing something
-        let detector = FormatDriftDetector(excludedDialect: expectedDialect)
+        let detector = FormatDriftDetector(excludedDialect: expectedDialect, knownToolNames: knownToolNames)
         if detector.containsAnySignal(in: sanitizedText) {
             return .degraded(result)
         }

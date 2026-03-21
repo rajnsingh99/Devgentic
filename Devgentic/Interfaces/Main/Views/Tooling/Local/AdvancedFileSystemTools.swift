@@ -330,12 +330,15 @@ struct SmartSearchTool: DevgenticTool {
 
             if !result.nameMatches.isEmpty {
                 output += "\n📁 Name Matches (\(result.nameMatches.count)):\n"
-                output += result.nameMatches.joined(separator: "\n")
+                output += result.nameMatches.map { path -> String in
+                    let icon = path.contains(".") ? "📄" : "📁"
+                    return "- \(icon) \(path)"
+                }.joined(separator: "\n")
             }
 
             if !result.contentMatches.isEmpty {
                 output += "\n\n📄 Content Matches (\(result.contentMatches.count)):\n"
-                output += result.contentMatches.joined(separator: "\n")
+                output += result.contentMatches.map { "- 📄 \($0)" }.joined(separator: "\n")
             }
 
             if let note = result.permissionNote {
@@ -578,46 +581,63 @@ struct OrganizeBatchTool: DevgenticTool {
 
 class WatcherService {
     static let shared = WatcherService()
-    private var activeMonitors: [UUID: DispatchSourceFileSystemObject] = [:]
-    
+    private var activeMonitors: [UUID: (source: DispatchSourceFileSystemObject, path: String)] = [:]
+
     func startWatching(path: String, auditRef: String) -> String {
         let url = URL(fileURLWithPath: path)
         let descriptor = open(url.path, O_EVTONLY)
         guard descriptor != -1 else { return "Failed to open descriptor for path." }
-        
+
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .delete, .rename, .extend], queue: DispatchQueue.global())
         let id = UUID()
-        
+
         source.setEventHandler {
             print("FS EVENT: Change detected in \(path)")
             NotificationCenter.default.post(name: Notification.Name("DevgenticFSEvent"), object: nil, userInfo: ["path": path, "auditRef": auditRef])
         }
-        
+
         source.setCancelHandler { close(descriptor) }
         source.resume()
-        activeMonitors[id] = source
+        activeMonitors[id] = (source: source, path: path)
         return "Started watching \(path). Monitor ID: \(id.uuidString). (Audit Ref: \(auditRef))"
+    }
+
+    func stopWatching(monitorID: String) -> String {
+        guard let uuid = UUID(uuidString: monitorID), let entry = activeMonitors[uuid] else {
+            return "Error: No active monitor with ID '\(monitorID)'."
+        }
+        entry.source.cancel()
+        activeMonitors.removeValue(forKey: uuid)
+        return "Stopped monitoring '\(entry.path)' (ID: \(monitorID))."
+    }
+
+    func listActive() -> [(id: String, path: String)] {
+        return activeMonitors.map { (id: $0.key.uuidString, path: $0.value.path) }
     }
 }
 
 struct WatchFolderTool: DevgenticTool {
     let name = "fs_watch_folder"
     let category = "File System"
-    let description = "Starts a background monitor on a specific folder to notify of writes, deletes, or renames."
-    
+    let description = "Manages folder monitoring: start watching, stop watching, or list active monitors."
+
     struct Arguments: Decodable, Sendable {
-        let path: String
-        
+        let action: String?
+        let path: String?
+        let monitor_id: String?
+
         private struct DynamicKey: CodingKey {
             var stringValue: String
             init?(stringValue: String) { self.stringValue = stringValue }
             var intValue: Int? { return nil }
             init?(intValue: Int) { return nil }
         }
-        
+
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: DynamicKey.self)
-            
+
+            self.action = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "action")!))
+
             var foundPath: String? = nil
             let keys = ["path", "folder", "directory", "dir"]
             for key in keys {
@@ -627,33 +647,55 @@ struct WatchFolderTool: DevgenticTool {
                     break
                 }
             }
-            guard let val = foundPath else {
-                throw DecodingError.dataCorrupted(DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Missing property 'path'"))
-            }
-            self.path = val
+            self.path = foundPath
+            self.monitor_id = (try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "monitor_id")!))
         }
     }
-    
+
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("path", "string", "The folder path to watch.")
+                ("action", "string", "Action: 'start' (default), 'stop', 'list'"),
+                ("path", "string", "Folder path to watch (required for start)"),
+                ("monitor_id", "string", "Monitor ID to stop (required for stop)")
             ],
-            required: ["path"]
+            required: []
         )
     }
-    
+
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
         let logID = LogManager.shared.logAction(
             toolName: self.name,
-            summary: "Started File System Monitor",
-            operations: [
-                ["path": arguments.path, "status": "active"]
-            ]
+            summary: "FS Watch: \(arguments.action ?? "start")",
+            operations: [["action": arguments.action ?? "start", "path": arguments.path ?? ""]]
         )
-        // -------------------------------
-        
-        return WatcherService.shared.startWatching(path: arguments.path, auditRef: logID)
+
+        let action = arguments.action ?? "start"
+
+        switch action {
+        case "start":
+            guard let path = arguments.path else {
+                return "Error: 'path' required for start. (Audit Ref: \(logID))"
+            }
+            return WatcherService.shared.startWatching(path: path, auditRef: logID)
+
+        case "stop":
+            guard let monitorID = arguments.monitor_id else {
+                return "Error: 'monitor_id' required for stop. (Audit Ref: \(logID))"
+            }
+            let result = WatcherService.shared.stopWatching(monitorID: monitorID)
+            return "\(result) (Audit Ref: \(logID))"
+
+        case "list":
+            let monitors = WatcherService.shared.listActive()
+            if monitors.isEmpty {
+                return "No active folder monitors. (Audit Ref: \(logID))"
+            }
+            let list = monitors.map { "- [\($0.id)] \($0.path)" }.joined(separator: "\n")
+            return "Active Monitors (\(monitors.count)):\n\(list)\n(Audit Ref: \(logID))"
+
+        default:
+            return "Error: Unknown action '\(action)'. Use start/stop/list. (Audit Ref: \(logID))"
+        }
     }
 }

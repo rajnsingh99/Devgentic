@@ -70,7 +70,12 @@ struct MistralXMLParser: CognitiveParserProtocol {
                         results.append(call)
                     } else {
                         // Fallback: old Mistral JSON format inside <tool_call>
-                        let cleanedPayload = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+                        var cleanedPayload = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Strip CDATA wrapper if present: <![CDATA[...]]> → ...
+                        if cleanedPayload.hasPrefix("<![CDATA[") && cleanedPayload.hasSuffix("]]>") {
+                            cleanedPayload = String(cleanedPayload.dropFirst(9).dropLast(3))
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
                         if let call = decodeSingleCall(cleanedPayload) {
                             results.append(call)
                         }
@@ -79,16 +84,47 @@ struct MistralXMLParser: CognitiveParserProtocol {
             }
         }
 
-        // Style 2: [TOOL_CALLS] [...]  — extract the JSON array after the tag
-        if results.isEmpty, let markerRange = text.range(of: "[TOOL_CALLS]", options: .caseInsensitive) {
-            let afterMarker = String(text[markerRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            // Find the opening bracket of the JSON array
-            if let arrayStart = afterMarker.firstIndex(of: "["),
-               let data = afterMarker[arrayStart...].data(using: .utf8),
-               let calls = try? JSONDecoder().decode([MistralToolCall].self, from: data) {
-                results = calls.map {
-                    PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
+        // Style 1b: <tool_call name="..." attr="..." /> — attribute-style self-closing XML
+        if results.isEmpty {
+            let attrPattern = #"<tool_call\s+([^>]*?)/>"#
+            if let regex = try? NSRegularExpression(pattern: attrPattern, options: .caseInsensitive) {
+                let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+                for match in matches {
+                    if let attrsRange = Range(match.range(at: 1), in: text) {
+                        let attrsString = String(text[attrsRange])
+                        if let call = parseAttributeStyleCall(attrsString) {
+                            results.append(call)
+                        }
+                    }
                 }
+            }
+        }
+
+        // Style 2: [TOOL_CALLS] [...]  — extract JSON arrays after each marker.
+        //   Handles multiple markers on separate lines by segmenting between markers.
+        if results.isEmpty {
+            let marker = "[TOOL_CALLS]"
+            let segments = text.components(separatedBy: marker).dropFirst() // skip text before first marker
+            for segment in segments {
+                let trimmed = segment.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let arrayStart = trimmed.firstIndex(of: "[") else { continue }
+                // Find matching ] for the opening [
+                var depth = 0
+                var endIdx: String.Index?
+                for idx in trimmed[arrayStart...].indices {
+                    if trimmed[idx] == "[" { depth += 1 }
+                    else if trimmed[idx] == "]" {
+                        depth -= 1
+                        if depth == 0 { endIdx = idx; break }
+                    }
+                }
+                guard let end = endIdx else { continue }
+                let arraySlice = trimmed[arrayStart...end]
+                guard let data = arraySlice.data(using: .utf8),
+                      let calls = try? JSONDecoder().decode([MistralToolCall].self, from: data) else { continue }
+                results.append(contentsOf: calls.map {
+                    PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
+                })
             }
         }
 
@@ -147,5 +183,32 @@ struct MistralXMLParser: CognitiveParserProtocol {
             return PendingToolCall(id: UUID().uuidString, name: call.name, arguments: call.arguments)
         }
         return PendingToolCall(id: UUID().uuidString, name: call.name, arguments: call.arguments)
+    }
+
+    /// Parses attribute-style XML: `<tool_call name="list_directory" path="/tmp" />`
+    /// Extracts `name` as the tool name and all other attributes as arguments.
+    private func parseAttributeStyleCall(_ attrsString: String) -> PendingToolCall? {
+        let attrPattern = #"(\w+)\s*=\s*"([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: attrPattern) else { return nil }
+        let matches = regex.matches(in: attrsString, range: NSRange(attrsString.startIndex..., in: attrsString))
+
+        var toolName: String?
+        var arguments: [String: JSONValue] = [:]
+
+        for match in matches {
+            guard let keyRange = Range(match.range(at: 1), in: attrsString),
+                  let valRange = Range(match.range(at: 2), in: attrsString) else { continue }
+            let key = String(attrsString[keyRange])
+            let val = String(attrsString[valRange])
+
+            if key == "name" {
+                toolName = val
+            } else {
+                arguments[key] = .string(val)
+            }
+        }
+
+        guard let name = toolName, !name.isEmpty else { return nil }
+        return PendingToolCall(id: UUID().uuidString, name: name, arguments: arguments)
     }
 }

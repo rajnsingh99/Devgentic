@@ -15,10 +15,10 @@ struct TaskSchedulerSidebarView: View {
 
     @StateObject private var viewModel = SchedulerViewModel()
     @EnvironmentObject var mainViewModel: MainApplicationViewModel
+    @EnvironmentObject private var router: MainViewRouter
     @Environment(\.appTheme) private var theme
 
     @State private var showingCreateSheet = false
-    @State private var editingTask: ScheduledTask?
     @State private var showingDeleteAlert = false
     @State private var taskToDelete: ScheduledTask?
 
@@ -73,9 +73,6 @@ struct TaskSchedulerSidebarView: View {
         }
         .sheet(isPresented: $showingCreateSheet) {
             CreateScheduledTaskView()
-        }
-        .sheet(item: $editingTask) { task in
-            CreateScheduledTaskView(existingTask: task)
         }
         .alert("Delete Task?", isPresented: $showingDeleteAlert, presenting: taskToDelete) { task in
             Button("Delete", role: .destructive) {
@@ -168,8 +165,11 @@ struct TaskSchedulerSidebarView: View {
             onTap: {
                 if let convID = task.linkedConversationID {
                     mainViewModel.selectedConversationID = convID
+                    if !router.isShowingChat {
+                        router.returnToChat()
+                    }
                 } else {
-                    editingTask = task
+                    router.navigateToTask(task.id)
                 }
             }
         )

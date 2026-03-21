@@ -185,10 +185,21 @@ struct AdvancedPromptEditorView: View {
             HStack(spacing: 0) {
                 // The Core Editor
                 ZStack(alignment: .topTrailing) {
-                    TokenizingTextEditor(text: $localText, configuredTools: $localTools, theme: theme, promptLibraryVM: promptLibraryVM)
-                        .padding()
-                        .scrollContentBackground(.hidden)
-                        .background(theme.textBackground)
+                    ZStack(alignment: .topLeading) {
+                        TokenizingTextEditor(text: $localText, configuredTools: $localTools, theme: theme, promptLibraryVM: promptLibraryVM)
+                            .padding()
+                            .scrollContentBackground(.hidden)
+                            .background(theme.textBackground)
+                        
+                        if localText.isEmpty {
+                            Text("Define persona, strategy, and guardrails for \(agentName)...")
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundColor(theme.secondaryText.opacity(0.5))
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 24)
+                                .allowsHitTesting(false)
+                        }
+                    }
                     
                     // Floating Guide Toggle
                     Button(action: { withAnimation { showingGuide.toggle() } }) {
@@ -339,11 +350,16 @@ struct TokenizingTextEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         
         if textView.string != text {
+            // Block textDidChange delegate from firing during structural SwiftUI update
+            context.coordinator.isUpdatingFromSwiftUI = true
+            
             let selectedRange = textView.selectedRange()
             textView.string = text
             if selectedRange.location <= text.count {
                 textView.setSelectedRange(selectedRange)
             }
+            
+            context.coordinator.isUpdatingFromSwiftUI = false
         }
         
         // Ensure theme colors are applied on update
@@ -363,6 +379,9 @@ struct TokenizingTextEditor: NSViewRepresentable {
         // Keyboard state tracking
         var mentionState = MentionState()
         var promptMentionState = PromptMentionState()
+        
+        // Flag to prevent loop-backs when updating from SwiftUI
+        var isUpdatingFromSwiftUI = false
 
         init(_ parent: TokenizingTextEditor) {
             self.parent = parent
@@ -466,10 +485,16 @@ struct TokenizingTextEditor: NSViewRepresentable {
         // MARK: - Mention Logic
         
         func textDidChange(_ notification: Notification) {
+            guard !isUpdatingFromSwiftUI else { return }
             guard let textView = notification.object as? NSTextView else { return }
             
+            let newText = textView.string
+            
             DispatchQueue.main.async {
-                self.parent.text = textView.string
+                // Ensure we only write back if the text actually mutated, preventing circular structural re-renders
+                if self.parent.text != newText {
+                    self.parent.text = newText
+                }
             }
 
             let selectedRange = textView.selectedRange()

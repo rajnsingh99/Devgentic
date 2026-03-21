@@ -46,4 +46,32 @@ enum VectorMath {
         guard norm > 0 else { return vector }
         return vector.map { $0 / norm }
     }
+
+    // MARK: - Safe Variants (Dimension & Zero-Vector Validation)
+
+    /// Safe dot product that returns `nil` on dimension mismatch instead of a silent `0.0`.
+    /// Use this at pipeline boundaries (e.g., comparing embeddings from different models).
+    static func safeDotProduct(_ vectorA: [Float], _ vectorB: [Float]) -> Float? {
+        guard vectorA.count == vectorB.count else { return nil }
+        return zip(vectorA, vectorB).map(*).reduce(0, +)
+    }
+
+    /// Safe cosine similarity that returns `nil` on dimension mismatch or zero-magnitude vectors.
+    static func safeCosineSimilarity(between vectorA: [Float], and vectorB: [Float]) -> Float? {
+        guard vectorA.count == vectorB.count else { return nil }
+        let dot = dotProduct(vectorA, vectorB)
+        let magA = magnitude(of: vectorA)
+        let magB = magnitude(of: vectorB)
+        guard magA > 0, magB > 0 else { return 0.0 }
+        return dot / (magA * magB)
+    }
+
+    /// Safe L2 normalization that returns `nil` for zero or empty vectors.
+    /// HNSW cosine distance requires unit vectors — storing a zero vector corrupts the graph.
+    static func safeL2Normalize(_ vector: [Float]) -> [Float]? {
+        guard !vector.isEmpty else { return nil }
+        let norm = sqrt(vector.reduce(0) { $0 + $1 * $1 })
+        guard norm > 0 else { return nil }
+        return vector.map { $0 / norm }
+    }
 }

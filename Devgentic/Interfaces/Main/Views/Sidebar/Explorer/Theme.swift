@@ -102,6 +102,7 @@ struct ThemeDecorator: Theme {
     var userBubbleBackground: Color { accentOverride ?? base.userBubbleBackground }
     var inlineCodeBackground: Color { base.inlineCodeBackground }
     var inlineCodeText: Color { base.inlineCodeText }
+    var inlineCodeHighlight: Color { accentColor }
     var accentMuted: Color { accentColor.opacity(0.7) }
     var codeBlockHeaderBackground: Color { base.codeBlockHeaderBackground }
     var codeBlockEditorBackground: Color { base.codeBlockEditorBackground }
@@ -252,6 +253,9 @@ protocol Theme {
     /// Text color for inline `code` spans.
     var inlineCodeText: Color { get }
 
+    /// Distinct foreground color for inline `code` spans to stand out from body text.
+    var inlineCodeHighlight: Color { get }
+
     /// A muted variant of the accent color.
     var accentMuted: Color { get }
 
@@ -330,6 +334,7 @@ extension Theme {
     var userBubbleBackground: Color { Color(hex: "#388E8E") }
     var inlineCodeBackground: Color { Color(red: 0.2, green: 0.2, blue: 0.22) }
     var inlineCodeText: Color { Color(red: 0.9, green: 0.9, blue: 0.9) }
+    var inlineCodeHighlight: Color { accentColor }
     var accentMuted: Color { accentColor.opacity(0.7) }
     var codeBlockHeaderBackground: Color { Color(red: 0.15, green: 0.15, blue: 0.17) }
     var codeBlockEditorBackground: Color { Color(red: 0.11, green: 0.11, blue: 0.13) }
@@ -459,6 +464,7 @@ extension AppThemes {
         var userBubbleBackground: Color { Color(hex: "#bd93f9") }
         var inlineCodeBackground: Color { Color(hex: "#44475a") }
         var inlineCodeText: Color { Color(hex: "#f8f8f2") }
+        var inlineCodeHighlight: Color { Color(hex: "#ff79c6") }    // Dracula Pink
         var codeBlockHeaderBackground: Color { Color(hex: "#282a36") }
         var codeBlockEditorBackground: Color { Color(hex: "#1e1e2e") }
         var surfaceOverlay: Color { Color.white.opacity(0.08) }
@@ -518,6 +524,7 @@ extension AppThemes {
         var userBubbleBackground: Color { Color(hex: "#4078f2") }
         var inlineCodeBackground: Color { Color(hex: "#f0f0f0") }
         var inlineCodeText: Color { Color(hex: "#383a42") }
+        var inlineCodeHighlight: Color { Color(hex: "#a626a4") }    // One Light Purple
         var codeBlockHeaderBackground: Color { Color(hex: "#f0f0f0") }
         var codeBlockEditorBackground: Color { Color(hex: "#fafafa") }
         var surfaceOverlay: Color { Color.black.opacity(0.04) }
@@ -582,6 +589,7 @@ extension AppThemes {
         var userBubbleBackground: Color { Color(hex: "#61afef") }
         var inlineCodeBackground: Color { Color(hex: "#2c313a") }
         var inlineCodeText: Color { Color(hex: "#abb2bf") }
+        var inlineCodeHighlight: Color { Color(hex: "#d19a66") }    // One Dark Orange
         var codeBlockHeaderBackground: Color { Color(hex: "#21252b") }
         var codeBlockEditorBackground: Color { Color(hex: "#282c34") }
         var surfaceOverlay: Color { Color.white.opacity(0.06) }
@@ -646,6 +654,7 @@ extension AppThemes {
         var userBubbleBackground: Color { Color(hex: "#1DB954") }
         var inlineCodeBackground: Color { Color(hex: "#282828") }
         var inlineCodeText: Color { .white }
+        var inlineCodeHighlight: Color { Color(hex: "#1DB954") }    // Spotify Green
         var codeBlockHeaderBackground: Color { Color(hex: "#1DB954").opacity(0.1) }
         var codeBlockEditorBackground: Color { Color(hex: "#0c0c0c") } // Even darker for contrast
         var surfaceOverlay: Color { Color.white.opacity(0.05) }

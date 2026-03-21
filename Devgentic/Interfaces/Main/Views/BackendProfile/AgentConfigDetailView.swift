@@ -20,6 +20,7 @@ import SwiftUI
 struct AgentConfigDetailView: View {
     @Binding var profile: BackendProfileModel
     @EnvironmentObject var profileService: BackendProfileService
+    @EnvironmentObject private var router: MainViewRouter
     @Environment(\.appTheme) private var theme
     
     // State to track unsaved changes
@@ -31,8 +32,9 @@ struct AgentConfigDetailView: View {
     // Local state for editing advanced configurations
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
+    @State private var localMlxConfig: MLXAdvancedConfig = .default()
 
-    // Guard flag: prevents onChange(of: localOllamaConfig/localGeminiConfig) from writing
+    // Guard flag: prevents onChange(of: localOllamaConfig/localGeminiConfig/localMlxConfig) from writing
     // back to providerConfig during initial load, which would create phantom "unsaved changes".
     @State private var isLoadingAdvancedConfig = false
     
@@ -40,8 +42,7 @@ struct AgentConfigDetailView: View {
     @State private var isApiKeyVisible: Bool = false
     @State private var isEditingBaseURL: Bool = false
     
-    // Tool Library Sheet
-    @State private var showingToolLibrary = false
+    // Tool Library (now navigated via router)
     
     // Prompt Library for the inline editor
     @StateObject private var promptLibraryVM = PromptLibraryViewModel()
@@ -161,7 +162,7 @@ struct AgentConfigDetailView: View {
                 if case .agent(let c, let a, let t, let d, _, let k) = profile.details {
                     profile.details = .agent(
                         llmConfig: c, architecture: a, tools: t,
-                        description: d, instructions: val.isEmpty ? nil : val, knowledgeSources: k
+                        description: d, instructions: val, knowledgeSources: k
                     )
                 }
             }
@@ -204,10 +205,15 @@ struct AgentConfigDetailView: View {
 
     // MARK: - Body
     var body: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                
-                // 1. Identity Header
+        VStack(spacing: 0) {
+            DynamicIslandBar {
+                actionButtons
+            }
+
+            ScrollView {
+                VStack(spacing: 24) {
+
+                    // 1. Identity Header
                 HStack(alignment: .center, spacing: 16) {
                     Image(systemName: "person.crop.square.fill.and.at.rectangle")
                         .resizable()
@@ -228,11 +234,8 @@ struct AgentConfigDetailView: View {
                     }
                     Spacer()
                 }
-                .padding()
-                .background(theme.secondaryBackground)
-                .cornerRadius(12)
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.dividerColor, lineWidth: 1))
-                
+                .padding(.bottom, 8)
+
                 // 2. Cognitive Architecture (The Brain)
                 ModernSection(title: "Cognitive Architecture", icon: "brain.head.profile") {
                     
@@ -291,18 +294,29 @@ struct AgentConfigDetailView: View {
                             .buttonStyle(.link)
                         }
                         
-                        TokenizingTextEditor(
-                            text: instructionsBinding,
-                            configuredTools: toolsBinding,
-                            theme: theme,
-                            promptLibraryVM: promptLibraryVM
-                        )
-                        .frame(minHeight: 120)
-                        .padding(8)
-                        .scrollContentBackground(.hidden)
-                        .background(theme.textBackground)
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
+                        ZStack(alignment: .topLeading) {
+                            TokenizingTextEditor(
+                                text: instructionsBinding,
+                                configuredTools: toolsBinding,
+                                theme: theme,
+                                promptLibraryVM: promptLibraryVM
+                            )
+                            .frame(minHeight: 120)
+                            .padding(8)
+                            .scrollContentBackground(.hidden)
+                            .background(theme.textBackground)
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
+                            
+                            if instructionsBinding.wrappedValue.isEmpty {
+                                Text("Define persona, reasoning strategy, and tool guidelines...")
+                                    .font(.system(.body, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText.opacity(0.5))
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 16)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                     }
                     
                     // Description
@@ -364,7 +378,17 @@ struct AgentConfigDetailView: View {
                                     modelMetadata: Binding(
                                         get: { providerConfig.wrappedValue.modelMetadata },
                                         set: { providerConfig.wrappedValue.modelMetadata = $0 }
-                                    )
+                                    ),
+                                    chatTemplateSource: Binding(
+                                        get: { providerConfig.wrappedValue.chatTemplateSource },
+                                        set: { providerConfig.wrappedValue.chatTemplateSource = $0 }
+                                    ),
+                                    stopSequences: Binding(
+                                        get: { providerConfig.wrappedValue.stopSequences },
+                                        set: { providerConfig.wrappedValue.stopSequences = $0 }
+                                    ),
+                                    profileID: profile.id,
+                                    filterForTools: true
                                 )
                                 .labelsHidden()
                                 .frame(maxWidth: 350, alignment: .trailing)
@@ -422,7 +446,7 @@ struct AgentConfigDetailView: View {
                         Spacer(minLength: 16)
                         
                         Button("Manage Library...") {
-                            showingToolLibrary = true
+                            router.navigate(to: .toolLibrary(profileID: profile.id))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -522,21 +546,10 @@ struct AgentConfigDetailView: View {
                 }
             }
             .padding()
-            .padding(.bottom, 80) // Space for action bar
+            .frame(maxWidth: 1000)
+            .frame(maxWidth: .infinity)
         }
-        .background(theme.primaryBackground) // Main background
-        .sheet(isPresented: $showingToolLibrary) {
-            ToolLibraryView(
-                configuredTools: toolsBinding,
-                instructions: instructionsBinding.wrappedValue
-            )
-        }
-        .safeAreaInset(edge: .bottom) {
-            actionButtons
-                .padding()
-                .background(theme.secondaryBackground)
-                .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .top)
-        }
+        } // end outer VStack
         .alert("Delete '\(profile.displayName)'?", isPresented: $showingDeleteAlert) {
             Button("Delete", role: .destructive) {
                 profileService.deleteProfile(withId: profile.id)
@@ -596,6 +609,12 @@ struct AgentConfigDetailView: View {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }
         }
+        .onChange(of: localMlxConfig) { _ in
+            guard !isLoadingAdvancedConfig else { return }
+            if providerConfig.wrappedValue.apiProvider == .mlx {
+                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localMlxConfig)
+            }
+        }
         .onChange(of: providerConfig.wrappedValue.modelName) { newModel in
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 detectAndApplyOllamaPreset(for: newModel)
@@ -624,66 +643,55 @@ struct AgentConfigDetailView: View {
     // MARK: - Subviews & Helpers
     
     private var actionButtons: some View {
-        HStack {
+        HStack(spacing: 8) {
+            if hasChanges {
+                Button {
+                    if let initialState = initialProfileState {
+                        profile = initialState
+                        loadAdvancedConfigs()
+                    }
+                } label: {
+                    Text("Revert")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .foregroundColor(theme.primaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(theme.surfaceOverlay))
+                .onHover { isRevertHovered = $0 }
+
+                Button {
+                    profileService.saveProfile(profile)
+                    initialProfileState = profile
+                } label: {
+                    Text("Save")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.defaultAction)
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(theme.accentColor))
+            }
+
             Button(role: .destructive) {
                 showingDeleteAlert = true
             } label: {
-                Label("Delete Agent", systemImage: "trash")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(isDeleteHovered ? Color.red.opacity(0.1) : Color.clear)
-                    .cornerRadius(8)
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(isDeleteHovered ? .white : .red.opacity(0.8))
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(isDeleteHovered ? Color.red : Color.red.opacity(0.1))
+                    )
             }
             .buttonStyle(.plain)
-            .foregroundColor(.red)
-            .scaleEffect(isDeleteHovered ? 1.02 : 1.0)
             .onHover { isDeleteHovered = $0 }
-            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isDeleteHovered)
-            
-            Spacer()
-            
-            if hasChanges {
-                HStack(spacing: 12) {
-                    Button("Revert") {
-                        if let initialState = initialProfileState {
-                            profile = initialState
-                            loadAdvancedConfigs()
-                        }
-                    }
-                    .keyboardShortcut(.cancelAction)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(isRevertHovered ? theme.surfaceOverlay : Color.clear)
-                    .cornerRadius(8)
-                    .onHover { isRevertHovered = $0 }
-                    .scaleEffect(isRevertHovered ? 1.02 : 1.0)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isRevertHovered)
-                    
-                    Button {
-                        profileService.saveProfile(profile)
-                        initialProfileState = profile
-                    } label: {
-                        Text("Save Changes")
-                            .fontWeight(.semibold)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(theme.accentColor.opacity(isSaveHovered ? 0.9 : 1.0))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .shadow(color: theme.accentColor.opacity(isSaveHovered ? 0.3 : 0.0), radius: 8, x: 0, y: 4)
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.defaultAction)
-                    .onHover { isSaveHovered = $0 }
-                    .scaleEffect(isSaveHovered ? 1.02 : 1.0)
-                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSaveHovered)
-                }
-                .transition(.opacity.combined(with: .move(edge: .trailing)))
-            } else {
-                Text("All changes saved")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
-            }
+            .animation(.easeInOut(duration: 0.15), value: isDeleteHovered)
         }
     }
     
@@ -803,6 +811,7 @@ struct AgentConfigDetailView: View {
                         set: { providerConfig.wrappedValue.modelMetadata = $0 }
                     ),
                     baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
+                    profileID: profile.id,
                     filterForTools: true
                 )
                 .labelsHidden()
@@ -910,7 +919,9 @@ struct AgentConfigDetailView: View {
             OllamaSettingsView(config: $localOllamaConfig)
         case .google:
             GeminiSettingsView(config: $localGeminiConfig)
-        case .openAI, .anthropic, .mlx:
+        case .mlx:
+            MLXSettingsView(config: $localMlxConfig)
+        case .openAI, .anthropic:
             Text("No advanced settings available for \(providerConfig.wrappedValue.apiProvider.rawValue).")
                 .foregroundColor(.secondary)
                 .italic()
@@ -929,6 +940,11 @@ struct AgentConfigDetailView: View {
             self.localGeminiConfig = profileService.decodeConfig(
                 from: providerConfig.wrappedValue.advancedConfiguration,
                 as: GeminiAdvancedConfig.self
+            ) ?? .default()
+        case .mlx:
+            self.localMlxConfig = profileService.decodeConfig(
+                from: providerConfig.wrappedValue.advancedConfiguration,
+                as: MLXAdvancedConfig.self
             ) ?? .default()
         default:
             break

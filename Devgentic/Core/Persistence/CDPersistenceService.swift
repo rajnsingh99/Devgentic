@@ -163,6 +163,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
             newMessage.timestamp = message.timestamp
             newMessage.senderType = message.sender.rawValue
             newMessage.conversationId = message.conversationId
+            newMessage.traceID = message.traceID
             mapMessageContent(from: message.content, to: newMessage)
             
             // **FIX:** Use KVC to set transformable attributes
@@ -205,6 +206,7 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
                 entityToUpdate.timestamp = message.timestamp
                 entityToUpdate.senderType = message.sender.rawValue
                 entityToUpdate.conversationId = message.conversationId
+                entityToUpdate.traceID = message.traceID
                 
                 if let currentAgentContent = message.currentAgentContent {
                     self.mapMessageContent(from: currentAgentContent, to: entityToUpdate)
@@ -384,6 +386,7 @@ extension ChatMessageEntity {
             attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles
         )
         
+        chatMessage.traceID = self.traceID
         chatMessage.agentResponse = finalAgentResponse
         
         if let timelineEvents = self.value(forKey: "timelineEvents") as? [TimelineEvent] {

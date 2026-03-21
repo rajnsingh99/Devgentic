@@ -1,5 +1,5 @@
 //
-//  MistralXMLGenerator.swift
+//  XMLStructuredGenerator.swift
 //  Devgentic
 //
 //  Step 2.2: Dialect-specific generator for the .mistralXML dialect.
@@ -13,11 +13,11 @@ import OSLog
 
 private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
 
-// MARK: - Strategy: Mistral XML Generator
+// MARK: - Strategy: XML Structured Generator
 
 /// A cognitive strategy for Mistral-family models that wrap tool calls in
 /// pseudo-XML boundaries (<tool_call>...</tool_call>).
-struct MistralXMLGenerator: CognitiveGenerator {
+struct XMLStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
 
     private let dialectRules = """

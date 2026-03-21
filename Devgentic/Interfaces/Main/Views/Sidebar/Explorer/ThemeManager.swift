@@ -69,6 +69,17 @@ final class ThemeManager: ObservableObject {
     /// The customizable accent color override.
     @Published private(set) var selectedAccentColor: AppAccentColor
 
+    // MARK: - Chat Font Customization
+    /// The font size for chat message body text. Default: 15pt (matches fontBody).
+    @Published var chatFontSize: CGFloat
+    /// The line spacing for chat message text. Default: 4pt.
+    @Published var chatLineSpacing: CGFloat
+
+    /// A computed `Font` built from the user's chat font size preference.
+    var chatFont: Font {
+        .system(size: chatFontSize, weight: .regular)
+    }
+
     init() {
         // Load the saved app theme.
         let savedThemeID = UserDefaults.standard.string(forKey: Self.selectedThemeKey)
@@ -90,6 +101,12 @@ final class ThemeManager: ObservableObject {
         let savedAccent = UserDefaults.standard.string(forKey: Self.accentColorKey)
         let accent = savedAccent.flatMap { AppAccentColor(rawValue: $0) } ?? .default
         self.selectedAccentColor = accent
+
+        // Load chat font settings (default: 15pt body, 4pt line spacing)
+        let savedFontSize = UserDefaults.standard.object(forKey: AppSettings.chatFontSizeKey) as? CGFloat
+        self.chatFontSize = savedFontSize ?? 15
+        let savedLineSpacing = UserDefaults.standard.object(forKey: AppSettings.chatLineSpacingKey) as? CGFloat
+        self.chatLineSpacing = savedLineSpacing ?? 4
 
         // Initialize currentTheme with decorator
         self.currentTheme = ThemeDecorator(base: base, accentColorOverride: accent)
@@ -113,6 +130,18 @@ final class ThemeManager: ObservableObject {
         self.selectedAccentColor = accent
         self.currentTheme = ThemeDecorator(base: baseTheme, accentColorOverride: accent)
         UserDefaults.standard.set(accent.rawValue, forKey: Self.accentColorKey)
+    }
+
+    // MARK: - Chat Font Actions
+
+    func applyChatFontSize(_ size: CGFloat) {
+        self.chatFontSize = size
+        UserDefaults.standard.set(size, forKey: AppSettings.chatFontSizeKey)
+    }
+
+    func applyChatLineSpacing(_ spacing: CGFloat) {
+        self.chatLineSpacing = spacing
+        UserDefaults.standard.set(spacing, forKey: AppSettings.chatLineSpacingKey)
     }
 
     /// The resolved syntax theme for the Code Viewer, accounting for the override setting.

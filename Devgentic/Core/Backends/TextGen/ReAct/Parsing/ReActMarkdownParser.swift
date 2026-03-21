@@ -29,9 +29,9 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         // 2. Extract Action (tool name)
         let terminators = ["none", "finish", "null", "done"]
         
-        guard let toolName = extractField(named: "Action", from: text),
-              !toolName.isEmpty,
-              !terminators.contains(toolName.lowercased().trimmingCharacters(in: .punctuationCharacters)) else {
+        guard let rawToolName = extractField(named: "Action", from: text)?.trimmingCharacters(in: .init(charactersIn: "`\"'")),
+              !rawToolName.isEmpty,
+              !terminators.contains(rawToolName.lowercased().trimmingCharacters(in: .punctuationCharacters)) else {
             // "Final Answer:", no action found, or termination word used — treat as termination
             logger.info("ReActMarkdownParser: No valid Action found. Treating as termination.")
             let finalAnswer = extractFinalAnswer(from: text)
@@ -44,8 +44,8 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
         // 3. Extract Action Input (JSON arguments)
         let arguments = extractActionInput(from: text)
 
-        logger.info("ReActMarkdownParser: Parsed action='\(toolName)' with \(arguments.count) argument(s).")
-        let call = PendingToolCall(id: UUID().uuidString, name: toolName, arguments: arguments)
+        logger.info("ReActMarkdownParser: Parsed action='\(rawToolName)' with \(arguments.count) argument(s).")
+        let call = PendingToolCall(id: UUID().uuidString, name: rawToolName, arguments: arguments)
         return ModernCognitiveStep(reasoning: reasoning ?? "Executing...", toolCalls: [call])
     }
 

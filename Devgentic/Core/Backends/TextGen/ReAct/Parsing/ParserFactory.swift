@@ -28,8 +28,8 @@ struct ParserFactory {
             return MistralXMLParser()
         case .reactMarkdown:
             return ReActMarkdownParser()
-        case .promptedFlatJSON:
-            return PromptedFlatJSONParser()
+        case .heuristicJson:
+            return HeuristicCognitiveParser()
         }
     }
 
@@ -57,6 +57,12 @@ struct ParserFactory {
             return MistralXMLParser()       // Reuse existing XML parser
         case .reactMarkdown:
             return ReActMarkdownParser()    // Reuse existing markdown parser
+        case .dynamicToolTag:
+            return DynamicToolTagParser()   // <tool_name>{args}</tool_name> — Mistral native dynamic tags
+        case .functionCallTag:
+            return MistralXMLParser()       // Similar XML structure — reuse XML parser
+        case .gorillaFunction:
+            return HeuristicCognitiveParser() // No dedicated parser yet — fallback to heuristic
         case .arrayInversion, .flatJSONLeakage:
             return NativeJSONParser()       // JSON-based formats handled by existing JSON parser
         }

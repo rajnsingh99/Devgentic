@@ -12,11 +12,32 @@ import SwiftUI
 struct ThinkingDynamicIsland: View {
     let thoughts: [AgentThought] // Using the new structured thought
     let currentHeadline: String?
+    let agentState: AgentState
     let isStreaming: Bool
     @Binding var isExpanded: Bool
 
     @State private var gradientRotation: Double = 0
     @Environment(\.appTheme) private var theme
+
+    /// Returns a static headline for states that shouldn't cycle (tool use, interactions, workflow).
+    /// Returns nil for thinking states, which triggers CyclingWordsView's animated word rotation.
+    private var concreteHeadline: String? {
+        switch agentState {
+        case .acting(.tool(let name)):
+            return "Using tool: \(name)"
+        case .interaction(.permission(let tool)):
+            return "Waiting for approval: \(tool)"
+        case .interaction(.clarification):
+            return "Asking you a question..."
+        default:
+            // Check if the headline is a concrete status (workflow, media, etc.)
+            if let headline = currentHeadline,
+               headline.contains("/") || headline.contains("completed") || headline.contains("failed") || headline.contains("%") {
+                return headline
+            }
+            return nil // Let CyclingWordsView animate
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -34,10 +55,10 @@ struct ThinkingDynamicIsland: View {
                     }
 
                     if isStreaming {
-                        Text(currentHeadline ?? "Reasoning...")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(theme.primaryText)
-                            .lineLimit(1)
+                        CyclingWordsView(
+                            agentState: agentState,
+                            overrideText: concreteHeadline
+                        )
                     } else {
                         Text("Thought Process")
                             .font(.system(size: 13, weight: .medium))

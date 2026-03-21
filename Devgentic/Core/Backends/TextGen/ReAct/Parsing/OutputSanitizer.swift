@@ -41,7 +41,16 @@ struct OutputSanitizer: Sendable {
         // 3. Strip markdown code fences (```json ... ```, ```xml ... ```, bare ```).
         text = stripCodeFences(text)
 
-        // 4. Strip trailing orphan XML close tags that aren't part of a matched pair.
+        // 4. Strip special token markers (<|eot_id|>, <|end_of_text|>, <|im_end|>, etc.).
+        //    These are tokenizer control tokens that leak into generated text
+        //    when stop sequences aren't configured or the model over-generates.
+        text = stripSpecialTokenMarkers(text)
+
+        // 5. Strip wrapper tags (<output>...</output>, <response>...</response>).
+        //    Some models wrap their entire response in these tags.
+        text = stripWrapperTags(text)
+
+        // 6. Strip trailing orphan XML close tags that aren't part of a matched pair.
         text = stripTrailingOrphanTags(text)
 
         let result = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -110,6 +119,39 @@ struct OutputSanitizer: Sendable {
             )
         }
         result = result.replacingOccurrences(of: "```", with: "")
+        return result
+    }
+
+    /// Strips special token markers like `<|eot_id|>`, `<|end_of_text|>`, `<|im_end|>`, etc.
+    /// These are tokenizer control tokens that sometimes leak into generated text.
+    private static func stripSpecialTokenMarkers(_ text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<\|[a-z_]+\|>"#,
+            options: .caseInsensitive
+        ) else { return text }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: ""
+        )
+    }
+
+    /// Strips opening and closing wrapper tags that some models use to enclose their response.
+    /// Removes `<output>...</output>` and `<response>...</response>` wrappers while preserving inner content.
+    private static func stripWrapperTags(_ text: String) -> String {
+        var result = text
+        let tags = ["output", "response"]
+        for tag in tags {
+            guard let regex = try? NSRegularExpression(
+                pattern: "</?\(tag)>",
+                options: .caseInsensitive
+            ) else { continue }
+            result = regex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: ""
+            )
+        }
         return result
     }
 

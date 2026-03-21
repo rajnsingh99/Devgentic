@@ -23,6 +23,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct HomeButton: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
+    @EnvironmentObject var router: MainViewRouter
     @Binding var isSidebarVisible: Bool
     @Binding var selectedTab: SidebarTab?
 
@@ -31,6 +32,12 @@ struct HomeButton: View {
 
     var body: some View {
         Button {
+            // Return router to chat first so the welcome view is visible
+            if !router.isShowingChat {
+                router.returnToChat()
+                logger.debug("Router returned to chat via Home button.")
+            }
+
             viewModel.deselectConversationAndShowWelcome()
             logger.debug("Triggered deselect conversation via Home button.")
 
@@ -67,16 +74,18 @@ struct ActivityBarButton: View {
     @Binding var isSidebarVisible: Bool
 
     @EnvironmentObject var viewModel: MainApplicationViewModel
-    @Environment(\.openWindow) var openWindow
+    @ObservedObject private var downloadManager = DownloadManager.shared
     @Environment(\.appTheme) private var theme
 
     @State private var isHovering = false
 
     private var isActive: Bool {
-        if tab == .settings || tab == .backendProfiles {
-            return false
-        }
         return selectedTab == tab && isSidebarVisible
+    }
+
+    /// Shows a badge dot on the downloads tab when downloads are active.
+    private var showBadge: Bool {
+        tab == .downloads && downloadManager.hasActiveDownloads
     }
 
     var body: some View {
@@ -109,7 +118,17 @@ struct ActivityBarButton: View {
                     .transition(.scale.combined(with: .opacity))
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if showBadge {
+                Circle()
+                    .fill(theme.accentColor)
+                    .frame(width: 8, height: 8)
+                    .offset(x: 2, y: -2)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isActive)
+        .animation(.easeInOut(duration: 0.3), value: showBadge)
         .help(tab.title)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
@@ -119,47 +138,13 @@ struct ActivityBarButton: View {
     }
 
     private func handleButtonTap() {
-        switch tab {
-        case .settings:
-            logger.debug("Settings button tapped. Attempting to open Settings window.")
-            
-            // Check if it's already open, if so bring to front. If not, open it.
-            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "settings" }) {
-                window.makeKeyAndOrderFront(nil)
-            } else {
-                openWindow(id: "settings")
-            }
-
-            if viewModel.showSettings {
-                viewModel.showSettings = false
-                logger.debug("Ensured old settings overlay is closed.")
-            }
-
-        case .backendProfiles:
-            
-            // Check if it's already open, if so bring to front. If not, open it.
-            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "backend-profiles" }) {
-                window.makeKeyAndOrderFront(nil)
-            } else {
-                openWindow(id: "backend-profiles")
-            }
-            
-            if viewModel.showSettings { viewModel.showSettings = false }
-
-
-        case .promptLibrary, .conversations, .explorer, .scheduler:
-            if selectedTab == tab {
-                isSidebarVisible.toggle()
-                logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
-            } else {
-                selectedTab = tab
-                isSidebarVisible = true
-                logger.debug("Selected tab \(tab.title) via button. Sidebar pane forced visible.")
-            }
-            if viewModel.showSettings {
-                viewModel.showSettings = false
-                logger.debug("Hid old settings panel because sidebar tab '\(tab.title)' was selected.")
-            }
+        if selectedTab == tab {
+            isSidebarVisible.toggle()
+            logger.debug("Toggled sidebar visibility via \(tab.title) button. Visible: \(isSidebarVisible)")
+        } else {
+            selectedTab = tab
+            isSidebarVisible = true
+            logger.debug("Selected tab \(tab.title) via button. Sidebar pane forced visible.")
         }
     }
 }
@@ -169,7 +154,7 @@ struct ActivityBarView: View {
     @Binding var selectedTab: SidebarTab?
     @Binding var isSidebarVisible: Bool
 
-    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles]
+    private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .downloads]
     private let bottomTabs: [SidebarTab] = [.settings]
 
 

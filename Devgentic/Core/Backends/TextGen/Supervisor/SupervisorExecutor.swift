@@ -180,6 +180,7 @@ actor SupervisorExecutor: Executor {
 
                             // Record to execution summary
                             executionSummary.record(
+                                toolCallId: result.workerId,
                                 toolName: "worker_\(result.workerRole)",
                                 params: workerTask.instruction,
                                 output: result.output,
@@ -245,6 +246,9 @@ actor SupervisorExecutor: Executor {
                         """]
                     ]
 
+                    // --- UI Progress: Synthesis ---
+                    continuation.yield(.thought("Composing final response…"))
+
                     let aggregatedResponse: String
                     do {
                         aggregatedResponse = try await spyModel.generate(messages: aggregationMessages, tools: nil, responseSchema: nil)
@@ -273,6 +277,7 @@ actor SupervisorExecutor: Executor {
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
                     sessionState.cancelActiveEpisode()
                     SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    continuation.yield(.thought("Cancelled by user."))
                     continuation.finish()
                 } catch {
                     logger.error("Supervisor fatal error: \(error.localizedDescription)")

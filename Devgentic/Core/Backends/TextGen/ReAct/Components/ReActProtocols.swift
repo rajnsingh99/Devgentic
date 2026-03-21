@@ -45,6 +45,9 @@ enum RetryAction: Equatable, Sendable {
     case throttle(seconds: TimeInterval, message: String)
     case networkRetry(message: String)
     case parseRetry(systemAlert: String, attemptCount: Int, maxAttempts: Int)
+    /// The local model was unloaded (e.g., idle timer fired during HITL suspension).
+    /// The executor should attempt to reload the model and retry the iteration.
+    case modelReload(message: String)
     case abort(reason: String)
 }
 

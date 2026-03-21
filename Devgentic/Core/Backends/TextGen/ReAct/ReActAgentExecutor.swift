@@ -86,7 +86,7 @@ actor ReActAgentExecutor: Executor {
                             }
                             onTraceUpdate(AgentTraceLog(
                                 traceID: executionTrace.traceID,
-                                spanID: executionTrace.newSpan().spanID,
+                                spanID: executionTrace.spanID,
                                 parentSpanID: executionTrace.parentSpanID,
                                 stepNumber: currentIteration,
                                 state: .thinking(.reasoning),
@@ -98,6 +98,12 @@ actor ReActAgentExecutor: Executor {
                         
                         let iterationSpan = executionTrace.newSpan()
                         var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
+                        
+                        await TraceRecorder.shared.beginSpan(context: iterationSpan, name: "iteration_\(currentIteration)", kind: .iteration)
+                        
+                        defer {
+                            Task { await TraceRecorder.shared.endSpan(spanID: iterationSpan.spanID, status: .completed) }
+                        }
                         
                         // --- Build Context ---
                         let envFacts = EnvironmentFacts(
@@ -176,7 +182,18 @@ actor ReActAgentExecutor: Executor {
                                 continuation.yield(.thought("⚠️ Error: Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
                                 await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
                                 continue cognitiveLoop
-                                
+
+                            case .modelReload(let message):
+                                continuation.yield(.thought(message))
+                                let reloaded = await MLXService.shared.reloadCurrentModel()
+                                if !reloaded {
+                                    continuation.yield(.content("The model was unloaded and could not be reloaded automatically. Please try again."))
+                                    continuation.finish()
+                                    return
+                                }
+                                currentIteration -= 1 // Don't count reload as an iteration
+                                continue cognitiveLoop
+
                             case .abort(let reason):
                                 sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
                                 SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
@@ -192,9 +209,9 @@ actor ReActAgentExecutor: Executor {
                         
                         // Yield the internal thought trace if the provider extracted one (e.g., Native Thinking)
                         if let thought = step.thought, !thought.isEmpty {
-                            continuation.yield(.thought(thought))
+                            continuation.yield(.thought("Step \(currentIteration) — \(thought)"))
                         }
-                        
+
                         // Yield the assistant monologue/reasoning text
                         // (Avoid yielding redundant text if thought and reasoning are identical)
                         if !step.reasoning.isEmpty && step.reasoning != step.thought {
@@ -237,15 +254,15 @@ actor ReActAgentExecutor: Executor {
                         
                         // Commit observations to memory strategy
                         for obs in observations {
-                            memoryStrategy.recordObservation(stepId: obs.stepId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
+                            memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
                         }
-                        
+
                         var shouldAbort = false
                         var abortReason = ""
-                        
+
                         for obs in observations {
                             let isSuccess = obs.isSuccess
-                            executionSummary.record(toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: isSuccess)
+                            executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: isSuccess)
                             
                             let resultAction = circuitBreaker.recordToolResult(isSuccess: isSuccess)
                             if case .abort(let reason) = resultAction {
@@ -260,6 +277,7 @@ actor ReActAgentExecutor: Executor {
                         
                         if shouldAbort {
                             executionSummary.markComplete(failureReason: abortReason)
+                            continuation.yield(.thought("⚠️ Circuit breaker triggered — recovering…"))
                             let response = await ResponseSynthesizer.synthesize(summary: executionSummary, model: model, personaInstructions: input.instructions, originalQuery: input.userInput)
                             sessionState.closeActiveEpisode(status: "FAILED", outcome: response)
                             SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
@@ -292,28 +310,35 @@ actor ReActAgentExecutor: Executor {
                         executionSummary.markComplete()
                     }
 
+                    // --- UI Progress: Synthesis ---
+                    continuation.yield(.thought("Composing final response…"))
+
                     let response = await ResponseSynthesizer.synthesize(
                         summary: executionSummary,
                         model: model,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
-                        isNativeFlow: input.generatorStrategy is NativeStructuredStrategy
+                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator
                     )
-                    
+
                     sessionState.closeActiveEpisode(status: exitStatus, outcome: response)
                     SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     logState.info("💾 Auto-Patched Active Episode to: \(exitStatus)")
                     
-                    let finalSpan = input.traceContext.newSpan()
                     onTraceUpdate(AgentTraceLog(
-                        traceID: finalSpan.traceID,
-                        spanID: finalSpan.spanID,
-                        parentSpanID: finalSpan.parentSpanID,
+                        traceID: input.traceContext.traceID,
+                        spanID: input.traceContext.spanID,
+                        parentSpanID: input.traceContext.parentSpanID,
                         stepNumber: currentIteration,
                         state: .thinking(.finalizing),
                         content: exitStatus == "COMPLETED" ? "Task completed successfully." : "Task failed or reached max iterations."
                     ))
                     
+                    logger.info("--- 🏁 REACT EXECUTION COMPLETE 🏁 ---")
+                    logger.info("Model: \(model.modelName)")
+                    logger.info("Final Synthesized Response: \(response)")
+                    logger.info("--------------------------------------")
+
                     continuation.yield(.content(response))
                     continuation.finish()
                     
@@ -322,6 +347,7 @@ actor ReActAgentExecutor: Executor {
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
                     sessionState.cancelActiveEpisode()
                     SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    continuation.yield(.thought("Cancelled by user."))
                     continuation.finish()
                 } catch {
                     logger.error("ReAct Fatal Error: \(error.localizedDescription)")

@@ -83,6 +83,133 @@ struct ThemeSettingsView: View {
 
                 Divider().background(theme.dividerColor)
 
+                // MARK: - Chat Font Section
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "textformat.size")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(theme.accentColor)
+                            Text("Chat Font")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(theme.primaryText)
+                        }
+
+                        Text("Adjust the font size and line spacing for chat messages.")
+                            .font(.system(size: 13))
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Font Size Slider
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Font Size")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(theme.primaryText)
+                                Spacer()
+                                Text("\(Int(themeManager.chatFontSize)) pt")
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(theme.surfaceOverlay)
+                                    )
+                            }
+                            HStack(spacing: 8) {
+                                Text("A")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(theme.tertiaryText)
+                                Slider(
+                                    value: Binding(
+                                        get: { themeManager.chatFontSize },
+                                        set: { themeManager.applyChatFontSize($0) }
+                                    ),
+                                    in: 12...22,
+                                    step: 1
+                                )
+                                .tint(theme.accentColor)
+                                Text("A")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundColor(theme.tertiaryText)
+                            }
+                        }
+
+                        // Line Spacing Slider
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Line Spacing")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(theme.primaryText)
+                                Spacer()
+                                Text(String(format: "%.0f pt", themeManager.chatLineSpacing))
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(theme.surfaceOverlay)
+                                    )
+                            }
+                            Slider(
+                                value: Binding(
+                                    get: { themeManager.chatLineSpacing },
+                                    set: { themeManager.applyChatLineSpacing($0) }
+                                ),
+                                in: 0...12,
+                                step: 1
+                            )
+                            .tint(theme.accentColor)
+                        }
+
+                        // Live Preview
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Preview")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(theme.tertiaryText)
+                                .textCase(.uppercase)
+
+                            Text("The quick brown fox jumps over the lazy dog. This is how your chat messages will look with the current font settings.")
+                                .font(.system(size: themeManager.chatFontSize, weight: .regular))
+                                .foregroundColor(theme.primaryText)
+                                .lineSpacing(themeManager.chatLineSpacing)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(theme.secondaryBackground)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(theme.surfaceOverlay, lineWidth: 1)
+                                )
+                        }
+
+                        // Reset Button
+                        HStack {
+                            Spacer()
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    themeManager.applyChatFontSize(15)
+                                    themeManager.applyChatLineSpacing(4)
+                                }
+                            } label: {
+                                Text("Reset to Default")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(theme.secondaryText)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4)
+                            .opacity(themeManager.chatFontSize == 15 && themeManager.chatLineSpacing == 4 ? 0.4 : 1)
+                        }
+                    }
+                }
+
+                Divider().background(theme.dividerColor)
+
                 // MARK: - Code Viewer Section
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 6) {

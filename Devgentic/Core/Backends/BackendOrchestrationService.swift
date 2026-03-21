@@ -103,7 +103,10 @@ class BackendOrchestrationService: ObservableObject {
                 // Fetch long-term memory context if applicable.
                 var ragContextString: String? = nil
                 if config.profile.profileType == .bot || config.profile.profileType == .agent {
-                    
+
+                    // --- UI Progress: RAG preparation ---
+                    continuation.yield(.thought("Searching knowledge base…"))
+
                     aggregatedTraceUpdate(AgentTraceLog(
                         traceID: context.traceID,
                         spanID: context.newSpan().spanID,
@@ -113,7 +116,7 @@ class BackendOrchestrationService: ObservableObject {
                         content: "Analyzing conversation history for context retrieval...",
                         metadata: nil
                     ))
-                    
+
                     let rewrittenQuery = await QueryRewritingService.shared.rewriteQuery(userQuery, history: conversationHistory)
                     
                     ragContextString = await self.retrieveRAGContext(for: rewrittenQuery, conversationID: conversationID, history: conversationHistory)

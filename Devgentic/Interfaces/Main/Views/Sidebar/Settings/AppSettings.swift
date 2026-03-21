@@ -27,6 +27,15 @@ struct AppSettings {
     static let notificationsEnabledKey = "notificationsEnabled"
     static let notificationChannelsKey = "notificationChannels"
     static let notificationPerConversationKey = "notificationPerConversation"
+
+    // Chat Font
+    static let chatFontSizeKey = "chatFontSize"
+    static let chatLineSpacingKey = "chatLineSpacing"
+
+    // Speech Playback (Read Aloud)
+    static let speechPlaybackRateKey = "speechPlaybackRate"
+    static let speechPlaybackVoiceKey = "speechPlaybackVoice"
+    static let speechPauseOnCodeKey = "speechPauseOnCode"
 }
 
 enum AgentViewVariant: String, Codable, CaseIterable, Identifiable {

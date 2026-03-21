@@ -1,5 +1,4 @@
-//
-//  PromptedJsonModeGenerator.swift
+//  JsonStructuredGenerator.swift
 //  Devgentic
 //
 //  Created by Raj Singh on 26/02/26.
@@ -11,14 +10,16 @@ import OSLog
 private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
 
 
-// MARK: - Strategy C: Prompted JSON Mode (Ollama / Local / MLX)
+// MARK: - Strategy C: JSON Structured (Ollama / Local / MLX)
 
 /// A cognitive strategy tailored for local models using standard JSON mode or prompt-enforced text mode.
-struct PromptedJsonModeStrategy: CognitiveGenerator {
+struct JsonStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
+    let dialect: ModelDialect
     
-    init(toolAdapter: ToolSchemaAdapter = PromptedMarkdownAdapter()) {
+    init(toolAdapter: ToolSchemaAdapter = PromptedMarkdownAdapter(), dialect: ModelDialect = .heuristicJson) {
         self.toolAdapter = toolAdapter
+        self.dialect = dialect
     }
 
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
@@ -80,7 +81,7 @@ struct PromptedJsonModeStrategy: CognitiveGenerator {
         }
 
         let pipeline = CognitiveParsePipeline(
-            expectedDialect: .promptedFlatJSON,
+            expectedDialect: dialect,
             modelId: model.modelName,
             iteration: iteration
         )

@@ -136,24 +136,20 @@ struct BackendProfileDetailView: View {
             switch profile.profileType {
             case .bot:
                 BotConfigDetailView(profile: $profile)
-                    .padding()
             case .agent:
                 AgentConfigDetailView(profile: $profile)
-                    .padding()
             case .workflow:
                 WorkflowCanvasView(profile: $profile)
             case .imageGen:
                 ImageGenConfigDetailView(profile: $profile)
-                    .padding()
             }
         }
-        .background(theme.primaryBackground)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 // MARK: - Profile Row View
-private struct ProfileRowView: View {
+struct ProfileRowView: View {
     let profile: BackendProfileModel
     let isSelected: Bool
     let onSelect: () -> Void

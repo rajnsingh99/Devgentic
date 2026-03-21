@@ -49,6 +49,10 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     let timestamp: Date
     let sender: SenderRole
     
+    /// The distributed trace ID for the request that produced this message.
+    /// Set when agent execution begins; used to retrieve trace data for the Report UI.
+    var traceID: String?
+    
     @Published var content: MessageContent
     @Published var agentResponse: AgentResponse?
     @Published var isStreaming: Bool = false
@@ -173,7 +177,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     
     private enum CodingKeys: String, CodingKey {
         case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        case timelineEvents, thoughts, artifacts, agentState // Added agentState to keys
+        case timelineEvents, thoughts, artifacts, agentState, traceID
     }
 
     // Manual Decodable conformance
@@ -189,6 +193,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
         self.isStreaming = try container.decode(Bool.self, forKey: .isStreaming)
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
+        self.traceID = try container.decodeIfPresent(String.self, forKey: .traceID)
         
         self.timelineEvents = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
         self.agentState = try container.decodeIfPresent(AgentState.self, forKey: .agentState) ?? .idle
@@ -225,6 +230,7 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
         try container.encode(isStreaming, forKey: .isStreaming)
         try container.encodeIfPresent(attachedTextFiles, forKey: .attachedTextFiles)
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
+        try container.encodeIfPresent(traceID, forKey: .traceID)
         
         try container.encode(timelineEvents, forKey: .timelineEvents)
         try container.encode(agentState, forKey: .agentState)

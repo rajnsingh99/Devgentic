@@ -56,9 +56,11 @@ actor ChatExecutor: Executor {
                     // We combine instructions, RAG context, history, and the user query.
                     let messages = self.buildMessages(input: input)
 
-                    // We need a config for streamChat, but ChatExecutor doesn't have one.
-                    // For now, create a dummy one. In the future, this might come from AgentInput.
-                    let config = LLMProviderConfig(baseURL: URL(string: "http://localhost")!, modelName: model.modelName)
+                    logger.info("--- 🤖 CHAT EXECUTOR START 🤖 ---")
+                    logger.info("Model: \(model.modelName)")
+                    if let instructions = input.instructions {
+                        logger.info("Instructions: \(instructions.prefix(100))...")
+                    }
 
                     onTraceUpdate(AgentTraceLog(
                         traceID: traceSpan.traceID,
@@ -71,12 +73,14 @@ actor ChatExecutor: Executor {
                     ))
 
                     var didSetFinalizing = false
+                    var fullResponse = ""
 
                     // Stream thoughts & content
                     // IMPORTANT: ChatExecutor currently uses the base LLMProvider.stream method
                     // until streamChat is formally added to the protocol.
                     for try await chunk in model.stream(messages: messages, tools: nil) {
                         try Task.checkCancellation()
+                        fullResponse += chunk
                         
                         if !didSetFinalizing {
                              onTraceUpdate(AgentTraceLog(
@@ -92,6 +96,10 @@ actor ChatExecutor: Executor {
                         
                         continuation.yield(.content(chunk))
                     }
+
+                    logger.info("--- 🏁 CHAT EXECUTOR COMPLETE 🏁 ---")
+                    logger.info("Final Response: \(fullResponse)")
+                    logger.info("-----------------------------------")
 
                     // 4. Trace: End
                     onTraceUpdate(AgentTraceLog(

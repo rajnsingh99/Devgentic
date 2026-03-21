@@ -205,9 +205,16 @@ struct ActionDetailView: View {
                     if isExecuting {
                         ProgressView().controlSize(.small).scaleEffect(0.7)
                     } else if let success = isSuccess {
-                        Image(systemName: success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(success ? theme.successColor.opacity(0.8) : theme.errorColor)
+                        if name == "ask_user" {
+                            // send = user answered, deny/skip = user skipped
+                            Image(systemName: success ? "bubble.left.fill" : "arrow.uturn.left")
+                                .font(.system(size: 10))
+                                .foregroundColor(success ? theme.streamingIndicator.opacity(0.8) : theme.secondaryText.opacity(0.5))
+                        } else {
+                            Image(systemName: success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(success ? theme.successColor.opacity(0.8) : theme.errorColor)
+                        }
                     }
                 }
                 

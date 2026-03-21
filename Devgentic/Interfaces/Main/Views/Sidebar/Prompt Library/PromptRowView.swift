@@ -12,7 +12,6 @@ struct PromptRowView: View {
     let isSelected: Bool
     
     let onSelect: () -> Void
-    let onUse: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
     
@@ -28,12 +27,6 @@ struct PromptRowView: View {
         .padding(.vertical, 6)
         .background(backgroundView)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(alignment: .trailing) {
-            if isHovering {
-                hoverActionsView
-                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-            }
-        }
         .contentShape(Rectangle())
         .onTapGesture {
             onSelect()
@@ -95,40 +88,6 @@ struct PromptRowView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 2)
-    }
-    
-    @ViewBuilder
-    private var hoverActionsView: some View {
-        HStack(spacing: 4) {
-            Button(action: onUse) {
-                Text("Use")
-                    .font(.system(size: 10, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(theme.accentColor.opacity(0.15))
-                    .foregroundColor(theme.accentColor)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            
-            Menu {
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
-                }
-                Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 14))
-                    .foregroundColor(theme.secondaryText)
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-        }
-        .padding(.trailing, 8)
     }
     
     @ViewBuilder

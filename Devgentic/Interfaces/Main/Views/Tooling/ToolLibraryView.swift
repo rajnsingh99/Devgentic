@@ -4,15 +4,9 @@
 //
 //  Created by Raj Singh on 25/09/25.
 //
-//  Refactored on 28/09/25 to unify Local and MCP tool management.
-//  Updated on 26/01/26 to integrate the V2 MCP Architecture.
-//  Updated on 04/02/26 for Modern Dashboard UI.
-//  Redesigned on 20/02/26 for Phase 4: Master-Detail Architecture & HITL controls.
-//  Polished on 20/02/26 to modernize UI alignments, typography, and macOS standards.
-//  Updated on 20/02/26 for Step 3: Dependency Protection via Instructions matching.
-//  Updated on 20/02/26: Added native Hover Tooltips and Detailed Parameter Popovers.
-//  Updated on 21/02/26: Replaced scroll-glitch toggles with semantic pill buttons, unified popover scroll.
-//  Updated on 21/02/26: Switched State button to icon-only for cleaner UI, fixed vertical alignment across columns.
+//  Redesigned on 19/03/26 for single-window stack navigation.
+//  Uses a custom split layout with themed sidebar + scrollable
+//  tool rows instead of NavigationSplitView + Table.
 //
 
 import SwiftUI
@@ -21,8 +15,32 @@ import SwiftUI
 
 enum SidebarSelection: Hashable {
     case all
-    case local
+    case localCategory(String)
     case mcp(UUID)
+}
+
+// MARK: - Built-in Tool Category Mapping
+
+struct BuiltInToolCategory: Identifiable {
+    var id: String { name }
+    let name: String
+    let icon: String
+    let rawCategories: Set<String>
+
+    static let allGroups: [BuiltInToolCategory] = [
+        .init(name: "File System", icon: "folder.fill", rawCategories: ["File System", "Advanced Finder & File Management"]),
+        .init(name: "System & Shell", icon: "terminal.fill", rawCategories: ["System & Shell", "System Toggles", "System State", "System Automation", "Device & Peripheral Control"]),
+        .init(name: "Coding & Dev Tools", icon: "chevron.left.forwardslash.chevron.right", rawCategories: ["Coding Assistant", "Developer & Diagnostics"]),
+        .init(name: "Vision & UI", icon: "eye.fill", rawCategories: ["Vision & UI", "Workspace Management", "Deep Context Awareness"]),
+        .init(name: "macOS Utilities", icon: "gearshape.fill", rawCategories: ["macOS Utilities"]),
+        .init(name: "Network & Web", icon: "globe", rawCategories: ["Network & Connectivity", "Native Browser Automation"]),
+        .init(name: "Communication & PIM", icon: "person.crop.rectangle.stack.fill", rawCategories: ["Personal Information", "Communication & Mail"]),
+        .init(name: "Audio & Media", icon: "speaker.wave.2.fill", rawCategories: ["Audio & Media"]),
+    ]
+
+    static func groupName(for rawCategory: String) -> String? {
+        allGroups.first { $0.rawCategories.contains(rawCategory) }?.name
+    }
 }
 
 struct ToolTableRow: Identifiable {
@@ -33,30 +51,37 @@ struct ToolTableRow: Identifiable {
 
 // MARK: - Main View
 
-/// A modern, macOS-native view for managing tools and MCP servers using a NavigationSplitView.
 struct ToolLibraryView: View {
-    // A binding to the agent's currently configured tools.
     @Binding var configuredTools: [Tool]
     let instructions: String
-    
-    @Environment(\.dismiss) private var dismiss
+    @Binding var searchText: String
+    @Binding var selectedSidebar: SidebarSelection?
+
+    @EnvironmentObject private var router: MainViewRouter
     @StateObject private var toolStore = UnifiedToolStore.shared
-    
-    // UI State
-    @State private var selectedSidebar: SidebarSelection? = .all
-    @State private var searchText = ""
+    @Environment(\.appTheme) private var theme
+
+    // Sheet state
     @State private var isPresentingAddView = false
     @State private var sourceToEdit: ToolSource? = nil
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
-        } detail: {
-            detailView
+        HStack(spacing: 0) {
+            // LEFT: Category sidebar
+            toolSidebar
+                .frame(width: 220)
+
+            // Separator
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.3))
+                .frame(width: 1)
+
+            // RIGHT: Tool list
+            toolDetailView
         }
-        .frame(minWidth: 900, idealWidth: 1000, minHeight: 600, idealHeight: 700)
-        .searchable(text: $searchText, placement: .toolbar, prompt: "Search tools...")
+        .frame(maxWidth: 1000)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 20)
         // Sheets
         .sheet(isPresented: $isPresentingAddView) {
             AddMCPServerView(
@@ -80,275 +105,311 @@ struct ToolLibraryView: View {
             )
         }
     }
-    
-    // MARK: - Sidebar View
-    
+
+    // MARK: - Sidebar
+
     @ViewBuilder
-    private var sidebar: some View {
-        List(selection: $selectedSidebar) {
-
-            Section("Library") {
-                HStack {
-                    Label("All Tools", systemImage: "archivebox.fill")
-                    Spacer()
-                    Text("\(totalToolCount)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.12))
-                        .cornerRadius(8)
+    private var toolSidebar: some View {
+        VStack(spacing: 0) {
+            List(selection: $selectedSidebar) {
+                Section {
+                    sidebarRow(
+                        label: "All Tools",
+                        icon: "archivebox.fill",
+                        count: totalToolCount,
+                        tag: .all
+                    )
+                } header: {
+                    Text("Library")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
                 }
-                .tag(SidebarSelection.all)
-            }
 
-            Section("Environment") {
-                HStack {
-                    Label("Built-in Tools", systemImage: "cpu")
-                    Spacer()
-                    Text("\(localToolCount)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.12))
-                        .cornerRadius(8)
-                }
-                .tag(SidebarSelection.local)
-            }
-
-            Section("MCP Servers") {
-                let mcpSources = toolStore.sources.filter { $0.type == .mcp }
-
-                if mcpSources.isEmpty {
-                    VStack(spacing: 4) {
-                        Text("No MCP servers")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Button("Add Server") { isPresentingAddView = true }
-                            .font(.caption2)
-                            .buttonStyle(.borderless)
+                Section {
+                    ForEach(builtInGroups, id: \.name) { group in
+                        sidebarRow(
+                            label: group.name,
+                            icon: group.icon,
+                            count: group.count,
+                            tag: .localCategory(group.name)
+                        )
                     }
-                    .padding(.vertical, 4)
-                } else {
-                    ForEach(mcpSources) { source in
-                        HStack(spacing: 6) {
-                            MCPIconView(
-                                icons: source.tools.first?.icons,
-                                fallbackSymbol: "network",
-                                size: 16
-                            )
-                            .foregroundColor(.secondary)
+                } header: {
+                    Text("Built-in Tools")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                }
 
-                            Text(source.serverName)
+                Section {
+                    let mcpSources = toolStore.sources.filter { $0.type == .mcp }
 
-                            Spacer()
-
-                            Text("\(source.tools.count)")
+                    if mcpSources.isEmpty {
+                        VStack(spacing: 4) {
+                            Text("No MCP servers")
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                            Button("Add Server") { isPresentingAddView = true }
                                 .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Color.secondary.opacity(0.12))
-                                .cornerRadius(8)
-
-                            ConnectionStateIndicator(sourceId: source.id)
+                                .buttonStyle(.borderless)
                         }
-                        .tag(SidebarSelection.mcp(source.id))
-                        .contextMenu {
-                            Button("Edit Configuration...") {
-                                sourceToEdit = source
+                        .padding(.vertical, 4)
+                    } else {
+                        ForEach(mcpSources) { source in
+                            HStack(spacing: 6) {
+                                MCPIconView(
+                                    icons: source.tools.first?.icons,
+                                    fallbackSymbol: "network",
+                                    size: 16
+                                )
+                                .foregroundColor(theme.secondaryText)
+
+                                Text(source.serverName)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(theme.primaryText)
+
+                                Spacer()
+
+                                Text("\(source.tools.count)")
+                                    .font(.caption2)
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(theme.surfaceOverlay)
+                                    .cornerRadius(8)
+
+                                ConnectionStateIndicator(sourceId: source.id)
                             }
-                            Divider()
-                            Button("Remove Server", role: .destructive) {
-                                toolStore.deleteTool(toolSource: source)
-                                if selectedSidebar == .mcp(source.id) {
-                                    selectedSidebar = .all
+                            .tag(SidebarSelection.mcp(source.id))
+                            .contextMenu {
+                                Button("Edit Configuration...") {
+                                    sourceToEdit = source
+                                }
+                                Divider()
+                                Button("Remove Server", role: .destructive) {
+                                    toolStore.deleteTool(toolSource: source)
+                                    if selectedSidebar == .mcp(source.id) {
+                                        selectedSidebar = .all
+                                    }
                                 }
                             }
                         }
                     }
+                } header: {
+                    Text("MCP Servers")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
                 }
             }
+            .listStyle(.sidebar)
         }
-        .listStyle(.sidebar)
-        .navigationTitle("Tool Library")
+        .background(theme.secondaryBackground.opacity(0.5))
     }
 
-    private var totalToolCount: Int {
+    private func sidebarRow(label: String, icon: String, count: Int, tag: SidebarSelection) -> some View {
+        HStack {
+            Label(label, systemImage: icon)
+                .font(.system(size: 13))
+                .foregroundColor(theme.primaryText)
+            Spacer()
+            Text("\(count)")
+                .font(.caption2)
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(theme.surfaceOverlay)
+                .cornerRadius(8)
+        }
+        .tag(tag)
+    }
+
+    // MARK: - Detail (Tool List)
+
+    @ViewBuilder
+    private var toolDetailView: some View {
+        if displayedRows.isEmpty {
+            emptyStateView
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    // Column header
+                    HStack(spacing: 0) {
+                        Text("Tool")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Description")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text("State")
+                            .frame(width: 80, alignment: .center)
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.secondaryText)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(theme.surfaceOverlay.opacity(0.3))
+
+                    ForEach(displayedRows) { row in
+                        toolRow(row)
+
+                        if row.id != displayedRows.last?.id {
+                            Divider()
+                                .padding(.leading, 56)
+                        }
+                    }
+                }
+                .padding(.bottom, 20)
+            }
+        }
+    }
+
+    private func toolRow(_ row: ToolTableRow) -> some View {
+        HStack(spacing: 12) {
+            // Icon
+            MCPIconView(
+                icons: row.definition.icons,
+                fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
+                size: 24
+            )
+            .foregroundColor(theme.accentColor)
+            .frame(width: 28)
+
+            // Name + source
+            VStack(alignment: .leading, spacing: 2) {
+                if let title = row.definition.title {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+                    Text(row.definition.name)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                } else {
+                    Text(row.definition.name)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.primaryText)
+                }
+
+                ToolAnnotationBadges(annotations: row.definition.annotations)
+
+                if selectedSidebar == .all {
+                    Text(row.source.serverName)
+                        .font(.system(size: 10))
+                        .foregroundColor(theme.secondaryText.opacity(0.7))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Description + info
+            HStack(alignment: .center, spacing: 8) {
+                Text(row.definition.description)
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(2)
+
+                Spacer(minLength: 4)
+
+                ToolDetailsButton(definition: row.definition)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // State control
+            ToolStateControl(
+                configuredTools: $configuredTools,
+                source: row.source,
+                definition: row.definition,
+                instructions: instructions
+            )
+            .frame(width: 80, alignment: .center)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+    }
+
+    // MARK: - Computed Properties
+
+    var totalToolCount: Int {
         toolStore.sources.reduce(0) { $0 + $1.tools.count }
     }
 
-    private var localToolCount: Int {
-        toolStore.sources.filter { $0.type == .local }.reduce(0) { $0 + $1.tools.count }
-    }
-    
-    // MARK: - Detail (Table) View
-    
-    @ViewBuilder
-    private var detailView: some View {
-        VStack(spacing: 0) {
-            if displayedRows.isEmpty {
-                emptyStateView
-            } else {
-                Table(displayedRows) {
-                    // 1. Tool Identity Column
-                    TableColumn("Tool") { row in
-                        HStack(spacing: 10) {
-                            MCPIconView(
-                                icons: row.definition.icons,
-                                fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
-                                size: 20
-                            )
-                            .foregroundColor(.accentColor)
-
-                            VStack(alignment: .leading, spacing: 4) {
-                                if let title = row.definition.title {
-                                    Text(title)
-                                        .font(.body)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.primary)
-                                    Text(row.definition.name)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .fontDesign(.monospaced)
-                                } else {
-                                    Text(row.definition.name)
-                                        .font(.system(.body, design: .monospaced))
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.primary)
-                                }
-
-                                ToolAnnotationBadges(annotations: row.definition.annotations)
-
-                                if selectedSidebar == .all {
-                                    Text(row.source.serverName)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        }
-                        .padding(.vertical, 10)
-                    }
-                    .width(min: 200, ideal: 260, max: 360)
-                    
-                    // 2. Description Column (Vertically Centered to match state toggles)
-                    TableColumn("Description") { row in
-                        HStack(alignment: .center) { // CHANGED: from .top to .center for perfect row alignment
-                            Text(row.definition.description)
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .lineLimit(3)
-                                .help(row.definition.description) // Native Hover Tooltip
-                            
-                            Spacer(minLength: 8)
-                            
-                            // Clickable Info Popover for Parameters
-                            ToolDetailsButton(definition: row.definition)
-                        }
-                        .padding(.vertical, 10)
-                    }
-                    
-                    // 3. State Column (Disabled / Ask / Auto)
-                    TableColumn("State") { row in
-                        ToolStateControl(
-                            configuredTools: $configuredTools,
-                            source: row.source,
-                            definition: row.definition,
-                            instructions: instructions
-                        )
-                        .padding(.vertical, 10)
-                    }
-                    .width(70)
-                }
-                .alternatingRowBackgrounds(.disabled)
-                .padding(.top, 12) // Ensures the Table headers don't overlap with the search field/toolbar area
-            }
-            
-            // Bottom Action Bar
-            Divider()
-            HStack(spacing: 12) {
-                Spacer()
-                
-                Button("Done") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction) // Allows hitting 'Esc' to close
-                .controlSize(.large)
-                
-                Button {
-                    isPresentingAddView = true
-                } label: {
-                    Label("Add MCP Server", systemImage: "plus")
-                        .padding(.horizontal, 8)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .help("Connect a new Model Context Protocol server")
-            }
-            .padding()
-            .background(Color(nsColor: .windowBackgroundColor))
-        }
-        .navigationTitle(detailTitle)
-    }
-    
-    // MARK: - Computed Properties & Helpers
-    
-    private var detailTitle: String {
-        switch selectedSidebar {
-        case .all: return "All Tools"
-        case .local: return "Built-in Tools"
-        case .mcp(let id): return toolStore.sources.first(where: { $0.id == id })?.serverName ?? "MCP Server"
-        case .none: return "Select a category"
+    /// Groups built-in tools by sidebar category with counts.
+    var builtInGroups: [(name: String, icon: String, count: Int)] {
+        let localTools = toolStore.sources.filter { $0.type == .local }.flatMap { $0.tools }
+        return BuiltInToolCategory.allGroups.compactMap { group in
+            let count = localTools.filter { group.rawCategories.contains($0.category) }.count
+            guard count > 0 else { return nil }
+            return (name: group.name, icon: group.icon, count: count)
         }
     }
-    
-    /// Flattens the hierarchical data into a searchable array of rows for the Table.
-    private var displayedRows: [ToolTableRow] {
+
+    private var isLocalCategorySelected: Bool {
+        if case .localCategory = selectedSidebar { return true }
+        return false
+    }
+
+    var displayedRows: [ToolTableRow] {
         var rows: [ToolTableRow] = []
-        let sourcesToProcess: [ToolSource]
-        
+
         switch selectedSidebar {
         case .all:
-            sourcesToProcess = toolStore.sources
-        case .local:
-            sourcesToProcess = toolStore.sources.filter { $0.type == .local }
-        case .mcp(let id):
-            sourcesToProcess = toolStore.sources.filter { $0.id == id }
-        case .none:
-            sourcesToProcess = []
-        }
-        
-        for source in sourcesToProcess {
-            for tool in source.tools {
-                if searchText.isEmpty ||
-                   tool.name.localizedCaseInsensitiveContains(searchText) ||
-                   tool.description.localizedCaseInsensitiveContains(searchText) {
-                    rows.append(ToolTableRow(source: source, definition: tool))
+            for source in toolStore.sources {
+                for tool in source.tools {
+                    if matchesSearch(tool) {
+                        rows.append(ToolTableRow(source: source, definition: tool))
+                    }
                 }
             }
+        case .localCategory(let groupName):
+            guard let group = BuiltInToolCategory.allGroups.first(where: { $0.name == groupName }) else { break }
+            for source in toolStore.sources where source.type == .local {
+                for tool in source.tools where group.rawCategories.contains(tool.category) {
+                    if matchesSearch(tool) {
+                        rows.append(ToolTableRow(source: source, definition: tool))
+                    }
+                }
+            }
+        case .mcp(let id):
+            for source in toolStore.sources where source.id == id {
+                for tool in source.tools {
+                    if matchesSearch(tool) {
+                        rows.append(ToolTableRow(source: source, definition: tool))
+                    }
+                }
+            }
+        case .none:
+            break
         }
-        
-        // Sort alphabetically by tool name
+
         return rows.sorted { $0.definition.name < $1.definition.name }
     }
-    
+
+    private func matchesSearch(_ tool: ToolDefinition) -> Bool {
+        searchText.isEmpty ||
+        tool.name.localizedCaseInsensitiveContains(searchText) ||
+        tool.description.localizedCaseInsensitiveContains(searchText)
+    }
+
     private var emptyStateView: some View {
         VStack(spacing: 16) {
             Image(systemName: searchText.isEmpty ? "puzzlepiece.extension" : "magnifyingglass")
                 .font(.system(size: 48))
-                .foregroundColor(.secondary.opacity(0.5))
-            
+                .foregroundColor(theme.secondaryText.opacity(0.4))
+
             Text(searchText.isEmpty ? "No Tools Found" : "No Matches for '\(searchText)'")
                 .font(.headline)
-            
-            if searchText.isEmpty && selectedSidebar != .local {
+                .foregroundColor(theme.secondaryText)
+
+            if searchText.isEmpty && !isLocalCategorySelected {
                 Button("Add MCP Server") { isPresentingAddView = true }
                     .buttonStyle(.bordered)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 }
 
@@ -358,19 +419,19 @@ struct ToolLibraryView: View {
 private struct ToolDetailsButton: View {
     let definition: ToolDefinition
     @State private var isShowingPopover = false
-    
+    @Environment(\.appTheme) private var theme
+
     var body: some View {
         Button {
             isShowingPopover.toggle()
         } label: {
             Image(systemName: "info.circle")
-                .foregroundColor(.secondary)
+                .foregroundColor(theme.secondaryText)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("View full tool details & parameters")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
-            // Master ScrollView ensures long descriptions AND params scroll seamlessly together
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     // Header
@@ -392,15 +453,15 @@ private struct ToolDetailsButton: View {
                         }
                     }
 
-                    // Full Description (Unrestricted Height)
+                    // Full Description
                     Text(definition.description)
                         .font(.body)
                         .foregroundColor(.primary)
                         .lineLimit(nil)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
-                    
-                    // Behavior Hints (if present)
+
+                    // Behavior Hints
                     if definition.annotations != nil {
                         Divider()
                         Text("Behavior Hints")
@@ -417,7 +478,7 @@ private struct ToolDetailsButton: View {
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .foregroundColor(.secondary)
-                    
+
                     if definition.parameters.properties.isEmpty {
                         Text("No parameters required.")
                             .font(.caption)
@@ -428,7 +489,7 @@ private struct ToolDetailsButton: View {
                             ForEach(Array(definition.parameters.properties.keys.sorted()), id: \.self) { key in
                                 let prop = definition.parameters.properties[key]!
                                 let isRequired = definition.parameters.required.contains(key)
-                                
+
                                 VStack(alignment: .leading, spacing: 4) {
                                     HStack(alignment: .firstTextBaseline) {
                                         Text(key)
@@ -437,7 +498,7 @@ private struct ToolDetailsButton: View {
                                         Text(prop.type)
                                             .font(.caption2)
                                             .foregroundColor(.blue)
-                                        
+
                                         if isRequired {
                                             Text("Required")
                                                 .font(.system(size: 9, weight: .bold))
@@ -448,7 +509,7 @@ private struct ToolDetailsButton: View {
                                                 .cornerRadius(4)
                                         }
                                     }
-                                    
+
                                     if let desc = prop.description {
                                         Text(desc)
                                             .font(.caption)
@@ -468,7 +529,7 @@ private struct ToolDetailsButton: View {
                 .padding()
             }
             .frame(width: 350)
-            .frame(maxHeight: 500) // Provides a ceiling so it scrolls gracefully if content is huge
+            .frame(maxHeight: 500)
         }
     }
 }
@@ -481,22 +542,22 @@ fileprivate struct ToolStateControl: View {
     let source: ToolSource
     let definition: ToolDefinition
     let instructions: String
-    
+
     @State private var showingDependencyAlert = false
-    
+
     private enum ToolControlState {
         case disabled
         case ask
         case auto
     }
-    
+
     private var currentState: ToolControlState {
         if let tool = configuredTools.first(where: { $0.name == definition.name && $0.sourceId == source.id }) {
             return tool.requiresConfirmation ? .ask : .auto
         }
         return .disabled
     }
-    
+
     var body: some View {
         Button {
             cycleState()
@@ -524,7 +585,7 @@ fileprivate struct ToolStateControl: View {
             Text("Cannot disable '\(definition.name)'. It is currently referenced in the System Instructions. Please remove it from the instructions first.")
         }
     }
-    
+
     @ViewBuilder
     private var stateIcon: some View {
         switch currentState {
@@ -536,7 +597,7 @@ fileprivate struct ToolStateControl: View {
             Image(systemName: "bolt.fill")
         }
     }
-    
+
     private var stateLabel: String {
         switch currentState {
         case .disabled: return ""
@@ -544,7 +605,7 @@ fileprivate struct ToolStateControl: View {
         case .auto: return "Auto"
         }
     }
-    
+
     private var stateBackground: Color {
         switch currentState {
         case .disabled: return Color.secondary.opacity(0.15)
@@ -552,11 +613,11 @@ fileprivate struct ToolStateControl: View {
         case .auto: return Color.green
         }
     }
-    
+
     private var stateForeground: Color {
         currentState == .disabled ? .primary : .white
     }
-    
+
     private var helpText: String {
         switch currentState {
         case .disabled: return "Tool is OFF. Click to enable (Ask mode)."
@@ -564,18 +625,17 @@ fileprivate struct ToolStateControl: View {
         case .auto: return "Auto-Run: Tool executes automatically. Click to disable."
         }
     }
-    
+
     private func cycleState() {
         switch currentState {
         case .disabled:
-            // Enable: Start with "Ask" (or smart default)
-            var confirmation = true // Default to Ask for safety
+            var confirmation = true
             if let annotations = definition.annotations {
                 if annotations.readOnlyHint == true {
-                    confirmation = false // Auto is fine for read-only
+                    confirmation = false
                 }
             }
-            
+
             let newTool = Tool(
                 name: definition.name,
                 description: definition.description,
@@ -585,15 +645,13 @@ fileprivate struct ToolStateControl: View {
                 parameters: definition.parameters
             )
             configuredTools.append(newTool)
-            
+
         case .ask:
-            // Switch to Auto
             if let index = configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id }) {
                 configuredTools[index].requiresConfirmation = false
             }
-            
+
         case .auto:
-            // Attempt to disable
             if instructions.contains("`\(definition.name)`") {
                 showingDependencyAlert = true
             } else {

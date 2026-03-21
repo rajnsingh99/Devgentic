@@ -28,9 +28,9 @@ struct SupervisorMemoryStrategy: WorkingMemoryStrategy {
 
     // MARK: - WorkingMemoryStrategy Conformance
 
-    mutating func recordObservation(stepId: Int, toolName: String, result: String, artifacts: [MediaArtifact] = []) {
+    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, result: String, artifacts: [MediaArtifact] = []) {
         let truncated = result.count > 500 ? String(result.prefix(500)) + "..." : result
-        observations.append("- [Step \(stepId)] \(toolName): \(truncated)")
+        observations.append("- [Step \(stepId)] \(toolName) (id: \(toolCallId)): \(truncated)")
     }
 
     mutating func recordSystemAlert(msg: String) {

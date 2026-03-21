@@ -8,31 +8,68 @@
 import SwiftUI
 
 struct MLXModelStoreView: View {
-    @StateObject private var viewModel = MLXModelStoreViewModel()
+    let filterForTools: Bool
+    @StateObject private var viewModel: MLXModelStoreViewModel
     @Environment(\.dismiss) var dismiss
     @Environment(\.appTheme) private var theme
-    
+
+    init(filterForTools: Bool = false) {
+        self.filterForTools = filterForTools
+        _viewModel = StateObject(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
+    }
+
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                
-                // MARK: - Header & Filter Bar
-                VStack(spacing: 16) {
-                    // Search Input & Controls
+            MLXModelStoreContent(viewModel: viewModel, filterForTools: filterForTools)
+                .navigationTitle(filterForTools ? "Agent Model Store" : "Model Store")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                    ToolbarItem(placement: .automatic) {
+                        Button {
+                            viewModel.refresh()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .help("Refresh Store")
+                    }
+                }
+        }
+        .frame(minWidth: 700, minHeight: 600)
+    }
+}
+
+// MARK: - Reusable Content (shared between sheet and inline container)
+
+struct MLXModelStoreContent: View {
+    @ObservedObject var viewModel: MLXModelStoreViewModel
+    let filterForTools: Bool
+    /// When false, the search bar is hidden (it's in the DynamicIslandBar instead).
+    var showSearchBar: Bool = true
+    /// When true, content is centered with maxWidth: 1000 to match DynamicIslandBar width.
+    var centeredLayout: Bool = false
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+
+            // MARK: - Header & Filter Bar
+            VStack(spacing: showSearchBar ? 16 : 0) {
+                // Search Input & Controls — only in sheet mode
+                if showSearchBar {
                     HStack(spacing: 8) {
-                        // Search Field
                         HStack {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(theme.secondaryText)
-                            
+
                             TextField(
                                 viewModel.selectedCategory == .installed ? "Filter fetched models..." : "Search Hugging Face...",
                                 text: $viewModel.searchText
                             )
                             .textFieldStyle(.plain)
                             .font(.body)
-                            
-                            // Sort Menu (Moved inside Search Box)
+
                             Menu {
                                 Picker("Sort By", selection: $viewModel.sortOption) {
                                     ForEach(MLXModelStoreViewModel.SortOption.allCases) { option in
@@ -57,114 +94,103 @@ struct MLXModelStoreView: View {
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
                     }
-                    
-                    // Category Tabs
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(MLXModelStoreViewModel.StoreCategory.allCases) { category in
-                                CategoryTabButton(
-                                    category: category,
-                                    isSelected: viewModel.selectedCategory == category
-                                ) {
-                                    viewModel.selectedCategory = category
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 2)
-                    }
                 }
-                .padding()
-                .background(theme.primaryBackground)
-                .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .bottom)
-                
-                // MARK: - Main Content Area
-                ZStack {
-                    if viewModel.isLoading && viewModel.displayedModels.isEmpty {
-                        VStack(spacing: 16) {
-                            ProgressView()
-                                .controlSize(.large)
-                            Text("Fetching \(viewModel.selectedCategory.rawValue) models...")
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        
-                    } else if viewModel.displayedModels.isEmpty {
-                        VStack(spacing: 12) {
-                            Image(systemName: viewModel.selectedCategory == .installed ? "externaldrive" : "magnifyingglass")
-                                .font(.system(size: 48))
-                                .foregroundColor(theme.secondaryText.opacity(0.5))
-                            
-                            if viewModel.selectedCategory == .installed {
-                                Text("No installed models")
-                                    .font(.title3)
-                                    .fontWeight(.medium)
-                                Text("Download models from the 'All' or specific category tabs.")
-                                    .foregroundColor(theme.secondaryText)
-                            } else {
-                                Text("No models found")
-                                    .font(.title3)
-                                    .fontWeight(.medium)
-                                Button("Try Reloading") {
-                                    viewModel.refresh()
-                                }
+
+                // Category Tabs
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(viewModel.availableCategories) { category in
+                            CategoryTabButton(
+                                category: category,
+                                isSelected: viewModel.selectedCategory == category
+                            ) {
+                                viewModel.selectedCategory = category
                             }
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 12) {
-                                ForEach(viewModel.displayedModels) { model in
-                                    ModelCardView(model: model, viewModel: viewModel)
-                                }
-                                
-                                // PAGINATION BUTTON
-                                if viewModel.selectedCategory != .installed && !viewModel.displayedModels.isEmpty {
-                                    Button {
-                                        viewModel.loadMore()
-                                    } label: {
-                                        HStack {
-                                            if viewModel.isLoading {
-                                                ProgressView().controlSize(.small)
-                                            }
-                                            Text("Load More Models")
-                                        }
-                                        .frame(maxWidth: .infinity)
-                                        .padding()
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .disabled(viewModel.isLoading)
-                                    .padding(.top, 8)
-                                }
-                            }
-                            .padding()
-                        }
                     }
-                    
-                    // MARK: - Download Status Banner
-                    if viewModel.isDownloading {
-                        downloadBanner
-                    }
+                    .padding(.horizontal, 2)
                 }
             }
-            .navigationTitle("Model Store")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItem(placement: .automatic) {
-                    Button {
-                        viewModel.refresh()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
+            .padding()
+            .frame(maxWidth: centeredLayout ? 1000 : .infinity)
+            .frame(maxWidth: .infinity)
+            .background(theme.primaryBackground)
+            .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .bottom)
+
+            // MARK: - Main Content Area
+            ZStack {
+                if viewModel.isLoading && viewModel.displayedModels.isEmpty {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text("Fetching \(viewModel.selectedCategory.rawValue) models...")
+                            .foregroundColor(theme.secondaryText)
                     }
-                    .help("Refresh Store")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                } else if viewModel.displayedModels.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: viewModel.selectedCategory == .installed ? "externaldrive" : "magnifyingglass")
+                            .font(.system(size: 48))
+                            .foregroundColor(theme.secondaryText.opacity(0.5))
+
+                        if viewModel.selectedCategory == .installed {
+                            Text(filterForTools ? "No installed tool-supported models" : "No installed models")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                            Text(filterForTools ? "Download models from the 'Tool Use' tab." : "Download models from the 'All' or specific category tabs.")
+                                .foregroundColor(theme.secondaryText)
+                        } else {
+                            Text("No models found")
+                                .font(.title3)
+                                .fontWeight(.medium)
+                            Button("Try Reloading") {
+                                viewModel.refresh()
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 12) {
+                            ForEach(viewModel.displayedModels) { model in
+                                ModelCardView(model: model, viewModel: viewModel)
+                            }
+
+                            // PAGINATION BUTTON
+                            if viewModel.selectedCategory != .installed && !viewModel.displayedModels.isEmpty {
+                                Button {
+                                    viewModel.loadMore()
+                                } label: {
+                                    HStack {
+                                        if viewModel.isLoading {
+                                            ProgressView().controlSize(.small)
+                                        }
+                                        Text("Load More Models")
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(viewModel.isLoading)
+                                .padding(.top, 8)
+                            }
+                        }
+                        .padding()
+                        .frame(maxWidth: centeredLayout ? 1000 : .infinity)
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+
+                // MARK: - Download Status Banner
+                if viewModel.isDownloading {
+                    downloadBanner
                 }
             }
         }
-        .frame(minWidth: 700, minHeight: 600)
     }
-    
+
     private var downloadBanner: some View {
         VStack {
             Spacer()
@@ -173,18 +199,18 @@ struct MLXModelStoreView: View {
                     Text("Downloading \(viewModel.currentDownloadName)...")
                         .font(.headline)
                         .lineLimit(1)
-                    
+
                     ProgressView(value: viewModel.downloadProgress)
                         .controlSize(.small)
                         .tint(.blue)
                 }
-                
+
                 Spacer()
-                
+
                 Text("\(Int(viewModel.downloadProgress * 100))%")
                     .monospacedDigit()
                     .fontWeight(.bold)
-                
+
                 Button {
                     viewModel.cancelDownload()
                 } label: {

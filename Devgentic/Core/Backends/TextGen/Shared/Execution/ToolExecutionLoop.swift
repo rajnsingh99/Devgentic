@@ -11,8 +11,13 @@ import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecutionLoop")
 
-/// Deduplicates and executes a set of tool calls in parallel with HITL, ask_user interception,
+/// Deduplicates and executes a set of tool calls with HITL, ask_user interception,
 /// tracing, and observation collection.
+///
+/// **Execution Strategy:**
+/// - Autonomous tools (no user interaction required) run in parallel via TaskGroup.
+/// - Interactive tools (`ask_user` or `requiresConfirmation`) run sequentially AFTER
+///   autonomous tools complete, ensuring only one UI suspension banner is active at a time.
 ///
 /// - Returns: An array of `ToolObservation` for each executed tool.
 func executeToolCalls(
@@ -27,19 +32,7 @@ func executeToolCalls(
 ) async throws -> [ToolObservation] {
 
     // --- Deduplicate ---
-    var uniqueToolCalls: [PendingToolCall] = []
-    var seenSignatures = Set<String>()
-
-    for tool in toolCalls {
-        let signature = "\(tool.name)|\(serializeToolParams(tool.arguments))"
-        if !seenSignatures.contains(signature) {
-            seenSignatures.insert(signature)
-            uniqueToolCalls.append(tool)
-        } else {
-            logger.warning("⚠️ Dropped duplicate parallel tool call: \(tool.name)")
-        }
-    }
-
+    let uniqueToolCalls = deduplicateToolCalls(toolCalls)
     logger.info("Deduped \(toolCalls.count) → \(uniqueToolCalls.count) unique tools.")
 
     onTraceUpdate(AgentTraceLog(
@@ -52,126 +45,72 @@ func executeToolCalls(
         metadata: ["iteration": "\(currentIteration)"]
     ))
 
-    // --- Parallel Execution ---
+    // --- Partition: Interactive vs Autonomous ---
+    // Interactive tools require human input (ask_user or HITL confirmation).
+    // They must run sequentially to avoid UI deadlock (only one banner can show at a time).
+    let toolLookup = Dictionary(uniqueKeysWithValues: availableTools.map { ($0.name, $0) })
+
+    var autonomousTools: [PendingToolCall] = []
+    var interactiveTools: [PendingToolCall] = []
+
+    for tool in uniqueToolCalls {
+        let isAskUser = tool.name == "ask_user"
+        let requiresConfirmation = toolLookup[tool.name]?.requiresConfirmation ?? false
+
+        if isAskUser || requiresConfirmation {
+            interactiveTools.append(tool)
+        } else {
+            autonomousTools.append(tool)
+        }
+    }
+
+    if !interactiveTools.isEmpty {
+        logger.info("Partitioned tools: \(autonomousTools.count) autonomous (parallel), \(interactiveTools.count) interactive (sequential).")
+    }
+
     var observations: [ToolObservation] = []
 
-    try await withThrowingTaskGroup(of: ToolObservation.self) { group in
-        for tool in uniqueToolCalls {
-            group.addTask {
-                let toolName = tool.name
-                let arguments = tool.arguments
-                let paramsString = serializeToolParams(arguments)
-
-                // Emit UI Event
-                continuation.yield(.toolCall(name: toolName, params: paramsString))
-
-                // Emit Trace Event
-                onTraceUpdate(AgentTraceLog(
-                    traceID: iterationSpan.traceID,
-                    spanID: iterationSpan.spanID,
-                    parentSpanID: iterationSpan.parentSpanID,
-                    stepNumber: currentIteration,
-                    state: .acting(.tool(name: toolName)),
-                    content: "Executing '\(toolName)'...",
-                    metadata: ["tool_name": toolName]
-                ))
-
-                // Intercept ask_user
-                if toolName == "ask_user" {
-                    let question = arguments["question"]?.stringValue ?? "Please provide clarification to proceed."
-                    continuation.yield(.requestClarification(question: question))
-
-                    let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: conversationID)
-                    let answerText = userResponse ?? "System: The user did not respond or the request timed out."
-
-                    return ToolObservation(
-                        stepId: currentIteration,
-                        toolName: toolName,
-                        result: "User Response: \(answerText)",
-                        summary: "User Response: \(answerText)",
-                        isSuccess: true,
-                        params: "n/a",
-                        output: "User Response: \(answerText)",
-                        artifacts: []
+    // --- Phase 1: Run Autonomous Tools in Parallel ---
+    if !autonomousTools.isEmpty {
+        try await withThrowingTaskGroup(of: ToolObservation.self) { group in
+            for tool in autonomousTools {
+                group.addTask {
+                    try await executeSingleTool(
+                        tool: tool,
+                        availableTools: availableTools,
+                        conversationID: conversationID,
+                        currentIteration: currentIteration,
+                        iterationSpan: iterationSpan,
+                        toolMediator: toolMediator,
+                        continuation: continuation,
+                        onTraceUpdate: onTraceUpdate
                     )
                 }
+            }
 
-                // Dispatch (handles HITL)
-                let dispatchOutcome = toolMediator.prepareDispatch(
-                    toolName: toolName,
-                    arguments: arguments,
-                    availableTools: availableTools
-                )
-
-                switch dispatchOutcome {
-                case .requiresConfirmation(let ps):
-                    continuation.yield(.requestConfirmation(toolName: toolName, params: ps))
-                    let approved = await ExecutionSuspensionService.shared.suspend(for: conversationID)
-                    if !approved {
-                        let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
-                        continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: denialResult.llmObservation, isSuccess: false)))
-                        return ToolObservation(
-                            stepId: currentIteration,
-                            toolName: toolName,
-                            result: denialResult.llmObservation,
-                            summary: denialResult.llmObservation,
-                            isSuccess: false,
-                            params: paramsString,
-                            output: denialResult.llmObservation,
-                            artifacts: []
-                        )
-                    }
-                case .executed, .userDenied:
-                    break
-                }
-
-                let result = await toolMediator.executePreparedTool(
-                    toolName: toolName,
-                    arguments: arguments,
-                    availableTools: availableTools,
-                    parentContext: iterationSpan
-                )
-
-                // Emit UI Output
-                continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: result.llmObservation, isSuccess: result.isSuccess)))
-
-                // Emit media artifacts if produced
-                for artifact in result.artifacts {
-                    continuation.yield(.artifactProduced(artifact))
-                }
-
-                // Emit Trace Observation
-                onTraceUpdate(AgentTraceLog(
-                    traceID: iterationSpan.traceID,
-                    spanID: iterationSpan.spanID,
-                    parentSpanID: iterationSpan.parentSpanID,
-                    stepNumber: currentIteration,
-                    state: .thinking(.reflecting),
-                    content: result.isSuccess ? "Tool '\(toolName)' succeeded." : "Tool '\(toolName)' failed.",
-                    metadata: [
-                        "tool_name": toolName,
-                        "is_success": "\(result.isSuccess)",
-                        "tool_params": paramsString,
-                        "tool_output": result.llmObservation
-                    ]
-                ))
-
-                return ToolObservation(
-                    stepId: currentIteration,
-                    toolName: toolName,
-                    result: result.llmObservation,
-                    summary: result.isSuccess ? "Tool '\(toolName)' executed successfully." : "Tool '\(toolName)' failed: \(result.llmObservation)",
-                    isSuccess: result.isSuccess,
-                    params: paramsString,
-                    output: result.llmObservation,
-                    artifacts: result.artifacts
-                )
+            for try await observation in group {
+                observations.append(observation)
             }
         }
+    }
 
-        for try await observation in group {
-            observations.append(observation)
-        }
+    // --- Phase 2: Run Interactive Tools Sequentially ---
+    // This ensures only ONE suspension banner is active at a time,
+    // preventing the deadlock where the UI can't show two interactions simultaneously.
+    for tool in interactiveTools {
+        try Task.checkCancellation()
+
+        let observation = try await executeSingleTool(
+            tool: tool,
+            availableTools: availableTools,
+            conversationID: conversationID,
+            currentIteration: currentIteration,
+            iterationSpan: iterationSpan,
+            toolMediator: toolMediator,
+            continuation: continuation,
+            onTraceUpdate: onTraceUpdate
+        )
+        observations.append(observation)
     }
 
     let outcomesOverview = observations.map { "[\($0.toolName): \($0.summary)]" }.joined(separator: ", ")
@@ -180,9 +119,165 @@ func executeToolCalls(
     return observations
 }
 
-// MARK: - Private Helpers
+// MARK: - Single Tool Execution
 
-private func serializeToolParams(_ params: [String: JSONValue]) -> String {
+/// Executes a single tool call with full event emission, ask_user interception,
+/// HITL permission gating, tracing, and observation construction.
+private func executeSingleTool(
+    tool: PendingToolCall,
+    availableTools: [AgentTool],
+    conversationID: UUID,
+    currentIteration: Int,
+    iterationSpan: TraceContext,
+    toolMediator: ToolExecutionMediator,
+    continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
+    onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
+) async throws -> ToolObservation {
+
+    let toolCallId = tool.id
+    let toolName = tool.name
+    let arguments = tool.arguments
+    let paramsString = serializeToolParams(arguments)
+
+    // Emit UI Event
+    continuation.yield(.toolCall(name: toolName, params: paramsString))
+
+    // Emit Trace Event
+    onTraceUpdate(AgentTraceLog(
+        traceID: iterationSpan.traceID,
+        spanID: iterationSpan.spanID,
+        parentSpanID: iterationSpan.parentSpanID,
+        stepNumber: currentIteration,
+        state: .acting(.tool(name: toolName)),
+        content: "Executing '\(toolName)'...",
+        metadata: ["tool_name": toolName]
+    ))
+
+    // Intercept ask_user
+    if let question = AskUserInterceptor.extractQuestion(toolName: toolName, arguments: arguments) {
+        continuation.yield(.requestClarification(question: question))
+
+        let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: conversationID)
+        let didAnswer = userResponse != nil
+        let answerText = userResponse ?? "System: The user skipped or did not respond."
+
+        // Resolve the timeline chip: send = success, skip/timeout = failure
+        continuation.yield(.toolOutput(ToolOutput(
+            toolName: toolName,
+            output: didAnswer ? "User answered: \(answerText)" : "Skipped by user.",
+            isSuccess: didAnswer
+        )))
+
+        return ToolObservation(
+            stepId: currentIteration,
+            toolCallId: toolCallId,
+            toolName: toolName,
+            result: "User Response: \(answerText)",
+            summary: "User Response: \(answerText)",
+            isSuccess: didAnswer,
+            params: "n/a",
+            output: "User Response: \(answerText)",
+            artifacts: []
+        )
+    }
+
+    // Dispatch (handles HITL)
+    let dispatchOutcome = toolMediator.prepareDispatch(
+        toolName: toolName,
+        arguments: arguments,
+        availableTools: availableTools
+    )
+
+    switch dispatchOutcome {
+    case .requiresConfirmation(let ps):
+        continuation.yield(.requestConfirmation(toolName: toolName, params: ps))
+        let approved = await ExecutionSuspensionService.shared.suspend(for: conversationID)
+        if !approved {
+            let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
+            continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: denialResult.llmObservation, isSuccess: false)))
+            return ToolObservation(
+                stepId: currentIteration,
+                toolCallId: toolCallId,
+                toolName: toolName,
+                result: denialResult.llmObservation,
+                summary: denialResult.llmObservation,
+                isSuccess: false,
+                params: paramsString,
+                output: denialResult.llmObservation,
+                artifacts: []
+            )
+        }
+    case .executed, .userDenied:
+        break
+    }
+
+    let result = await toolMediator.executePreparedTool(
+        toolName: toolName,
+        arguments: arguments,
+        availableTools: availableTools,
+        parentContext: iterationSpan
+    )
+
+    // Emit UI Output
+    continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: result.llmObservation, isSuccess: result.isSuccess)))
+
+    // Emit media artifacts if produced
+    for artifact in result.artifacts {
+        continuation.yield(.artifactProduced(artifact))
+    }
+
+    // Emit Trace Observation
+    onTraceUpdate(AgentTraceLog(
+        traceID: iterationSpan.traceID,
+        spanID: iterationSpan.spanID,
+        parentSpanID: iterationSpan.parentSpanID,
+        stepNumber: currentIteration,
+        state: .thinking(.reflecting),
+        content: result.isSuccess ? "Tool '\(toolName)' succeeded." : "Tool '\(toolName)' failed.",
+        metadata: [
+            "tool_name": toolName,
+            "is_success": "\(result.isSuccess)",
+            "tool_params": paramsString,
+            "tool_output": result.llmObservation
+        ]
+    ))
+
+    return ToolObservation(
+        stepId: currentIteration,
+        toolCallId: toolCallId,
+        toolName: toolName,
+        result: result.llmObservation,
+        summary: result.isSuccess ? "Tool '\(toolName)' executed successfully." : "Tool '\(toolName)' failed: \(result.llmObservation)",
+        isSuccess: result.isSuccess,
+        params: paramsString,
+        output: result.llmObservation,
+        artifacts: result.artifacts
+    )
+}
+
+// MARK: - Testable Helpers
+
+func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
+    var unique: [PendingToolCall] = []
+    var seen = Set<String>()
+    for tool in toolCalls {
+        let signature = "\(tool.name)|\(serializeToolParams(tool.arguments))"
+        if !seen.contains(signature) {
+            seen.insert(signature)
+            unique.append(tool)
+        }
+    }
+    return unique
+}
+
+func serializeToolParams(_ params: [String: JSONValue]) -> String {
     if let data = try? JSONEncoder().encode(params), let str = String(data: data, encoding: .utf8) { return str }
     return "{}"
+}
+
+struct AskUserInterceptor {
+    static func extractQuestion(toolName: String, arguments: [String: JSONValue]) -> String? {
+        guard toolName == "ask_user" else { return nil }
+        return arguments["question"]?.stringValue ?? "Please provide clarification to proceed."
+    }
 }

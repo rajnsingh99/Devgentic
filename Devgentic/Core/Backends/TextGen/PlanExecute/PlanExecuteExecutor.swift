@@ -194,6 +194,15 @@ actor PlanExecuteExecutor: Executor {
                                     planMemory.recordSystemAlert(msg: systemAlert)
                                     continuation.yield(.thought("⚠️ Parse error. Retrying (\(attemptCount)/\(maxAttempts))..."))
                                     continue innerLoop
+                                case .modelReload(let message):
+                                    continuation.yield(.thought(message))
+                                    let reloaded = await MLXService.shared.reloadCurrentModel()
+                                    if !reloaded {
+                                        planMemory.markSubtask(at: subtaskIndex, status: .failed, result: "Model unloaded and could not be reloaded.")
+                                        break innerLoop
+                                    }
+                                    innerIteration -= 1
+                                    continue innerLoop
                                 case .abort(let reason):
                                     planMemory.markSubtask(at: subtaskIndex, status: .failed, result: reason)
                                     break innerLoop
@@ -244,8 +253,8 @@ actor PlanExecuteExecutor: Executor {
 
                             // Record observations
                             for obs in observations {
-                                planMemory.recordObservation(stepId: globalStep, toolName: obs.toolName, result: obs.result)
-                                executionSummary.record(toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
+                                planMemory.recordObservation(stepId: globalStep, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result)
+                                executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
 
                                 let resultAction = circuitBreaker.recordToolResult(isSuccess: obs.isSuccess)
                                 if case .abort(let reason) = resultAction {
@@ -281,6 +290,9 @@ actor PlanExecuteExecutor: Executor {
                         executionSummary.markComplete()
                     }
 
+                    // --- UI Progress: Synthesis ---
+                    continuation.yield(.thought("Composing final response…"))
+
                     // Use the plan summary as the final thought for native flows
                     let planResult = planMemory.subtasks
                         .filter { $0.status == .completed }
@@ -293,7 +305,7 @@ actor PlanExecuteExecutor: Executor {
                         model: model,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
-                        isNativeFlow: input.generatorStrategy is NativeStructuredStrategy
+                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator
                     )
 
                     sessionState.closeActiveEpisode(status: exitStatus, outcome: response)
@@ -308,6 +320,11 @@ actor PlanExecuteExecutor: Executor {
                         content: exitStatus == "COMPLETED" ? "All subtasks completed." : "Plan execution finished with failures."
                     ))
 
+                    logger.info("--- 🏁 PLAN & EXECUTE COMPLETE 🏁 ---")
+                    logger.info("Model: \(model.modelName)")
+                    logger.info("Final Synthesized Response: \(response)")
+                    logger.info("---------------------------------------")
+
                     continuation.yield(.content(response))
                     continuation.finish()
 
@@ -316,6 +333,7 @@ actor PlanExecuteExecutor: Executor {
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
                     sessionState.cancelActiveEpisode()
                     SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    continuation.yield(.thought("Cancelled by user."))
                     continuation.finish()
                 } catch {
                     logger.error("Plan & Execute fatal error: \(error.localizedDescription)")

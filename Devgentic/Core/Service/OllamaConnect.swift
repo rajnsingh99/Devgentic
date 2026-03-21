@@ -81,7 +81,7 @@ struct OllamaShowResponse: Codable {
 
         let dialect: ModelDialect
         if capability == .none {
-            dialect = .promptedFlatJSON
+            dialect = .heuristicJson
         } else if hasMistralXMLMarker {
             // Template uses <tool_call> XML-style wrapping
             dialect = .mistralXML
@@ -93,7 +93,7 @@ struct OllamaShowResponse: Codable {
             dialect = .nativeJSON
         } else {
             // Modelfile hint only: fall back to prompted flat JSON
-            dialect = .promptedFlatJSON
+            dialect = .heuristicJson
         }
 
         // --- METADATA DETECTION ---

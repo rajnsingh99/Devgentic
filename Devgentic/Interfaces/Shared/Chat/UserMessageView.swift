@@ -11,10 +11,13 @@ import AppKit
 
 struct UserMessageView: View {
     let text: String
+    var searchQuery: String = ""
+    var activeHighlightIndex: Int? = nil
     private let lineLimitCollapsed = 10
     @State private var isExpanded = false
     @State private var isTruncatable = false
 
+    @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -40,28 +43,76 @@ struct UserMessageView: View {
                 }
             }
 
-            Text(text)
-                .font(theme.fontBody)
-                .lineLimit(isExpanded ? nil : lineLimitCollapsed)
-                .background(
-                    GeometryReader { geometry in
-                        Color.clear.onAppear {
-                            determineTruncation(availableWidth: geometry.size.width)
+            if !searchQuery.isEmpty {
+                Text(highlightedText)
+                    .font(themeManager.chatFont)
+                    .lineLimit(isExpanded ? nil : lineLimitCollapsed)
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear.onAppear {
+                                determineTruncation(availableWidth: geometry.size.width)
+                            }
                         }
-                    }
-                )
-                .fixedSize(horizontal: false, vertical: true)
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(text)
+                    .font(themeManager.chatFont)
+                    .lineLimit(isExpanded ? nil : lineLimitCollapsed)
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear.onAppear {
+                                determineTruncation(availableWidth: geometry.size.width)
+                            }
+                        }
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .clipped()
+    }
+
+    private var highlightedText: AttributedString {
+        var attrString = AttributedString(text)
+        attrString.font = themeManager.chatFont
+
+        let lowercasedText = text.lowercased()
+        let lowercasedQuery = searchQuery.lowercased()
+
+        guard !lowercasedQuery.isEmpty else { return attrString }
+
+        var matchRanges: [Range<String.Index>] = []
+        var searchStart = lowercasedText.startIndex
+        while searchStart < lowercasedText.endIndex,
+              let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
+            matchRanges.append(range)
+            searchStart = range.upperBound
+        }
+
+        let highlightColor = Color.yellow.opacity(0.4)
+        let activeHighlightColor = Color.orange.opacity(0.6)
+
+        for (index, range) in matchRanges.enumerated().reversed() {
+            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
+            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
+            let attrStart = attrString.index(attrString.startIndex, offsetByCharacters: startOffset)
+            let attrEnd = attrString.index(attrString.startIndex, offsetByCharacters: endOffset)
+            let attrRange = attrStart..<attrEnd
+
+            let isActiveMatch = (activeHighlightIndex == index)
+            attrString[attrRange].backgroundColor = isActiveMatch ? activeHighlightColor : highlightColor
+        }
+
+        return attrString
     }
     
     private func determineTruncation(availableWidth: CGFloat) {
         let fullTextView = Text(text)
-            .font(.system(size: 15)) // Fallback for fixed size calc
+            .font(themeManager.chatFont)
             .frame(width: availableWidth, alignment: .leading)
-        
+
         let truncatedTextView = Text(text)
-            .font(.system(size: 15)) // Fallback for fixed size calc
+            .font(themeManager.chatFont)
             .lineLimit(lineLimitCollapsed)
             .frame(width: availableWidth, alignment: .leading)
             

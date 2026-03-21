@@ -28,6 +28,9 @@ enum DetectedFormat: String, Sendable {
     case reactMarkdown     // Action: / Action Input:  (when primary wasn't ReActMarkdown)
     case arrayInversion    // Starts with [ after trim, contains "name" key
     case flatJSONLeakage   // "tool_name" or "tool_calls" appearing in content
+    case dynamicToolTag    // <tool_name>{JSON}</tool_name>  (Mistral native — tag IS the tool name)
+    case functionCallTag   // <functioncall>...</functioncall>  (some fine-tuned models)
+    case gorillaFunction   // <<function>>name(args)  (Gorilla-style format)
 }
 
 // MARK: - Format Probe Protocol
@@ -61,8 +64,8 @@ struct FormatDriftDetector: Sendable {
 
     private let probes: [any FormatProbe]
 
-    init(excludedDialect: ModelDialect) {
-        self.probes = Self.buildProbeList(excluding: excludedDialect)
+    init(excludedDialect: ModelDialect, knownToolNames: Set<String> = []) {
+        self.probes = Self.buildProbeList(excluding: excludedDialect, knownToolNames: knownToolNames)
     }
 
     /// Scans sanitized text for drift signals.
@@ -85,7 +88,7 @@ struct FormatDriftDetector: Sendable {
 
     // MARK: - Probe Construction
 
-    private static func buildProbeList(excluding dialect: ModelDialect) -> [any FormatProbe] {
+    private static func buildProbeList(excluding dialect: ModelDialect, knownToolNames: Set<String> = []) -> [any FormatProbe] {
         var probes: [any FormatProbe] = [
             PythonicTagProbe(),      // 1. Most distinctive — unique token
             DeepXMLProbe(),          // 2. Qwen-Coder specific tags
@@ -104,8 +107,11 @@ struct FormatDriftDetector: Sendable {
             probes.append(ReActMarkdownProbe())
         }
 
-        probes.append(ArrayInversionProbe())    // 7. JSON array starting with [
-        probes.append(FlatJSONLeakageProbe())   // 8. Least specific — broad string match
+        probes.append(FunctionCallTagProbe())   // 8. <functioncall>...</functioncall> (more specific — fixed tag name)
+        probes.append(GorillaFunctionProbe())   // 9. <<function>>name(args)
+        probes.append(DynamicToolTagProbe(knownToolNames: knownToolNames))  // 10. <tool_name>{JSON}</tool_name> (Mistral native — least specific XML)
+        probes.append(ArrayInversionProbe())    // 11. JSON array starting with [
+        probes.append(FlatJSONLeakageProbe())   // 12. Least specific — broad string match
 
         return probes
     }
@@ -202,7 +208,65 @@ struct ArrayInversionProbe: FormatProbe {
     }
 }
 
-/// Probe 8: Flat JSON Leakage — `"tool_name"` or `"tool_calls"` appearing in text content.
+/// Probe 8: Dynamic Tool Tag — `<tool_name>{JSON}</tool_name>` where the XML tag itself
+/// is the tool name. This is Mistral's native tool-calling format when tools are passed
+/// via `applyChatTemplate(tools:)`. Unlike `<tool_call>` (a fixed wrapper), here the tag
+/// is dynamic and different for every tool (e.g., `<search_issues>`, `<get_file_contents>`).
+///
+/// Two-phase detection:
+///   Phase B (precise): Checks for `<tag>{...}</tag>` where tag matches a known registered tool.
+///   Phase A (structural): Falls back to regex pattern matching `<word>{JSON}</word>` for
+///                         hallucinated tool names not in the registry.
+struct DynamicToolTagProbe: FormatProbe {
+    let probeID = "dynamic-tool-tag"
+
+    /// Known tool names injected from the tool registry at construction time.
+    /// When empty, only the structural Phase A runs.
+    let knownToolNames: Set<String>
+
+    init(knownToolNames: Set<String> = []) {
+        self.knownToolNames = knownToolNames
+    }
+
+    func detect(in text: String) -> DetectedFormat? {
+        // Phase B (precise): Check for known tool names used as XML tags.
+        // Fast O(n) string scan — no regex needed.
+        for toolName in knownToolNames {
+            if text.contains("<\(toolName)>") && text.contains("</\(toolName)>") {
+                return .dynamicToolTag
+            }
+        }
+
+        // Phase A (structural): Match <identifier>{...JSON...}</identifier> pattern.
+        // The identifier must look like a tool name (lowercase + underscores),
+        // followed by a JSON object body, and closed with a matching end tag.
+        // This catches hallucinated tool names not in the registry.
+        let pattern = #"<([a-z][a-z0-9_]*)>\s*\{[\s\S]*?\}\s*</\1>"#
+        if text.range(of: pattern, options: .regularExpression) != nil {
+            return .dynamicToolTag
+        }
+
+        return nil
+    }
+}
+
+/// Probe 9: FunctionCall Tag — `<functioncall>...</functioncall>` wrappers used by some fine-tuned models.
+struct FunctionCallTagProbe: FormatProbe {
+    let probeID = "functioncall-tag"
+    func detect(in text: String) -> DetectedFormat? {
+        (text.contains("<functioncall>") && text.contains("</functioncall>")) ? .functionCallTag : nil
+    }
+}
+
+/// Probe 10: Gorilla-style — `<<function>>name(args)` format from Gorilla LLM.
+struct GorillaFunctionProbe: FormatProbe {
+    let probeID = "gorilla-function"
+    func detect(in text: String) -> DetectedFormat? {
+        text.contains("<<function>>") ? .gorillaFunction : nil
+    }
+}
+
+/// Probe 11: Flat JSON Leakage — `"tool_name"` or `"tool_calls"` appearing in text content.
 /// Least specific probe; catches miscellaneous JSON leakage patterns.
 struct FlatJSONLeakageProbe: FormatProbe {
     let probeID = "flat-json-leakage"

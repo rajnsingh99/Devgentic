@@ -15,6 +15,8 @@ class MetricsManager {
 
     /// Records a performance metric using the detailed information from the TraceContext.
     func record(duration: TimeInterval, for key: String, context: TraceContext) {
+        Task { await TraceRecorder.shared.emitMetric(span: context, key: key, valueMs: Int(duration * 1000)) }
+        
         let logString = self.formatLog(key: key, value: String(format: "%.4fs", duration), context: context)
         print("📊 METRIC: \(logString)")
     }
@@ -24,6 +26,8 @@ class MetricsManager {
         var meta = context.metadata
         meta["ambiguous"] = String(isAmbiguous)
         meta["outcome"] = success ? "success" : "failure"
+        
+        Task { await TraceRecorder.shared.emitMetric(span: context, key: "plan_outcome", valueMs: success ? 1 : 0) }
         
         let logString = self.formatLog(key: "plan_outcome", value: success ? "1" : "0", context: context, extraMeta: meta)
         print("📊 METRIC: \(logString)")
@@ -42,6 +46,11 @@ class MetricsManager {
             meta["error_signature"] = TelemetrySanitizer.sanitize(error)
         }
         
+        Task { 
+            let durationMs = 0 // Duration usually captured via span end time natively now
+            await TraceRecorder.shared.emitToolResult(span: context, name: toolName, success: isSuccess, output: errorType ?? "success", durationMs: durationMs) 
+        }
+        
         let logString = self.formatLog(key: "tool_execution", value: isSuccess ? "1" : "0", context: context, extraMeta: meta)
         print("📊 METRIC: \(logString)")
     }
@@ -50,6 +59,8 @@ class MetricsManager {
     func recordHallucination(toolName: String, context: TraceContext) {
         var meta = context.metadata
         meta["hallucinated_tool"] = toolName
+        
+        Task { await TraceRecorder.shared.emitError(span: context, error: "Hallucinated tool: \(toolName)", isRecoverable: true) }
         
         let logString = self.formatLog(key: "agent_hallucination", value: "1", context: context, extraMeta: meta)
         print("📊 METRIC: \(logString)")

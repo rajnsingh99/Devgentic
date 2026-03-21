@@ -368,13 +368,20 @@ struct DeleteFileTool: DevgenticTool {
         )
     }
 
+    // MARK: - Testable Safety Guard
+
+    static let criticalPaths: Set<String> = ["/", "/Users", "/System", "/Library", "/bin", "/usr"]
+
+    static func isCriticalPath(_ path: String) -> Bool {
+        criticalPaths.contains(path) || path == NSHomeDirectory()
+    }
+
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
         let resolvedPath = (arguments.path as NSString).expandingTildeInPath
         let fm = FileManager.default
-        let criticalPaths = ["/", "/Users", "/System", "/Library", "/bin", "/usr"]
-        
-        if criticalPaths.contains(resolvedPath) || resolvedPath == NSHomeDirectory() {
+
+        if Self.isCriticalPath(resolvedPath) {
             return "Error: Safety Block. Deletion of root or home directory is forbidden."
         }
 

@@ -225,23 +225,24 @@ struct OllamaModelPickerView: View {
     @Binding var modelMetadata: ModelMetadata?
 
     let baseURL: String
+    let profileID: UUID
 
     /// If true, incompatible models will be disabled/dimmed (Agents). If false, all are available (Bots).
     var filterForTools: Bool = false
 
-    @State private var showingStore: Bool = false
+    @EnvironmentObject private var router: MainViewRouter
     @State private var models: [String] = []
     @State private var loadedLocalModels: [LocalModel] = [] // Cache to look up capabilities
     @State private var isLoading: Bool = false
     @State private var errorMessage: String? = nil
-    
+
     // Alert state for unsupported model selection
     @State private var showUnsupportedAlert: Bool = false
-    
+
     var body: some View {
         HStack {
             Button("Manage Models") {
-                showingStore = true
+                router.navigateToModelStore(backend: .ollama, profileID: profileID)
             }
             .fixedSize()
             
@@ -286,9 +287,6 @@ struct OllamaModelPickerView: View {
         }
         .onChange(of: selectedModel) { newValue in
             handleSelectionChange(newValue: newValue)
-        }
-        .sheet(isPresented: $showingStore) {
-            OllamaModelStoreView()
         }
         .alert("Unsupported Model", isPresented: $showUnsupportedAlert) {
             Button("OK", role: .cancel) { }

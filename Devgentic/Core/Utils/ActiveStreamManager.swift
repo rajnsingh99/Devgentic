@@ -79,13 +79,25 @@ class ActiveStreamManager: ObservableObject {
             guard let self = self else { return }
             
             do {
+                let traceContext = TraceContext(profile: config.profile, messageID: agentMessage.id)
+                agentMessage.traceID = traceContext.traceID
+                
+                Task {
+                    await TraceRecorder.shared.beginTrace(
+                        context: traceContext,
+                        conversationID: conversationID,
+                        messageID: agentMessage.id,
+                        modelName: nil
+                    )
+                }
+                
                 let stream = self.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,
                     userQuery: userQuery,
                     history: history,
                     files: files,
-                    context: TraceContext(profile: config.profile),
+                    context: traceContext,
                     onTraceUpdate: { _ in } // Trace logs are handled by events now
                 )
                 
@@ -93,11 +105,12 @@ class ActiveStreamManager: ObservableObject {
                 
                 var tokenBuffer = ""
                 var lastUpdateTime = Date()
-                let updateInterval: TimeInterval = 0.1
+                var tokensReceivedInWindow = 0
+                var adaptiveInterval: TimeInterval = 0.1 // Start with default
 
                 for try await event in stream {
                     try Task.checkCancellation()
-                    
+
                     switch event {
                     case .thought(let thoughtText, let id):
                         // 1. Handle Thoughts (Update Headline + Append to History using structured ID)
@@ -156,9 +169,15 @@ class ActiveStreamManager: ObservableObject {
                             }
                         }
 
-                        // Clear pending confirmation/clarification if any (it's done now)
-                        agentMessage.pendingToolConfirmation = nil
-                        agentMessage.pendingClarification = nil
+                        // Clear only the specific pending interaction that matches this tool output.
+                        // Blanket clearing both flags caused a deadlock when interactive tools
+                        // ran sequentially — completing one tool would erase the other's pending UI.
+                        if output.toolName == "ask_user" {
+                            agentMessage.pendingClarification = nil
+                        }
+                        if let pending = agentMessage.pendingToolConfirmation, pending.toolName == output.toolName {
+                            agentMessage.pendingToolConfirmation = nil
+                        }
                         
                     case .content(let textChunk):
                         // 3. Handle Final Text (Buffered)
@@ -168,10 +187,28 @@ class ActiveStreamManager: ObservableObject {
                         }
                         
                         tokenBuffer += textChunk
-                        
-                        if -lastUpdateTime.timeIntervalSinceNow >= updateInterval || tokenBuffer.count > 50 {
+                        tokensReceivedInWindow += textChunk.count
+
+                        let elapsed = -lastUpdateTime.timeIntervalSinceNow
+                        if elapsed >= adaptiveInterval || tokenBuffer.count > 50 {
                             self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
+
+                            // Adapt interval based on token throughput:
+                            // High throughput (fast local models) → shorter interval (0.05s) for smooth streaming
+                            // Low throughput (slow remote APIs)  → longer interval (0.2s) to reduce UI churn
+                            if elapsed > 0 {
+                                let charsPerSecond = Double(tokensReceivedInWindow) / elapsed
+                                if charsPerSecond > 500 {
+                                    adaptiveInterval = 0.05   // Fast: flush frequently for smooth UX
+                                } else if charsPerSecond > 100 {
+                                    adaptiveInterval = 0.1    // Normal: balanced default
+                                } else {
+                                    adaptiveInterval = 0.2    // Slow: batch more to reduce rerenders
+                                }
+                            }
+
                             tokenBuffer = ""
+                            tokensReceivedInWindow = 0
                             lastUpdateTime = Date()
                         }
                         
@@ -273,6 +310,11 @@ class ActiveStreamManager: ObservableObject {
         message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
         message.pendingToolConfirmation = nil // Clear any pending UI state
+        
+        if let traceID = message.traceID {
+            let traceStatus: TraceStatus = error != nil ? .error : .completed
+            await TraceRecorder.shared.endTrace(traceID: traceID, status: traceStatus, error: error?.localizedDescription)
+        }
         
         if let error = error {
             let errorContent = MessageContent.error(title: "Response Error", details: error.localizedDescription)
