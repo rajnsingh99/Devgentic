@@ -65,12 +65,6 @@ struct ScreenCaptureTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Screen capture: \(arguments.mode ?? "fullscreen")",
-            operations: [["mode": arguments.mode ?? "fullscreen"]]
-        )
-
         let mode = arguments.mode ?? "fullscreen"
         let timestamp = Int(Date().timeIntervalSince1970)
         let defaultPath = (NSHomeDirectory() as NSString).appendingPathComponent("Desktop/screenshot_\(timestamp).png")
@@ -82,7 +76,7 @@ struct ScreenCaptureTool: DevgenticTool {
         case "region":
             guard let x = arguments.x, let y = arguments.y,
                   let w = arguments.width, let h = arguments.height else {
-                return "Error: 'x', 'y', 'width', and 'height' are required for region mode. (Audit Ref: \(logID))"
+                return "Error: 'x', 'y', 'width', and 'height' are required for region mode."
             }
             cmdArgs = ["-R", "\(x),\(y),\(w),\(h)"]
 
@@ -102,7 +96,7 @@ struct ScreenCaptureTool: DevgenticTool {
             break
 
         default:
-            return "Error: Unknown mode '\(mode)'. Use 'fullscreen', 'region', or 'window'. (Audit Ref: \(logID))"
+            return "Error: Unknown mode '\(mode)'. Use 'fullscreen', 'region', or 'window'."
         }
 
         if arguments.hide_cursor ?? true {
@@ -119,18 +113,18 @@ struct ScreenCaptureTool: DevgenticTool {
             try process.run()
             process.waitUntilExit()
         } catch {
-            return "Error capturing screen: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error capturing screen: \(error.localizedDescription)"
         }
 
         guard FileManager.default.fileExists(atPath: outputPath) else {
-            return "Error: Screenshot was not saved. The capture may have been cancelled. (Audit Ref: \(logID))"
+            return "Error: Screenshot was not saved. The capture may have been cancelled."
         }
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: outputPath)
         let size = (attrs?[.size] as? Int) ?? 0
         let sizeKB = size / 1024
 
-        return "Screenshot saved to: \(outputPath) (\(sizeKB) KB) (Audit Ref: \(logID))"
+        return "Screenshot saved to: \(outputPath) (\(sizeKB) KB)"
     }
 }
 
@@ -176,35 +170,29 @@ struct FinderTagsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Finder tags: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         switch arguments.action {
         case "read":
             guard let path = arguments.path else {
-                return "Error: 'path' required for read. (Audit Ref: \(logID))"
+                return "Error: 'path' required for read."
             }
             let expandedPath = (path as NSString).expandingTildeInPath
             let url = URL(fileURLWithPath: expandedPath)
 
             guard FileManager.default.fileExists(atPath: expandedPath) else {
-                return "Error: File not found at '\(expandedPath)'. (Audit Ref: \(logID))"
+                return "Error: File not found at '\(expandedPath)'."
             }
 
             let resourceValues = try? url.resourceValues(forKeys: [.tagNamesKey])
             let tags = resourceValues?.tagNames ?? []
 
             if tags.isEmpty {
-                return "No tags on '\(path)'. (Audit Ref: \(logID))"
+                return "No tags on '\(path)'."
             }
-            return "Tags on '\(path)': \(tags.joined(separator: ", ")) (Audit Ref: \(logID))"
+            return "Tags on '\(path)': \(tags.joined(separator: ", "))"
 
         case "add":
             guard let path = arguments.path, let newTags = arguments.tags, !newTags.isEmpty else {
-                return "Error: 'path' and 'tags' required for add. (Audit Ref: \(logID))"
+                return "Error: 'path' and 'tags' required for add."
             }
             let expandedPath = (path as NSString).expandingTildeInPath
             let url = URL(fileURLWithPath: expandedPath) as NSURL
@@ -216,11 +204,11 @@ struct FinderTagsTool: DevgenticTool {
             }
 
             try url.setResourceValue(currentTags, forKey: .tagNamesKey)
-            return "Added tags \(newTags) to '\(path)'. Current tags: \(currentTags.joined(separator: ", ")) (Audit Ref: \(logID))"
+            return "Added tags \(newTags) to '\(path)'. Current tags: \(currentTags.joined(separator: ", "))"
 
         case "remove":
             guard let path = arguments.path, let removeTags = arguments.tags, !removeTags.isEmpty else {
-                return "Error: 'path' and 'tags' required for remove. (Audit Ref: \(logID))"
+                return "Error: 'path' and 'tags' required for remove."
             }
             let expandedPath = (path as NSString).expandingTildeInPath
             let url = URL(fileURLWithPath: expandedPath) as NSURL
@@ -230,21 +218,21 @@ struct FinderTagsTool: DevgenticTool {
             currentTags.removeAll { removeTags.contains($0) }
 
             try url.setResourceValue(currentTags, forKey: .tagNamesKey)
-            return "Removed tags \(removeTags) from '\(path)'. Remaining: \(currentTags.isEmpty ? "none" : currentTags.joined(separator: ", ")) (Audit Ref: \(logID))"
+            return "Removed tags \(removeTags) from '\(path)'. Remaining: \(currentTags.isEmpty ? "none" : currentTags.joined(separator: ", "))"
 
         case "set":
             guard let path = arguments.path, let tags = arguments.tags else {
-                return "Error: 'path' and 'tags' required for set. (Audit Ref: \(logID))"
+                return "Error: 'path' and 'tags' required for set."
             }
             let expandedPath = (path as NSString).expandingTildeInPath
             let url = URL(fileURLWithPath: expandedPath) as NSURL
 
             try url.setResourceValue(tags, forKey: .tagNamesKey)
-            return "Set tags on '\(path)' to: \(tags.isEmpty ? "none" : tags.joined(separator: ", ")) (Audit Ref: \(logID))"
+            return "Set tags on '\(path)' to: \(tags.isEmpty ? "none" : tags.joined(separator: ", "))"
 
         case "search":
             guard let searchTag = arguments.search_tag else {
-                return "Error: 'search_tag' required for search. (Audit Ref: \(logID))"
+                return "Error: 'search_tag' required for search."
             }
             let searchPath = (arguments.path as NSString?)?.expandingTildeInPath ?? NSHomeDirectory()
 
@@ -261,17 +249,17 @@ struct FinderTagsTool: DevgenticTool {
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 if output.isEmpty {
-                    return "No files found with tag '\(searchTag)' in \(searchPath). (Audit Ref: \(logID))"
+                    return "No files found with tag '\(searchTag)' in \(searchPath)."
                 }
 
                 let files = output.components(separatedBy: "\n").prefix(50)
-                return "Files with tag '\(searchTag)' (\(files.count)):\n\(files.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+                return "Files with tag '\(searchTag)' (\(files.count)):\n\(files.joined(separator: "\n"))"
             } catch {
-                return "Error searching: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error searching: \(error.localizedDescription)"
             }
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use read/add/remove/set/search. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use read/add/remove/set/search."
         }
     }
 }
@@ -315,12 +303,6 @@ struct DiskUsageTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Disk usage: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         switch arguments.action {
         case "volume":
             let path = (arguments.path as NSString?)?.expandingTildeInPath ?? "/"
@@ -349,15 +331,14 @@ struct DiskUsageTool: DevgenticTool {
                 Total: \(totalGB) GB
                 Used: \(usedGB) GB (\(usedPercent)%)
                 Available: \(availableGB) GB
-                (Audit Ref: \(logID))
                 """
             } catch {
-                return "Error reading volume info: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error reading volume info: \(error.localizedDescription)"
             }
 
         case "folder_size":
             guard let path = arguments.path else {
-                return "Error: 'path' required for folder_size. (Audit Ref: \(logID))"
+                return "Error: 'path' required for folder_size."
             }
             let expandedPath = (path as NSString).expandingTildeInPath
 
@@ -373,9 +354,9 @@ struct DiskUsageTool: DevgenticTool {
                 process.waitUntilExit()
                 let data = outPipe.fileHandleForReading.readDataToEndOfFile()
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                return "Folder size: \(output)\n(Audit Ref: \(logID))"
+                return "Folder size: \(output)"
             } catch {
-                return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error: \(error.localizedDescription)"
             }
 
         case "largest_files":
@@ -396,15 +377,15 @@ struct DiskUsageTool: DevgenticTool {
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 if output.isEmpty {
-                    return "No files found in '\(searchPath)'. (Audit Ref: \(logID))"
+                    return "No files found in '\(searchPath)'."
                 }
-                return "Largest files in '\(searchPath)':\n\(output)\n(Audit Ref: \(logID))"
+                return "Largest files in '\(searchPath)':\n\(output)"
             } catch {
-                return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error: \(error.localizedDescription)"
             }
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use volume/folder_size/largest_files. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use volume/folder_size/largest_files."
         }
     }
 }
@@ -448,17 +429,11 @@ struct DisplayManagementTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Display: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         switch arguments.action {
         case "list":
             let screens = NSScreen.screens
             if screens.isEmpty {
-                return "No displays detected. (Audit Ref: \(logID))"
+                return "No displays detected."
             }
 
             var result = "Connected Displays (\(screens.count)):\n"
@@ -480,7 +455,7 @@ struct DisplayManagementTool: DevgenticTool {
 
                 """
             }
-            return "\(result)(Audit Ref: \(logID))"
+            return "\(result)"
 
         case "get_brightness":
             let process = Process()
@@ -498,16 +473,16 @@ struct DisplayManagementTool: DevgenticTool {
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 if output.isEmpty {
-                    return "Could not read brightness. External displays may not support programmatic brightness control. (Audit Ref: \(logID))"
+                    return "Could not read brightness. External displays may not support programmatic brightness control."
                 }
-                return "Brightness info: \(output)\n(Audit Ref: \(logID))"
+                return "Brightness info: \(output)"
             } catch {
-                return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error: \(error.localizedDescription)"
             }
 
         case "set_brightness":
             guard let brightness = arguments.brightness, brightness >= 0.0, brightness <= 1.0 else {
-                return "Error: 'brightness' must be between 0.0 and 1.0. (Audit Ref: \(logID))"
+                return "Error: 'brightness' must be between 0.0 and 1.0."
             }
 
             // Use AppleScript to set brightness via System Events
@@ -543,15 +518,15 @@ struct DisplayManagementTool: DevgenticTool {
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 if output.contains("not found") {
-                    return "\(output) (Audit Ref: \(logID))"
+                    return "\(output)"
                 }
-                return "Brightness set to \(brightness). \(output)\n(Audit Ref: \(logID))"
+                return "Brightness set to \(brightness). \(output)"
             } catch {
-                return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error: \(error.localizedDescription)"
             }
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use list/get_brightness/set_brightness. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use list/get_brightness/set_brightness."
         }
     }
 }
@@ -577,12 +552,6 @@ struct OpenSystemSettingsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Open settings: \(arguments.pane)",
-            operations: [["pane": arguments.pane]]
-        )
-
         // macOS 13+ uses x-apple.systempreferences URL scheme
         let paneURL: String
 
@@ -621,9 +590,9 @@ struct OpenSystemSettingsTool: DevgenticTool {
         return await MainActor.run {
             if let url = URL(string: paneURL) {
                 NSWorkspace.shared.open(url)
-                return "Opened System Settings: \(arguments.pane). (Audit Ref: \(logID))"
+                return "Opened System Settings: \(arguments.pane)."
             }
-            return "Error: Could not construct URL for pane '\(arguments.pane)'. (Audit Ref: \(logID))"
+            return "Error: Could not construct URL for pane '\(arguments.pane)'."
         }
     }
 }
@@ -649,12 +618,6 @@ struct LoginItemsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Login items: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         switch arguments.action {
         case "list":
             let process = Process()
@@ -680,7 +643,7 @@ struct LoginItemsTool: DevgenticTool {
                 let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
                 if output.isEmpty {
-                    return "No login items found. (Audit Ref: \(logID))"
+                    return "No login items found."
                 }
 
                 let items = output.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -688,22 +651,22 @@ struct LoginItemsTool: DevgenticTool {
                 for (idx, item) in items.enumerated() {
                     result += "  \(idx + 1). \(item)\n"
                 }
-                return "\(result)(Audit Ref: \(logID))"
+                return "\(result)"
             } catch {
-                return "Error listing login items: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error listing login items: \(error.localizedDescription)"
             }
 
         case "open_settings":
             return await MainActor.run {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
                     NSWorkspace.shared.open(url)
-                    return "Opened Login Items settings. (Audit Ref: \(logID))"
+                    return "Opened Login Items settings."
                 }
-                return "Error opening settings. (Audit Ref: \(logID))"
+                return "Error opening settings."
             }
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use list/open_settings. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use list/open_settings."
         }
     }
 }
@@ -729,19 +692,12 @@ struct ExternalDevicesTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "List devices: \(arguments.device_type ?? "usb")",
-            operations: [["type": arguments.device_type ?? "usb"]]
-        )
-
         let deviceType = arguments.device_type ?? "usb"
 
         switch deviceType {
         case "usb":
             return await shellCommand(
-                "/usr/sbin/system_profiler", ["SPUSBDataType", "-detailLevel", "mini"],
-                logID: logID
+                "/usr/sbin/system_profiler", ["SPUSBDataType", "-detailLevel", "mini"]
             )
 
         case "disks":
@@ -751,7 +707,7 @@ struct ExternalDevicesTool: DevgenticTool {
                 includingResourceValuesForKeys: [.volumeNameKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey, .volumeIsRemovableKey],
                 options: [.skipHiddenVolumes]
             ) else {
-                return "No mounted volumes found. (Audit Ref: \(logID))"
+                return "No mounted volumes found."
             }
 
             var result = "Mounted Volumes (\(mountedURLs.count)):\n"
@@ -769,21 +725,20 @@ struct ExternalDevicesTool: DevgenticTool {
                 result += "    Path: \(url.path)\n"
                 result += "    Total: \(totalGB) GB, Available: \(availableGB) GB\n"
             }
-            return "\(result)(Audit Ref: \(logID))"
+            return "\(result)"
 
         case "all":
             return await shellCommand(
                 "/usr/sbin/system_profiler",
-                ["SPUSBDataType", "SPBluetoothDataType", "SPDisplaysDataType", "SPAudioDataType", "-detailLevel", "mini"],
-                logID: logID
+                ["SPUSBDataType", "SPBluetoothDataType", "SPDisplaysDataType", "SPAudioDataType", "-detailLevel", "mini"]
             )
 
         default:
-            return "Error: Unknown device_type '\(deviceType)'. Use usb/disks/all. (Audit Ref: \(logID))"
+            return "Error: Unknown device_type '\(deviceType)'. Use usb/disks/all."
         }
     }
 
-    private func shellCommand(_ executable: String, _ args: [String], logID: String) async -> String {
+    private func shellCommand(_ executable: String, _ args: [String]) async -> String {
         let process = Process()
         let outPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -801,9 +756,9 @@ struct ExternalDevicesTool: DevgenticTool {
             if output.count > maxOutput {
                 output = String(output.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars]"
             }
-            return "\(output)\n(Audit Ref: \(logID))"
+            return "\(output)"
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }
@@ -856,12 +811,6 @@ struct AppleNotesTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Apple Notes: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         switch arguments.action {
         case "list":
             let limit = arguments.limit ?? 20
@@ -887,11 +836,11 @@ struct AppleNotesTool: DevgenticTool {
                 return noteList as string
             end tell
             """
-            return await runAppleScript(script, logID: logID, prefix: "Notes")
+            return await runAppleScript(script, prefix: "Notes")
 
         case "read":
             guard let title = arguments.title else {
-                return "Error: 'title' required for read. (Audit Ref: \(logID))"
+                return "Error: 'title' required for read."
             }
 
             let script = """
@@ -907,11 +856,11 @@ struct AppleNotesTool: DevgenticTool {
                 return "Title: " & noteTitle & linefeed & "Modified: " & (noteDate as string) & linefeed & linefeed & noteBody
             end tell
             """
-            return await runAppleScript(script, logID: logID, prefix: "Note Content")
+            return await runAppleScript(script, prefix: "Note Content")
 
         case "create":
             guard let title = arguments.title else {
-                return "Error: 'title' required for create. (Audit Ref: \(logID))"
+                return "Error: 'title' required for create."
             }
             let body = arguments.body ?? ""
             let htmlBody = "<h1>\(Self.escapeHTML(title))</h1><br>\(Self.escapeHTML(body).replacingOccurrences(of: "\n", with: "<br>"))"
@@ -934,11 +883,11 @@ struct AppleNotesTool: DevgenticTool {
                 return "Created note: \(Self.escapeAppleScript(title))"
             end tell
             """
-            return await runAppleScript(script, logID: logID, prefix: "")
+            return await runAppleScript(script, prefix: "")
 
         case "search":
             guard let term = arguments.search_term else {
-                return "Error: 'search_term' required for search. (Audit Ref: \(logID))"
+                return "Error: 'search_term' required for search."
             }
             let limit = arguments.limit ?? 20
 
@@ -961,7 +910,7 @@ struct AppleNotesTool: DevgenticTool {
                 return results as string
             end tell
             """
-            return await runAppleScript(script, logID: logID, prefix: "Search results for '\(term)'")
+            return await runAppleScript(script, prefix: "Search results for '\(term)'")
 
         case "list_folders":
             let script = """
@@ -975,14 +924,14 @@ struct AppleNotesTool: DevgenticTool {
                 return folderList as string
             end tell
             """
-            return await runAppleScript(script, logID: logID, prefix: "Note Folders")
+            return await runAppleScript(script, prefix: "Note Folders")
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use list/read/create/search/list_folders. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use list/read/create/search/list_folders."
         }
     }
 
-    private func runAppleScript(_ script: String, logID: String, prefix: String) async -> String {
+    private func runAppleScript(_ script: String, prefix: String) async -> String {
         let process = Process()
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -1001,11 +950,11 @@ struct AppleNotesTool: DevgenticTool {
             let errOutput = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             if process.terminationStatus != 0 {
-                return "Error: \(errOutput.isEmpty ? "AppleScript execution failed" : errOutput) (Audit Ref: \(logID))"
+                return "Error: \(errOutput.isEmpty ? "AppleScript execution failed" : errOutput)"
             }
 
             if output.isEmpty {
-                return "\(prefix.isEmpty ? "" : prefix + ": ")No results. (Audit Ref: \(logID))"
+                return "\(prefix.isEmpty ? "" : prefix + ": ")No results."
             }
 
             var result = output
@@ -1015,11 +964,11 @@ struct AppleNotesTool: DevgenticTool {
             }
 
             if prefix.isEmpty {
-                return "\(result) (Audit Ref: \(logID))"
+                return "\(result)"
             }
-            return "\(prefix):\n\(result)\n(Audit Ref: \(logID))"
+            return "\(prefix):\n\(result)"
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 

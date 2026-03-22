@@ -76,6 +76,12 @@ class EvaluationLogger {
                 }
                 if detail == .finalizing {
                     metrics.didFinishSuccessfully = true
+                    // Ensure at least 1 iteration is counted when the loop ran
+                    // but no .reasoning trace was emitted (e.g., null-termination
+                    // on first iteration where the model returned no tool calls).
+                    if metrics.totalIterations == 0 {
+                        metrics.totalIterations = 1
+                    }
                 }
                 if detail == .errorRecovery {
                     if log.content.contains("Max iterations reached") {

@@ -82,11 +82,35 @@ struct ToolExecutionMediator: ToolDispatching {
             }
             // -----------------------------------
             
+            // --- PRE-FLIGHT ARGUMENT VALIDATION ---
+            // Dynamically validates required parameters against the tool's schema.
+            // Catches empty strings, null, and missing values BEFORE dispatch,
+            // giving the model a clear, actionable error to self-correct.
+            let validationErrors = Self.validateRequiredArguments(
+                arguments: arguments,
+                schema: tool.parameters,
+                toolName: sanitizedName
+            )
+            if !validationErrors.isEmpty {
+                let errorMsg = validationErrors.joined(separator: " ")
+                logToolExecution.warning("⚠️ Argument validation failed for '\(sanitizedName)': \(errorMsg)")
+                result = .semanticFailure(toolName: sanitizedName, output: errorMsg)
+                errorDescriptionForMetrics = errorMsg
+
+                let duration = Date().timeIntervalSince(startTime)
+                Task { @MainActor in
+                    MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: false, errorType: errorMsg, context: toolSpan)
+                    MetricsManager.shared.record(duration: duration, for: "tool_latency", context: toolSpan)
+                }
+                return result
+            }
+            // -----------------------------------
+
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
                 let paramData = try encoder.encode(arguments)
-                
+
                 if let payloadStr = String(data: paramData, encoding: .utf8) {
                     logToolExecution.debug("▶️ Dispatching Tool '\(toolName)' with payload:\n\(payloadStr)")
                 }
@@ -145,6 +169,58 @@ struct ToolExecutionMediator: ToolDispatching {
         }
     }
     
+    /// Validates that all required parameters (per the tool's schema) are present and non-empty.
+    /// Returns an array of human-readable error strings — one per violation.
+    /// Empty array means all validations passed.
+    ///
+    /// Validation rules by type:
+    /// - `string`: must not be empty (`""`) or null
+    /// - `number`/`integer`: must not be null or missing
+    /// - `array`: must not be empty or null
+    /// - `object`: must not be empty or null
+    /// - Any type: must not be missing entirely
+    static func validateRequiredArguments(
+        arguments: [String: JSONValue],
+        schema: ToolParameters,
+        toolName: String
+    ) -> [String] {
+        var errors: [String] = []
+
+        for key in schema.required {
+            let propType = schema.properties[key]?.type ?? "string"
+
+            guard let value = arguments[key] else {
+                errors.append("\(toolName): '\(key)' is required but was not provided.")
+                continue
+            }
+
+            switch value {
+            case .null:
+                errors.append("\(toolName): '\(key)' cannot be null.")
+
+            case .string(let s):
+                if propType == "string" && s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    errors.append("\(toolName): '\(key)' cannot be empty. Provide a meaningful value.")
+                }
+
+            case .array(let arr):
+                if propType == "array" && arr.isEmpty {
+                    errors.append("\(toolName): '\(key)' cannot be an empty array.")
+                }
+
+            case .object(let dict):
+                if propType == "object" && dict.isEmpty {
+                    errors.append("\(toolName): '\(key)' cannot be an empty object.")
+                }
+
+            default:
+                break // numbers, bools — presence is sufficient
+            }
+        }
+
+        return errors
+    }
+
     private func serializeParams(_ params: [String: JSONValue]) -> String {
         if let data = try? JSONEncoder().encode(params), let str = String(data: data, encoding: .utf8) {
             return str

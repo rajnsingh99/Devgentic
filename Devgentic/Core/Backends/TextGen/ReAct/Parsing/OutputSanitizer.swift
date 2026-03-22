@@ -50,7 +50,12 @@ struct OutputSanitizer: Sendable {
         //    Some models wrap their entire response in these tags.
         text = stripWrapperTags(text)
 
-        // 6. Strip trailing orphan XML close tags that aren't part of a matched pair.
+        // 6. Deduplicate repeated top-level JSON blocks.
+        //    Small models sometimes emit the same JSON response twice in a single generation.
+        //    Keeps only the first block to prevent downstream parse confusion.
+        text = deduplicateRepeatedBlocks(text)
+
+        // 7. Strip trailing orphan XML close tags that aren't part of a matched pair.
         text = stripTrailingOrphanTags(text)
 
         let result = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -60,6 +65,17 @@ struct OutputSanitizer: Sendable {
         }
 
         return SanitizedOutput(cleaned: result, thought: extractedThought)
+    }
+
+    // MARK: - Public Scoped Helpers
+
+    /// Strips `<think>` blocks and special token markers from user-facing text.
+    /// Safe for post-synthesis output — does NOT strip code fences or wrapper tags
+    /// which could destroy legitimate markdown in the response.
+    static func stripThinkBlocksAndTokens(_ text: String) -> String {
+        let (stripped, _) = extractAndStripThinkBlocks(text)
+        let cleaned = stripSpecialTokenMarkers(stripped)
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Private Helpers
@@ -153,6 +169,47 @@ struct OutputSanitizer: Sendable {
             )
         }
         return result
+    }
+
+    /// Detects and removes duplicate top-level JSON blocks from the response.
+    /// Small models sometimes repeat the entire JSON object. This keeps only the first.
+    /// Uses brace-depth tracking to find the end of the first complete `{...}` block,
+    /// then checks if the remainder (after trimming whitespace) starts another `{`.
+    private static func deduplicateRepeatedBlocks(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") else { return text }
+
+        var depth = 0
+        var inString = false
+        var prevChar: Character = "\0"
+        var firstBlockEnd: String.Index?
+
+        for (index, char) in zip(trimmed.indices, trimmed) {
+            if char == "\"" && prevChar != "\\" {
+                inString.toggle()
+            }
+            if !inString {
+                if char == "{" { depth += 1 }
+                else if char == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        firstBlockEnd = index
+                        break
+                    }
+                }
+            }
+            prevChar = char
+        }
+
+        guard let endIndex = firstBlockEnd else { return text }
+
+        let afterFirst = trimmed[trimmed.index(after: endIndex)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard afterFirst.hasPrefix("{") else { return text }
+
+        // There's a second JSON block — keep only the first
+        let firstBlock = String(trimmed[...endIndex])
+        logger.debug("OutputSanitizer: Stripped duplicate JSON block (\(afterFirst.count) chars removed).")
+        return firstBlock
     }
 
     /// Strips common orphan close tags at the very end of the string.

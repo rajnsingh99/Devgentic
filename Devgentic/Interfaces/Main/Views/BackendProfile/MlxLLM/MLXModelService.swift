@@ -79,7 +79,7 @@ class MLXModelService: ObservableObject {
         
         var foundModels: [MLXModelItem] = []
         let fileManager = FileManager.default
-        let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey, .creationDateKey]
         
         if let enumerator = fileManager.enumerator(
             at: modelsDirectory,
@@ -102,9 +102,12 @@ class MLXModelService: ObservableObject {
                             .replacingOccurrences(of: "--", with: "/")
                     }
                     
+                    // Read creation date from the config.json file (reflects download time)
+                    let createdAt = try? fileURL.resourceValues(forKeys: [.creationDateKey]).creationDate
+
                     // Deduplicate
                     if !foundModels.contains(where: { $0.displayName == displayName }) {
-                        foundModels.append(MLXModelItem(id: displayName, displayName: displayName, localPath: modelDir))
+                        foundModels.append(MLXModelItem(id: displayName, displayName: displayName, localPath: modelDir, createdAt: createdAt))
                     }
                 }
             }

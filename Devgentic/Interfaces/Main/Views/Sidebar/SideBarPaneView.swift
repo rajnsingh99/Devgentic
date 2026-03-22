@@ -125,19 +125,19 @@ struct PlaceholderSidebarView: View {
             Spacer()
             ZStack {
                 Circle()
-                    .fill(Color.secondary.opacity(0.1))
+                    .fill(theme.surfaceOverlay)
                     .frame(width: 70, height: 70)
                 Image(systemName: icon)
                     .font(.system(size: 30))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
             }
-            
+
             VStack(spacing: 6) {
                 Text(title)
-                    .font(.headline)
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(theme.primaryText)
                 Text(description)
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)

@@ -59,28 +59,22 @@ struct ManageWindowsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Window action: \(arguments.action)",
-            operations: [["action": arguments.action, "bundle_id": arguments.bundle_id ?? "all"]]
-        )
-
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else {
-            return "Error: Accessibility permission denied. (Audit Ref: \(logID))"
+            return "Error: Accessibility permission denied."
         }
 
         if arguments.action == "list_windows" {
-            return listAllWindows(logID: logID)
+            return listAllWindows()
         }
 
         guard let bundleID = arguments.bundle_id else {
-            return "Error: 'bundle_id' required for action '\(arguments.action)'. (Audit Ref: \(logID))"
+            return "Error: 'bundle_id' required for action '\(arguments.action)'."
         }
 
         let apps = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }
         guard let app = apps.first else {
-            return "Error: App with bundle ID \(bundleID) is not running. (Audit Ref: \(logID))"
+            return "Error: App with bundle ID \(bundleID) is not running."
         }
 
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
@@ -88,11 +82,11 @@ struct ManageWindowsTool: DevgenticTool {
         var frontWindowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &frontWindowRef) != .success {
             if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &frontWindowRef) != .success {
-                return "Error: App has no accessible windows. (Audit Ref: \(logID))"
+                return "Error: App has no accessible windows."
             }
         }
         guard let window = frontWindowRef else {
-            return "Error: App has no accessible windows. (Audit Ref: \(logID))"
+            return "Error: App has no accessible windows."
         }
         let targetWindow = window as! AXUIElement
 
@@ -100,36 +94,36 @@ struct ManageWindowsTool: DevgenticTool {
         case "bring_to_front":
             app.activate()
             AXUIElementPerformAction(targetWindow, kAXRaiseAction as CFString)
-            return "Brought \(app.localizedName ?? bundleID) to front. (Audit Ref: \(logID))"
+            return "Brought \(app.localizedName ?? bundleID) to front."
 
         case "close_window":
             var closeButtonRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(targetWindow, kAXCloseButtonAttribute as CFString, &closeButtonRef) == .success, let closeButton = closeButtonRef {
                 AXUIElementPerformAction(closeButton as! AXUIElement, kAXPressAction as CFString)
-                return "Closed window. (Audit Ref: \(logID))"
+                return "Closed window."
             }
-            return "Error: Could not find close button. (Audit Ref: \(logID))"
+            return "Error: Could not find close button."
 
         case "minimize":
             let minVal = true as CFTypeRef
             AXUIElementSetAttributeValue(targetWindow, kAXMinimizedAttribute as CFString, minVal)
-            return "Minimized window. (Audit Ref: \(logID))"
+            return "Minimized window."
 
         case "resize":
             guard let w = arguments.width, let h = arguments.height else {
-                return "Error: 'width' and 'height' required for resize. (Audit Ref: \(logID))"
+                return "Error: 'width' and 'height' required for resize."
             }
             var newSize = CGSize(width: CGFloat(w), height: CGFloat(h))
             if let sizeVal = AXValueCreate(AXValueType.cgSize, &newSize) {
                 AXUIElementSetAttributeValue(targetWindow, kAXSizeAttribute as CFString, sizeVal)
             }
-            return "Resized window to \(w)x\(h). (Audit Ref: \(logID))"
+            return "Resized window to \(w)x\(h)."
 
         case "move_to_display":
             let displayIdx = arguments.display_index ?? 0
             let screens = NSScreen.screens
             guard displayIdx < screens.count else {
-                return "Error: Display index \(displayIdx) not found. Available: 0-\(screens.count - 1). (Audit Ref: \(logID))"
+                return "Error: Display index \(displayIdx) not found. Available: 0-\(screens.count - 1)."
             }
             let targetScreen = screens[displayIdx]
             var newPos = targetScreen.frame.origin
@@ -137,11 +131,11 @@ struct ManageWindowsTool: DevgenticTool {
             if let posVal = AXValueCreate(AXValueType.cgPoint, &newPos) {
                 AXUIElementSetAttributeValue(targetWindow, kAXPositionAttribute as CFString, posVal)
             }
-            return "Moved window to display \(displayIdx). (Audit Ref: \(logID))"
+            return "Moved window to display \(displayIdx)."
 
         default:
             guard NSScreen.main != nil else {
-                return "Error: No main screen found. (Audit Ref: \(logID))"
+                return "Error: No main screen found."
             }
             let mainDisplayBounds = CGDisplayBounds(CGMainDisplayID())
             var newPosition = CGPoint.zero
@@ -165,7 +159,7 @@ struct ManageWindowsTool: DevgenticTool {
                 newPosition = CGPoint(x: (width - w)/2, y: (height - h)/2)
                 newSize = CGSize(width: w, height: h)
             default:
-                return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+                return "Error: Unknown action '\(arguments.action)'."
             }
 
             if let sizeVal = AXValueCreate(AXValueType.cgSize, &newSize) {
@@ -174,11 +168,11 @@ struct ManageWindowsTool: DevgenticTool {
             if let posVal = AXValueCreate(AXValueType.cgPoint, &newPosition) {
                 AXUIElementSetAttributeValue(targetWindow, kAXPositionAttribute as CFString, posVal)
             }
-            return "Window action '\(arguments.action)' applied. (Audit Ref: \(logID))"
+            return "Window action '\(arguments.action)' applied."
         }
     }
 
-    private func listAllWindows(logID: String) -> String {
+    private func listAllWindows() -> String {
         var windowList: [String] = []
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             let appElement = AXUIElementCreateApplication(app.processIdentifier)
@@ -197,8 +191,8 @@ struct ManageWindowsTool: DevgenticTool {
             }
         }
         if windowList.isEmpty {
-            return "No accessible windows found. (Audit Ref: \(logID))"
+            return "No accessible windows found."
         }
-        return "Open Windows (\(windowList.count)):\n\(windowList.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+        return "Open Windows (\(windowList.count)):\n\(windowList.joined(separator: "\n"))"
     }
 }

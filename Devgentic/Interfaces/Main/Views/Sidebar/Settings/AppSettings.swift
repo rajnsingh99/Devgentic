@@ -22,6 +22,18 @@ struct AppSettings {
 
     // Intelligence Core
     static let isIntelligenceCoreEnabledKey = "isIntelligenceCoreEnabled"
+    static let coreIntelligenceModelKey = "coreIntelligenceModel"
+
+    // Core Intelligence Feature Toggles
+    static let ciFeatureRAGRewritingKey = "ciFeatureRAGRewriting"
+    static let ciFeatureSuggestionKey = "ciFeatureSuggestion"
+    static let ciFeatureMorningBriefKey = "ciFeatureMorningBrief"
+    static let ciFeatureUserPersonalKey = "ciFeatureUserPersonal"
+    static let ciCustomPromptKey = "ciCustomPrompt"
+
+    // Morning Brief
+    static let lastMorningBriefDateKey = "lastMorningBriefDate"
+    static let morningBriefIncludeAISummaryKey = "morningBriefIncludeAISummary"
 
     // Notifications
     static let notificationsEnabledKey = "notificationsEnabled"

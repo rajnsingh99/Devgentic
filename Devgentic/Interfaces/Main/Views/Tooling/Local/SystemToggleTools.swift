@@ -27,12 +27,6 @@ struct ToggleDarkModeTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Dark mode: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         return await MainActor.run {
             var script = ""
             switch arguments.action {
@@ -69,7 +63,7 @@ struct ToggleDarkModeTool: DevgenticTool {
                 end tell
                 """
             default:
-                return "Error: Unknown action '\(arguments.action)'. Use toggle/get/dark/light. (Audit Ref: \(logID))"
+                return "Error: Unknown action '\(arguments.action)'. Use toggle/get/dark/light."
             }
 
             var errorInfo: NSDictionary?
@@ -77,15 +71,15 @@ struct ToggleDarkModeTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
 
             if arguments.action == "get" {
                 let isDark = desc?.booleanValue ?? false
-                return "Current mode: \(isDark ? "Dark" : "Light") (Audit Ref: \(logID))"
+                return "Current mode: \(isDark ? "Dark" : "Light")"
             }
 
-            return "Appearance updated. (Audit Ref: \(logID))"
+            return "Appearance updated."
         }
     }
 }
@@ -111,12 +105,6 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "DND: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         // Use AppleScript to toggle DND via Focus system
         return await MainActor.run {
             let script: String
@@ -153,7 +141,7 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
                 end tell
                 """
             default:
-                return "Error: Unknown action '\(arguments.action)'. Use on/off/toggle. (Audit Ref: \(logID))"
+                return "Error: Unknown action '\(arguments.action)'. Use on/off/toggle."
             }
 
             var errorInfo: NSDictionary?
@@ -161,10 +149,10 @@ struct ToggleDoNotDisturbTool: DevgenticTool {
             scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "Focus toggle may require accessibility permission. Error: \(err) (Audit Ref: \(logID))"
+                return "Focus toggle may require accessibility permission. Error: \(err)"
             }
 
-            return "Do Not Disturb '\(arguments.action)' executed. (Audit Ref: \(logID))"
+            return "Do Not Disturb '\(arguments.action)' executed."
         }
     }
 }
@@ -183,12 +171,6 @@ struct GetWiFiInfoTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Get Wi-Fi info",
-            operations: []
-        )
-
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport")
         process.arguments = ["-I"]
@@ -201,9 +183,9 @@ struct GetWiFiInfoTool: DevgenticTool {
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "No Wi-Fi data"
-            return "Wi-Fi Info:\n\(output)\n(Audit Ref: \(logID))"
+            return "Wi-Fi Info:\n\(output)"
         } catch {
-            return "Error getting Wi-Fi info: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error getting Wi-Fi info: \(error.localizedDescription)"
         }
     }
 }
@@ -229,12 +211,6 @@ struct ManageBluetoothTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Bluetooth: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
 
@@ -242,7 +218,7 @@ struct ManageBluetoothTool: DevgenticTool {
         case "status", "list_devices":
             process.arguments = ["SPBluetoothDataType"]
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use status or list_devices. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use status or list_devices."
         }
 
         let outPipe = Pipe()
@@ -259,9 +235,9 @@ struct ManageBluetoothTool: DevgenticTool {
                 output = String(output.prefix(maxOutput)) + "\n...[Truncated]"
             }
 
-            return "Bluetooth \(arguments.action):\n\(output)\n(Audit Ref: \(logID))"
+            return "Bluetooth \(arguments.action):\n\(output)"
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }

@@ -123,4 +123,85 @@ final class ToolExecutionMediatorTests: XCTestCase {
             XCTFail("Expected hallucinated result with available tool names")
         }
     }
+
+    // MARK: - Gap A: Required Argument Validation
+
+    private func makeSearchSchema() -> ToolParameters {
+        SchemaBuilder.object(
+            properties: [
+                ("search_term", "string", "The keyword to search for."),
+                ("search_scope", "string", "Optional folder path.")
+            ],
+            required: ["search_term"]
+        )
+    }
+
+    func testValidation_EmptyRequiredString_ReturnsError() {
+        let schema = makeSearchSchema()
+        let args: [String: JSONValue] = ["search_term": .string(""), "search_scope": .null]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors[0].contains("fs_smart_search"))
+        XCTAssertTrue(errors[0].contains("search_term"))
+        XCTAssertTrue(errors[0].contains("cannot be empty"))
+    }
+
+    func testValidation_NullRequiredParam_ReturnsError() {
+        let schema = makeSearchSchema()
+        let args: [String: JSONValue] = ["search_term": .null]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors[0].contains("cannot be null"))
+    }
+
+    func testValidation_MissingRequiredParam_ReturnsError() {
+        let schema = makeSearchSchema()
+        let args: [String: JSONValue] = ["search_scope": .string("/tmp")]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors[0].contains("not provided"))
+    }
+
+    func testValidation_WhitespaceOnlyString_ReturnsError() {
+        let schema = makeSearchSchema()
+        let args: [String: JSONValue] = ["search_term": .string("   \n\t  ")]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors[0].contains("cannot be empty"))
+    }
+
+    func testValidation_ValidArgs_NoErrors() {
+        let schema = makeSearchSchema()
+        let args: [String: JSONValue] = ["search_term": .string("Acme")]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        XCTAssertTrue(errors.isEmpty)
+    }
+
+    func testValidation_OptionalParamNull_NoError() {
+        // search_scope is NOT in required[], so null is fine
+        let schema = makeSearchSchema()
+        let args: [String: JSONValue] = ["search_term": .string("files"), "search_scope": .null]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "fs_smart_search")
+        XCTAssertTrue(errors.isEmpty, "Optional params should not trigger validation errors")
+    }
+
+    func testValidation_MultipleViolations_ReturnsAll() {
+        let schema = SchemaBuilder.object(
+            properties: [
+                ("path", "string", "The file path."),
+                ("mode", "string", "Read or write.")
+            ],
+            required: ["path", "mode"]
+        )
+        let args: [String: JSONValue] = ["path": .string(""), "mode": .null]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "read_file")
+        XCTAssertEqual(errors.count, 2)
+    }
+
+    func testValidation_EmptySchema_NoErrors() {
+        let schema = SchemaBuilder.empty()
+        let args: [String: JSONValue] = ["anything": .string("")]
+        let errors = ToolExecutionMediator.validateRequiredArguments(arguments: args, schema: schema, toolName: "some_tool")
+        XCTAssertTrue(errors.isEmpty)
+    }
 }

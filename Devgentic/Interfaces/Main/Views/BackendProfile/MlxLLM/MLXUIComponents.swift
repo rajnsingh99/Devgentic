@@ -28,12 +28,12 @@ struct CapabilityBadge: View {
         }
         .font(.caption2.weight(.medium))
         .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
         .background(color.opacity(0.1))
         .foregroundColor(color)
-        .cornerRadius(4)
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .stroke(color.opacity(0.3), lineWidth: 1)
         )
     }

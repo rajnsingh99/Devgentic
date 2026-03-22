@@ -62,7 +62,6 @@ struct WorkerAgent: Sendable {
                 instructions: "You are a specialized \(task.workerRole) worker. Focus on completing your assigned task.",
                 environmentFacts: envFacts,
                 longTermMemory: input.longTermMemory,
-                compressedStateGraph: "",
                 recentHistory: nil,
                 originalQuery: task.instruction,
                 currentIteration: iteration,
@@ -178,6 +177,18 @@ struct WorkerAgent: Sendable {
                 if !obs.isSuccess {
                     circuitBreaker.recordHallucination(obs.toolName)
                 }
+            }
+
+            // Repetitive action loop detection
+            let repetitiveAction = circuitBreaker.evaluateRepetitiveActions(observations)
+            if case .abort(let reason) = repetitiveAction {
+                return WorkerResult(
+                    workerId: task.id,
+                    workerRole: task.workerRole,
+                    output: "Worker aborted: \(reason)",
+                    isSuccess: false,
+                    toolsUsed: toolsUsed
+                )
             }
 
             circuitBreaker.resetCountersOnSuccess()

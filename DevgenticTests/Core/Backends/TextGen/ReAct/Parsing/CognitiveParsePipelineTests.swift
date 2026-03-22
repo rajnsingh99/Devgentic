@@ -251,6 +251,53 @@ final class CognitiveParsePipelineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(result.toolCalls.count, 1, "Should recover tool calls from the higher-priority drift format")
     }
 
+    // MARK: - S23: Nested Content with Duplicate Blocks (G1 + G2)
+
+    func testNestedContent_WithDuplicateBlocks_ParsedCorrectly() {
+        // Reproduces the exact log scenario: model emits nested content wrapper
+        // with think block and duplicates the JSON block.
+        let pipeline = CognitiveParsePipeline(expectedDialect: .heuristicJson)
+        let input = """
+        <think>
+        Okay, let's see what the user is asking here.
+        </think>
+        {
+        "content": {
+        "thought": "No file list can be retrieved with the available tools.",
+        "tool_calls": []
+          }
+        }
+        {
+        "content": {
+        "thought": "No file list can be retrieved with the available tools.",
+        "tool_calls": []
+          }
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 0, "Empty tool_calls should be recognized as conversational exit")
+        XCTAssertTrue(result.reasoning.contains("No file list"), "Should extract thought as reasoning")
+        XCTAssertNotNil(result.thought, "Think block should be captured")
+    }
+
+    func testNestedContent_WithToolCalls_ThroughPipeline() {
+        let pipeline = CognitiveParsePipeline(expectedDialect: .heuristicJson)
+        let input = """
+        {
+          "content": {
+            "thought": "I should list the directory.",
+            "tool_calls": [
+              {"name": "list_directory", "arguments": {"path": "/Users/alice"}}
+            ]
+          }
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
+        XCTAssertEqual(result.reasoning, "I should list the directory.")
+    }
+
     func testDoubleDrift_DeepXMLAndFlatJSON_DeepXMLWins() {
         // Text contains both DeepXML signals and flat JSON leakage.
         // DeepXML (probe 2) is higher priority than FlatJSONLeakage (probe 12).

@@ -40,6 +40,18 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         let arguments: [String: JSONValue]?
     }
 
+    /// Nested content wrapper: `{"content": {"thought": "...", "tool_calls": [...]}}`
+    /// Some models (especially small MLX models) nest the entire response inside `content` as an object
+    /// instead of using `content` as a string. This schema unwraps the inner structure.
+    private struct NestedContentSchema: Decodable {
+        let content: NestedContent
+
+        struct NestedContent: Decodable {
+            let thought: String?
+            let tool_calls: [LegacyArraySchema.LegacyToolCall]?
+        }
+    }
+
     /// Bare tool call object: `{"name": "tool", "arguments": {...}}`
     /// No `content` wrapper — the model emitted just the raw call.
     /// Handles both "arguments" and "parameters" keys for flexibility.
@@ -104,6 +116,18 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             return ModernCognitiveStep(reasoning: arrayDecoded.content, toolCalls: pending)
         }
         
+        // Attempt 1.5: Nested Content Wrapper (Small models wrap response inside "content" as object)
+        // e.g. {"content": {"thought": "...", "tool_calls": [...]}}
+        if let nestedDecoded = try? decoder.decode(NestedContentSchema.self, from: data) {
+            let inner = nestedDecoded.content
+            let reasoning = inner.thought ?? ""
+            let pending = (inner.tool_calls ?? []).map {
+                PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
+            }
+            logger.info("✅ [JSONParser] Nested content schema matched. Tools: \(pending.count)")
+            return ModernCognitiveStep(reasoning: reasoning, toolCalls: pending)
+        }
+
         // Attempt 2: Graceful Degradation (Dumb Model used old format)
         if let singleDecoded = try? decoder.decode(LegacySingleSchema.self, from: data) {
             var pending: [PendingToolCall] = []

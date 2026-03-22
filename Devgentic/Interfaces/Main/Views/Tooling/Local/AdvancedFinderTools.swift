@@ -27,19 +27,13 @@ struct ManageFinderTagsTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Finder tags action: \(arguments.action)",
-            operations: [["file": arguments.file_path]]
-        )
-        
         let url = URL(fileURLWithPath: arguments.file_path)
         do {
             let resourceValues = try url.resourceValues(forKeys: [.tagNamesKey])
             let tags = resourceValues.tagNames ?? []
-            return "Tags for \(url.lastPathComponent):\n\(tags.joined(separator: ", "))\n(Audit Ref: \(logID))"
+            return "Tags for \(url.lastPathComponent):\n\(tags.joined(separator: ", "))"
         } catch {
-            return "Error reading tags: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error reading tags: \(error.localizedDescription)"
         }
     }
 }
@@ -63,23 +57,17 @@ struct TriggerQuickLookTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Triggered QuickLook",
-            operations: [["file": arguments.file_path]]
-        )
-        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/qlmanage")
         process.arguments = ["-p", arguments.file_path]
         let outPipe = Pipe()
         process.standardOutput = outPipe
-        
+
         do {
             try process.run()
-            return "QuickLook opened for \(arguments.file_path). (Audit Ref: \(logID))"
+            return "QuickLook opened for \(arguments.file_path)."
         } catch {
-            return "Error triggering QuickLook: \(error) (Audit Ref: \(logID))"
+            return "Error triggering QuickLook: \(error)"
         }
     }
 }
@@ -96,12 +84,6 @@ struct EmptyTrashTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Emptied Trash",
-            operations: []
-        )
-        
         return await MainActor.run {
             let script = """
             tell application "Finder"
@@ -111,11 +93,11 @@ struct EmptyTrashTool: DevgenticTool {
             var errorInfo: NSDictionary?
             let scriptObj = NSAppleScript(source: script)
             _ = scriptObj?.executeAndReturnError(&errorInfo)
-            
+
             if let err = errorInfo {
-                return "AppleScript Error while emptying trash: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error while emptying trash: \(err)"
             }
-            return "Trash emptied successfully. (Audit Ref: \(logID))"
+            return "Trash emptied successfully."
         }
     }
 }

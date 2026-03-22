@@ -105,28 +105,30 @@ struct OllamaModelStoreContent: View {
                                 }
                                 .buttonStyle(.plain)
                             }
+
+                            Menu {
+                                Picker("Sort By", selection: $viewModel.sortOption) {
+                                    ForEach(OllamaModelStoreViewModel.SortOption.allCases) { option in
+                                        Label(option.rawValue, systemImage: option.icon).tag(option)
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .font(.body)
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.horizontal, 8)
+                                    .contentShape(Rectangle())
+                            }
+                            .menuStyle(.borderlessButton)
+                            .help("Sort Models")
                         }
                         .padding(10)
                         .background(theme.secondaryBackground)
-                        .cornerRadius(8)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
-
-                        // Sort Menu
-                        Menu {
-                            Picker("Sort By", selection: $viewModel.sortOption) {
-                                ForEach(OllamaModelStoreViewModel.SortOption.allCases) { option in
-                                    Label(option.rawValue, systemImage: option.icon).tag(option)
-                                }
-                            }
-                        } label: {
-                            Label("Sort", systemImage: "line.3.horizontal.decrease.circle")
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help("Sort Models")
 
                         // Contextual Pull Button
                         if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
@@ -141,15 +143,11 @@ struct OllamaModelStoreContent: View {
                     }
                 }
                 .padding(20)
-                .background(theme.primaryBackground)
-
-                Divider().foregroundColor(theme.dividerColor)
+                .background(showSearchBar ? theme.primaryBackground : Color.clear)
             }
 
             // MARK: - Main Content Area
             ZStack {
-                theme.primaryBackground
-
                 if viewModel.isLoading && viewModel.displayedModels.isEmpty {
                     loadingState
                 } else if viewModel.displayedModels.isEmpty {
@@ -224,21 +222,22 @@ struct OllamaModelStoreContent: View {
     private var downloadBanner: some View {
         HStack(spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Pulling \(viewModel.currentDownloadName)")
+                Text("Pulling \(viewModel.currentDownloadName)...")
                     .font(.headline)
+                    .foregroundColor(theme.primaryText)
                     .lineLimit(1)
-                
+
                 ProgressView(value: viewModel.downloadProgress)
-                    .progressViewStyle(.linear)
-                    .tint(.blue)
+                    .controlSize(.small)
+                    .tint(theme.accentColor)
             }
-            
+
             Text("\(Int(viewModel.downloadProgress * 100))%")
                 .monospacedDigit()
                 .fontWeight(.bold)
-                .foregroundColor(.blue)
+                .foregroundColor(theme.accentColor)
                 .frame(width: 50, alignment: .trailing)
-            
+
             Button {
                 viewModel.cancelDownload()
             } label: {
@@ -251,17 +250,16 @@ struct OllamaModelStoreContent: View {
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(theme.secondaryBackground)
-                .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 4)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.dividerColor, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
         )
+        .shadow(color: theme.primaryText.opacity(0.08), radius: 10, y: 4)
         .padding(.horizontal, 40)
         .transition(.move(edge: .bottom).combined(with: .opacity))
-        .animation(.spring(), value: viewModel.isDownloading)
     }
 }
 
@@ -269,35 +267,47 @@ struct OllamaModelCardView: View {
     let model: LocalModel
     @ObservedObject var viewModel: OllamaModelStoreViewModel
     @State private var showingDeleteAlert = false
-    @Environment(\.appTheme) private var theme
-    
-    // Hover state for modern macOS feel
     @State private var isHovered = false
-    
+    @Environment(\.appTheme) private var theme
+
+    /// Fit assessment using the model's cognitive profile metadata.
+    private var fitAssessment: ModelFitAssessment {
+        ModelFitAdvisor.assess(metadata: model.cognitiveProfile.metadata)
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            // Icon
+        HStack(alignment: .top, spacing: 14) {
+            // Icon — unified 44x44, controlBackground, continuous corner
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(theme.secondaryBackground)
-                    .frame(width: 48, height: 48)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.controlBackground)
+                    .frame(width: 44, height: 44)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(theme.dividerColor, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
                     )
-                
-                Image(systemName: "cpu")
+
+                Image(systemName: "cube.fill")
                     .font(.title2)
                     .foregroundColor(theme.accentColor)
             }
-            
+
             // Details
-            VStack(alignment: .leading, spacing: 8) {
-                Text(model.name)
-                    .font(.headline)
-                    .foregroundColor(theme.primaryText)
-                
-                // Meta info (Size, Quant, Family)
+            VStack(alignment: .leading, spacing: 6) {
+                // Name + Family
+                HStack(alignment: .firstTextBaseline) {
+                    Text(model.name)
+                        .font(.headline)
+                        .foregroundColor(theme.primaryText)
+
+                    if let family = model.details?.family {
+                        Text(family)
+                            .font(.caption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+                }
+
+                // Meta info row
                 if let details = model.details {
                     HStack(spacing: 12) {
                         if let size = details.parameterSize {
@@ -306,18 +316,14 @@ struct OllamaModelCardView: View {
                         if let quant = details.quantizationLevel {
                             Label(quant, systemImage: "square.3.layers.3d.down.right")
                         }
-                        if let family = details.family {
-                            Label(family, systemImage: "network")
-                        }
                     }
                     .font(.caption)
                     .foregroundColor(theme.secondaryText)
                 }
-                
-                // Badges & Capabilities
+
+                // Badges + Capability + Fit
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        // Tags
                         ForEach(model.tags) { tag in
                             HStack(spacing: 4) {
                                 if let icon = tag.icon {
@@ -327,31 +333,43 @@ struct OllamaModelCardView: View {
                             }
                             .font(.caption2)
                             .fontWeight(.medium)
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 8)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
                             .background(tag.color.opacity(0.1))
                             .foregroundColor(tag.color)
-                            .cornerRadius(6)
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .stroke(tag.color.opacity(0.3), lineWidth: 1)
+                            )
                         }
-                        
+
                         // Capability Badge
                         HStack(spacing: 4) {
                             Image(systemName: capabilityIcon(for: model.cognitiveCapability))
                             Text(model.cognitiveCapability.rawValue)
                         }
                         .font(.caption2)
-                        .fontWeight(.bold)
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 8)
+                        .fontWeight(.medium)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(capabilityColor(for: model.cognitiveCapability).opacity(0.1))
                         .foregroundColor(capabilityColor(for: model.cognitiveCapability))
-                        .cornerRadius(6)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(capabilityColor(for: model.cognitiveCapability).opacity(0.3), lineWidth: 1)
+                        )
+
+                        if fitAssessment.estimatedRuntimeRAM > 0 {
+                            ModelFitBadgeView(assessment: fitAssessment)
+                        }
                     }
                 }
             }
-            
+
             Spacer(minLength: 16)
-            
+
             // Actions
             Button(role: .destructive) {
                 showingDeleteAlert = true
@@ -360,7 +378,7 @@ struct OllamaModelCardView: View {
                     .foregroundColor(isHovered ? theme.errorColor : theme.secondaryText)
                     .padding(8)
                     .background(isHovered ? theme.errorColor.opacity(0.1) : Color.clear)
-                    .cornerRadius(8)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("Delete Model")
@@ -373,21 +391,21 @@ struct OllamaModelCardView: View {
                 Text("Are you sure you want to delete '\(model.name)'? This will permanently remove the files from your local Ollama storage.")
             }
         }
-        .padding(16)
-        .background(isHovered ? theme.secondaryBackground.opacity(0.5) : theme.primaryBackground)
-        .cornerRadius(12)
+        .padding(14)
+        .background(isHovered ? theme.controlBackground : theme.secondaryBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(isHovered ? theme.accentColor.opacity(0.5) : theme.dividerColor, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 1)
         )
+        .shadow(color: theme.primaryText.opacity(isHovered ? 0.05 : 0.03), radius: isHovered ? 12 : 6, y: isHovered ? 6 : 3)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.easeOut(duration: 0.2)) {
                 isHovered = hovering
             }
         }
     }
-    
-    // Helper colors/icons duplicated from detail views or centralized
+
     private func capabilityIcon(for capability: ModelCognitiveCapability) -> String {
         switch capability {
         case .parallelActions: return "bolt.fill"
@@ -395,7 +413,7 @@ struct OllamaModelCardView: View {
         case .none: return "message.fill"
         }
     }
-    
+
     private func capabilityColor(for capability: ModelCognitiveCapability) -> Color {
         switch capability {
         case .parallelActions: return .purple

@@ -91,12 +91,6 @@ struct GitTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Git \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         let repoPath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
         let extraArgs = arguments.args ?? ""
 
@@ -106,7 +100,7 @@ struct GitTool: DevgenticTool {
         case .command(let cmd):
             gitCommand = cmd
         case .error(let msg):
-            return "\(msg) (Audit Ref: \(logID))"
+            return msg
         }
 
         let process = Process()
@@ -126,15 +120,15 @@ struct GitTool: DevgenticTool {
             let errOutput = String(data: errData, encoding: .utf8) ?? ""
 
             if process.terminationStatus != 0 && !errOutput.isEmpty {
-                return "Git error:\n\(errOutput)\n(Audit Ref: \(logID))"
+                return "Git error:\n\(errOutput)"
             }
 
             let maxOutput = 6000
             let result = output.count > maxOutput ? String(output.prefix(maxOutput)) + "\n...[Truncated]" : output
 
-            return "git \(arguments.action):\n\(result)\n(Audit Ref: \(logID))"
+            return "git \(arguments.action):\n\(result)"
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }

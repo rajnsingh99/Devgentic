@@ -29,12 +29,6 @@ struct TypeTextTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Typed \(arguments.text.count) characters",
-            operations: [["length": String(arguments.text.count)]]
-        )
-
         let src = CGEventSource(stateID: .hidSystemState)
 
         for char in arguments.text {
@@ -51,7 +45,7 @@ struct TypeTextTool: DevgenticTool {
             try await Task.sleep(nanoseconds: 10_000_000) // 10ms
         }
 
-        return "Successfully typed \(arguments.text.count) characters. (Audit Ref: \(logID))"
+        return "Successfully typed \(arguments.text.count) characters."
     }
 }
 
@@ -83,12 +77,6 @@ struct PressKeyComboTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Pressed key combo: \(arguments.keys)",
-            operations: [["keys": arguments.keys]]
-        )
-
         let parts = arguments.keys.lowercased().split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
         var flags: CGEventFlags = []
         var keyCode: CGKeyCode = 0
@@ -107,13 +95,13 @@ struct PressKeyComboTool: DevgenticTool {
         }
 
         guard foundKey else {
-            return "Error: No key specified in '\(arguments.keys)'. (Audit Ref: \(logID))"
+            return "Error: No key specified in '\(arguments.keys)'."
         }
 
         let src = CGEventSource(stateID: .hidSystemState)
         guard let keyDown = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false) else {
-            return "Error: Failed to create key events. (Audit Ref: \(logID))"
+            return "Error: Failed to create key events."
         }
 
         keyDown.flags = flags
@@ -121,7 +109,7 @@ struct PressKeyComboTool: DevgenticTool {
         keyDown.post(tap: .cghidEventTap)
         keyUp.post(tap: .cghidEventTap)
 
-        return "Successfully pressed '\(arguments.keys)'. (Audit Ref: \(logID))"
+        return "Successfully pressed '\(arguments.keys)'."
     }
 
     private static func keyCodeForString(_ key: String) -> CGKeyCode {
@@ -185,12 +173,6 @@ struct ScrollUITool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Scrolled \(arguments.direction)",
-            operations: [["direction": arguments.direction]]
-        )
-
         let amount = Int32(arguments.amount ?? 3)
         let screenBounds = CGDisplayBounds(CGMainDisplayID())
         let posX = CGFloat(arguments.x ?? Int(screenBounds.width / 2))
@@ -205,7 +187,7 @@ struct ScrollUITool: DevgenticTool {
         case "left": deltaX = amount
         case "right": deltaX = -amount
         default:
-            return "Error: Unknown direction '\(arguments.direction)'. Use up/down/left/right. (Audit Ref: \(logID))"
+            return "Error: Unknown direction '\(arguments.direction)'. Use up/down/left/right."
         }
 
         // Move cursor to position first
@@ -217,7 +199,7 @@ struct ScrollUITool: DevgenticTool {
             scrollEvent.post(tap: .cghidEventTap)
         }
 
-        return "Scrolled \(arguments.direction) by \(amount) lines at (\(Int(posX)), \(Int(posY))). (Audit Ref: \(logID))"
+        return "Scrolled \(arguments.direction) by \(amount) lines at (\(Int(posX)), \(Int(posY)))."
     }
 }
 
@@ -244,15 +226,9 @@ struct ReadUIElementTreeTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Read UI element tree",
-            operations: []
-        )
-
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else {
-            return "Error: Accessibility permission denied. (Audit Ref: \(logID))"
+            return "Error: Accessibility permission denied."
         }
 
         let maxDepth = min(arguments.max_depth ?? 3, 5)
@@ -265,7 +241,7 @@ struct ReadUIElementTreeTool: DevgenticTool {
         }
 
         guard let runningApp = app else {
-            return "Error: Application not found. (Audit Ref: \(logID))"
+            return "Error: Application not found."
         }
 
         let appElement = AXUIElementCreateApplication(runningApp.processIdentifier)
@@ -278,7 +254,7 @@ struct ReadUIElementTreeTool: DevgenticTool {
             output = String(output.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars]"
         }
 
-        return "\(output)\n(Audit Ref: \(logID))"
+        return output
     }
 
     private func dumpElement(_ element: AXUIElement, depth: Int, maxDepth: Int) -> String {

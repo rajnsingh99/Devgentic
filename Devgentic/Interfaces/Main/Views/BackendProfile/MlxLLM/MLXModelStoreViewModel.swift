@@ -100,14 +100,16 @@ class MLXModelStoreViewModel: ObservableObject {
     
     enum SortOption: String, CaseIterable, Identifiable {
         case popularity = "Popularity"
+        case recent = "Recent"
         case sizeSmallest = "Size (Smallest)"
         case sizeLargest = "Size (Largest)"
-        
+
         var id: String { rawValue }
-        
+
         var icon: String {
             switch self {
             case .popularity: return "arrow.down.circle"
+            case .recent: return "clock.arrow.circlepath"
             case .sizeSmallest: return "arrow.up.arrow.down.square"
             case .sizeLargest: return "arrow.up.arrow.down.square.fill"
             }
@@ -161,8 +163,10 @@ class MLXModelStoreViewModel: ObservableObject {
     
     private func refreshCategoryData() {
         currentPage = 0
-        
+
         if selectedCategory == .installed {
+            // Default installed tab to most-recent-first
+            if sortOption == .popularity { sortOption = .recent }
             service.refreshInstalledModels()
         } else {
             let search = (isRemoteSearchEnabled && !searchText.isEmpty) ? searchText : nil
@@ -253,7 +257,8 @@ class MLXModelStoreViewModel: ObservableObject {
                     tags: ["Installed"],
                     downloads: 0,
                     likes: 0,
-                    description: item.localPath.path
+                    description: item.localPath.path,
+                    createdAt: item.createdAt
                 )
             }
             
@@ -277,15 +282,14 @@ class MLXModelStoreViewModel: ObservableObject {
         // 3. Sort
         switch sort {
         case .popularity:
-            // Default API order is usually popularity, but we can enforce logic here if needed.
-            // For now, we trust the API order or the list order unless explicitly sorting.
-            // If strictly local sorting is needed:
-            // sourceModels.sort { $0.downloads > $1.downloads }
             break
-            
+
+        case .recent:
+            sourceModels.sort { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+
         case .sizeSmallest:
             sourceModels.sort { parseSize($0.size) < parseSize($1.size) }
-            
+
         case .sizeLargest:
             sourceModels.sort { parseSize($0.size) > parseSize($1.size) }
         }

@@ -476,6 +476,83 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
     }
 
+    // MARK: - Nested Content Schema (G1)
+
+    func testNestedContent_WithToolCalls() {
+        let input = """
+        {
+          "content": {
+            "thought": "I need to list the directory.",
+            "tool_calls": [
+              {"name": "list_directory", "arguments": {"path": "/Users/alice"}}
+            ]
+          }
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
+        XCTAssertEqual(result.toolCalls.first?.arguments["path"], .string("/Users/alice"))
+        XCTAssertEqual(result.reasoning, "I need to list the directory.")
+    }
+
+    func testNestedContent_EmptyToolCalls() {
+        let input = """
+        {
+          "content": {
+            "thought": "No tools available for this task.",
+            "tool_calls": []
+          }
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertEqual(result.reasoning, "No tools available for this task.")
+    }
+
+    func testNestedContent_NilThought() {
+        let input = """
+        {
+          "content": {
+            "tool_calls": [
+              {"name": "fs_smart_search", "arguments": {"search_term": "Acme"}}
+            ]
+          }
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.reasoning, "")
+    }
+
+    func testNestedContent_NilToolCalls() {
+        // Model wraps content as object but omits tool_calls entirely
+        let input = """
+        {
+          "content": {
+            "thought": "I cannot help with that."
+          }
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertEqual(result.reasoning, "I cannot help with that.")
+    }
+
+    func testNestedContent_DoesNotInterfereWithStandardFormat() {
+        // Standard format with content as String should still work (Attempt 1)
+        let input = """
+        {
+          "content": "Standard reasoning.",
+          "tool_calls": [{"name": "list_directory", "arguments": {"path": "/"}}]
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.reasoning, "Standard reasoning.")
+    }
+
     func testTruncatedJSON_MissingClosingBrace_RecoversContent() {
         // Root object opens but never closes — model truncated output
         let input = """

@@ -119,8 +119,6 @@ class AgentConnect: ObservableObject {
                         longTermMemory = ToolAugmentedMemory(
                             ragContext: fallbackRag,
                             memoryTools: [
-                                wrapTool(ReadActionLogTool(), requiresConfirmation: false),
-                                wrapTool(SearchActionLogsTool(), requiresConfirmation: false),
                                 wrapTool(ReadSessionHistoryTool(conversationID: conversationID), requiresConfirmation: false)
                             ]
                         )

@@ -73,12 +73,6 @@ struct GrepFilesTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Grep '\(arguments.pattern)' in \(arguments.path)",
-            operations: [["pattern": arguments.pattern, "path": arguments.path]]
-        )
-
         let expandedPath = (arguments.path as NSString).expandingTildeInPath
 
         var grepArgs = ["-rn", "--include=*"]
@@ -102,7 +96,7 @@ struct GrepFilesTool: DevgenticTool {
             let output = String(data: data, encoding: .utf8) ?? ""
 
             if output.isEmpty {
-                return "No matches found for '\(arguments.pattern)' in \(arguments.path). (Audit Ref: \(logID))"
+                return "No matches found for '\(arguments.pattern)' in \(arguments.path)."
             }
 
             let maxResults = arguments.max_results ?? 50
@@ -114,9 +108,9 @@ struct GrepFilesTool: DevgenticTool {
             }
             result += ":\n\(limited.joined(separator: "\n"))"
 
-            return "\(result)\n(Audit Ref: \(logID))"
+            return "\(result)"
         } catch {
-            return "Grep error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Grep error: \(error.localizedDescription)"
         }
     }
 }
@@ -144,12 +138,6 @@ struct DiffFilesTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Diff \(arguments.file_a) vs \(arguments.file_b)",
-            operations: [["file_a": arguments.file_a, "file_b": arguments.file_b]]
-        )
-
         let pathA = (arguments.file_a as NSString).expandingTildeInPath
         let pathB = (arguments.file_b as NSString).expandingTildeInPath
 
@@ -166,14 +154,14 @@ struct DiffFilesTool: DevgenticTool {
             let output = String(data: data, encoding: .utf8) ?? ""
 
             if output.isEmpty {
-                return "Files are identical. (Audit Ref: \(logID))"
+                return "Files are identical."
             }
 
             let maxOutput = 6000
             let truncated = output.count > maxOutput ? String(output.prefix(maxOutput)) + "\n...[Truncated]" : output
-            return "Diff:\n\(truncated)\n(Audit Ref: \(logID))"
+            return "Diff:\n\(truncated)"
         } catch {
-            return "Diff error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Diff error: \(error.localizedDescription)"
         }
     }
 }
@@ -228,12 +216,6 @@ struct PreviewFileTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Preview file: \(arguments.path)",
-            operations: [["path": arguments.path, "mode": arguments.mode ?? "head"]]
-        )
-
         let expandedPath = (arguments.path as NSString).expandingTildeInPath
         let cmd = (arguments.mode ?? "head") == "tail" ? "/usr/bin/tail" : "/usr/bin/head"
         let lineCount = arguments.lines ?? 20
@@ -250,9 +232,9 @@ struct PreviewFileTool: DevgenticTool {
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
-            return "\(arguments.mode ?? "head") \(lineCount) lines of \(arguments.path):\n\(output)\n(Audit Ref: \(logID))"
+            return "\(arguments.mode ?? "head") \(lineCount) lines of \(arguments.path):\n\(output)"
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }
@@ -280,12 +262,6 @@ struct GetFileHashTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Hash file: \(arguments.path)",
-            operations: [["path": arguments.path]]
-        )
-
         let expandedPath = (arguments.path as NSString).expandingTildeInPath
         let algo = (arguments.algorithm ?? "sha256").lowercased()
 
@@ -294,7 +270,7 @@ struct GetFileHashTool: DevgenticTool {
         case "md5": cmd = "md5 -q \"\(expandedPath)\""
         case "sha256": cmd = "shasum -a 256 \"\(expandedPath)\" | awk '{print $1}'"
         default:
-            return "Error: Unknown algorithm '\(algo)'. Use sha256 or md5. (Audit Ref: \(logID))"
+            return "Error: Unknown algorithm '\(algo)'. Use sha256 or md5."
         }
 
         let process = Process()
@@ -308,9 +284,9 @@ struct GetFileHashTool: DevgenticTool {
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let hash = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return "\(algo.uppercased()): \(hash)\nFile: \(arguments.path)\n(Audit Ref: \(logID))"
+            return "\(algo.uppercased()): \(hash)\nFile: \(arguments.path)"
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }

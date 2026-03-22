@@ -26,14 +26,6 @@ struct RunMacShortcutTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Ran shortcut: \(arguments.shortcut_name)",
-            operations: [
-                ["shortcut_name": arguments.shortcut_name]
-            ]
-        )
-        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
         process.arguments = ["run", arguments.shortcut_name]
@@ -56,9 +48,9 @@ struct RunMacShortcutTool: DevgenticTool {
             process.waitUntilExit()
             let outputData = outPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: outputData, encoding: .utf8) ?? ""
-            return "Shortcut executed. Output:\n\(output)\n(Audit Ref: \(logID))"
+            return "Shortcut executed. Output:\n\(output)"
         } catch {
-            return "Error running shortcut: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error running shortcut: \(error.localizedDescription)"
         }
     }
 }

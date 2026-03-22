@@ -74,29 +74,19 @@ struct TerminalTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Executed shell command",
-            operations: [
-                ["command": arguments.command, "status": "attempted"]
-            ]
-        )
-        // -------------------------------
-        
         do {
             if let id = conversationID {
-                // ✅ Stateful Execution via ShellSessionManager
+                // Stateful Execution via ShellSessionManager
                 // Uses the Conversation ID to persist 'cd' changes.
                 let output = try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: id)
-                return "\(output)\n(Audit Ref: \(logID))"
+                return output
             } else {
                 // Fallback: Stateless Execution (Legacy/Bot Mode)
                 let output = try await ShellSessionManager.shared.execute(command: arguments.command, conversationID: UUID()) // Ephemeral ID
-                return "\(output)\n(Audit Ref: \(logID))"
+                return output
             }
         } catch {
-            return "Command failed: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Command failed: \(error.localizedDescription)"
         }
     }
 }
@@ -159,32 +149,22 @@ struct OpenApplicationTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Launched App: \(arguments.bundle_identifier)",
-            operations: [
-                ["app_id": arguments.bundle_identifier, "action": "launch"]
-            ]
-        )
-        // -------------------------------
-        
         // Wait for actual completion to report success/failure accurately
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.main.async {
                 guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: arguments.bundle_identifier) else {
-                    continuation.resume(returning: "Error: App with bundle ID '\(arguments.bundle_identifier)' not found. (Audit Ref: \(logID))")
+                    continuation.resume(returning: "Error: App with bundle ID '\(arguments.bundle_identifier)' not found.")
                     return
                 }
-                
+
                 let config = NSWorkspace.OpenConfiguration()
                 config.activates = true
-                
+
                 NSWorkspace.shared.openApplication(at: url, configuration: config) { app, error in
                     if let error = error {
-                        continuation.resume(returning: "Error launching app: \(error.localizedDescription) (Audit Ref: \(logID))")
+                        continuation.resume(returning: "Error launching app: \(error.localizedDescription)")
                     } else {
-                        continuation.resume(returning: "Successfully launched \(app?.localizedName ?? arguments.bundle_identifier) (Audit Ref: \(logID))")
+                        continuation.resume(returning: "Successfully launched \(app?.localizedName ?? arguments.bundle_identifier)")
                     }
                 }
             }
@@ -249,26 +229,16 @@ struct RunAppleScriptTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Ran AppleScript",
-            operations: [
-                ["script_preview": String(arguments.script.prefix(200))]
-            ]
-        )
-        // -------------------------------
-        
         return await MainActor.run {
             var errorInfo: NSDictionary?
             guard let scriptObject = NSAppleScript(source: arguments.script) else {
-                return "Failed to init script. (Audit Ref: \(logID))"
+                return "Failed to init script."
             }
             let descriptor = scriptObject.executeAndReturnError(&errorInfo)
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
-            return (descriptor.stringValue ?? descriptor.description) + " (Audit Ref: \(logID))"
+            return descriptor.stringValue ?? descriptor.description
         }
     }
 }
@@ -298,14 +268,6 @@ struct GetSystemStatsTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Retrieved System Stats",
-            operations: []
-        )
-        // -------------------------------
-        
         let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
         let userName = ProcessInfo.processInfo.fullUserName
         
@@ -325,6 +287,6 @@ struct GetSystemStatsTool: DevgenticTool {
             memInfo = String(format: ", Free Memory: %.2f GB", free)
         }
         
-        return "OS: \(osVersion), User: \(userName)\(memInfo) (Audit Ref: \(logID))"
+        return "OS: \(osVersion), User: \(userName)\(memInfo)"
     }
 }

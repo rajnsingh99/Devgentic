@@ -1,0 +1,233 @@
+//
+//  EpisodicHistoryFormatterTests.swift
+//  DevgenticTests
+//
+//  Tests for XML-based episodic memory generation.
+//
+
+import XCTest
+@testable import devgentic
+
+final class EpisodicHistoryFormatterTests: XCTestCase {
+
+    // MARK: - Test Helpers
+
+    private let testConversationID = UUID()
+
+    private func makeUserMessage(_ text: String) -> ChatMessage {
+        ChatMessage(
+            conversationId: testConversationID,
+            sender: .user,
+            content: .plainText(text)
+        )
+    }
+
+    private func makeAgentMessage(_ text: String, toolEvents: [(name: String, params: String, output: String?, isSuccess: Bool)] = []) -> ChatMessage {
+        let msg = ChatMessage(
+            conversationId: testConversationID,
+            sender: .agent,
+            content: .plainText(text)
+        )
+        msg.timelineEvents = toolEvents.map { event in
+            .toolExecution(
+                id: UUID(),
+                name: event.name,
+                params: event.params,
+                output: event.output,
+                isSuccess: event.isSuccess,
+                isExecuting: false
+            )
+        }
+        return msg
+    }
+
+    // MARK: - buildRecentHistoryString Tests
+
+    func testEmptyHistory() {
+        let result = EpisodicHistoryFormatter.buildRecentHistoryString(from: [])
+        XCTAssertEqual(result, "<episodic_memory><recent/></episodic_memory>")
+    }
+
+    func testSingleSuccessfulTurn() {
+        let history: [ChatMessage] = [
+            makeUserMessage("List files in /tmp"),
+            makeAgentMessage("Found 3 files.", toolEvents: [
+                (name: "list_directory", params: "{\"path\":\"/tmp\"}", output: "file1.txt\nfile2.txt\nfile3.txt", isSuccess: true)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("<episodic_memory>"))
+        XCTAssertTrue(xml.contains("</episodic_memory>"))
+        XCTAssertTrue(xml.contains("status=\"completed\""))
+        XCTAssertTrue(xml.contains("goal=\"List files in /tmp\""))
+        XCTAssertTrue(xml.contains("recency=\"1 turn ago\""))
+        XCTAssertTrue(xml.contains("tool=\"list_directory\""))
+        XCTAssertTrue(xml.contains("status=\"success\""))
+        XCTAssertTrue(xml.contains("path=\"/tmp\""))
+    }
+
+    func testFailedDeniedTurn() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Delete cache folder"),
+            makeAgentMessage("Permission denied.", toolEvents: [
+                (name: "delete_file", params: "{\"path\":\"/tmp/cache\"}", output: "User explicitly denied permission for destructive operation", isSuccess: false)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("status=\"failed\""), "Turn should be failed")
+        XCTAssertTrue(xml.contains("status=\"denied\""), "Action should be denied")
+        XCTAssertTrue(xml.contains("<error>"), "Should contain error element")
+        XCTAssertTrue(xml.contains("denied permission"), "Error should contain denial reason")
+        XCTAssertTrue(xml.contains("<user_correction>User denied: delete_file</user_correction>"))
+    }
+
+    func testRecencyAttributes() {
+        var history: [ChatMessage] = []
+        for i in 1...4 {
+            history.append(makeUserMessage("Query \(i)"))
+            history.append(makeAgentMessage("Response \(i)"))
+        }
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("recency=\"4 turns ago\""))
+        XCTAssertTrue(xml.contains("recency=\"3 turns ago\""))
+        XCTAssertTrue(xml.contains("recency=\"2 turns ago\""))
+        XCTAssertTrue(xml.contains("recency=\"1 turn ago\""))
+    }
+
+    func testUserCorrectionSignal() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Run rm -rf /"),
+            makeAgentMessage("Denied.", toolEvents: [
+                (name: "execute_shell", params: "{\"command\":\"rm -rf /\"}", output: "User explicitly denied permission", isSuccess: false)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("<user_correction>User denied: execute_shell</user_correction>"))
+    }
+
+    func testParamsSerialization() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Search for Python files"),
+            makeAgentMessage("Found files.", toolEvents: [
+                (name: "fs_smart_search", params: "{\"search_term\":\"*.py\",\"search_scope\":\"/tmp\"}", output: nil, isSuccess: true)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("search_scope=\"/tmp\""))
+        XCTAssertTrue(xml.contains("search_term=\"*.py\""))
+    }
+
+    func testEmptyParamsLegacyMigration() {
+        // Legacy migrated messages have params: ""
+        let history: [ChatMessage] = [
+            makeUserMessage("Old query"),
+            makeAgentMessage("Old response.", toolEvents: [
+                (name: "list_directory", params: "", output: "result", isSuccess: true)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("tool=\"list_directory\""))
+        // No <params/> element should appear for empty params
+        XCTAssertFalse(xml.contains("<params"))
+    }
+
+    func testMultipleToolsPerTurn() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Read and search files"),
+            makeAgentMessage("Done.", toolEvents: [
+                (name: "read_file", params: "{\"path\":\"/tmp/a.txt\"}", output: "content", isSuccess: true),
+                (name: "fs_smart_search", params: "{\"search_term\":\"hello\"}", output: "found", isSuccess: true)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        XCTAssertTrue(xml.contains("tool=\"read_file\""))
+        XCTAssertTrue(xml.contains("tool=\"fs_smart_search\""))
+    }
+
+    func testXMLEscaping() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Find files with \"special\" <chars> & symbols"),
+            makeAgentMessage("Done.", toolEvents: [
+                (name: "fs_smart_search", params: "{\"search_term\":\"<>&\\\"\"}", output: nil, isSuccess: true)
+            ])
+        ]
+
+        let xml = EpisodicHistoryFormatter.buildRecentHistoryString(from: history)
+
+        // Goal should be escaped
+        XCTAssertTrue(xml.contains("&amp;"))
+        XCTAssertTrue(xml.contains("&lt;"))
+        XCTAssertTrue(xml.contains("&gt;"))
+        XCTAssertTrue(xml.contains("&quot;"))
+    }
+
+    // MARK: - buildGraph Tests
+
+    func testGhostProtocolPreserved() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Delete file"),
+            makeAgentMessage("Failed.", toolEvents: [
+                (name: "delete_file", params: "{\"path\":\"/tmp/x\"}", output: "Permission denied", isSuccess: false)
+            ]),
+            makeUserMessage("Try again"),
+            makeAgentMessage("OK.", toolEvents: [
+                (name: "read_file", params: "{\"path\":\"/tmp/x\"}", output: "contents", isSuccess: true)
+            ])
+        ]
+
+        let graph = EpisodicHistoryFormatter.buildGraph(from: history, sessionID: "test")
+
+        XCTAssertTrue(graph.negativeConstraints.contains("delete_file"), "Failed tool should be in negative constraints")
+        XCTAssertFalse(graph.negativeConstraints.contains("read_file"), "Successful tool should NOT be in negative constraints")
+    }
+
+    func testBuildGraphEnrichesActions() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Search for logs"),
+            makeAgentMessage("Found logs.", toolEvents: [
+                (name: "fs_smart_search", params: "{\"search_term\":\"*.log\",\"search_scope\":\"/var\"}", output: "found 5", isSuccess: true)
+            ])
+        ]
+
+        let graph = EpisodicHistoryFormatter.buildGraph(from: history, sessionID: "test")
+
+        XCTAssertEqual(graph.episodes.count, 1)
+        let episode = graph.episodes[0]
+        XCTAssertEqual(episode.actions.count, 1)
+
+        let action = episode.actions[0]
+        XCTAssertEqual(action.toolName, "fs_smart_search")
+        XCTAssertEqual(action.params["search_term"], "*.log")
+        XCTAssertEqual(action.params["search_scope"], "/var")
+        XCTAssertEqual(action.status, "SUCCESS")
+        XCTAssertNil(action.errorReason)
+    }
+
+    func testBuildGraphUserCorrection() {
+        let history: [ChatMessage] = [
+            makeUserMessage("Delete everything"),
+            makeAgentMessage("Denied.", toolEvents: [
+                (name: "delete_file", params: "{}", output: "User explicitly denied permission", isSuccess: false)
+            ])
+        ]
+
+        let graph = EpisodicHistoryFormatter.buildGraph(from: history, sessionID: "test")
+
+        XCTAssertEqual(graph.episodes.count, 1)
+        XCTAssertEqual(graph.episodes[0].userCorrection, "User denied: delete_file")
+    }
+}

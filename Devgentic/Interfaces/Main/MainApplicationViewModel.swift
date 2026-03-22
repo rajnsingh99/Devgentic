@@ -51,10 +51,6 @@ class MainApplicationViewModel: ObservableObject {
     
     // Intelligence Core
     @Published var isIntelligenceCoreEnabled: Bool = false
-    @Published var intelligenceCoreDownloadProgress: Double = 0.0
-    @Published var isIntelligenceCoreDownloading: Bool = false
-    @Published var intelligenceCoreError: String? = nil
-    @Published var showIntelligenceCoreDownloadPopup: Bool = false
     
     @Published var streamingMessageID: UUID? = nil
     @Published var streamingMessage: ChatMessage? = nil
@@ -127,18 +123,6 @@ class MainApplicationViewModel: ObservableObject {
         
         self.isIntelligenceCoreEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
         
-        // Startup check for Intelligence Core popup
-        if self.isIntelligenceCoreEnabled {
-            Task {
-                let downloaded = await IntelligenceCoreService.shared.isDownloaded()
-                if !downloaded {
-                    DispatchQueue.main.async {
-                        self.showIntelligenceCoreDownloadPopup = true
-                    }
-                }
-            }
-        }
-        
         logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(self.useStreamingResponse)")
     }
 
@@ -157,11 +141,9 @@ class MainApplicationViewModel: ObservableObject {
         $isIntelligenceCoreEnabled
             .dropFirst()
             .removeDuplicates()
-            .sink { [weak self] enabled in
+            .sink { enabled in
                 UserDefaults.standard.set(enabled, forKey: AppSettings.isIntelligenceCoreEnabledKey)
-                if enabled {
-                    self?.handleIntelligenceCoreEnablement()
-                } else {
+                if !enabled {
                     Task { await IntelligenceCoreService.shared.unload() }
                 }
             }
@@ -665,40 +647,6 @@ class MainApplicationViewModel: ObservableObject {
         self.isWebSearchEnabled = false
         self.isWebSearchActive = false
         logger.info("Successfully removed web search API key from UserDefaults and disabled search.")
-    }
-
-    // MARK: - Intelligence Core Logic
-
-    func handleIntelligenceCoreEnablementManually() {
-        handleIntelligenceCoreEnablement()
-    }
-
-    private func handleIntelligenceCoreEnablement() {
-        Task {
-            let isDownloaded = await IntelligenceCoreService.shared.isDownloaded()
-            if !isDownloaded {
-                self.isIntelligenceCoreDownloading = true
-                self.intelligenceCoreError = nil
-                do {
-                    try await IntelligenceCoreService.shared.downloadIfNeeded { progress in
-                        DispatchQueue.main.async {
-                            self.intelligenceCoreDownloadProgress = progress.fractionCompleted
-                        }
-                    }
-                    self.isIntelligenceCoreDownloading = false
-                    logger.info("Intelligence Core downloaded successfully.")
-                } catch {
-                    self.intelligenceCoreError = error.localizedDescription
-                    self.isIntelligenceCoreDownloading = false
-                    self.isIntelligenceCoreEnabled = false
-                    logger.error("Failed to download Intelligence Core: \(error.localizedDescription)")
-                }
-            } else {
-                // Pre-load if already downloaded? User request says "Load and unload on immediate basis"
-                // For now, let's just ensure it's available.
-                logger.info("Intelligence Core enabled and already present.")
-            }
-        }
     }
 
     // MARK: - Scheduler Support

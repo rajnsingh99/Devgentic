@@ -109,7 +109,6 @@ actor SupervisorExecutor: Executor {
                             instructions: input.instructions,
                             environmentFacts: envFacts,
                             longTermMemory: input.longTermMemory,
-                            compressedStateGraph: sessionState.compressWithPointers(windowSize: 5),
                             recentHistory: input.recentHistory,
                             originalQuery: routingQuery,
                             currentIteration: round,

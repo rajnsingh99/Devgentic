@@ -49,12 +49,12 @@ struct OllamaModelStoreContainerView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
                 .background(
-                    Capsule()
-                        .fill(theme.primaryBackground.opacity(0.6))
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(theme.primaryBackground)
                 )
                 .overlay(
-                    Capsule()
-                        .stroke(theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(theme.dividerColor, lineWidth: 1)
                 )
             } trailing: {
                 // Sort menu
@@ -65,7 +65,7 @@ struct OllamaModelStoreContainerView: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
+                    Image(systemName: "arrow.up.arrow.down")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(theme.accentColor)
                 }

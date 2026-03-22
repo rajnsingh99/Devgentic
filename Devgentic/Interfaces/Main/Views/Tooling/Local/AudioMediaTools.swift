@@ -29,12 +29,6 @@ struct ManageAudioTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Audio action: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         return await MainActor.run {
             var script = ""
             switch arguments.action {
@@ -42,7 +36,7 @@ struct ManageAudioTool: DevgenticTool {
                 script = "output volume of (get volume settings) & \",\" & input volume of (get volume settings) & \",\" & output muted of (get volume settings)"
             case "set_volume":
                 guard let level = arguments.level, level >= 0, level <= 100 else {
-                    return "Error: level (0-100) required for set_volume. (Audit Ref: \(logID))"
+                    return "Error: level (0-100) required for set_volume."
                 }
                 script = "set volume output volume \(level)"
             case "mute":
@@ -50,7 +44,7 @@ struct ManageAudioTool: DevgenticTool {
             case "unmute":
                 script = "set volume without output muted"
             default:
-                return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+                return "Error: Unknown action '\(arguments.action)'."
             }
 
             var errorInfo: NSDictionary?
@@ -58,18 +52,18 @@ struct ManageAudioTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
 
             if arguments.action == "get_volume" {
                 let raw = desc?.stringValue ?? ""
                 let parts = raw.split(separator: ",")
                 if parts.count >= 3 {
-                    return "Output Volume: \(parts[0])%, Input Volume: \(parts[1])%, Muted: \(parts[2]) (Audit Ref: \(logID))"
+                    return "Output Volume: \(parts[0])%, Input Volume: \(parts[1])%, Muted: \(parts[2])"
                 }
             }
 
-            return "Audio action '\(arguments.action)' executed. (Audit Ref: \(logID))"
+            return "Audio action '\(arguments.action)' executed."
         }
     }
 }
@@ -95,12 +89,6 @@ struct MediaControlTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Media control: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         // Use NX key codes for media keys
         let keyCode: UInt32
         switch arguments.action {
@@ -108,7 +96,7 @@ struct MediaControlTool: DevgenticTool {
         case "next_track": keyCode = 0x11 // NX_KEYTYPE_NEXT
         case "previous_track": keyCode = 0x12 // NX_KEYTYPE_PREVIOUS
         default:
-            return "Error: Unknown action '\(arguments.action)'. Use play_pause, next_track, previous_track. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'. Use play_pause, next_track, previous_track."
         }
 
         func postMediaKeyEvent(keyCode: UInt32, keyDown: Bool) {
@@ -131,7 +119,7 @@ struct MediaControlTool: DevgenticTool {
         postMediaKeyEvent(keyCode: keyCode, keyDown: true)
         postMediaKeyEvent(keyCode: keyCode, keyDown: false)
 
-        return "Media action '\(arguments.action)' sent. (Audit Ref: \(logID))"
+        return "Media action '\(arguments.action)' sent."
     }
 }
 
@@ -158,12 +146,6 @@ struct TextToSpeechTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "TTS: \(arguments.text.prefix(50))",
-            operations: [["text_length": String(arguments.text.count)]]
-        )
-
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
         if let voice = arguments.voice {
@@ -181,11 +163,11 @@ struct TextToSpeechTool: DevgenticTool {
             if process.terminationStatus != 0 {
                 let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
                 let errStr = String(data: errData, encoding: .utf8) ?? ""
-                return "TTS error: \(errStr) (Audit Ref: \(logID))"
+                return "TTS error: \(errStr)"
             }
-            return "Speech completed. (Audit Ref: \(logID))"
+            return "Speech completed."
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }

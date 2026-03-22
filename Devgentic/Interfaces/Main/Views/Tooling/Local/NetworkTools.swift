@@ -20,12 +20,6 @@ struct CheckNetworkStatusTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Checked network status",
-            operations: []
-        )
-
         var info = "Network Status:\n"
 
         // Internet reachability via SCNetworkReachability
@@ -67,7 +61,7 @@ struct CheckNetworkStatusTool: DevgenticTool {
         let ip = String(data: ipData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Unknown"
         info += "Local IP: \(ip)\n"
 
-        return "\(info)(Audit Ref: \(logID))"
+        return info
     }
 }
 
@@ -125,14 +119,8 @@ struct HTTPRequestTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "HTTP \(arguments.method ?? "GET") \(arguments.url)",
-            operations: [["url": arguments.url, "method": arguments.method ?? "GET"]]
-        )
-
         guard let url = URL(string: arguments.url) else {
-            return "Error: Invalid URL '\(arguments.url)'. (Audit Ref: \(logID))"
+            return "Error: Invalid URL '\(arguments.url)'."
         }
 
         var request = URLRequest(url: url, timeoutInterval: 30)
@@ -151,7 +139,7 @@ struct HTTPRequestTool: DevgenticTool {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
-                return "Error: Non-HTTP response. (Audit Ref: \(logID))"
+                return "Error: Non-HTTP response."
             }
 
             let statusCode = httpResponse.statusCode
@@ -159,9 +147,9 @@ struct HTTPRequestTool: DevgenticTool {
             let maxBody = 5000
             let truncatedBody = bodyString.count > maxBody ? String(bodyString.prefix(maxBody)) + "\n...[Truncated at \(maxBody) chars]" : bodyString
 
-            return "HTTP \(statusCode)\nHeaders: \(httpResponse.allHeaderFields.count) fields\nBody:\n\(truncatedBody)\n(Audit Ref: \(logID))"
+            return "HTTP \(statusCode)\nHeaders: \(httpResponse.allHeaderFields.count) fields\nBody:\n\(truncatedBody)"
         } catch {
-            return "Request failed: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Request failed: \(error.localizedDescription)"
         }
     }
 }
@@ -187,12 +175,6 @@ struct DNSLookupTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "DNS lookup: \(arguments.hostname)",
-            operations: [["hostname": arguments.hostname]]
-        )
-
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/nslookup")
         process.arguments = [arguments.hostname]
@@ -205,9 +187,9 @@ struct DNSLookupTool: DevgenticTool {
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
-            return "DNS Lookup for '\(arguments.hostname)':\n\(output)\n(Audit Ref: \(logID))"
+            return "DNS Lookup for '\(arguments.hostname)':\n\(output)"
         } catch {
-            return "DNS lookup failed: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "DNS lookup failed: \(error.localizedDescription)"
         }
     }
 }

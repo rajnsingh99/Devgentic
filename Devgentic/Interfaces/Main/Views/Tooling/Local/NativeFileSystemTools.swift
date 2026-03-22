@@ -68,16 +68,6 @@ struct ListDirectoryTool: DevgenticTool {
         // FIX: Support Tilde Expansion
         let resolvedPath = (arguments.path as NSString).expandingTildeInPath
 
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Listed directory contents: \(resolvedPath)",
-            operations: [
-                ["action": "list", "path": resolvedPath]
-            ]
-        )
-        // -------------------------------
-
         let fileManager = FileManager.default
         let dirURL = URL(fileURLWithPath: resolvedPath)
 
@@ -89,7 +79,7 @@ struct ListDirectoryTool: DevgenticTool {
             )
 
             if contents.isEmpty {
-                return "📂 Directory '\(resolvedPath)' is empty.\n(Audit Ref: \(logID))"
+                return "📂 Directory '\(resolvedPath)' is empty."
             }
 
             // Phase 10: Structured output with type indicators and sizes for LLM clarity.
@@ -114,9 +104,9 @@ struct ListDirectoryTool: DevgenticTool {
             }
 
             let header = "📂 Contents of '\(resolvedPath)' — \(contents.count) items (\(dirCount) folders, \(fileCount) files):"
-            return "\(header)\n\(lines.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+            return "\(header)\n\(lines.joined(separator: "\n"))"
         } catch {
-            return "Error listing directory: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error listing directory: \(error.localizedDescription)"
         }
     }
 }
@@ -180,23 +170,13 @@ struct ReadFileTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
         let resolvedPath = (arguments.path as NSString).expandingTildeInPath
-        
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Read file content: \(resolvedPath)",
-            operations: [
-                ["action": "read", "path": resolvedPath]
-            ]
-        )
-        // -------------------------------
-        
+
         do {
             let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
             // FIX: Explicitly label the file source
-            return "📄 Contents of file '\(resolvedPath)':\n\(content)\n(Audit Ref: \(logID))"
+            return "📄 Contents of file '\(resolvedPath)':\n\(content)"
         } catch {
-            return "Error reading file: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error reading file: \(error.localizedDescription)"
         }
     }
 }
@@ -285,18 +265,8 @@ struct WriteFileTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
         let resolvedPath = (arguments.path as NSString).expandingTildeInPath
-        
-        // --- LOGGING INSTRUMENTATION ---
         let mode = (arguments.append ?? false) ? "append" : "write"
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "\(mode.capitalized) to file at \(resolvedPath)",
-            operations: [
-                ["action": mode, "path": resolvedPath, "status": "attempted"]
-            ]
-        )
-        // -------------------------------
-        
+
         do {
             let fileURL = URL(fileURLWithPath: resolvedPath)
             let data = arguments.content.data(using: .utf8) ?? Data()
@@ -316,9 +286,9 @@ struct WriteFileTool: DevgenticTool {
                 try data.write(to: fileURL, options: .atomic)
             }
 
-            return "Successfully \(mode)ed to \(resolvedPath) (Audit Ref: \(logID))"
+            return "Successfully \(mode)ed to \(resolvedPath)"
         } catch {
-            return "Error writing file: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error writing file: \(error.localizedDescription)"
         }
     }
 }
@@ -390,16 +360,7 @@ struct DeleteFileTool: DevgenticTool {
                 return "Error: File not found at \(resolvedPath)"
             }
             try fm.removeItem(atPath: resolvedPath)
-            
-            // --- LOGGING INSTRUMENTATION ---
-            let logID = LogManager.shared.logAction(
-                toolName: self.name,
-                summary: "Deleted item at \(resolvedPath)",
-                operations: [
-                    ["action": "delete", "path": resolvedPath, "status": "success"]
-                ]
-            )
-            return "Successfully deleted: \(resolvedPath) (Audit Ref: \(logID))"
+            return "Successfully deleted: \(resolvedPath)"
         } catch {
             return "Deletion failed: \(error.localizedDescription)"
         }
@@ -490,16 +451,7 @@ struct MoveFileTool: DevgenticTool {
             }
             
             try fm.moveItem(atPath: resolvedSource, toPath: resolvedDest)
-            
-            // --- LOGGING INSTRUMENTATION ---
-            let logID = LogManager.shared.logAction(
-                toolName: self.name,
-                summary: "Moved item",
-                operations: [
-                    ["from": resolvedSource, "to": resolvedDest, "status": "success"]
-                ]
-            )
-            return "Successfully moved/renamed to: \(resolvedDest) (Audit Ref: \(logID))"
+            return "Successfully moved/renamed to: \(resolvedDest)"
         } catch {
             return "Move failed: \(error.localizedDescription)"
         }
@@ -584,16 +536,7 @@ struct CopyFileTool: DevgenticTool {
             }
             
             try fm.copyItem(atPath: resolvedSource, toPath: resolvedDest)
-            
-            // --- LOGGING INSTRUMENTATION ---
-            let logID = LogManager.shared.logAction(
-                toolName: self.name,
-                summary: "Copied item",
-                operations: [
-                    ["from": resolvedSource, "to": resolvedDest, "status": "success"]
-                ]
-            )
-            return "Successfully copied to: \(resolvedDest) (Audit Ref: \(logID))"
+            return "Successfully copied to: \(resolvedDest)"
         } catch {
             return "Copy failed: \(error.localizedDescription)"
         }
@@ -659,16 +602,7 @@ struct CreateFolderTool: DevgenticTool {
             }
             
             try fm.createDirectory(atPath: resolvedPath, withIntermediateDirectories: true, attributes: nil)
-            
-            // --- LOGGING INSTRUMENTATION ---
-            let logID = LogManager.shared.logAction(
-                toolName: self.name,
-                summary: "Created directory",
-                operations: [
-                    ["path": resolvedPath, "status": "success"]
-                ]
-            )
-            return "Successfully created directory: \(resolvedPath) (Audit Ref: \(logID))"
+            return "Successfully created directory: \(resolvedPath)"
         } catch {
             return "Creation failed: \(error.localizedDescription)"
         }

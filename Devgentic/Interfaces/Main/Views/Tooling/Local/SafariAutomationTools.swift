@@ -29,17 +29,11 @@ struct ManageSafariTabsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Safari tab action: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         return await MainActor.run {
             var script = ""
             switch arguments.action {
             case "open":
-                guard let url = arguments.url else { return "Error: url missing. (Audit Ref: \(logID))" }
+                guard let url = arguments.url else { return "Error: url missing." }
                 script = """
                 tell application "Safari"
                     open location "\(url)"
@@ -86,7 +80,7 @@ struct ManageSafariTabsTool: DevgenticTool {
                 end if
                 """
             case "switch_tab":
-                guard let idx = arguments.tab_index else { return "Error: tab_index required for switch_tab. (Audit Ref: \(logID))" }
+                guard let idx = arguments.tab_index else { return "Error: tab_index required for switch_tab." }
                 script = """
                 tell application "Safari"
                     set current tab of front window to tab \(idx) of front window
@@ -108,7 +102,7 @@ struct ManageSafariTabsTool: DevgenticTool {
                 end if
                 """
             default:
-                return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+                return "Error: Unknown action '\(arguments.action)'."
             }
 
             var errorInfo: NSDictionary?
@@ -116,11 +110,11 @@ struct ManageSafariTabsTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
 
             let output = desc?.stringValue ?? "Success"
-            return "\(output) (Audit Ref: \(logID))"
+            return output
         }
     }
 }
@@ -144,22 +138,16 @@ struct ReadSafariBookmarksTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Read Safari Bookmarks",
-            operations: []
-        )
-        
         let url = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Safari/Bookmarks.plist")
         guard let data = try? Data(contentsOf: url),
               let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
-            return "Error: Could not read Bookmarks.plist. Need Full Disk Access or file is missing. (Audit Ref: \(logID))"
+            return "Error: Could not read Bookmarks.plist. Need Full Disk Access or file is missing."
         }
-        
+
         var foundURLs: [String] = []
         func findURLs(in dict: [String: Any]) {
             if let count = arguments.limit, foundURLs.count >= count { return }
-            
+
             if let url = dict["URLString"] as? String, let titleDict = dict["URIDictionary"] as? [String: Any], let title = titleDict["title"] as? String {
                 foundURLs.append("\(title): \(url)")
             } else if let children = dict["Children"] as? [[String: Any]] {
@@ -168,10 +156,10 @@ struct ReadSafariBookmarksTool: DevgenticTool {
                 }
             }
         }
-        
+
         findURLs(in: plist)
-        
-        return "Bookmarks:\n\(foundURLs.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+
+        return "Bookmarks:\n\(foundURLs.joined(separator: "\n"))"
     }
 }
 
@@ -196,12 +184,6 @@ struct ExtractSafariReaderViewTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Extracted Safari Text",
-            operations: []
-        )
-
         return await MainActor.run {
             let script = """
             if application "Safari" is running then
@@ -222,7 +204,7 @@ struct ExtractSafariReaderViewTool: DevgenticTool {
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
 
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
 
             let output = desc?.stringValue ?? "No content found"
@@ -231,7 +213,7 @@ struct ExtractSafariReaderViewTool: DevgenticTool {
             let totalLen = output.count
 
             guard startOffset < totalLen else {
-                return "Offset \(startOffset) exceeds content length \(totalLen). (Audit Ref: \(logID))"
+                return "Offset \(startOffset) exceeds content length \(totalLen)."
             }
 
             let startIdx = output.index(output.startIndex, offsetBy: startOffset)
@@ -245,7 +227,7 @@ struct ExtractSafariReaderViewTool: DevgenticTool {
                 result += "\n[More content available — use offset: \(startOffset + chunk.count)]"
             }
 
-            return "\(result)\n(Audit Ref: \(logID))"
+            return result
         }
     }
 }

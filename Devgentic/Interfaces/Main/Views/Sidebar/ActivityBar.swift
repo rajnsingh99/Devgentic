@@ -153,6 +153,7 @@ struct ActivityBarView: View {
 
     @Binding var selectedTab: SidebarTab?
     @Binding var isSidebarVisible: Bool
+    @Environment(\.appTheme) private var theme
 
     private let topTabs: [SidebarTab] = [.conversations, .explorer, .promptLibrary, .scheduler, .backendProfiles, .downloads]
     private let bottomTabs: [SidebarTab] = [.settings]
@@ -161,6 +162,12 @@ struct ActivityBarView: View {
     var body: some View {
         VStack(spacing: 6) {
             HomeButton(isSidebarVisible: $isSidebarVisible, selectedTab: $selectedTab)
+
+            // Visual separator between Home and tab buttons
+            Capsule()
+                .fill(theme.dividerColor)
+                .frame(width: 24, height: 1)
+                .padding(.vertical, 2)
 
             ForEach(topTabs) { tab in
                 ActivityBarButton(

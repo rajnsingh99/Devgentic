@@ -31,6 +31,7 @@ struct MLXModelItem: Identifiable, Hashable {
     let id: String         // Folder Name
     let displayName: String // Readable Name (e.g. "mlx-community/Llama-3...")
     let localPath: URL
+    let createdAt: Date?   // Filesystem creation date — used to sort by recency
 }
 
 
@@ -38,13 +39,14 @@ struct MLXModelItem: Identifiable, Hashable {
 struct MLXDisplayModel: Identifiable, Hashable {
     let id: String               // e.g. "mlx-community/Llama-3.2..."
     var size: String?            // e.g. "2.4 GB"
-    
+
     // Metadata
     let capabilities: Set<MLXModelCapability>
     let tags: [String]
     let downloads: Int
     let likes: Int
     let description: String?
+    var createdAt: Date?         // Filesystem creation date for installed models
     
     // UI Helpers
     var displayName: String {

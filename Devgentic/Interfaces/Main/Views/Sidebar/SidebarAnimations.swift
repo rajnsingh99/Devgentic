@@ -37,17 +37,18 @@ struct PulseAnimationModifier: ViewModifier {
 }
 
 // MARK: - Streaming Pulse Indicator
-/// An animated pulsing blue dot indicating an active streaming conversation.
+/// An animated pulsing dot indicating an active streaming conversation.
 struct StreamingPulseIndicator: View {
     @State private var isPulsing = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         Circle()
-            .fill(Color.blue)
+            .fill(theme.streamingIndicator)
             .frame(width: 8, height: 8)
             .scaleEffect(isPulsing ? 1.3 : 0.8)
             .opacity(isPulsing ? 1.0 : 0.5)
-            .shadow(color: .blue.opacity(isPulsing ? 0.4 : 0.0), radius: 4)
+            .shadow(color: theme.streamingIndicator.opacity(isPulsing ? 0.4 : 0.0), radius: 4)
             .animation(
                 .easeInOut(duration: 0.8)
                 .repeatForever(autoreverses: true),
@@ -64,16 +65,17 @@ struct HoverActionButton: View {
     var tint: Color = .secondary
     let action: () -> Void
     @State private var isHovering = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(isHovering ? tint : .secondary.opacity(0.5))
+                .foregroundColor(isHovering ? tint : theme.tertiaryText)
                 .frame(width: 22, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isHovering ? Color.white.opacity(0.1) : Color.clear)
+                        .fill(isHovering ? theme.surfaceOverlay : Color.clear)
                 )
         }
         .buttonStyle(.plain)

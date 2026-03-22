@@ -95,14 +95,14 @@ struct ConversationRowView: View {
                     .padding(.trailing, 4)
                     .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
             } else {
-                // Spacer to keep layout identical when not selected
                 Spacer()
                     .frame(width: 7)
             }
 
             // Content Container
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
+                // Title row with timestamp
+                HStack(spacing: 5) {
                     // Inline pin icon
                     if conversation.isPinned {
                         Image(systemName: "pin.fill")
@@ -111,24 +111,36 @@ struct ConversationRowView: View {
                             .rotationEffect(.degrees(-45))
                     }
 
+                    // Backend colored dot
+                    if let backendType = conversation.backendType, backendType != .none {
+                        Circle()
+                            .fill(badgeColor(for: backendType))
+                            .frame(width: 6, height: 6)
+                    }
+
                     Text(conversation.displayTitle)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
                     Spacer()
+
+                    // Streaming indicator or timestamp
+                    if conversation.isStreaming {
+                        StreamingPulseIndicator()
+                    } else {
+                        Text(conversation.relativeTimestamp)
+                            .font(.system(size: 10))
+                            .foregroundColor(theme.tertiaryText)
+                    }
                 }
 
-                // Backend badge chip displayed below the title
-                if let backendType = conversation.backendType, backendType != .none {
-                    Text(backendType.rawValue)
-                        .font(.system(size: 9, weight: .medium))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(badgeColor(for: backendType).opacity(0.1))
-                        .foregroundColor(badgeColor(for: backendType).opacity(0.8))
-                        .clipShape(Capsule())
-                }
+                // Last message preview
+                Text(conversation.lastMessageSnippet)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(1)
+                    .padding(.leading, conversation.isPinned ? 14 : (conversation.backendType != nil && conversation.backendType != .none ? 11 : 0))
             }
         }
     }

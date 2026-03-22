@@ -47,7 +47,10 @@ class RAGIndexingService {
             return
         }
         
-        let fullText = message.content.textContent ?? chunks.joined(separator: "\n\n")
+        // Strip think blocks from the full text to prevent internal model reasoning
+        // from polluting the semantic index. Only user-facing content should be searchable.
+        let rawFullText = message.content.textContent ?? chunks.joined(separator: "\n\n")
+        let fullText = OutputSanitizer.stripThinkBlocksAndTokens(rawFullText)
         
         let parentDoc = ParentDocumentEntity(
             sourceMessageID: message.id,
@@ -59,7 +62,10 @@ class RAGIndexingService {
         var childEntities: [ChildChunkEntity] = []
         
         // Await EmbeddingService.generateEmbedding() for each chunk
-        for (index, chunkText) in chunks.enumerated() {
+        for (index, rawChunkText) in chunks.enumerated() {
+            // Strip think blocks from individual chunks as well
+            let chunkText = OutputSanitizer.stripThinkBlocksAndTokens(rawChunkText)
+            guard !chunkText.isEmpty else { continue }
             if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
                 let child = ChildChunkEntity(
                     chunkText: chunkText,

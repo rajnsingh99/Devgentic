@@ -1,6 +1,6 @@
 //
 //  AgentModel.swift
-//  Devgentic
+//  Devgentic5
 //
 //  Created by Raj Singh on 02/02/26.
 //
@@ -349,26 +349,6 @@ struct AgentInput: Sendable {
         userPayload ?? [.text(userInput)]
     }
 
-    /// Computed Compatibility Layer
-    var persistentMemory: String? {
-        guard let state = activeState else { return nil }
-        let history = recentHistory ?? "(No recent history)"
-        
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let jsonString = (try? String(data: encoder.encode(state), encoding: .utf8)) ?? "{}"
-
-        return """
-        ## 🧠 UNIFIED HIERARCHICAL STATE (FULL GRAPH)
-        ```json
-        \(jsonString)
-        ```
-
-        ## 📜 RECENT ACTIVITY
-        \(history)
-        """
-    }
-
     init(
         userInput: String,
         userPayload: Payload? = nil,
@@ -418,7 +398,6 @@ struct SemanticContext: Sendable {
     
     // 2. Memory & Long-Term State
     let longTermMemory: any LongTermMemoryStrategy
-    let compressedStateGraph: String
     let recentHistory: String?
     
     // 3. Current Execution State

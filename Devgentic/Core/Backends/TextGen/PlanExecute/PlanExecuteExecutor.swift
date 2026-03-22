@@ -88,7 +88,6 @@ actor PlanExecuteExecutor: Executor {
                         instructions: input.instructions,
                         environmentFacts: envFacts,
                         longTermMemory: input.longTermMemory,
-                        compressedStateGraph: sessionState.compressWithPointers(windowSize: 5),
                         recentHistory: input.recentHistory,
                         originalQuery: input.userInput,
                         currentIteration: 0,
@@ -157,7 +156,6 @@ actor PlanExecuteExecutor: Executor {
                                 instructions: input.instructions,
                                 environmentFacts: envFacts,
                                 longTermMemory: input.longTermMemory,
-                                compressedStateGraph: sessionState.compressWithPointers(windowSize: 5),
                                 recentHistory: input.recentHistory,
                                 originalQuery: subtask.description,
                                 currentIteration: innerIteration,
@@ -264,6 +262,13 @@ actor PlanExecuteExecutor: Executor {
                                 if !obs.isSuccess {
                                     circuitBreaker.recordHallucination(obs.toolName)
                                 }
+                            }
+
+                            // Repetitive action loop detection
+                            let repetitiveAction = circuitBreaker.evaluateRepetitiveActions(observations)
+                            if case .abort(let reason) = repetitiveAction {
+                                planMemory.markSubtask(at: subtaskIndex, status: .failed, result: reason)
+                                break innerLoop
                             }
 
                             circuitBreaker.resetCountersOnSuccess()

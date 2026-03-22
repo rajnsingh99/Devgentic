@@ -3,7 +3,7 @@
 //  Devgentic
 //
 //  Created by Devgentic Architect
-//  Updated: Memory Architecture Migration - Phase 2 (Pointer-Based Memory)
+//  Updated: Memory Architecture Migration - Phase 3 (XML Episodic Memory)
 //
 
 import Foundation
@@ -15,15 +15,21 @@ import Foundation
 /// Decoupled from database identity constraints.
 struct MemoryAction: Sendable, Codable, Identifiable {
     let id: UUID
+    let toolName: String
     let intent: String
     var status: String
+    var params: [String: String]
+    var errorReason: String?
     var logs: [String]
     var artifacts: [MediaArtifact]
 
-    init(id: UUID = UUID(), intent: String, status: String, logs: [String] = [], artifacts: [MediaArtifact] = []) {
+    init(id: UUID = UUID(), toolName: String = "", intent: String, status: String, params: [String: String] = [:], errorReason: String? = nil, logs: [String] = [], artifacts: [MediaArtifact] = []) {
         self.id = id
+        self.toolName = toolName
         self.intent = intent
         self.status = status
+        self.params = params
+        self.errorReason = errorReason
         self.logs = logs
         self.artifacts = artifacts
     }
@@ -46,14 +52,18 @@ struct MemoryEpisode: Sendable, Codable, Identifiable {
     var summary: String?
     
     var actions: [MemoryAction]
-    
-    init(id: UUID = UUID(), primaryGoal: String, status: String = "ACTIVE", finalOutcome: String? = nil, summary: String? = nil, actions: [MemoryAction] = []) {
+
+    /// Captures user correction/denial signal for this turn.
+    var userCorrection: String?
+
+    init(id: UUID = UUID(), primaryGoal: String, status: String = "ACTIVE", finalOutcome: String? = nil, summary: String? = nil, actions: [MemoryAction] = [], userCorrection: String? = nil) {
         self.id = id
         self.primaryGoal = primaryGoal
         self.status = status
         self.finalOutcome = finalOutcome
         self.summary = summary
         self.actions = actions
+        self.userCorrection = userCorrection
     }
     
     /// Returns the currently active action, if any.
@@ -83,73 +93,6 @@ struct SessionGraph: Sendable, Codable {
         self.episodes = episodes
         self.negativeConstraints = negativeConstraints
         self.workingMemory = workingMemory
-    }
-    
-    /// Generates a pointer-based string representation for the LLM prompt.
-    /// It separates older history into lightweight pointers (UUIDs + summaries)
-    /// and retains full JSON context only for the recent sliding window.
-    func compressWithPointers(windowSize: Int = 5) -> String {
-        let totalEpisodes = episodes.count
-        
-        if totalEpisodes <= windowSize {
-            return """
-            [RECENT MEMORY - LAST \(totalEpisodes) TURNS]
-            \(self.generateLegacyJson())
-            """
-        }
-        
-        let splitIndex = totalEpisodes - windowSize
-        let archivedEpisodes = episodes.prefix(splitIndex)
-        let recentEpisodes = episodes.suffix(windowSize)
-        
-        // Build the pointers string
-        var pointersBlock = "[ARCHIVED MEMORY POINTERS]\n"
-        for (index, ep) in archivedEpisodes.enumerated() {
-            let turnNum = index + 1
-            let summaryText = ep.summary ?? ep.primaryGoal
-            pointersBlock += "- Turn \(turnNum) [UUID: \(ep.id.uuidString)]: \(summaryText)\n"
-        }
-        pointersBlock += "(Use conversation_history_tool to retrieve full details if needed)\n"
-        
-        // Build the recent JSON string by masking older episodes
-        var recentGraph = self
-        recentGraph.episodes = Array(recentEpisodes)
-        let recentJson = recentGraph.generateLegacyJson()
-        
-        return """
-        \(pointersBlock)
-        [RECENT MEMORY - LAST \(windowSize) TURNS]
-        \(recentJson)
-        """
-    }
-    
-    /// Generates a token-efficient JSON string representation for the LLM prompt.
-    /// Strips out raw logs from COMPLETED episodes to save context window space,
-    /// while keeping the full diagnostic logs for ACTIVE episodes.
-    @available(*, deprecated, message: "JSON-based memory injection is being phased out in favor of 3-Tier XML/Markdown. Use generateLegacyJson() if raw JSON is still required by legacy generators.")
-    func compressForPrompt() -> String {
-        return generateLegacyJson()
-    }
-    
-    private func generateLegacyJson() -> String {
-        var compressedGraph = self
-        
-        // Loop through episodes and strip logs for completed tasks
-        for i in compressedGraph.episodes.indices {
-            if compressedGraph.episodes[i].status.uppercased() == "COMPLETED" {
-                for j in compressedGraph.episodes[i].actions.indices {
-                    compressedGraph.episodes[i].actions[j].logs = []
-                }
-            }
-        }
-        
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(compressedGraph),
-              let string = String(data: data, encoding: .utf8) else {
-            return "{}"
-        }
-        return string
     }
     
     // MARK: - Legacy Compatibility Layer

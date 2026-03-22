@@ -30,16 +30,6 @@ struct ReadSessionHistoryTool: DevgenticTool {
     // MARK: - Execution
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Recalled uncompressed session history graph",
-            operations: [
-                ["conversation_id": conversationID.uuidString, "action": "history_retrieval"]
-            ]
-        )
-        // -------------------------------
-
         // 1. Fetch the raw, uncompressed state from the Twin-Store / Graph Manager
         let uncompressedState = SessionGraphStore.shared.getActiveState(for: conversationID)
         
@@ -50,21 +40,19 @@ struct ReadSessionHistoryTool: DevgenticTool {
         do {
             let data = try encoder.encode(uncompressedState)
             guard let jsonString = String(data: data, encoding: .utf8) else {
-                return "System Error: Failed to convert session graph to string. (Audit Ref: \(logID))"
+                return "System Error: Failed to convert session graph to string."
             }
             
             return """
             [SYSTEM: UNCOMPRESSED SESSION GRAPH]
             The following JSON contains the full history of this session, including raw logs for COMPLETED tasks:
-            
+
             ```json
             \(jsonString)
             ```
-            
-            (Audit Ref: \(logID))
             """
         } catch {
-            return "System Error: Failed to encode session history. Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "System Error: Failed to encode session history. Error: \(error.localizedDescription)"
         }
     }
 }

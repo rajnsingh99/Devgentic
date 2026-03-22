@@ -30,34 +30,28 @@ struct ManageClipboardTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Clipboard action: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         return await MainActor.run {
             let pb = NSPasteboard.general
 
             switch arguments.action {
             case "read":
                 if let str = pb.string(forType: .string) {
-                    return "Clipboard Contents:\n\(str)\n(Audit Ref: \(logID))"
+                    return "Clipboard Contents:\n\(str)"
                 } else {
-                    return "Clipboard is empty or does not contain text. (Audit Ref: \(logID))"
+                    return "Clipboard is empty or does not contain text."
                 }
 
             case "write":
                 guard let text = arguments.text else {
-                    return "Error: 'text' is required for 'write' action. (Audit Ref: \(logID))"
+                    return "Error: 'text' is required for 'write' action."
                 }
                 pb.clearContents()
                 pb.setString(text, forType: .string)
-                return "Successfully wrote to clipboard. (Audit Ref: \(logID))"
+                return "Successfully wrote to clipboard."
 
             case "read_image":
                 guard let imgData = pb.data(forType: .tiff) ?? pb.data(forType: .png) else {
-                    return "No image data on clipboard. (Audit Ref: \(logID))"
+                    return "No image data on clipboard."
                 }
                 let savePath = (arguments.image_path as NSString?)?.expandingTildeInPath
                     ?? NSTemporaryDirectory() + "clipboard_image_\(UUID().uuidString.prefix(8)).png"
@@ -65,33 +59,33 @@ struct ManageClipboardTool: DevgenticTool {
                       let tiffData = image.tiffRepresentation,
                       let bitmapRep = NSBitmapImageRep(data: tiffData),
                       let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
-                    return "Error: Could not convert clipboard image. (Audit Ref: \(logID))"
+                    return "Error: Could not convert clipboard image."
                 }
                 do {
                     try pngData.write(to: URL(fileURLWithPath: savePath))
-                    return "Saved clipboard image to: \(savePath) (\(pngData.count) bytes) (Audit Ref: \(logID))"
+                    return "Saved clipboard image to: \(savePath) (\(pngData.count) bytes)"
                 } catch {
-                    return "Error saving image: \(error.localizedDescription) (Audit Ref: \(logID))"
+                    return "Error saving image: \(error.localizedDescription)"
                 }
 
             case "write_image":
                 guard let imagePath = arguments.image_path else {
-                    return "Error: 'image_path' required for write_image. (Audit Ref: \(logID))"
+                    return "Error: 'image_path' required for write_image."
                 }
                 let expandedPath = (imagePath as NSString).expandingTildeInPath
                 guard let image = NSImage(contentsOfFile: expandedPath) else {
-                    return "Error: Could not load image from '\(expandedPath)'. (Audit Ref: \(logID))"
+                    return "Error: Could not load image from '\(expandedPath)'."
                 }
                 pb.clearContents()
                 pb.writeObjects([image])
-                return "Image copied to clipboard from \(expandedPath). (Audit Ref: \(logID))"
+                return "Image copied to clipboard from \(expandedPath)."
 
             case "get_types":
                 let types = pb.types?.map { $0.rawValue } ?? []
-                return "Clipboard content types: \(types.joined(separator: ", ")) (Audit Ref: \(logID))"
+                return "Clipboard content types: \(types.joined(separator: ", "))"
 
             default:
-                return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+                return "Error: Unknown action '\(arguments.action)'."
             }
         }
     }
@@ -118,20 +112,12 @@ struct PushLocalNotificationTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Pushed notification: \(arguments.title)",
-            operations: [
-                ["title": arguments.title]
-            ]
-        )
-        
         let center = UNUserNotificationCenter.current()
         let options: UNAuthorizationOptions = [.alert, .sound]
         
         let access = try await center.requestAuthorization(options: options)
         guard access else {
-            return "Error: Notification permission denied. (Audit Ref: \(logID))"
+            return "Error: Notification permission denied."
         }
         
         let content = UNMutableNotificationContent()
@@ -142,6 +128,6 @@ struct PushLocalNotificationTool: DevgenticTool {
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         try await center.add(request)
         
-        return "Notification pushed successfully. (Audit Ref: \(logID))"
+        return "Notification pushed successfully."
     }
 }

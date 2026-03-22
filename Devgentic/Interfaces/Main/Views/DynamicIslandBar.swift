@@ -63,7 +63,7 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
         .background(
             Capsule()
                 .fill(theme.secondaryBackground)
-                .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 4)
+                .shadow(color: theme.primaryText.opacity(0.08), radius: 12, x: 0, y: 4)
         )
         .overlay(
             Capsule()

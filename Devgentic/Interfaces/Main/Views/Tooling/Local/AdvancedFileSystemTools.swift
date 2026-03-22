@@ -300,16 +300,6 @@ struct SmartSearchTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Executed Spotlight Search: '\(arguments.search_term)'",
-            operations: [
-                ["term": arguments.search_term, "scope": arguments.search_scope ?? "Global"]
-            ]
-        )
-        // -------------------------------
-
         do {
             let result = try await HybridSearchService.shared.search(
                 term: arguments.search_term,
@@ -318,11 +308,11 @@ struct SmartSearchTool: DevgenticTool {
 
             // Check for explicit error
             if let error = result.error {
-                return "\(error) (Audit Ref: \(logID))"
+                return "\(error)"
             }
 
             if result.isEmpty {
-                return "No results found matching '\(arguments.search_term)'. (Audit Ref: \(logID))"
+                return "No results found matching '\(arguments.search_term)'."
             }
 
             // Build structured output with relevance tiers
@@ -345,10 +335,10 @@ struct SmartSearchTool: DevgenticTool {
                 output += "\n\n\(note)"
             }
 
-            return "\(output)\n(Audit Ref: \(logID))"
+            return "\(output)"
 
         } catch {
-            return "Search failed: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Search failed: \(error.localizedDescription)"
         }
     }
 }
@@ -399,16 +389,6 @@ struct ReadMetadataTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Read metadata for: \(arguments.path)",
-            operations: [
-                ["path": arguments.path]
-            ]
-        )
-        // -------------------------------
-
         let url = URL(fileURLWithPath: arguments.path)
         do {
             let resourceKeys: Set<URLResourceKey> = [.tagNamesKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey, .fileSizeKey]
@@ -436,9 +416,9 @@ struct ReadMetadataTool: DevgenticTool {
                 info += "Origin URL: \(origin.first ?? "Unknown")\n"
             }
             
-            return info + "\n(Audit Ref: \(logID))"
+            return info + ""
         } catch {
-            return "Error reading metadata: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error reading metadata: \(error.localizedDescription)"
         }
     }
 }
@@ -567,12 +547,6 @@ struct OrganizeBatchTool: DevgenticTool {
         resultMessage += "Processed \(arguments.sourcePaths.count) files. Moved: \(movedCount). Errors: \(errors.count)."
         if !errors.isEmpty { resultMessage += "\nDetails: \(errors.joined(separator: ", "))" }
         
-        // --- LOGGING ---
-        if !isDryRun && movedCount > 0 {
-            let summary = "Moved \(movedCount) files to \(destURL.lastPathComponent)"
-            let actionID = LogManager.shared.logAction(toolName: self.name, summary: summary, operations: operationsLog)
-            resultMessage += "\n\n✅ Action Logged to Evidence Locker. Reference ID: \(actionID)"
-        }
         return resultMessage
     }
 }
@@ -583,7 +557,7 @@ class WatcherService {
     static let shared = WatcherService()
     private var activeMonitors: [UUID: (source: DispatchSourceFileSystemObject, path: String)] = [:]
 
-    func startWatching(path: String, auditRef: String) -> String {
+    func startWatching(path: String) -> String {
         let url = URL(fileURLWithPath: path)
         let descriptor = open(url.path, O_EVTONLY)
         guard descriptor != -1 else { return "Failed to open descriptor for path." }
@@ -593,13 +567,13 @@ class WatcherService {
 
         source.setEventHandler {
             print("FS EVENT: Change detected in \(path)")
-            NotificationCenter.default.post(name: Notification.Name("DevgenticFSEvent"), object: nil, userInfo: ["path": path, "auditRef": auditRef])
+            NotificationCenter.default.post(name: Notification.Name("DevgenticFSEvent"), object: nil, userInfo: ["path": path])
         }
 
         source.setCancelHandler { close(descriptor) }
         source.resume()
         activeMonitors[id] = (source: source, path: path)
-        return "Started watching \(path). Monitor ID: \(id.uuidString). (Audit Ref: \(auditRef))"
+        return "Started watching \(path). Monitor ID: \(id.uuidString)."
     }
 
     func stopWatching(monitorID: String) -> String {
@@ -664,38 +638,32 @@ struct WatchFolderTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "FS Watch: \(arguments.action ?? "start")",
-            operations: [["action": arguments.action ?? "start", "path": arguments.path ?? ""]]
-        )
-
         let action = arguments.action ?? "start"
 
         switch action {
         case "start":
             guard let path = arguments.path else {
-                return "Error: 'path' required for start. (Audit Ref: \(logID))"
+                return "Error: 'path' required for start."
             }
-            return WatcherService.shared.startWatching(path: path, auditRef: logID)
+            return WatcherService.shared.startWatching(path: path)
 
         case "stop":
             guard let monitorID = arguments.monitor_id else {
-                return "Error: 'monitor_id' required for stop. (Audit Ref: \(logID))"
+                return "Error: 'monitor_id' required for stop."
             }
             let result = WatcherService.shared.stopWatching(monitorID: monitorID)
-            return "\(result) (Audit Ref: \(logID))"
+            return "\(result)"
 
         case "list":
             let monitors = WatcherService.shared.listActive()
             if monitors.isEmpty {
-                return "No active folder monitors. (Audit Ref: \(logID))"
+                return "No active folder monitors."
             }
             let list = monitors.map { "- [\($0.id)] \($0.path)" }.joined(separator: "\n")
-            return "Active Monitors (\(monitors.count)):\n\(list)\n(Audit Ref: \(logID))"
+            return "Active Monitors (\(monitors.count)):\n\(list)"
 
         default:
-            return "Error: Unknown action '\(action)'. Use start/stop/list. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(action)'. Use start/stop/list."
         }
     }
 }

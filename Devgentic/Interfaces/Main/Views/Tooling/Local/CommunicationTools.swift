@@ -31,12 +31,6 @@ struct ManageAppleMailTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Mail action: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-        
         return await MainActor.run {
             var script = ""
             switch arguments.action {
@@ -72,18 +66,18 @@ struct ManageAppleMailTool: DevgenticTool {
                 end tell
                 """
             default:
-                return "Error: Unknown action. (Audit Ref: \(logID))"
+                return "Error: Unknown action."
             }
-            
+
             var errorInfo: NSDictionary?
             let scriptObj = NSAppleScript(source: script)
             let desc = scriptObj?.executeAndReturnError(&errorInfo)
-            
+
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
             let output = desc?.stringValue ?? "Success"
-            return "\(output) (Audit Ref: \(logID))"
+            return output
         }
     }
 }
@@ -109,12 +103,6 @@ struct SendIMessageTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Sent iMessage to \(arguments.target_buddy)",
-            operations: [["target": arguments.target_buddy]]
-        )
-        
         return await MainActor.run {
             let script = """
             tell application "Messages"
@@ -124,15 +112,15 @@ struct SendIMessageTool: DevgenticTool {
                 send "\(arguments.message)" to theBuddy
             end tell
             """
-            
+
             var errorInfo: NSDictionary?
             let scriptObj = NSAppleScript(source: script)
             _ = scriptObj?.executeAndReturnError(&errorInfo)
-            
+
             if let err = errorInfo {
-                return "AppleScript Error: \(err) (Audit Ref: \(logID))"
+                return "AppleScript Error: \(err)"
             }
-            return "Successfully sent iMessage. (Audit Ref: \(logID))"
+            return "Successfully sent iMessage."
         }
     }
 }

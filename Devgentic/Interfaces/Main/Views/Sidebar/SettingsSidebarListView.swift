@@ -82,9 +82,16 @@ private struct SettingsCategoryRow: View {
                     .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
                     .frame(width: 24)
 
-                Text(category.rawValue)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(theme.primaryText)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(category.rawValue)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(theme.primaryText)
+
+                    Text(category.subtitle)
+                        .font(.system(size: 10))
+                        .foregroundColor(theme.tertiaryText)
+                        .lineLimit(1)
+                }
 
                 Spacer()
             }

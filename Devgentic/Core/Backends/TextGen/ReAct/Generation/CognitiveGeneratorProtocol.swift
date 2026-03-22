@@ -88,9 +88,9 @@ extension CognitiveGenerator {
         
         var messages: [[String: String]] = [["role": "system", "content": systemContent]]
         
-        // Tier 2: Episodic History
+        // Tier 2: Episodic Memory (XML with executable tool recipes)
         if let history = context.recentHistory, !history.isEmpty {
-            messages.append(["role": "user", "content": "<episodic_history>\n\(history)\n</episodic_history>"])
+            messages.append(["role": "user", "content": history])
         }
         
         // Tier 3: Active Scratchpad & Objective

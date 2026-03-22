@@ -112,11 +112,6 @@ struct MainApplicationView: View {
                 isInputFocused = false
             }
         }
-        .sheet(isPresented: $viewModel.showIntelligenceCoreDownloadPopup) {
-            IntelligenceCorePopup()
-                .environmentObject(viewModel)
-                .environment(\.appTheme, theme)
-        }
     }
     
     // MARK: - Subviews

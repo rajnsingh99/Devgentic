@@ -23,19 +23,13 @@ struct ReadScreenStateTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Extracted structural text from screen",
-            operations: []
-        )
-        
         guard CGPreflightScreenCaptureAccess() else {
-            return "Error: Screen recording permission denied. (Audit Ref: \(logID))"
+            return "Error: Screen recording permission denied."
         }
         
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else {
-            return "Error: No displays found. (Audit Ref: \(logID))"
+            return "Error: No displays found."
         }
         
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
@@ -53,7 +47,7 @@ struct ReadScreenStateTool: DevgenticTool {
         try requestHandler.perform([request])
         
         guard let observations = request.results as? [VNRecognizedTextObservation] else {
-            return "No text recognized. (Audit Ref: \(logID))"
+            return "No text recognized."
         }
         
         var recognizedElements: [[String: Any]] = []
@@ -76,7 +70,7 @@ struct ReadScreenStateTool: DevgenticTool {
         let jsonData = try JSONSerialization.data(withJSONObject: recognizedElements, options: .prettyPrinted)
         let jsonString = String(data: jsonData, encoding: .utf8) ?? "[]"
         
-        return "Screen state extracted successfully:\n\(jsonString)\n(Audit Ref: \(logID))"
+        return "Screen state extracted successfully:\n\(jsonString)"
     }
 }
 
@@ -101,21 +95,13 @@ struct ClickUIElementTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Clicked UI element with label '\(arguments.label)'",
-            operations: [
-                ["label": arguments.label]
-            ]
-        )
-        
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else {
-            return "Error: Accessibility permission denied. (Audit Ref: \(logID))"
+            return "Error: Accessibility permission denied."
         }
         
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
-            return "Error: No frontmost application. (Audit Ref: \(logID))"
+            return "Error: No frontmost application."
         }
         
         let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
@@ -144,14 +130,14 @@ struct ClickUIElementTool: DevgenticTool {
         }
         
         guard let target = search(element: appElement, targetLabel: arguments.label, depth: 0) else {
-            return "Error: Could not find UI element with label '\(arguments.label)' in the frontmost application. (Audit Ref: \(logID))"
+            return "Error: Could not find UI element with label '\(arguments.label)' in the frontmost application."
         }
         
         let result = AXUIElementPerformAction(target, kAXPressAction as CFString)
         if result == .success {
-            return "Successfully clicked element '\(arguments.label)'. (Audit Ref: \(logID))"
+            return "Successfully clicked element '\(arguments.label)'."
         } else {
-            return "Error: Could not perform click action on element '\(arguments.label)'. AXError: \(result.rawValue) (Audit Ref: \(logID))"
+            return "Error: Could not perform click action on element '\(arguments.label)'. AXError: \(result.rawValue)"
         }
     }
 }

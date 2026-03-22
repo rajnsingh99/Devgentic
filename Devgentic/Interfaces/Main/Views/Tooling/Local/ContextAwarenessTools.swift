@@ -18,19 +18,13 @@ struct GetFocusContextTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Retrieved Focus Context",
-            operations: []
-        )
-        
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         guard AXIsProcessTrustedWithOptions(options) else {
-            return "Error: Accessibility permission denied. (Audit Ref: \(logID))"
+            return "Error: Accessibility permission denied."
         }
         
         guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
-            return "No frontmost application. (Audit Ref: \\(logID))"
+            return "No frontmost application."
         }
         
         let appName = frontmostApp.localizedName ?? "Unknown App"
@@ -52,7 +46,6 @@ struct GetFocusContextTool: DevgenticTool {
         return """
         Active Application: \(appName) (\(bundleID))
         Focused Window: \(windowTitle)
-        (Audit Ref: \(logID))
         """
     }
 }

@@ -117,7 +117,6 @@ actor ReActAgentExecutor: Executor {
                             instructions: input.instructions,
                             environmentFacts: envFacts,
                             longTermMemory: input.longTermMemory,
-                            compressedStateGraph: sessionState.compressWithPointers(windowSize: 5),
                             recentHistory: input.recentHistory,
                             originalQuery: input.userInput,
                             currentIteration: currentIteration,
@@ -127,8 +126,6 @@ actor ReActAgentExecutor: Executor {
                             hallucinatedTools: circuitBreaker.hallucinatedTools,
                             availableTools: input.tools
                         )
-                        
-                        logState.debug("SemanticContext Assembled. Compressed Graph Length: \(context.compressedStateGraph.count) chars.")
                         
                         try Task.checkCancellation()
 
@@ -275,6 +272,15 @@ actor ReActAgentExecutor: Executor {
                             }
                         }
                         
+                        // --- Repetitive Action Loop Detection ---
+                        // Check if this iteration's observations are identical to previous ones.
+                        // Catches "successful but useless" loops (e.g., same tool with empty args returning same result).
+                        let repetitiveAction = circuitBreaker.evaluateRepetitiveActions(observations)
+                        if case .abort(let reason) = repetitiveAction {
+                            shouldAbort = true
+                            abortReason = reason
+                        }
+
                         if shouldAbort {
                             executionSummary.markComplete(failureReason: abortReason)
                             continuation.yield(.thought("⚠️ Circuit breaker triggered — recovering…"))
@@ -286,7 +292,7 @@ actor ReActAgentExecutor: Executor {
                             continuation.finish()
                             return
                         }
-                        
+
                         circuitBreaker.resetCountersOnSuccess()
                         
                         onTraceUpdate(AgentTraceLog(

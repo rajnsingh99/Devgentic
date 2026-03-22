@@ -112,7 +112,6 @@ actor ReflexionExecutor: Executor {
                                 instructions: input.instructions,
                                 environmentFacts: envFacts,
                                 longTermMemory: input.longTermMemory,
-                                compressedStateGraph: sessionState.compressWithPointers(windowSize: 5),
                                 recentHistory: input.recentHistory,
                                 originalQuery: input.userInput,
                                 currentIteration: innerIteration,
@@ -217,6 +216,13 @@ actor ReflexionExecutor: Executor {
                                 if !obs.isSuccess {
                                     circuitBreaker.recordHallucination(obs.toolName)
                                 }
+                            }
+
+                            // Repetitive action loop detection
+                            let repetitiveAction = circuitBreaker.evaluateRepetitiveActions(observations)
+                            if case .abort(let reason) = repetitiveAction {
+                                trialSummary.markComplete(failureReason: reason)
+                                break innerLoop
                             }
 
                             circuitBreaker.resetCountersOnSuccess()

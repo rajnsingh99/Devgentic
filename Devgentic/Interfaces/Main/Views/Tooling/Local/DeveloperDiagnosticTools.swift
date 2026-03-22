@@ -26,22 +26,16 @@ struct ManageProcessesTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Process management: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-        
         let process = Process()
         let outPipe = Pipe()
         process.standardOutput = outPipe
-        
+
         if arguments.action == "list_top" {
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-c", "ps -eo pid,pcpu,pmem,comm | sort -k 2 -nr | head -n 10"]
         } else if arguments.action == "kill" {
             guard let target = arguments.target else {
-                return "Error: target required for kill. (Audit Ref: \(logID))"
+                return "Error: target required for kill."
             }
             process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
             if let pid = Int(target) {
@@ -51,17 +45,17 @@ struct ManageProcessesTool: DevgenticTool {
                 process.arguments = ["-9", target]
             }
         } else {
-            return "Error: Unknown action. (Audit Ref: \(logID))"
+            return "Error: Unknown action."
         }
-        
+
         do {
             try process.run()
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
-            return "Result:\n\(output)\n(Audit Ref: \(logID))"
+            return "Result:\n\(output)"
         } catch {
-            return "Error executing process command: \(error) (Audit Ref: \(logID))"
+            return "Error executing process command: \(error)"
         }
     }
 }
@@ -109,75 +103,69 @@ struct XcodeOrchestratorTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Xcode Orchestrator: \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         switch arguments.action {
         case "clear_derived_data":
             let path = NSHomeDirectory() + "/Library/Developer/Xcode/DerivedData"
             do {
                 try FileManager.default.removeItem(atPath: path)
-                return "Cleared DerivedData successfully at \(path). (Audit Ref: \(logID))"
+                return "Cleared DerivedData successfully at \(path)."
             } catch {
                 if (error as NSError).code == NSFileNoSuchFileError {
-                    return "DerivedData already clean/empty. (Audit Ref: \(logID))"
+                    return "DerivedData already clean/empty."
                 }
-                return "Error clearing DerivedData: \(error) (Audit Ref: \(logID))"
+                return "Error clearing DerivedData: \(error)"
             }
 
         case "build":
             guard let scheme = arguments.scheme else {
-                return "Error: 'scheme' required for build. (Audit Ref: \(logID))"
+                return "Error: 'scheme' required for build."
             }
             var cmd = "xcodebuild -scheme \"\(scheme)\" build 2>&1 | tail -30"
             if let project = arguments.project {
                 cmd = "xcodebuild -project \"\(project)\" -scheme \"\(scheme)\" build 2>&1 | tail -30"
             }
-            return await xcodeShell(cmd, logID: logID)
+            return await xcodeShell(cmd)
 
         case "test":
             guard let scheme = arguments.scheme else {
-                return "Error: 'scheme' required for test. (Audit Ref: \(logID))"
+                return "Error: 'scheme' required for test."
             }
             var cmd = "xcodebuild -scheme \"\(scheme)\" test 2>&1 | tail -50"
             if let project = arguments.project {
                 cmd = "xcodebuild -project \"\(project)\" -scheme \"\(scheme)\" test 2>&1 | tail -50"
             }
-            return await xcodeShell(cmd, logID: logID)
+            return await xcodeShell(cmd)
 
         case "list_schemes":
             var cmd = "xcodebuild -list 2>&1"
             if let project = arguments.project {
                 cmd = "xcodebuild -project \"\(project)\" -list 2>&1"
             }
-            return await xcodeShell(cmd, logID: logID)
+            return await xcodeShell(cmd)
 
         case "open_file":
             guard let filePath = arguments.file_path else {
-                return "Error: 'file_path' required for open_file. (Audit Ref: \(logID))"
+                return "Error: 'file_path' required for open_file."
             }
             let expandedPath = (filePath as NSString).expandingTildeInPath
             var cmd = "xed \"\(expandedPath)\""
             if let line = arguments.line {
                 cmd = "xed --line \(line) \"\(expandedPath)\""
             }
-            return await xcodeShell(cmd, logID: logID)
+            return await xcodeShell(cmd)
 
         case "read_build_errors":
             let cmd = """
             find ~/Library/Developer/Xcode/DerivedData -name "*.xcactivitylog" -maxdepth 5 -type f -print0 | xargs -0 ls -t 2>/dev/null | head -1 | xargs -I{} gunzip -c {} 2>/dev/null | strings | grep -E "(error:|warning:)" | head -30
             """
-            return await xcodeShell(cmd, logID: logID)
+            return await xcodeShell(cmd)
 
         default:
-            return "Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+            return "Unknown action '\(arguments.action)'."
         }
     }
 
-    private func xcodeShell(_ cmd: String, logID: String) async -> String {
+    private func xcodeShell(_ cmd: String) async -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-c", cmd]
@@ -192,9 +180,9 @@ struct XcodeOrchestratorTool: DevgenticTool {
             let output = String(data: data, encoding: .utf8) ?? ""
             let maxOutput = 6000
             let result = output.count > maxOutput ? String(output.prefix(maxOutput)) + "\n...[Truncated]" : output
-            return "\(result)\n(Audit Ref: \(logID))"
+            return result
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
     }
 }
@@ -211,26 +199,20 @@ struct GetPowerStateTool: DevgenticTool {
     }
     
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Get Power State",
-            operations: []
-        )
-        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
         process.arguments = ["-g", "batt"]
         let outPipe = Pipe()
         process.standardOutput = outPipe
-        
+
         do {
             try process.run()
             process.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
             let output = String(data: data, encoding: .utf8) ?? ""
-            return "Power State:\n\(output)\n(Audit Ref: \(logID))"
+            return "Power State:\n\(output)"
         } catch {
-            return "Error retrieving power state: \(error) (Audit Ref: \(logID))"
+            return "Error retrieving power state: \(error)"
         }
     }
 }

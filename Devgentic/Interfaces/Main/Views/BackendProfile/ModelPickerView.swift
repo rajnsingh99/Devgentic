@@ -238,47 +238,50 @@ struct OllamaModelPickerView: View {
 
     // Alert state for unsupported model selection
     @State private var showUnsupportedAlert: Bool = false
+    @State private var currentFitAssessment: ModelFitAssessment?
 
     var body: some View {
-        HStack {
-            Button("Manage Models") {
-                router.navigateToModelStore(backend: .ollama, profileID: profileID)
-            }
-            .fixedSize()
-            
-            Spacer()
-            
-            if isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Loading models...")
-                    .foregroundColor(.secondary)
-            } else if let errorMessage = errorMessage {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.red)
-                Text(errorMessage)
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-            } else if loadedLocalModels.isEmpty {
-                 Text("No models found.")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-            } else {
-                Picker("Available Models", selection: $selectedModel) {
-                    // Iterate over the detailed local models instead of strings
-                    ForEach(loadedLocalModels, id: \.name) { model in
-                        
-                        // Single Source of Truth check
-                        let isUnsupported = filterForTools && model.cognitiveCapability == .none
-                        
-                        // macOS native pickers strip strikethroughs, so we append descriptive text
-                        // and use the native .disabled() modifier to dim the item visually
-                        Text(isUnsupported ? "\(model.name) (Chat Only)" : model.name)
-                            .tag(model.name)
-                            .disabled(isUnsupported)
-                    }
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack {
+                Button("Manage Models") {
+                    router.navigateToModelStore(backend: .ollama, profileID: profileID)
                 }
-                .labelsHidden()
+                .fixedSize()
+
+                Spacer()
+
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Loading models...")
+                        .foregroundColor(.secondary)
+                } else if let errorMessage = errorMessage {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(errorMessage)
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                } else if loadedLocalModels.isEmpty {
+                    Text("No models found.")
+                        .foregroundColor(.secondary)
+                        .font(.caption)
+                } else {
+                    Picker("Available Models", selection: $selectedModel) {
+                        ForEach(loadedLocalModels, id: \.name) { model in
+                            let isUnsupported = filterForTools && model.cognitiveCapability == .none
+
+                            Text(isUnsupported ? "\(model.name) (Chat Only)" : model.name)
+                                .tag(model.name)
+                                .disabled(isUnsupported)
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+
+            // Inline fit indicator
+            if let assessment = currentFitAssessment, assessment.estimatedRuntimeRAM > 0 {
+                ModelFitInlineView(assessment: assessment)
             }
         }
         .onAppear(perform: fetchModels)
@@ -404,6 +407,7 @@ struct OllamaModelPickerView: View {
             self.cognitiveCapability = matchedModel.cognitiveCapability
             self.modelDialect = matchedModel.modelDialect
             self.modelMetadata = matchedModel.cognitiveProfile.metadata
+            self.currentFitAssessment = ModelFitAdvisor.assess(metadata: matchedModel.cognitiveProfile.metadata)
         }
     }
 }

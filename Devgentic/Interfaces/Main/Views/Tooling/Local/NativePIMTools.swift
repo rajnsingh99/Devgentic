@@ -36,12 +36,6 @@ struct ManageCalendarTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Calendar \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         let store = EKEventStore()
         var accessGranted: Bool
 
@@ -52,7 +46,7 @@ struct ManageCalendarTool: DevgenticTool {
         }
 
         guard accessGranted else {
-            return "Error: Calendar access denied. (Audit Ref: \(logID))"
+            return "Error: Calendar access denied."
         }
 
         let formatter = ISO8601DateFormatter()
@@ -61,20 +55,20 @@ struct ManageCalendarTool: DevgenticTool {
         case "read":
             guard let startStr = arguments.start_date, let endStr = arguments.end_date,
                   let start = formatter.date(from: startStr), let end = formatter.date(from: endStr) else {
-                return "Error: start_date and end_date required (ISO8601). (Audit Ref: \(logID))"
+                return "Error: start_date and end_date required (ISO8601)."
             }
             let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
             let events = store.events(matching: predicate)
             let eventStrings = events.map { "- [\($0.eventIdentifier ?? "?")] \($0.title ?? "Untitled") from \($0.startDate ?? Date()) to \($0.endDate ?? Date())" }
-            return "Events:\n\(eventStrings.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+            return "Events:\n\(eventStrings.joined(separator: "\n"))"
 
         case "create":
             guard let startStr = arguments.start_date, let endStr = arguments.end_date,
                   let start = formatter.date(from: startStr), let end = formatter.date(from: endStr) else {
-                return "Error: start_date and end_date required (ISO8601). (Audit Ref: \(logID))"
+                return "Error: start_date and end_date required (ISO8601)."
             }
             guard let title = arguments.title else {
-                return "Error: 'title' required for create. (Audit Ref: \(logID))"
+                return "Error: 'title' required for create."
             }
             let event = EKEvent(eventStore: store)
             event.title = title
@@ -82,21 +76,21 @@ struct ManageCalendarTool: DevgenticTool {
             event.endDate = end
             event.calendar = store.defaultCalendarForNewEvents
             try store.save(event, span: .thisEvent)
-            return "Created event '\(title)' (ID: \(event.eventIdentifier ?? "unknown")). (Audit Ref: \(logID))"
+            return "Created event '\(title)' (ID: \(event.eventIdentifier ?? "unknown"))."
 
         case "delete":
             guard let eventID = arguments.event_id else {
-                return "Error: 'event_id' required for delete. (Audit Ref: \(logID))"
+                return "Error: 'event_id' required for delete."
             }
             guard let event = store.event(withIdentifier: eventID) else {
-                return "Error: Event not found with ID '\(eventID)'. (Audit Ref: \(logID))"
+                return "Error: Event not found with ID '\(eventID)'."
             }
             try store.remove(event, span: .thisEvent)
-            return "Deleted event '\(event.title ?? "Untitled")'. (Audit Ref: \(logID))"
+            return "Deleted event '\(event.title ?? "Untitled")'."
 
         case "search":
             guard let term = arguments.search_term else {
-                return "Error: 'search_term' required for search. (Audit Ref: \(logID))"
+                return "Error: 'search_term' required for search."
             }
             let start = Date()
             let end = Calendar.current.date(byAdding: .month, value: 3, to: start)!
@@ -106,10 +100,10 @@ struct ManageCalendarTool: DevgenticTool {
                 ($0.notes ?? "").localizedCaseInsensitiveContains(term)
             }
             let eventStrings = events.map { "- [\($0.eventIdentifier ?? "?")] \($0.title ?? "Untitled") on \($0.startDate ?? Date())" }
-            return "Search results for '\(term)' (\(events.count)):\n\(eventStrings.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+            return "Search results for '\(term)' (\(events.count)):\n\(eventStrings.joined(separator: "\n"))"
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'."
         }
     }
 }
@@ -139,12 +133,6 @@ struct ManageRemindersTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Reminders \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         let store = EKEventStore()
         var accessGranted: Bool
 
@@ -155,7 +143,7 @@ struct ManageRemindersTool: DevgenticTool {
         }
 
         guard accessGranted else {
-            return "Error: Reminders access denied. (Audit Ref: \(logID))"
+            return "Error: Reminders access denied."
         }
 
         switch arguments.action {
@@ -171,13 +159,13 @@ struct ManageRemindersTool: DevgenticTool {
                         }
                         return line
                     }
-                    continuation.resume(returning: "Incomplete Reminders (\(items.count)):\n\(strings.joined(separator: "\n"))\n(Audit Ref: \(logID))")
+                    continuation.resume(returning: "Incomplete Reminders (\(items.count)):\n\(strings.joined(separator: "\n"))")
                 }
             }
 
         case "create":
             guard let title = arguments.title else {
-                return "Error: 'title' required for create. (Audit Ref: \(logID))"
+                return "Error: 'title' required for create."
             }
             let reminder = EKReminder(eventStore: store)
             reminder.title = title
@@ -189,38 +177,38 @@ struct ManageRemindersTool: DevgenticTool {
                 }
             }
             try store.save(reminder, commit: true)
-            return "Created reminder '\(title)'. (Audit Ref: \(logID))"
+            return "Created reminder '\(title)'."
 
         case "complete", "delete":
             let targetTitle = arguments.reminder_title ?? arguments.title
             guard let searchTitle = targetTitle else {
-                return "Error: 'reminder_title' or 'title' required. (Audit Ref: \(logID))"
+                return "Error: 'reminder_title' or 'title' required."
             }
             let predicate = store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: nil)
             return try await withCheckedThrowingContinuation { continuation in
                 store.fetchReminders(matching: predicate) { reminders in
                     guard let match = (reminders ?? []).first(where: { ($0.title ?? "").localizedCaseInsensitiveContains(searchTitle) }) else {
-                        continuation.resume(returning: "Error: No reminder found matching '\(searchTitle)'. (Audit Ref: \(logID))")
+                        continuation.resume(returning: "Error: No reminder found matching '\(searchTitle)'.")
                         return
                     }
                     do {
                         if arguments.action == "complete" {
                             match.isCompleted = true
                             try store.save(match, commit: true)
-                            continuation.resume(returning: "Completed reminder '\(match.title ?? "")'. (Audit Ref: \(logID))")
+                            continuation.resume(returning: "Completed reminder '\(match.title ?? "")'.")
                         } else {
                             let title = match.title ?? ""
                             try store.remove(match, commit: true)
-                            continuation.resume(returning: "Deleted reminder '\(title)'. (Audit Ref: \(logID))")
+                            continuation.resume(returning: "Deleted reminder '\(title)'.")
                         }
                     } catch {
-                        continuation.resume(returning: "Error: \(error.localizedDescription) (Audit Ref: \(logID))")
+                        continuation.resume(returning: "Error: \(error.localizedDescription)")
                     }
                 }
             }
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'."
         }
     }
 }
@@ -256,16 +244,10 @@ struct ManageContactsTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Contacts \(arguments.action)",
-            operations: [["action": arguments.action]]
-        )
-
         let store = CNContactStore()
         let access = try await store.requestAccess(for: .contacts)
         guard access else {
-            return "Error: Contacts access denied. (Audit Ref: \(logID))"
+            return "Error: Contacts access denied."
         }
 
         let keysToFetch: [CNKeyDescriptor] = [
@@ -278,11 +260,11 @@ struct ManageContactsTool: DevgenticTool {
         switch arguments.action {
         case "search":
             guard let query = arguments.query else {
-                return "Error: 'query' required for search. (Audit Ref: \(logID))"
+                return "Error: 'query' required for search."
             }
             let predicate = CNContact.predicateForContacts(matchingName: query)
             let contacts = try store.unifiedContacts(matching: predicate, keysToFetch: keysToFetch)
-            return formatContacts(contacts, logID: logID)
+            return formatContacts(contacts)
 
         case "list":
             let limit = arguments.limit ?? 20
@@ -295,11 +277,11 @@ struct ManageContactsTool: DevgenticTool {
                     stop.pointee = true
                 }
             }
-            return formatContacts(allContacts, logID: logID)
+            return formatContacts(allContacts)
 
         case "create":
             guard let givenName = arguments.given_name else {
-                return "Error: 'given_name' required for create. (Audit Ref: \(logID))"
+                return "Error: 'given_name' required for create."
             }
             let newContact = CNMutableContact()
             newContact.givenName = givenName
@@ -313,16 +295,16 @@ struct ManageContactsTool: DevgenticTool {
             let saveRequest = CNSaveRequest()
             saveRequest.add(newContact, toContainerWithIdentifier: nil)
             try store.execute(saveRequest)
-            return "Created contact: \(givenName) \(arguments.family_name ?? ""). (Audit Ref: \(logID))"
+            return "Created contact: \(givenName) \(arguments.family_name ?? "")."
 
         default:
-            return "Error: Unknown action '\(arguments.action)'. (Audit Ref: \(logID))"
+            return "Error: Unknown action '\(arguments.action)'."
         }
     }
 
-    private func formatContacts(_ contacts: [CNContact], logID: String) -> String {
+    private func formatContacts(_ contacts: [CNContact]) -> String {
         if contacts.isEmpty {
-            return "No contacts found. (Audit Ref: \(logID))"
+            return "No contacts found."
         }
         var results: [String] = []
         for contact in contacts {
@@ -335,6 +317,6 @@ struct ManageContactsTool: DevgenticTool {
             }
             results.append(info)
         }
-        return "Contacts (\(contacts.count)):\n\(results.joined(separator: "\n"))\n(Audit Ref: \(logID))"
+        return "Contacts (\(contacts.count)):\n\(results.joined(separator: "\n"))"
     }
 }

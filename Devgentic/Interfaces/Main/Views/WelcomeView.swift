@@ -3,123 +3,359 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 20/08/25.
+//  Redesigned for commercial polish — contextual greeting, quick actions,
+//  and seamless Morning Brief integration.
 //
 
 import SwiftUI
 
 struct WelcomeView: View {
     @Environment(\.appTheme) private var theme
-    
+    @EnvironmentObject private var viewModel: MainApplicationViewModel
+    @EnvironmentObject private var router: MainViewRouter
+    @StateObject private var briefService = MorningBriefService.shared
+
+    @State private var briefChecked = false
+    @State private var showContent = false
+    @State private var showActions = false
+    @State private var showShortcuts = false
+
     var body: some View {
-        VStack(spacing: 32) {
-            // MARK: - Hero Section
-            VStack(spacing: 16) {
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 0) {
+                Spacer()
+                    .frame(height: 60)
+
+                // MARK: - Greeting
+                greetingSection
+                    .opacity(showContent ? 1 : 0)
+                    .offset(y: showContent ? 0 : 12)
+
+                Spacer()
+                    .frame(height: 36)
+
+                // MARK: - Morning Brief
+                if briefService.isGenerating {
+                    MorningBriefLoadingView()
+                        .transition(.opacity)
+                        .padding(.bottom, 28)
+                } else if let brief = briefService.currentBrief, !brief.isEmpty {
+                    MorningBriefCardView(
+                        brief: brief,
+                        onNavigate: { handleNavigation($0) },
+                        onDismiss: {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                briefService.dismissBrief()
+                            }
+                        }
+                    )
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.96)),
+                        removal: .opacity
+                    ))
+                    .padding(.bottom, 28)
+                }
+
+                // MARK: - Quick Actions
+                quickActionsGrid
+                    .opacity(showActions ? 1 : 0)
+                    .offset(y: showActions ? 0 : 10)
+
+                Spacer()
+                    .frame(height: 24)
+
+                // MARK: - Keyboard Hints
+                keyboardHints
+                    .opacity(showShortcuts ? 1 : 0)
+                    .offset(y: showShortcuts ? 0 : 8)
+
+                Spacer()
+                    .frame(height: 40)
+            }
+            .frame(maxWidth: 520)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollContentBackground(.hidden)
+        .animation(.easeOut(duration: 0.4), value: showContent)
+        .animation(.easeOut(duration: 0.35).delay(0.08), value: showActions)
+        .animation(.easeOut(duration: 0.3).delay(0.16), value: showShortcuts)
+        .animation(.easeInOut(duration: 0.3), value: briefService.currentBrief != nil)
+        .animation(.easeInOut(duration: 0.2), value: briefService.isGenerating)
+        .onAppear {
+            if !briefChecked {
+                briefChecked = true
+                checkAndGenerateBrief()
+            }
+            // Staggered entrance
+            withAnimation { showContent = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                withAnimation { showActions = true }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                withAnimation { showShortcuts = true }
+            }
+        }
+    }
+
+    // MARK: - Greeting Section
+
+    private var greetingSection: some View {
+        VStack(spacing: 10) {
+            // Time-aware greeting
+            HStack(spacing: 10) {
+                Image(systemName: greetingIcon)
+                    .font(.system(size: 24))
+                    .foregroundStyle(greetingGradient)
+
+                Text(greetingText)
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(theme.primaryText)
+            }
+
+            Text("What would you like to work on?")
+                .font(.system(size: 15))
+                .foregroundColor(theme.secondaryText)
+        }
+    }
+
+    private var greetingText: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return "Good morning"
+        case 12..<17: return "Good afternoon"
+        case 17..<22: return "Good evening"
+        default: return "Working late"
+        }
+    }
+
+    private var greetingIcon: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return "sunrise.fill"
+        case 12..<17: return "sun.max.fill"
+        case 17..<22: return "sunset.fill"
+        default: return "moon.stars.fill"
+        }
+    }
+
+    private var greetingGradient: LinearGradient {
+        let hour = Calendar.current.component(.hour, from: Date())
+        let colors: [Color]
+        switch hour {
+        case 5..<12: colors = [.orange, .yellow]
+        case 12..<17: colors = [.yellow, .orange]
+        case 17..<22: colors = [.orange, .pink]
+        default: colors = [.indigo, .purple]
+        }
+        return LinearGradient(colors: colors, startPoint: .bottomLeading, endPoint: .topTrailing)
+    }
+
+    // MARK: - Quick Actions Grid
+
+    private var quickActionsGrid: some View {
+        LazyVGrid(columns: [
+            GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12)
+        ], spacing: 12) {
+            QuickActionCard(
+                icon: "plus.message.fill",
+                title: "New Chat",
+                subtitle: "Start a conversation",
+                shortcut: "⌘ N",
+                accentColors: [theme.accentColor, theme.accentMuted],
+                theme: theme
+            ) {
+                viewModel.startNewConversation()
+            }
+
+            QuickActionCard(
+                icon: "doc.badge.plus",
+                title: "Add Context",
+                subtitle: "Attach files or folders",
+                shortcut: "⌘ O",
+                accentColors: [.green, .mint],
+                theme: theme
+            ) {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("openFilePicker"),
+                    object: nil
+                )
+            }
+
+            QuickActionCard(
+                icon: "square.grid.2x2.fill",
+                title: "Model Store",
+                subtitle: "Browse & manage models",
+                shortcut: nil,
+                accentColors: [.purple, .indigo],
+                theme: theme
+            ) {
+                router.navigate(to: .mlxModelStore(profileID: UUID(), filterForTools: false))
+            }
+
+            QuickActionCard(
+                icon: "gearshape.fill",
+                title: "Settings",
+                subtitle: "Configure Devgentic",
+                shortcut: "⌘ ,",
+                accentColors: [.gray, Color(white: 0.5)],
+                theme: theme
+            ) {
+                router.navigateToSettings(.general)
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    // MARK: - Keyboard Hints
+
+    private var keyboardHints: some View {
+        HStack(spacing: 20) {
+            KeyHint(keys: ["⌘", "B"], label: "Sidebar", theme: theme)
+            KeyHint(keys: ["⇧", "⌘", "V"], label: "Voice", theme: theme)
+        }
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Brief Generation
+
+    private func checkAndGenerateBrief() {
+        guard briefService.shouldShowBrief() else { return }
+        Task {
+            let _ = await briefService.generateBrief()
+        }
+    }
+
+    // MARK: - Navigation
+
+    private func handleNavigation(_ destination: BriefItemDestination) {
+        switch destination {
+        case .conversation(let id):
+            viewModel.selectedConversationID = id
+            if !router.isShowingChat {
+                router.returnToChat()
+            }
+        }
+    }
+}
+
+// MARK: - Quick Action Card
+
+private struct QuickActionCard: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let shortcut: String?
+    let accentColors: [Color]
+    let theme: any Theme
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                // Icon circle
                 ZStack {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [theme.accentColor.opacity(0.15), theme.accentMuted.opacity(0.15)],
+                                colors: accentColors.map { $0.opacity(isHovering ? 0.25 : 0.15) },
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .frame(width: 120, height: 120)
-                        .blur(radius: 20)
-                    
-                    Image(systemName: "bubble.left.and.bubble.right.fill")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 60, height: 60)
+                        .frame(width: 38, height: 38)
+
+                    Image(systemName: icon)
+                        .font(.system(size: 16, weight: .medium))
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [theme.accentColor, theme.accentMuted],
+                                colors: accentColors,
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .shadow(color: theme.accentMuted.opacity(0.3), radius: 10, x: 0, y: 5)
                 }
 
-                VStack(spacing: 6) {
-                    Text("Devgentic")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundColor(theme.primaryText)
-                    
-                    Text("Your AI Development Companion")
-                        .font(.title3)
-                        .foregroundColor(theme.secondaryText)
-                }
-            }
+                // Text
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(theme.primaryText)
 
-            // MARK: - Shortcuts Card
-            VStack(alignment: .leading, spacing: 16) {
-                ShortcutRow(keys: ["⌘", "B"], description: "Toggle Sidebar")
-                Rectangle().fill(theme.dividerColor).frame(height: 1).opacity(0.5)
-                ShortcutRow(keys: ["⌘", "O"], description: "Add Context")
-                Rectangle().fill(theme.dividerColor).frame(height: 1).opacity(0.5)
-                ShortcutRow(keys: ["⇧", "⌘", "C"], description: "New Conversation")
-                Rectangle().fill(theme.dividerColor).frame(height: 1).opacity(0.5)
-                ShortcutRow(keys: ["⇧", "⌘", "A"], description: "Settings")
+                        if let shortcut {
+                            Text(shortcut)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(theme.tertiaryText)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(theme.secondaryBackground)
+                                .cornerRadius(4)
+                        }
+                    }
+
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.tertiaryText)
+                }
+
+                Spacer()
             }
-            .padding(24)
-            .background {
-                RoundedRectangle(cornerRadius: 16)
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(theme.controlBackground)
-                    .shadow(color: theme.primaryText.opacity(0.05), radius: 15, x: 0, y: 8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(
+                        isHovering ? accentColors.first!.opacity(0.4) : theme.surfaceOverlayStrong,
+                        lineWidth: 1
                     )
-            }
-            .frame(maxWidth: 400)
+            )
+            .shadow(color: theme.primaryText.opacity(isHovering ? 0.08 : 0.03), radius: isHovering ? 12 : 6, x: 0, y: 4)
+            .scaleEffect(isHovering ? 1.01 : 1.0)
         }
-        .padding()
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.2)) {
+                isHovering = hovering
+            }
+        }
     }
 }
 
-// MARK: - Helper Views
+// MARK: - Keyboard Hint (Compact)
 
-struct ShortcutRow: View {
+private struct KeyHint: View {
     let keys: [String]
-    let description: String
-    @Environment(\.appTheme) private var theme
+    let label: String
+    let theme: any Theme
 
     var body: some View {
-        HStack {
-            Text(description)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundColor(theme.secondaryText)
-
-            Spacer()
-
-            HStack(spacing: 4) {
+        HStack(spacing: 6) {
+            HStack(spacing: 3) {
                 ForEach(keys, id: \.self) { key in
-                    KeyboardKeyView(symbol: key)
+                    Text(key)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.tertiaryText)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(theme.secondaryBackground)
+                        .cornerRadius(4)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                        )
                 }
             }
-        }
-    }
-}
 
-struct KeyboardKeyView: View {
-    let symbol: String
-    @Environment(\.appTheme) private var theme
-    
-    var body: some View {
-        Text(symbol)
-            .font(.system(size: 13, weight: .semibold, design: .monospaced))
-            .foregroundColor(theme.primaryText)
-            .frame(minWidth: 24)
-            .padding(.horizontal, 6)
-            .background {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(theme.secondaryBackground)
-                    .shadow(color: theme.primaryText.opacity(0.1), radius: 1, x: 0, y: 1)
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-            )
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(theme.tertiaryText)
+        }
     }
 }
 

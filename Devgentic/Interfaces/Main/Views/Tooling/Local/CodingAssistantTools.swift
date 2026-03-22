@@ -100,24 +100,18 @@ struct EditCodeTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Edit code in file",
-            operations: [["file": arguments.file_path]]
-        )
-
         let expandedPath = (arguments.file_path as NSString).expandingTildeInPath
         let fileURL = URL(fileURLWithPath: expandedPath)
 
         guard FileManager.default.fileExists(atPath: expandedPath) else {
-            return "Error: File not found at '\(expandedPath)'. (Audit Ref: \(logID))"
+            return "Error: File not found at '\(expandedPath)'."
         }
 
         var content: String
         do {
             content = try String(contentsOf: fileURL, encoding: .utf8)
         } catch {
-            return "Error reading file: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error reading file: \(error.localizedDescription)"
         }
 
         // Build edit list from either `edits` array or single old_string/new_string
@@ -128,7 +122,7 @@ struct EditCodeTool: DevgenticTool {
         } else if let oldStr = arguments.old_string {
             editPairs = [(oldStr, arguments.new_string ?? "")]
         } else {
-            return "Error: Provide either 'edits' array or 'old_string'/'new_string' parameters. (Audit Ref: \(logID))"
+            return "Error: Provide either 'edits' array or 'old_string'/'new_string' parameters."
         }
 
         var appliedCount = 0
@@ -151,7 +145,7 @@ struct EditCodeTool: DevgenticTool {
             do {
                 try content.write(to: fileURL, atomically: true, encoding: .utf8)
             } catch {
-                return "Error writing file: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error writing file: \(error.localizedDescription)"
             }
         }
 
@@ -159,7 +153,7 @@ struct EditCodeTool: DevgenticTool {
         if !errors.isEmpty {
             result += "\nErrors:\n" + errors.joined(separator: "\n")
         }
-        return "\(result) (Audit Ref: \(logID))"
+        return result
     }
 }
 
@@ -217,12 +211,6 @@ struct CodeSearchTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Code search: \(arguments.pattern)",
-            operations: [["pattern": arguments.pattern]]
-        )
-
         var args: [String] = ["-n", "--no-heading", "--color=never"]
 
         let contextLines = min(arguments.context_lines ?? 2, 10)
@@ -288,14 +276,14 @@ struct CodeSearchTool: DevgenticTool {
             try process.run()
             process.waitUntilExit()
         } catch {
-            return "Error running search: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error running search: \(error.localizedDescription)"
         }
 
         let data = outPipe.fileHandleForReading.readDataToEndOfFile()
         let rawOutput = String(data: data, encoding: .utf8) ?? ""
 
         if rawOutput.isEmpty {
-            return "No matches found for '\(arguments.pattern)'. (Audit Ref: \(logID))"
+            return "No matches found for '\(arguments.pattern)'."
         }
 
         // Truncate to max_results matches
@@ -328,7 +316,7 @@ struct CodeSearchTool: DevgenticTool {
             result = String(result.prefix(maxOutput)) + "\n...[Output truncated at \(maxOutput) chars]"
         }
 
-        return "\(result)\n(\(matchCount) match\(matchCount == 1 ? "" : "es")) (Audit Ref: \(logID))"
+        return "\(result)\n(\(matchCount) match\(matchCount == 1 ? "" : "es"))"
     }
 }
 
@@ -371,12 +359,6 @@ struct GlobFilesTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Glob files: \(arguments.pattern)",
-            operations: [["pattern": arguments.pattern]]
-        )
-
         let basePath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
         let maxResults = arguments.max_results ?? 100
 
@@ -407,14 +389,14 @@ struct GlobFilesTool: DevgenticTool {
             try process.run()
             process.waitUntilExit()
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
 
         let data = outPipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if output.isEmpty {
-            return "No files found matching '\(arguments.pattern)' in \(basePath). (Audit Ref: \(logID))"
+            return "No files found matching '\(arguments.pattern)' in \(basePath)."
         }
 
         let files = output.components(separatedBy: "\n").filter { !$0.isEmpty }
@@ -425,7 +407,7 @@ struct GlobFilesTool: DevgenticTool {
             result += "\n\n[Truncated at \(maxResults) results. Refine your pattern to narrow results.]"
         }
 
-        return "\(result)\n(Audit Ref: \(logID))"
+        return result
     }
 }
 
@@ -468,12 +450,6 @@ struct FindDefinitionTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Find definition: \(arguments.symbol)",
-            operations: [["symbol": arguments.symbol]]
-        )
-
         let basePath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
         let symbol = arguments.symbol
 
@@ -562,7 +538,7 @@ struct FindDefinitionTool: DevgenticTool {
         }
 
         if allResults.isEmpty {
-            return "No definition found for '\(symbol)'\(arguments.language != nil ? " in \(arguments.language!) files" : ""). (Audit Ref: \(logID))"
+            return "No definition found for '\(symbol)'\(arguments.language != nil ? " in \(arguments.language!) files" : "")."
         }
 
         var result = allResults.joined(separator: "\n---\n")
@@ -572,7 +548,7 @@ struct FindDefinitionTool: DevgenticTool {
             result = String(result.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars]"
         }
 
-        return "Definitions for '\(symbol)':\n\(result)\n(Audit Ref: \(logID))"
+        return "Definitions for '\(symbol)':\n\(result)"
     }
 }
 
@@ -666,15 +642,9 @@ struct BatchCommandTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Execute: \(String(arguments.command.prefix(60)))",
-            operations: [["command": String(arguments.command.prefix(100))]]
-        )
-
         // Safety: block destructive commands
         if Self.isDestructiveCommand(arguments.command) {
-            return "Error: Command blocked by safety filter. Destructive system commands are not permitted. (Audit Ref: \(logID))"
+            return "Error: Command blocked by safety filter. Destructive system commands are not permitted."
         }
 
         let timeout = min(arguments.timeout_seconds ?? 30, 300)
@@ -695,16 +665,16 @@ struct BatchCommandTool: DevgenticTool {
         if arguments.background ?? false {
             do {
                 try process.run()
-                return "Command launched in background (PID: \(process.processIdentifier)). (Audit Ref: \(logID))"
+                return "Command launched in background (PID: \(process.processIdentifier))."
             } catch {
-                return "Error launching background command: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error launching background command: \(error.localizedDescription)"
             }
         }
 
         do {
             try process.run()
         } catch {
-            return "Error: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error: \(error.localizedDescription)"
         }
 
         // Timeout enforcement
@@ -720,7 +690,7 @@ struct BatchCommandTool: DevgenticTool {
         let waitResult = group.wait(timeout: deadline)
         if waitResult == .timedOut {
             process.terminate()
-            return "Error: Command timed out after \(timeout)s and was terminated. (Audit Ref: \(logID))"
+            return "Error: Command timed out after \(timeout)s and was terminated."
         }
 
         let stdoutData = outPipe.fileHandleForReading.readDataToEndOfFile()
@@ -737,7 +707,7 @@ struct BatchCommandTool: DevgenticTool {
 
         output = Self.truncateOutput(output)
 
-        return "Exit code: \(exitCode)\n\(output)\n(Audit Ref: \(logID))"
+        return "Exit code: \(exitCode)\n\(output)"
     }
 }
 
@@ -789,18 +759,12 @@ struct CreateFileTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Create file: \(arguments.file_path)",
-            operations: [["file": arguments.file_path]]
-        )
-
         let expandedPath = (arguments.file_path as NSString).expandingTildeInPath
         let fileURL = URL(fileURLWithPath: expandedPath)
         let fm = FileManager.default
 
         if fm.fileExists(atPath: expandedPath) && !(arguments.overwrite ?? false) {
-            return "Error: File already exists at '\(expandedPath)'. Set overwrite=true to replace it. (Audit Ref: \(logID))"
+            return "Error: File already exists at '\(expandedPath)'. Set overwrite=true to replace it."
         }
 
         // Create parent directories if needed
@@ -809,16 +773,16 @@ struct CreateFileTool: DevgenticTool {
             do {
                 try fm.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
             } catch {
-                return "Error creating directory: \(error.localizedDescription) (Audit Ref: \(logID))"
+                return "Error creating directory: \(error.localizedDescription)"
             }
         }
 
         do {
             try arguments.content.write(to: fileURL, atomically: true, encoding: .utf8)
             let lineCount = arguments.content.components(separatedBy: "\n").count
-            return "Created file '\(arguments.file_path)' (\(lineCount) lines, \(arguments.content.count) chars). (Audit Ref: \(logID))"
+            return "Created file '\(arguments.file_path)' (\(lineCount) lines, \(arguments.content.count) chars)."
         } catch {
-            return "Error writing file: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error writing file: \(error.localizedDescription)"
         }
     }
 }
@@ -864,23 +828,17 @@ struct FileOverviewTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "File overview: \(arguments.file_path)",
-            operations: [["file": arguments.file_path]]
-        )
-
         let expandedPath = (arguments.file_path as NSString).expandingTildeInPath
 
         guard FileManager.default.fileExists(atPath: expandedPath) else {
-            return "Error: File not found at '\(expandedPath)'. (Audit Ref: \(logID))"
+            return "Error: File not found at '\(expandedPath)'."
         }
 
         let content: String
         do {
             content = try String(contentsOfFile: expandedPath, encoding: .utf8)
         } catch {
-            return "Error reading file: \(error.localizedDescription) (Audit Ref: \(logID))"
+            return "Error reading file: \(error.localizedDescription)"
         }
 
         let lines = content.components(separatedBy: "\n")
@@ -969,7 +927,7 @@ struct FileOverviewTool: DevgenticTool {
             }
         }
 
-        return "\(result)\n(Audit Ref: \(logID))"
+        return result
     }
 }
 
@@ -1012,12 +970,6 @@ struct CodebaseMapTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Codebase map",
-            operations: []
-        )
-
         let basePath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
         let maxDepth = min(arguments.max_depth ?? 3, 5)
         let showFiles = arguments.show_files ?? false
@@ -1092,6 +1044,6 @@ struct CodebaseMapTool: DevgenticTool {
             output = String(output.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars. Use smaller max_depth or specific path.]"
         }
 
-        return "\(output)\n(Audit Ref: \(logID))"
+        return output
     }
 }

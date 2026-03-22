@@ -20,10 +20,9 @@ struct DownloadSidebarView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Text("DOWNLOADS")
-                    .font(.system(size: 11, weight: .bold))
+                Text("Downloads")
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(theme.primaryText)
-                    .tracking(0.5)
 
                 Spacer()
 
@@ -31,20 +30,25 @@ struct DownloadSidebarView: View {
                     Button {
                         withAnimation { manager.clearCompleted() }
                     } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 11))
-                            .foregroundColor(theme.secondaryText)
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Clear")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(theme.accentColor.opacity(0.15))
+                        .foregroundColor(theme.accentColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .buttonStyle(.plain)
-                    .help("Clear Completed")
+                    .help("Clear completed downloads")
                 }
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
-            .padding(.bottom, 8)
-
-            Divider()
-                .background(theme.dividerColor)
+            .padding(.bottom, 10)
 
             if manager.activeDownloads.isEmpty && manager.completedDownloads.isEmpty {
                 PlaceholderSidebarView(
@@ -211,15 +215,15 @@ private struct CompletedDownloadRowView: View {
         case .completed:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 12))
-                .foregroundColor(.green)
+                .foregroundColor(theme.successColor)
         case .failed:
             Image(systemName: "exclamationmark.circle.fill")
                 .font(.system(size: 12))
-                .foregroundColor(.red)
+                .foregroundColor(theme.errorColor)
         case .cancelled:
             Image(systemName: "minus.circle.fill")
                 .font(.system(size: 12))
-                .foregroundColor(.orange)
+                .foregroundColor(theme.warningColor)
         case .downloading:
             ProgressView()
                 .controlSize(.mini)

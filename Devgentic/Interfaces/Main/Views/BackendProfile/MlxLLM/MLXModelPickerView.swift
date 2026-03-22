@@ -26,30 +26,38 @@ struct MLXModelPickerView: View {
 
     @StateObject private var service = MLXModelService.shared
     @State private var showUnsupportedAlert = false
+    @State private var currentFitAssessment: ModelFitAssessment?
 
     var body: some View {
-        HStack {
-            Button("Manage Models") {
-                router.navigateToModelStore(backend: .mlx, profileID: profileID, filterForTools: filterForTools)
-            }
-            .fixedSize()
-            Spacer()
-            if service.installedModels.isEmpty {
-                Text("No models found.")
-                    .foregroundColor(theme.secondaryText)
-                    .font(.caption)
-            } else {
-                Picker("Model", selection: $selectedModel) {
-                    ForEach(service.installedModels) { model in
-                        let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: model.displayName)
-                        let isUnsupported = filterForTools && profile.capability == .none
-                        
-                        Text(isUnsupported ? "\(model.displayName) (Chat Only)" : model.displayName)
-                            .tag(model.displayName)
-                            .disabled(isUnsupported)
-                    }
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack {
+                Button("Manage Models") {
+                    router.navigateToModelStore(backend: .mlx, profileID: profileID, filterForTools: filterForTools)
                 }
-                .labelsHidden() // Hide label to prevent weird alignment issues
+                .fixedSize()
+                Spacer()
+                if service.installedModels.isEmpty {
+                    Text("No models found.")
+                        .foregroundColor(theme.secondaryText)
+                        .font(.caption)
+                } else {
+                    Picker("Model", selection: $selectedModel) {
+                        ForEach(service.installedModels) { model in
+                            let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: model.displayName)
+                            let isUnsupported = filterForTools && profile.capability == .none
+
+                            Text(isUnsupported ? "\(model.displayName) (Chat Only)" : model.displayName)
+                                .tag(model.displayName)
+                                .disabled(isUnsupported)
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+
+            // Inline fit indicator
+            if let assessment = currentFitAssessment, assessment.estimatedRuntimeRAM > 0 {
+                ModelFitInlineView(assessment: assessment)
             }
         }
         .onAppear {
@@ -106,6 +114,7 @@ struct MLXModelPickerView: View {
             self.modelMetadata = profile.metadata
             self.chatTemplateSource = profile.chatTemplateSource
             self.stopSequences = profile.stopSequences
+            self.currentFitAssessment = ModelFitAdvisor.assess(metadata: profile.metadata)
 
             if filterForTools && profile.capability == .none {
                 self.showUnsupportedAlert = true

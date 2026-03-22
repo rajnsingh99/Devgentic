@@ -117,9 +117,21 @@ class BackendOrchestrationService: ObservableObject {
                         metadata: nil
                     ))
 
-                    let rewrittenQuery = await QueryRewritingService.shared.rewriteQuery(userQuery, history: conversationHistory)
-                    
-                    ragContextString = await self.retrieveRAGContext(for: rewrittenQuery, conversationID: conversationID, history: conversationHistory)
+                    // Use Intelligence Core query rewriting when enabled, feature toggled on, and a model is selected
+                    let isICEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+                    let hasICModel = await IntelligenceCoreService.shared.hasModelSelected
+                    // Default to true if the key hasn't been set yet (matches @AppStorage default in settings UI)
+                    let isRAGRewritingEnabled = UserDefaults.standard.object(forKey: AppSettings.ciFeatureRAGRewritingKey) == nil
+                        ? true
+                        : UserDefaults.standard.bool(forKey: AppSettings.ciFeatureRAGRewritingKey)
+                    let queryForRAG: String
+                    if isICEnabled && hasICModel && isRAGRewritingEnabled {
+                        queryForRAG = await QueryRewritingService.shared.rewriteQuery(userQuery, history: conversationHistory)
+                    } else {
+                        queryForRAG = userQuery
+                    }
+
+                    ragContextString = await self.retrieveRAGContext(for: queryForRAG, conversationID: conversationID, history: conversationHistory)
                 }
                 
                 // Check cancellation before heavy lifting

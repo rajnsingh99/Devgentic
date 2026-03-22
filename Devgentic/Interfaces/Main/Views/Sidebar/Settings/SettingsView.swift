@@ -10,6 +10,7 @@ import SwiftUI
 /// Enum to represent the different settings categories for easier navigation and management.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case general = "General"
+    case coreIntelligence = "Core Intelligence"
     case account = "Account"
     case notifications = "Notifications"
     case theme = "Theme"
@@ -22,6 +23,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general:
             return "gear"
+        case .coreIntelligence:
+            return "cpu.fill"
         case .account:
             return "person.crop.circle"
         case .notifications:
@@ -32,13 +35,27 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "info.circle"
         }
     }
-    
+
+    /// Brief subtitle shown below the category name in the sidebar.
+    var subtitle: String {
+        switch self {
+        case .general: return "Appearance and behavior"
+        case .coreIntelligence: return "On-device intelligence"
+        case .account: return "API keys and providers"
+        case .notifications: return "Alerts and sounds"
+        case .theme: return "Colors and typography"
+        case .about: return "Version and licenses"
+        }
+    }
+
     /// Provides the destination view for each category.
     @ViewBuilder
     var destination: some View {
         switch self {
         case .general:
             GeneralSettingsView()
+        case .coreIntelligence:
+            CoreIntelligenceSettingsView()
         case .account:
             AccountSettingsView()
         case .notifications:

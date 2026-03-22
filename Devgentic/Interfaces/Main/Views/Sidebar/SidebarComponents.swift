@@ -79,7 +79,7 @@ struct SidebarSearchBarView: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 12))
-                        .foregroundColor(.secondary.opacity(0.6))
+                        .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
                 .transition(.scale.combined(with: .opacity))

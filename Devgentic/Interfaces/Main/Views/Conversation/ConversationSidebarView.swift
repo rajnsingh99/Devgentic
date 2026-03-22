@@ -53,15 +53,15 @@ struct SidebarGroupHeaderView: View {
 
             Text(title)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.secondary.opacity(0.9))
+                .foregroundColor(theme.secondaryText)
                 .padding(.leading, 2)
 
             Text("\(count)")
                 .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.secondary.opacity(0.5))
+                .foregroundColor(theme.tertiaryText)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
-                .background(Color.primary.opacity(0.04))
+                .background(theme.surfaceOverlay)
                 .clipShape(Capsule())
                 .padding(.leading, 6)
 
@@ -72,7 +72,7 @@ struct SidebarGroupHeaderView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(isHovering ? Color.white.opacity(0.04) : Color.clear)
+                .fill(isHovering ? theme.surfaceOverlay : Color.clear)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -252,6 +252,7 @@ struct ConversationSidebarRow: View {
 struct ConversationSidebarView: View {
     @EnvironmentObject var viewModel: MainApplicationViewModel
     @Environment(\.managedObjectContext) private var viewContext
+    @Environment(\.appTheme) private var theme
 
     // MARK: - Data Fetching
     @FetchRequest(
@@ -357,14 +358,22 @@ struct ConversationSidebarView: View {
                 }
 
                 // Date-Grouped Sections
-                ForEach(dateGroupedSections, id: \.title) { section in
+                ForEach(Array(dateGroupedSections.enumerated()), id: \.element.title) { index, section in
                     VStack(alignment: .leading, spacing: 2) {
+                        // Subtle divider between sections
+                        if index > 0 || !pinnedConversations.isEmpty {
+                            Divider()
+                                .background(theme.dividerColor)
+                                .padding(.horizontal, 8)
+                                .padding(.top, 4)
+                        }
+
                         Text(section.title)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary.opacity(0.7))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(theme.secondaryText)
                             .padding(.horizontal, 8)
-                            .padding(.top, 8)
-                            .padding(.bottom, 2)
+                            .padding(.top, 10)
+                            .padding(.bottom, 4)
 
                         ForEach(section.conversations) { conversation in
                             row(for: conversation)
@@ -481,8 +490,8 @@ struct ConversationSidebarView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(Color.red.opacity(0.1))
-                .foregroundColor(.red)
+                .background(theme.errorColor.opacity(0.1))
+                .foregroundColor(theme.errorColor)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
@@ -495,10 +504,10 @@ struct ConversationSidebarView: View {
             } label: {
                 Text("Cancel")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.05))
+                    .background(theme.surfaceOverlay)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
@@ -506,10 +515,10 @@ struct ConversationSidebarView: View {
         .padding(8)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.primary.opacity(0.03))
+                .fill(theme.surfaceOverlay)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
+                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
                 )
         )
     }

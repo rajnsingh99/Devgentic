@@ -76,20 +76,10 @@ struct VectorSearchTool: DevgenticTool {
     // MARK: - Execution
     
     func call(arguments: Arguments) async throws -> String {
-        // --- LOGGING INSTRUMENTATION ---
-        let logID = LogManager.shared.logAction(
-            toolName: self.name,
-            summary: "Semantic Search: '\(arguments.query)'",
-            operations: [
-                ["query": arguments.query]
-            ]
-        )
-        // -------------------------------
-        
         let query = arguments.query
         
         guard let embedding = await EmbeddingService.shared.generateEmbedding(for: query) else {
-            return "Error: Could not generate embedding for query. (Audit Ref: \(logID))"
+            return "Error: Could not generate embedding for query."
         }
         
         let results = VectorStoreService.shared.findNearest(
@@ -99,10 +89,10 @@ struct VectorSearchTool: DevgenticTool {
         )
         
         if results.isEmpty {
-            return "No relevant information found in local history. (Audit Ref: \(logID))"
+            return "No relevant information found in local history."
         }
         
         let resultText = results.map { "--- Context ---\n\($0.fullTextContent)" }.joined(separator: "\n\n")
-        return resultText + "\n(Audit Ref: \(logID))"
+        return resultText
     }
 }

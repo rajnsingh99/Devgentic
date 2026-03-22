@@ -19,24 +19,31 @@ struct MLXModelStoreView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
             MLXModelStoreContent(viewModel: viewModel, filterForTools: filterForTools)
-                .navigationTitle(filterForTools ? "Agent Model Store" : "Model Store")
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") { dismiss() }
-                    }
-                    ToolbarItem(placement: .automatic) {
-                        Button {
-                            viewModel.refresh()
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .help("Refresh Store")
-                    }
+
+            Divider().background(theme.dividerColor)
+
+            // Bottom Action Bar — matches Ollama sheet
+            HStack {
+                Text("\(viewModel.displayedModels.count) Models Available")
+                    .font(.caption)
+                    .foregroundColor(theme.secondaryText)
+
+                Spacer()
+
+                Button("Done") {
+                    dismiss()
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(theme.accentColor)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding()
+            .background(theme.secondaryBackground)
         }
-        .frame(minWidth: 700, minHeight: 600)
+        .frame(width: 750, height: 650)
     }
 }
 
@@ -56,19 +63,52 @@ struct MLXModelStoreContent: View {
 
             // MARK: - Header & Filter Bar
             VStack(spacing: showSearchBar ? 16 : 0) {
-                // Search Input & Controls — only in sheet mode
+                // Title + Search — only in sheet mode
                 if showSearchBar {
+                    // Title Row
+                    HStack {
+                        Image(systemName: "square.grid.2x2.fill")
+                            .font(.title2)
+                            .foregroundColor(theme.accentColor)
+
+                        Text(filterForTools ? "Agent Model Store" : "MLX Model Library")
+                            .font(.title2)
+                            .fontWeight(.bold)
+                            .foregroundColor(theme.primaryText)
+
+                        Spacer()
+
+                        Button {
+                            viewModel.refresh()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.body)
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Refresh Models")
+                    }
                     HStack(spacing: 8) {
                         HStack {
                             Image(systemName: "magnifyingglass")
                                 .foregroundColor(theme.secondaryText)
 
                             TextField(
-                                viewModel.selectedCategory == .installed ? "Filter fetched models..." : "Search Hugging Face...",
+                                viewModel.selectedCategory == .installed ? "Filter installed models..." : "Search Hugging Face...",
                                 text: $viewModel.searchText
                             )
                             .textFieldStyle(.plain)
                             .font(.body)
+
+                            if !viewModel.searchText.isEmpty {
+                                Button {
+                                    viewModel.searchText = ""
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(theme.secondaryText)
+                                }
+                                .buttonStyle(.plain)
+                            }
 
                             Menu {
                                 Picker("Sort By", selection: $viewModel.sortOption) {
@@ -88,9 +128,9 @@ struct MLXModelStoreContent: View {
                         }
                         .padding(10)
                         .background(theme.secondaryBackground)
-                        .cornerRadius(8)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
                     }
@@ -111,11 +151,10 @@ struct MLXModelStoreContent: View {
                     .padding(.horizontal, 2)
                 }
             }
-            .padding()
+            .padding(20)
             .frame(maxWidth: centeredLayout ? 1000 : .infinity)
             .frame(maxWidth: .infinity)
-            .background(theme.primaryBackground)
-            .overlay(Rectangle().frame(height: 1).foregroundColor(theme.dividerColor), alignment: .bottom)
+            .background(showSearchBar ? theme.primaryBackground : Color.clear)
 
             // MARK: - Main Content Area
             ZStack {
@@ -177,7 +216,7 @@ struct MLXModelStoreContent: View {
                                 .padding(.top, 8)
                             }
                         }
-                        .padding()
+                        .padding(20)
                         .frame(maxWidth: centeredLayout ? 1000 : .infinity)
                         .frame(maxWidth: .infinity)
                     }
@@ -195,21 +234,22 @@ struct MLXModelStoreContent: View {
         VStack {
             Spacer()
             HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text("Downloading \(viewModel.currentDownloadName)...")
                         .font(.headline)
+                        .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
                     ProgressView(value: viewModel.downloadProgress)
                         .controlSize(.small)
-                        .tint(.blue)
+                        .tint(theme.accentColor)
                 }
-
-                Spacer()
 
                 Text("\(Int(viewModel.downloadProgress * 100))%")
                     .monospacedDigit()
                     .fontWeight(.bold)
+                    .foregroundColor(theme.accentColor)
+                    .frame(width: 50, alignment: .trailing)
 
                 Button {
                     viewModel.cancelDownload()
@@ -221,11 +261,18 @@ struct MLXModelStoreContent: View {
                 .buttonStyle(.plain)
                 .help("Cancel Download")
             }
-            .padding()
-            .background(.regularMaterial)
-            .cornerRadius(12)
-            .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 5)
-            .padding()
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(theme.secondaryBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+            )
+            .shadow(color: theme.primaryText.opacity(0.08), radius: 10, y: 4)
+            .padding(.horizontal, 40)
+            .padding(.bottom, 20)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
@@ -235,77 +282,126 @@ struct MLXModelStoreContent: View {
 struct ModelCardView: View {
     let model: MLXDisplayModel
     @ObservedObject var viewModel: MLXModelStoreViewModel
-    @State private var showingDeleteAlert = false // Local state for delete confirmation
+    @State private var showingDeleteAlert = false
+    @State private var showingFitAdvisory = false
+    @State private var isHovered = false
+    @AppStorage(AppSettings.coreIntelligenceModelKey) private var coreIntelligenceModel: String = ""
     @Environment(\.appTheme) private var theme
-    
+
     var isInstalled: Bool {
         viewModel.isInstalled(model)
     }
-    
+
+    /// Lazily computed fit assessment based on available model metadata.
+    private var fitAssessment: ModelFitAssessment {
+        ModelFitAdvisor.assess(metadata: nil, diskSizeString: model.size)
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
+            // Icon — unified 44x44, controlBackground, continuous corner
             ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(theme.dividerColor)
-                    .frame(width: 52, height: 52)
-                
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(theme.controlBackground)
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+                    )
+
                 Image(systemName: "cube.fill")
-                    .font(.title)
-                    .foregroundColor(theme.secondaryText)
+                    .font(.title2)
+                    .foregroundColor(theme.accentColor)
             }
-            
+
             VStack(alignment: .leading, spacing: 6) {
+                // Name + Organization
                 HStack(alignment: .firstTextBaseline) {
                     Text(model.displayName)
                         .font(.headline)
-                        .foregroundColor(.primary)
-                    
+                        .foregroundColor(theme.primaryText)
+
                     if !model.organization.isEmpty {
                         Text(model.organization)
                             .font(.caption)
                             .foregroundColor(theme.secondaryText)
                     }
                 }
-                
-                // Badges
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack {
-                        ForEach(Array(model.capabilities), id: \.self) { cap in
-                            CapabilityBadge(capability: cap)
-                        }
-                    }
-                }
-                
+
+                // Meta info row
                 HStack(spacing: 12) {
                     if model.downloads > 0 {
                         Label("\(model.downloads.formatted())", systemImage: "arrow.down.circle")
                     }
                     if let size = model.size {
-                        Text("• \(size)")
+                        Label(size, systemImage: "internaldrive")
                     }
-                    // For installed models, show path
                     if viewModel.selectedCategory == .installed, let desc = model.description {
-                        Text("• \(desc)")
+                        Text(desc)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                 }
-                .font(.caption2)
+                .font(.caption)
                 .foregroundColor(theme.secondaryText)
+
+                // Badges + Fit
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(Array(model.capabilities), id: \.self) { cap in
+                            CapabilityBadge(capability: cap)
+                        }
+
+                        if model.size != nil && fitAssessment.estimatedRuntimeRAM > 0 {
+                            ModelFitBadgeView(assessment: fitAssessment)
+                        }
+                    }
+                }
             }
-            
-            Spacer()
-            
-            VStack(alignment: .trailing) {
+
+            Spacer(minLength: 16)
+
+            // Actions
+            VStack(alignment: .trailing, spacing: 8) {
                 if isInstalled {
                     if viewModel.selectedCategory == .installed {
-                        // DELETE BUTTON (Only in Installed Tab)
+                        // Set as Intelligence Core
+                        if coreIntelligenceModel == model.id {
+                            HStack(spacing: 4) {
+                                Image(systemName: "cpu.fill")
+                                Text("Intelligence Core")
+                            }
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.purple)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.purple.opacity(0.1))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        } else {
+                            Button {
+                                coreIntelligenceModel = model.id
+                            } label: {
+                                Label("Set as IC", systemImage: "cpu")
+                                    .font(.caption2)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Set as Intelligence Core model")
+                        }
+
+                        // DELETE BUTTON
                         Button(role: .destructive) {
                             showingDeleteAlert = true
                         } label: {
-                            Label("Delete", systemImage: "trash")
+                            Image(systemName: "trash")
+                                .foregroundColor(isHovered ? theme.errorColor : theme.secondaryText)
+                                .padding(8)
+                                .background(isHovered ? theme.errorColor.opacity(0.1) : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         }
-                        .controlSize(.regular)
+                        .buttonStyle(.plain)
+                        .help("Delete Model")
                         .alert("Delete Model?", isPresented: $showingDeleteAlert) {
                             Button("Delete", role: .destructive) {
                                 viewModel.deleteModel(model)
@@ -316,20 +412,30 @@ struct ModelCardView: View {
                         }
                     } else {
                         // INSTALLED BADGE (In other tabs)
-                        HStack {
+                        HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                             Text("Installed")
                         }
-                        .font(.subheadline)
+                        .font(.caption2)
+                        .fontWeight(.medium)
                         .foregroundColor(.green)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(Color.green.opacity(0.1))
-                        .cornerRadius(6)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                        )
                     }
                 } else {
                     Button {
-                        viewModel.downloadModel(model)
+                        let verdict = fitAssessment.verdict
+                        if verdict == .risky || verdict == .incompatible {
+                            showingFitAdvisory = true
+                        } else {
+                            viewModel.downloadModel(model)
+                        }
                     } label: {
                         if viewModel.isDownloading && viewModel.currentDownloadName == model.id {
                             ProgressView().controlSize(.small).frame(width: 60)
@@ -339,17 +445,37 @@ struct ModelCardView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
+                    .tint(theme.accentColor)
                     .disabled(viewModel.isDownloading && viewModel.currentDownloadName != model.id)
                 }
             }
         }
-        .padding(12)
-        .background(theme.secondaryBackground)
-        .cornerRadius(12)
+        .padding(14)
+        .background(isHovered ? theme.controlBackground : theme.secondaryBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(theme.dividerColor, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 1)
         )
+        .shadow(color: theme.primaryText.opacity(isHovered ? 0.05 : 0.03), radius: isHovered ? 12 : 6, y: isHovered ? 6 : 3)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.2)) {
+                isHovered = hovering
+            }
+        }
+        .sheet(isPresented: $showingFitAdvisory) {
+            ModelFitAdvisoryView(
+                modelName: model.displayName,
+                assessment: fitAssessment,
+                onDownloadAnyway: {
+                    showingFitAdvisory = false
+                    viewModel.downloadModel(model)
+                },
+                onDismiss: {
+                    showingFitAdvisory = false
+                }
+            )
+        }
     }
 }
 
@@ -369,9 +495,9 @@ struct CategoryTabButton: View {
             .font(.subheadline.weight(isSelected ? .semibold : .regular))
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
-            .background(isSelected ? Color.accentColor : theme.dividerColor)
-            .foregroundColor(isSelected ? .white : .primary)
-            .cornerRadius(20)
+            .background(isSelected ? theme.accentColor : theme.surfaceOverlay)
+            .foregroundColor(isSelected ? .white : theme.primaryText)
+            .clipShape(Capsule())
         }
         .buttonStyle(.plain)
     }

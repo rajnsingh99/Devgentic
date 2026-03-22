@@ -58,9 +58,10 @@ struct ResponseSynthesizer {
         // Native models output conversational answers naturally when they finish.
         // We trust them 100% and NEVER trigger a secondary LLM synthesis.
         if isNativeFlow {
-            if let finalAnswer = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines), !finalAnswer.isEmpty {
+            if let rawAnswer = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines), !rawAnswer.isEmpty {
                 logger.info("🏎️ [Synthesizer] Native API flow detected. Returning agent's natural response directly.")
-                return finalAnswer
+                let finalAnswer = OutputSanitizer.stripThinkBlocksAndTokens(rawAnswer)
+                return finalAnswer.isEmpty ? rawAnswer : finalAnswer
             }
             
             // If the native loop crashed or stalled abruptly without generating a final thought:
@@ -107,10 +108,13 @@ struct ResponseSynthesizer {
 
         do {
             let response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
-            let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { throw SynthesizerError.emptyResponse }
+            // Strip think blocks and special tokens that the synthesis model may emit.
+            // Uses the scoped sanitizer — does NOT strip code fences or wrapper tags
+            // which could destroy legitimate markdown in the response.
+            let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(response)
+            guard !cleaned.isEmpty else { throw SynthesizerError.emptyResponse }
             logger.info("✅ [Synthesizer] LLM synthesis succeeded.")
-            return trimmed
+            return cleaned
         } catch {
             logger.error("❌ [Synthesizer] LLM synthesis failed (\(error.localizedDescription)). Using deterministic fallback.")
             return buildDeterministicFallback(summary: summary)

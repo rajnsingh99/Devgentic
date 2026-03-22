@@ -249,4 +249,79 @@ final class OutputSanitizerTests: XCTestCase {
         XCTAssertEqual(result.cleaned, input)
         XCTAssertNil(result.thought)
     }
+
+    // MARK: - Duplicate Block Deduplication (G2)
+
+    func testDuplicateBlock_TwoIdenticalJSONObjects() {
+        let block = """
+        {"content": {"thought": "No tools.", "tool_calls": []}}
+        """
+        let input = block + "\n" + block
+        let result = OutputSanitizer.sanitize(input)
+        // Should contain only one block
+        let braceCount = result.cleaned.filter { $0 == "{" }.count
+        // One top-level + one nested "content" object = 2 open braces for single block
+        XCTAssertEqual(braceCount, 2, "Should keep only the first JSON block")
+    }
+
+    func testDuplicateBlock_SingleBlock_Unchanged() {
+        let input = """
+        {"content": "Hello.", "tool_calls": []}
+        """
+        let result = OutputSanitizer.sanitize(input)
+        XCTAssertTrue(result.cleaned.contains("Hello."))
+    }
+
+    func testDuplicateBlock_NonJSON_Unchanged() {
+        let input = "Action: list_directory\nAction Input: {\"path\": \"/\"}"
+        let result = OutputSanitizer.sanitize(input)
+        XCTAssertTrue(result.cleaned.contains("Action:"))
+    }
+
+    // MARK: - Scoped Think-Block Strip (G3)
+
+    func testStripThinkBlocksAndTokens_RemovesThinkTags() {
+        let input = "<think>Internal reasoning here.</think>\nThe answer is 42."
+        let result = OutputSanitizer.stripThinkBlocksAndTokens(input)
+        XCTAssertFalse(result.contains("<think>"))
+        XCTAssertFalse(result.contains("Internal reasoning"))
+        XCTAssertEqual(result, "The answer is 42.")
+    }
+
+    func testStripThinkBlocksAndTokens_RemovesSpecialTokens() {
+        let input = "The answer is 42.<|eot_id|>"
+        let result = OutputSanitizer.stripThinkBlocksAndTokens(input)
+        XCTAssertEqual(result, "The answer is 42.")
+    }
+
+    func testStripThinkBlocksAndTokens_PreservesCodeFences() {
+        let input = """
+        Here's the code:
+
+        ```swift
+        let files = try FileManager.default.contentsOfDirectory(atPath: path)
+        ```
+        """
+        let result = OutputSanitizer.stripThinkBlocksAndTokens(input)
+        XCTAssertTrue(result.contains("```swift"), "Code fences should NOT be stripped by scoped sanitizer")
+        XCTAssertTrue(result.contains("```"), "Closing code fence should be preserved")
+    }
+
+    func testStripThinkBlocksAndTokens_PreservesMarkdown() {
+        let input = """
+        <think>Some internal reasoning.</think>
+        Here's an example:
+
+        ```python
+        print("hello world")
+        ```
+
+        That's all!
+        """
+        let result = OutputSanitizer.stripThinkBlocksAndTokens(input)
+        XCTAssertFalse(result.contains("<think>"))
+        XCTAssertTrue(result.contains("```python"), "Python code fence should be preserved")
+        XCTAssertTrue(result.contains("print(\"hello world\")"))
+        XCTAssertTrue(result.contains("That's all!"))
+    }
 }
