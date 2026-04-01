@@ -75,7 +75,7 @@ struct APIKeyInputPopup: View {
             .textFieldStyle(.roundedBorder)
             .controlSize(.large)
             // Reset validation state when user starts typing
-            .onChange(of: inputViewModel.apiKeyInput) {
+            .onChange(of: inputViewModel.apiKeyInput) { _, _ in
                 if case .valid = inputViewModel.validationState { return }
                 if case .invalid = inputViewModel.validationState {
                     inputViewModel.validationState = .idle

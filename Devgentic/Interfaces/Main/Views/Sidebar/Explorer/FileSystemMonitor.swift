@@ -36,23 +36,24 @@ private func fsEventsCallback(
 
 class FileSystemMonitor {
     private var stream: FSEventStreamRef?
-    private let callback: ([URL]) -> Void // Updated to pass specific changed URLs
+    private let callback: @Sendable ([URL]) -> Void
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "FileSystemMonitor")
-    
+
     private var monitoringURL: URL?
 
-    init(callback: @escaping ([URL]) -> Void) {
+    init(callback: @escaping @Sendable ([URL]) -> Void) {
         self.callback = callback
     }
 
     func start(path: String, excludedPaths: [String] = []) {
         stop()
-        
+
         self.monitoringURL = URL(fileURLWithPath: path)
-        
+
+        // Use passRetained to prevent dangling pointer if deinit races with a pending callback
         var context = FSEventStreamContext(
             version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
+            info: Unmanaged.passRetained(self).toOpaque(),
             retain: nil,
             release: nil,
             copyDescription: nil
@@ -88,7 +89,10 @@ class FileSystemMonitor {
     }
     
     fileprivate func handleEvents(changedURLs: [URL]) {
-        callback(changedURLs)
+        // Dispatch to main thread so callers can safely interact with @MainActor-isolated state
+        DispatchQueue.main.async { [callback] in
+            callback(changedURLs)
+        }
     }
 
     func stop() {
@@ -97,10 +101,15 @@ class FileSystemMonitor {
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil
+        // Balance the passRetained from start()
+        Unmanaged.passUnretained(self).release()
         logger.info("FSEventStream stopped.")
     }
 
     deinit {
-        stop()
+        // Only stop if stream is still active (stop() handles its own release)
+        if stream != nil {
+            stop()
+        }
     }
 }

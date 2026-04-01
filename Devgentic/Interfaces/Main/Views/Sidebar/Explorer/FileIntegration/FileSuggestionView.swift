@@ -73,8 +73,8 @@ struct FileSuggestionView: View {
                 }
                 .padding(4)
             }
-            .onChange(of: selectedItemID) { newId in
-                if let newId = newId {
+            .onChange(of: selectedItemID) { _, newId in
+                if let newId {
                     withAnimation {
                         scrollViewProxy.scrollTo(newId, anchor: .center)
                     }

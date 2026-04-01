@@ -252,3 +252,205 @@ struct OllamaSettingsView: View {
         }
     }
 }
+
+// MARK: - Anthropic Claude Settings
+
+struct AnthropicSettingsView: View {
+    @Binding var config: AnthropicAdvancedConfig
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+
+            // Max Tokens
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Max Output Tokens").fontWeight(.medium)
+                    Text("Maximum length of the generated response. Claude requires this explicitly.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.maxTokens)").monospacedDigit()
+                    Stepper("", value: $config.maxTokens, in: 256...128000, step: 256).labelsHidden()
+                }
+            }
+
+            Divider()
+
+            // Temperature
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Temperature").fontWeight(.medium)
+                    if config.extendedThinking {
+                        Text("Locked to 1.0 when Extended Thinking is enabled.").font(.caption).foregroundColor(.orange)
+                    } else {
+                        Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                    }
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                        .disabled(config.extendedThinking)
+                    Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+                .opacity(config.extendedThinking ? 0.5 : 1.0)
+            }
+
+            Divider()
+
+            // Top P
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top P").fontWeight(.medium)
+                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.topP ?? 1.0, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+
+            Divider()
+
+            // Top K
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top K").fontWeight(.medium)
+                    Text("Maximum number of tokens to consider when sampling.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.topK ?? 250)").monospacedDigit()
+                    Stepper("", value: $config.topK.toNonOptional(defaultValue: 250), in: 1...500).labelsHidden()
+                }
+            }
+
+            Divider()
+
+            // Extended Thinking Section
+            Text("Extended Thinking")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .padding(.top, 8)
+
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Enable Thinking").fontWeight(.medium)
+                    Text("Claude will reason internally before responding. Improves complex task performance.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                Toggle("", isOn: $config.extendedThinking)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            if config.extendedThinking {
+                Divider()
+
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Thinking Budget").fontWeight(.medium)
+                        Text("Max tokens for internal reasoning. Must be less than Max Output Tokens.").font(.caption).foregroundColor(theme.secondaryText)
+                    }
+                    Spacer(minLength: 16)
+                    HStack {
+                        Text("\(config.thinkingBudgetTokens ?? 10000)").monospacedDigit()
+                        Stepper("", value: $config.thinkingBudgetTokens.toNonOptional(defaultValue: 10000), in: 1024...100000, step: 1024).labelsHidden()
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - OpenAI Settings
+
+struct OpenAISettingsView: View {
+    @Binding var config: OpenAIAdvancedConfig
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+
+            // Max Tokens
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Max Output Tokens").fontWeight(.medium)
+                    Text("Maximum length of the generated response. Leave at 0 for model default.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.maxTokens ?? 0)").monospacedDigit()
+                    Stepper("", value: $config.maxTokens.toNonOptional(defaultValue: 0), in: 0...128000, step: 256).labelsHidden()
+                }
+            }
+
+            Divider()
+
+            // Temperature
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Temperature").fontWeight(.medium)
+                    Text("Controls the randomness of the generated response.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.temperature.toNonOptional(defaultValue: 1.0), in: 0.0...2.0, step: 0.1)
+                        .frame(width: 150)
+                    Text("\(config.temperature ?? 1.0, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+
+            Divider()
+
+            // Top P
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top P").fontWeight(.medium)
+                    Text("Cumulative probability of tokens to consider.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.topP.toNonOptional(defaultValue: 1.0), in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.topP ?? 1.0, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
+            }
+
+            Divider()
+
+            // Reasoning Effort (for o-series models)
+            Text("Reasoning")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .padding(.top, 8)
+
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Reasoning Effort").fontWeight(.medium)
+                    Text("Controls thinking depth for o-series models (o1, o3). Leave as Auto for other models.").font(.caption).foregroundColor(theme.secondaryText)
+                }
+                Spacer(minLength: 16)
+                Picker("", selection: $config.reasoningEffort.toNonOptional(defaultValue: "")) {
+                    Text("Auto").tag("")
+                    Text("Low").tag("low")
+                    Text("Medium").tag("medium")
+                    Text("High").tag("high")
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+        }
+    }
+}

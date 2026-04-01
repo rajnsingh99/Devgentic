@@ -23,8 +23,8 @@ class MainApplicationViewModel: ObservableObject {
     let explorerViewModel = ExplorerViewModel()
     
     // Dependencies are now injected and stored.
-    private let activeStreamManager: ActiveStreamManager
-    private let persistenceService: CoreDataServiceProtocol
+    private(set) var activeStreamManager: ActiveStreamManager
+    private(set) var persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     private let chatHistoryViewModel: ChatHistoryViewModel
 
@@ -33,6 +33,12 @@ class MainApplicationViewModel: ObservableObject {
     private var conversationLoadTask: Task<Void, Never>?
     
     private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
+
+    // MARK: - ChatOps
+    private(set) var chatOpsBridge: ChatOpsBridge?
+    private(set) var discordChatOpsBridge: DiscordChatOpsBridge?
+    private(set) var slackChatOpsBridge: SlackChatOpsBridge?
+    private var conversationSyncService: ConversationSyncService?
 
     // MARK: - Service & Store Observables
     @ObservedObject var ollamaService = OllamaService.shared
@@ -105,6 +111,116 @@ class MainApplicationViewModel: ObservableObject {
         } else {
             logger.info("Web search is disabled (API key not found in UserDefaults).")
         }
+
+        // Start ChatOps bridge if enabled
+        setupChatOps()
+    }
+
+    // MARK: - ChatOps Setup
+
+    /// Starts the ChatOps bridge. Called on launch (if already enabled) and from Settings after pairing/toggle.
+    func startChatOps() {
+        let chatOpsConfig = ChatOpsConfigManager.shared
+        guard chatOpsConfig.botToken != nil,
+              chatOpsConfig.authorizedChatID != nil else {
+            logger.info("ChatOps not configured — missing token or chat ID.")
+            return
+        }
+
+        // Reuse existing bridge or create a new one
+        if chatOpsBridge == nil {
+            chatOpsBridge = ChatOpsBridge(viewModel: self)
+        }
+        chatOpsBridge?.start()
+        logger.info("ChatOps bridge started.")
+    }
+
+    /// Stops the ChatOps bridge.
+    func stopChatOps() {
+        chatOpsBridge?.stop()
+        logger.info("ChatOps bridge stopped.")
+    }
+
+    // MARK: - Discord ChatOps
+
+    /// Starts the Discord ChatOps bridge. Called on launch (if already enabled) and from Settings after pairing/toggle.
+    func startDiscordChatOps() {
+        let chatOpsConfig = ChatOpsConfigManager.shared
+        guard chatOpsConfig.discordBotToken != nil,
+              chatOpsConfig.discordAuthorizedChannelID != nil else {
+            logger.info("Discord ChatOps not configured — missing token or channel ID.")
+            return
+        }
+
+        if discordChatOpsBridge == nil {
+            discordChatOpsBridge = DiscordChatOpsBridge(viewModel: self)
+        }
+        discordChatOpsBridge?.start()
+        logger.info("Discord ChatOps bridge started.")
+    }
+
+    /// Stops the Discord ChatOps bridge.
+    func stopDiscordChatOps() {
+        discordChatOpsBridge?.stop()
+        logger.info("Discord ChatOps bridge stopped.")
+    }
+
+    // MARK: - Slack ChatOps
+
+    /// Starts the Slack ChatOps bridge.
+    func startSlackChatOps() {
+        let chatOpsConfig = ChatOpsConfigManager.shared
+        guard chatOpsConfig.slackBotToken != nil,
+              chatOpsConfig.slackAppToken != nil,
+              chatOpsConfig.slackAuthorizedChannelID != nil else {
+            logger.info("Slack ChatOps not configured — missing tokens or channel ID.")
+            return
+        }
+
+        if slackChatOpsBridge == nil {
+            slackChatOpsBridge = SlackChatOpsBridge(viewModel: self)
+        }
+        slackChatOpsBridge?.start()
+        logger.info("Slack ChatOps bridge started.")
+    }
+
+    /// Stops the Slack ChatOps bridge.
+    func stopSlackChatOps() {
+        slackChatOpsBridge?.stop()
+        logger.info("Slack ChatOps bridge stopped.")
+    }
+
+    private func setupChatOps() {
+        // ConversationSyncService is always active (handles real-time UI updates for remote messages)
+        if conversationSyncService == nil {
+            conversationSyncService = ConversationSyncService(
+                chatHistoryViewModel: chatHistoryViewModel,
+                activeStreamManager: activeStreamManager
+            )
+        }
+
+        let chatOpsConfig = ChatOpsConfigManager.shared
+
+        // Start Telegram if enabled
+        if chatOpsConfig.isEnabled {
+            startChatOps()
+        } else {
+            logger.info("Telegram ChatOps is disabled.")
+        }
+
+        // Start Discord if enabled
+        if chatOpsConfig.isDiscordEnabled {
+            startDiscordChatOps()
+        } else {
+            logger.info("Discord ChatOps is disabled.")
+        }
+
+        // Start Slack if enabled
+        if chatOpsConfig.isSlackEnabled {
+            startSlackChatOps()
+        } else {
+            logger.info("Slack ChatOps is disabled.")
+        }
     }
 
     deinit {
@@ -174,15 +290,25 @@ class MainApplicationViewModel: ObservableObject {
                 self.conversationLoadTask?.cancel()
                 
                 self.conversationLoadTask = Task {
-                    // NEW: Unload MLX model whenever the user switches conversation.
-                    // This ensures memory is freed immediately upon navigation.
-                    let stats = await MLXService.shared.unloadModel()
-                    logger.debug("Conversation switch MLX unload stats: \(stats)")
-                    
-                    // NEW: Unload Ollama model to free VRAM.
-                    // This assumes OllamaService has an exposed unloadModel() method that sends keep_alive: 0.
-                    await self.ollamaService.unloadModel()
-                    
+                    // Only unload models if no agent is actively streaming
+                    // AND the new conversation uses a different backend profile.
+                    if self.streamingMessageID == nil {
+                        let newProfileID: UUID? = conversationID.flatMap {
+                            self.persistenceService.getConversation(withId: $0)?.backendEntityId
+                        }
+                        let currentProfileID = self.backendConfiguration.selectedProfileID
+
+                        if newProfileID != currentProfileID || newProfileID == nil {
+                            let stats = await MLXService.shared.unloadModel()
+                            logger.debug("Conversation switch MLX unload stats: \(stats)")
+                            await self.ollamaService.unloadModel()
+                        } else {
+                            logger.info("Skipping model unload — new conversation uses same backend profile (\(currentProfileID?.uuidString ?? "nil")).")
+                        }
+                    } else {
+                        logger.info("Skipping model unload — agent is actively streaming (messageID: \(self.streamingMessageID!.uuidString)).")
+                    }
+
                     await self.chatHistoryViewModel.loadConversation(id: conversationID)
                     if let id = conversationID {
                         self.loadBackendStateForSelectedConversation(conversationID: id)
@@ -195,9 +321,9 @@ class MainApplicationViewModel: ObservableObject {
     
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
 
-        
+
         let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         guard !chatHistoryViewModel.isSending else {
             logger.warning("[sendMessage] Message sending already in progress. Ignoring new request.")
             return
@@ -212,15 +338,15 @@ class MainApplicationViewModel: ObservableObject {
 
         chatHistoryViewModel.isSending = true
         logger.info("Beginning message send process with profile: \(config.profile.displayName)")
-        
+
         // Add to query history
         if !plainUserQueryFromEditor.isEmpty, queryHistory.last != plainUserQueryFromEditor {
             queryHistory.append(plainUserQueryFromEditor)
         }
         resetQueryHistoryIndex() // Reset index after sending a new message
-        
+
         let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
-        
+
         guard let targetConversationEntity = persistenceService.getConversation(withId: conversationIDToUse) else {
             logger.error("[sendMessage] CRITICAL: Could not find or create conversation entity for ID: \(conversationIDToUse.uuidString)")
             chatHistoryViewModel.isSending = false
@@ -235,46 +361,45 @@ class MainApplicationViewModel: ObservableObject {
         }
 
         let filesForBackend = self.attachedFiles
-        
-        let userMessage = createUserMessage(
-            conversationID: conversationIDToUse,
-            query: plainUserQueryFromEditor,
-            files: filesForBackend
-        )
-        
-        chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
-        logger.debug("Appended user message into UI.")
-        
-        Task {
-            await persistenceService.addMessage(userMessage, to: targetConversationEntity)
-            logger.debug("User message persisted successfully.")
-        }
-
         self.clearAttachedFiles()
         logger.debug("Cleared user input and attachments from UI.")
 
-        let agentMessage = activeStreamManager.startMessageStream(
-            withConfig: config,
-            conversationID: conversationIDToUse,
-            userQuery: plainUserQueryFromEditor,
-            history: chatHistoryViewModel.currentChatMessages.reversed(),
-            files: filesForBackend,
-            updating: nil,
-            onComplete: { [weak self] in
-                DispatchQueue.main.async {
-                    self?.streamingMessageID = nil
-                    self?.streamingMessage = nil
-                    logger.info("Stream completed. Resetting streamingMessageID.")
-                }
+        Task { @MainActor in
+            let userMessage = await createUserMessage(
+                conversationID: conversationIDToUse,
+                query: plainUserQueryFromEditor,
+                files: filesForBackend
+            )
+
+            chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
+            logger.debug("Appended user message into UI.")
+
+            Task {
+                await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+                logger.debug("User message persisted successfully.")
             }
-        )
 
-        self.streamingMessageID = agentMessage.id
-        self.streamingMessage = agentMessage
-        chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-        logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
+            let agentMessage = activeStreamManager.startMessageStream(
+                withConfig: config,
+                conversationID: conversationIDToUse,
+                userQuery: plainUserQueryFromEditor,
+                history: chatHistoryViewModel.currentChatMessages.reversed(),
+                files: filesForBackend,
+                updating: nil,
+                onComplete: { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.streamingMessageID = nil
+                        self?.streamingMessage = nil
+                        logger.info("Stream completed. Resetting streamingMessageID.")
+                    }
+                }
+            )
 
-        Task {
+            self.streamingMessageID = agentMessage.id
+            self.streamingMessage = agentMessage
+            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
+            logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
+
             await chatHistoryViewModel.resetSendingState()
         }
     }
@@ -388,29 +513,104 @@ class MainApplicationViewModel: ObservableObject {
     
     /// Submits the user's decision (Approve/Deny) for a pending tool execution.
     /// - Parameters:
-    ///   - conversationID: The conversation ID where the permission was requested.
+    ///   - operationID: The unique HITL operation identifier (from PendingToolConfirmation.id).
     ///   - approved: True to execute the tool, False to reject it.
-    func submitToolApproval(conversationID: UUID, approved: Bool) {
-        logger.info("[HITL] Submitting approval decision: \(approved) for conversation \(conversationID)")
+    func submitToolApproval(operationID: UUID, approved: Bool) {
+        logger.info("[HITL] Submitting approval decision: \(approved) for operation \(operationID)")
 
         Task {
-            // Signal the suspension service to resume execution
-            await ExecutionSuspensionService.shared.resume(for: conversationID, approved: approved)
+            await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved)
         }
     }
 
     /// Submits the user's text response (or nil for skip) for a pending clarification request.
-    func submitClarificationResponse(conversationID: UUID, response: String?) {
-        logger.info("[ASK_USER] Submitting clarification response for conversation \(conversationID)")
+    /// - Parameters:
+    ///   - operationID: The unique HITL operation identifier (from PendingClarification.id).
+    ///   - response: The user's text response, or nil to skip.
+    func submitClarificationResponse(operationID: UUID, response: String?) {
+        logger.info("[ASK_USER] Submitting clarification response for operation \(operationID)")
 
         Task {
-            await ExecutionSuspensionService.shared.resumeClarification(for: conversationID, userInput: response)
+            await ExecutionSuspensionService.shared.resumeClarification(for: operationID, userInput: response)
+        }
+    }
+
+    // MARK: - Remote Message Submission (ChatOps Single-Path)
+
+    /// Submits a message from a remote transport (Telegram, Discord, etc.) through the SAME
+    /// flow as the Mac UI's `sendMessage()`. This ensures:
+    /// - The message appears in Mac UI chat history
+    /// - HITL banners work identically on both surfaces
+    /// - The agent response streams through ActiveStreamManager (not a truncated summary)
+    ///
+    /// The `RemoteMirrorService` observes the resulting stream and mirrors events back to the transport.
+    func submitRemoteMessage(
+        prompt: String,
+        conversationID: UUID,
+        source: MessageSource,
+        config: BackendRequestConfig
+    ) {
+        guard let targetConversationEntity = persistenceService.getConversation(withId: conversationID) else {
+            logger.error("[ChatOps] Could not find conversation entity for ID: \(conversationID.uuidString)")
+            return
+        }
+
+        // Auto-title if empty (same as sendMessage)
+        if targetConversationEntity.userDefinedTitle == nil || targetConversationEntity.userDefinedTitle?.isEmpty == true {
+            targetConversationEntity.userDefinedTitle = prompt
+            persistenceService.saveContext()
+        }
+
+        // Auto-navigate Mac UI to this conversation so the user can see remote activity,
+        // HITL banners, and agent responses in real-time. Setting selectedConversationID
+        // triggers the Combine conversation loader which loads messages and merges active streams.
+        if selectedConversationID != conversationID {
+            logger.info("[ChatOps] Auto-navigating Mac UI to conversation \(conversationID.uuidString).")
+            selectedConversationID = conversationID
+        }
+
+        Task { @MainActor in
+            let userMessage = await createUserMessage(conversationID: conversationID, query: prompt, files: [])
+            userMessage.messageSource = source
+
+            // Insert into Mac UI — the conversation is now guaranteed to be selected
+            chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
+
+            Task {
+                await persistenceService.addMessage(userMessage, to: targetConversationEntity)
+            }
+
+            // Fetch history for context (same as sendMessage)
+            let history = chatHistoryViewModel.currentChatMessages.filter { $0.conversationId == conversationID }.reversed()
+
+            let agentMessage = activeStreamManager.startMessageStream(
+                withConfig: config,
+                conversationID: conversationID,
+                userQuery: prompt,
+                history: Array(history),
+                files: [],
+                updating: nil,
+                onComplete: { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.streamingMessageID = nil
+                        self?.streamingMessage = nil
+                        logger.info("[ChatOps] Remote stream completed for conversation \(conversationID).")
+                    }
+                }
+            )
+
+            agentMessage.messageSource = source
+            self.streamingMessageID = agentMessage.id
+            self.streamingMessage = agentMessage
+
+            // Insert agent streaming message into Mac UI
+            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
         }
     }
 
     // MARK: - Message Helpers
     
-    private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) -> ChatMessage {
+    private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) async -> ChatMessage {
         var attachedTextFiles: [AttachedTextFile] = []
         var attachedImageFiles: [AttachedImageFile] = []
 
@@ -421,7 +621,7 @@ class MainApplicationViewModel: ObservableObject {
             let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
 
             if fileProcessorService.isTextFile(mimeType: mimeType, url: fileItem.url) {
-                if let content = fileProcessorService.readFileContent(for: fileItem.url) {
+                if let content = await fileProcessorService.readFileContent(for: fileItem.url) {
                     let textFile = AttachedTextFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, content: content, size: fileSize)
                     attachedTextFiles.append(textFile)
                 }
@@ -473,9 +673,18 @@ class MainApplicationViewModel: ObservableObject {
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
 
-        
         let profileID = backendConfiguration.selectedProfileID
-        
+
+        // Reuse an existing empty conversation if one exists — prevents duplicate empties.
+        if let emptyConvID = findReusableEmptyConversation() {
+            logger.info("[NewChat] Reusing existing empty conversation \(emptyConvID.uuidString).")
+            chatHistoryViewModel.currentChatMessages = []
+            selectedConversationID = emptyConvID
+            chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
+            updateBackendForCurrentConversation(conversationID: emptyConvID, profileID: profileID)
+            return emptyConvID
+        }
+
         let newConversation = Conversation(
             id: UUID(),
             messages: [],
@@ -487,10 +696,22 @@ class MainApplicationViewModel: ObservableObject {
         chatHistoryViewModel.currentChatMessages = []
         selectedConversationID = newConversation.id
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-        
+
         updateBackendForCurrentConversation(conversationID: newConversation.id, profileID: profileID)
-        
+
         return newConversation.id
+    }
+
+    /// Finds the most recent empty conversation (zero messages) that can be reused.
+    private func findReusableEmptyConversation() -> UUID? {
+        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
+        ]
+        request.fetchLimit = 5
+
+        guard let results = try? CoreDataPersistenceService.shared.viewContext.fetch(request) else { return nil }
+        return results.first(where: { ($0.messages?.count ?? 0) == 0 })?.id
     }
     
     private func loadBackendStateForSelectedConversation(conversationID: UUID) {
@@ -510,12 +731,12 @@ class MainApplicationViewModel: ObservableObject {
 
     private func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
         var legacyBackendType: BackendType = .none
-        if let id = profileID, let profile = BackendProfileStore.shared.fetchProfiles().first(where: { $0.id == id }) {
+        if let id = profileID, let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == id }) {
             switch profile.profileType {
             case .agent:
                 legacyBackendType = .agent
             case .bot:
-                if case .bot(let config, _) = profile.details, config.apiProvider == .ollama {
+                if case .bot(let config) = profile.details, config.llmConfig.apiProvider == .ollama {
                     legacyBackendType = .ollama
                 } else {
                     legacyBackendType = .remote
@@ -579,7 +800,7 @@ class MainApplicationViewModel: ObservableObject {
 
         Task {
             let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 10000)
-            ConversationExporter.exportToFile(title: title, messages: messages)
+            await ConversationExporter.exportToFile(title: title, messages: messages)
         }
     }
 
@@ -689,7 +910,7 @@ class MainApplicationViewModel: ObservableObject {
         }
 
         // Create user message
-        let userMessage = createUserMessage(conversationID: conversationID, query: prompt, files: fileItems)
+        let userMessage = await createUserMessage(conversationID: conversationID, query: prompt, files: fileItems)
         await persistenceService.addMessage(userMessage, to: targetEntity)
 
         // Fetch history for context
@@ -698,7 +919,7 @@ class MainApplicationViewModel: ObservableObject {
         // Start stream and await completion.
         // Use a box to break the forward-capture cycle: the closure captures
         // `messageBox` (already declared), and we fill it after the call returns.
-        return await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { [weak self] continuation in
             var messageBox: ChatMessage? = nil
             let agentMessage = activeStreamManager.startMessageStream(
                 withConfig: config,
@@ -706,7 +927,7 @@ class MainApplicationViewModel: ObservableObject {
                 userQuery: prompt,
                 history: history,
                 files: fileItems,
-                onComplete: {
+                onComplete: { [weak self] in
                     // Extract summary from the completed message
                     let summary: String
                     switch messageBox?.content {
@@ -717,11 +938,33 @@ class MainApplicationViewModel: ObservableObject {
                     default:
                         summary = "Response complete."
                     }
+
+                    // Clear streaming state so Mac UI hides the banner
+                    self?.streamingMessageID = nil
+                    self?.streamingMessage = nil
+
                     continuation.resume(returning: summary)
                 }
             )
             messageBox = agentMessage // Fill the box so the closure can read it
+
+            // Set streaming state so the Mac UI can display HITL banners
+            // (ask_user / tool confirmation) for remotely-triggered work.
+            self?.streamingMessageID = agentMessage.id
+            self?.streamingMessage = agentMessage
         }
+    }
+}
+
+// MARK: - ChatInputMainDelegate Conformance
+
+extension MainApplicationViewModel: ChatInputMainDelegate {
+    var attachedFilesPublisher: AnyPublisher<[FileSystemItem], Never> {
+        $attachedFiles.eraseToAnyPublisher()
+    }
+
+    var streamingMessageIDPublisher: AnyPublisher<UUID?, Never> {
+        $streamingMessageID.eraseToAnyPublisher()
     }
 }
 

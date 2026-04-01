@@ -148,13 +148,13 @@ struct SimplePromptEditorView: View {
             // Initialize local state from the binding
             localText = text
         }
-        .onChange(of: localText) { newValue in
+        .onChange(of: localText) { _, newValue in
             // Push changes back to the main app binding
             if text != newValue {
                 text = newValue
             }
         }
-        .onChange(of: text) { newValue in
+        .onChange(of: text) { _, newValue in
             // Sync if the text was changed externally while the window is open
             if localText != newValue {
                 localText = newValue

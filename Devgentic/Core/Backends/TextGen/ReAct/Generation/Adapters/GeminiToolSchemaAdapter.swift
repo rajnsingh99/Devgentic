@@ -79,12 +79,7 @@ struct GeminiToolSchemaAdapter: ToolSchemaAdapter {
                 result[key] = uppercaseTypes(in: nestedDict)
             } else if let nestedArray = value as? [[String: Any]] {
                 // Recurse into arrays of objects
-                result[key] = nestedArray.map { item -> Any in
-                    if let dictItem = item as? [String: Any] {
-                        return uppercaseTypes(in: dictItem)
-                    }
-                    return item
-                }
+                result[key] = nestedArray.map { uppercaseTypes(in: $0) }
             }
         }
         

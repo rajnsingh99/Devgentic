@@ -9,11 +9,60 @@ import Foundation
 import SwiftUI
 import AppKit
 
+// MARK: - User Feedback Model
+
+enum FeedbackRating: String, Codable, CaseIterable {
+    case positive = "positive"
+    case negative = "negative"
+}
+
+struct UserFeedback: Codable {
+    var messageText: String = ""
+    var rating: FeedbackRating?
+    var screenshotData: Data?
+
+    var isEmpty: Bool { messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && rating == nil }
+}
+
+// MARK: - Event Type Filter
+
+enum EventTypeFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case thoughts = "Thoughts"
+    case tools = "Tools"
+    case llm = "LLM"
+    case errors = "Errors"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .all: return "line.3.horizontal.decrease"
+        case .thoughts: return "brain.head.profile"
+        case .tools: return "hammer"
+        case .llm: return "brain"
+        case .errors: return "exclamationmark.triangle"
+        }
+    }
+
+    func matches(_ event: SpanEvent) -> Bool {
+        switch self {
+        case .all: return true
+        case .thoughts: return event.eventType == .thought
+        case .tools: return event.eventType == .toolCall || event.eventType == .toolResult
+        case .llm: return event.eventType == .llmRequest || event.eventType == .llmResponse
+        case .errors: return event.severity == .error || event.eventType == .parseError || event.eventType == .error
+        }
+    }
+}
+
+// MARK: - Report Scope
+
 enum ReportScope: String, CaseIterable, Identifiable {
     case currentSpan = "This Message"
     case previousSpans = "Previous Messages"
     case fullConversation = "Full Conversation"
-    
+
     var id: String { rawValue }
 }
 
@@ -62,7 +111,15 @@ class ReportViewModel {
             updateVisibleEvents()
         }
     }
+    var activeEventFilter: EventTypeFilter = .all {
+        didSet {
+            updateVisibleEvents()
+        }
+    }
     
+    // User Feedback (for User View)
+    var userFeedback: UserFeedback = UserFeedback()
+
     // Computed Data
     var visibleSpans: [Span] = []
     var visibleEvents: [SpanEvent] = []
@@ -134,7 +191,6 @@ class ReportViewModel {
             let relevantTraces = allTraces.prefix(while: { $0.traceID != initialTraceID }) + allTraces.filter({ $0.traceID == initialTraceID })
             self.visibleSpans = relevantTraces.compactMap { trace -> Span? in
                 // For multiple traces, we simulate a "Trace-level" root span
-                let duration = (trace.endedAt?.timeIntervalSince(trace.startedAt) ?? 0) * 1000
                 return Span(
                     spanID: trace.traceID,
                     traceID: trace.traceID,
@@ -147,7 +203,6 @@ class ReportViewModel {
             }
         case .fullConversation:
             self.visibleSpans = allTraces.compactMap { trace -> Span? in
-                let duration = (trace.endedAt?.timeIntervalSince(trace.startedAt) ?? 0) * 1000
                 return Span(
                     spanID: trace.traceID,
                     traceID: trace.traceID,
@@ -224,31 +279,39 @@ class ReportViewModel {
         if !showDebugEvents {
             events = events.filter { $0.severity != .debug }
         }
-        
+
+        // Filter by event type
+        if activeEventFilter != .all {
+            events = events.filter { activeEventFilter.matches($0) }
+        }
+
         self.visibleEvents = events.sorted(by: { $0.timestamp < $1.timestamp })
     }
     
-    // MARK: - Export functionality
-    
-    func exportAsJSON() -> URL? {
-        guard let trace = activeTraceRecord else { return nil }
-        
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .prettyPrinted
-        encoder.dateEncodingStrategy = .iso8601
-        
-        do {
-            let data = try encoder.encode(trace)
-            let tempDir = FileManager.default.temporaryDirectory
-            let fileURL = tempDir.appendingPathComponent("trace_\(trace.traceID).json")
-            try data.write(to: fileURL)
-            return fileURL
-        } catch {
-            print("Failed to encode trace to JSON: \(error)")
-            return nil
+    // MARK: - Computed Helpers
+
+    /// All error events in the current trace (unfiltered).
+    var errorEvents: [SpanEvent] {
+        guard let trace = activeTraceRecord else { return [] }
+        func flatten(spans: [Span]) -> [Span] {
+            var flat = spans
+            for span in spans {
+                if let children = span.children {
+                    flat.append(contentsOf: flatten(spans: children))
+                }
+            }
+            return flat
         }
+        let allSpans: [Span] = flatten(spans: trace.rootSpans ?? [])
+        let allEvents: [SpanEvent] = allSpans.flatMap { $0.events ?? [] }
+        let filtered: [SpanEvent] = allEvents.filter { event in
+            event.severity == .error || event.eventType == .parseError || event.eventType == .error
+        }
+        return filtered.sorted { $0.timestamp < $1.timestamp }
     }
-    
+
+    // MARK: - Screenshot
+
     @MainActor
     func captureScreenshot(of view: NSView) -> NSImage? {
         guard let bitmapRep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }

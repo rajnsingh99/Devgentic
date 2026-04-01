@@ -5,9 +5,11 @@
 //  Central service for managing scheduled tasks: CRUD, timer management,
 //  and task execution (fire logic for both conversation-bound and autonomous tasks).
 //
+//  Migrated to SwiftData on 26/03/26.
+//
 
 import Foundation
-import CoreData
+import SwiftData
 import AppKit
 import os
 
@@ -26,21 +28,34 @@ final class SchedulerService: ObservableObject {
     /// Weak reference set during app bootstrap (avoids circular dependency).
     weak var mainViewModel: MainApplicationViewModel?
 
-    private var viewContext: NSManagedObjectContext {
-        CoreDataPersistenceService.shared.viewContext
+    /// The shared model container, injected during app init.
+    private var modelContainer: ModelContainer?
+
+    private var mainContext: ModelContext? {
+        modelContainer?.mainContext
     }
 
     private init() {}
 
+    /// Call this once from the App init to inject the container.
+    func configureContainer(_ container: ModelContainer) {
+        self.modelContainer = container
+    }
+
     // MARK: - Load
 
     func loadAllTasks() {
-        let request = NSFetchRequest<ScheduledTaskEntity>(entityName: "ScheduledTaskEntity")
-        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+        guard let context = mainContext else {
+            logger.error("loadAllTasks called before ModelContainer configured.")
+            return
+        }
 
         do {
-            let entities = try viewContext.fetch(request)
-            scheduledTasks = entities.map { $0.toStruct() }
+            let descriptor = FetchDescriptor<ScheduledTaskModel>(
+                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+            )
+            let models = try context.fetch(descriptor)
+            scheduledTasks = models.map { $0.toStruct() }
             logger.info("Loaded \(self.scheduledTasks.count) scheduled task(s).")
         } catch {
             logger.error("Failed to load scheduled tasks: \(error.localizedDescription)")
@@ -50,8 +65,11 @@ final class SchedulerService: ObservableObject {
     // MARK: - CRUD
 
     func createTask(_ task: ScheduledTask) {
-        let entity = ScheduledTaskEntity(context: viewContext)
-        task.applyTo(entity: entity)
+        guard let context = mainContext else { return }
+
+        let model = ScheduledTaskModel(id: task.id)
+        model.apply(from: task)
+        context.insert(model)
         saveContext()
         scheduledTasks.insert(task, at: 0)
         scheduleTimer(for: task)
@@ -59,8 +77,8 @@ final class SchedulerService: ObservableObject {
     }
 
     func updateTask(_ task: ScheduledTask) {
-        guard let entity = fetchEntity(id: task.id) else { return }
-        task.applyTo(entity: entity)
+        guard let model = fetchModel(id: task.id) else { return }
+        model.apply(from: task)
         saveContext()
 
         if let idx = scheduledTasks.firstIndex(where: { $0.id == task.id }) {
@@ -76,8 +94,8 @@ final class SchedulerService: ObservableObject {
 
     func deleteTask(id: UUID) {
         cancelTimer(for: id)
-        if let entity = fetchEntity(id: id) {
-            viewContext.delete(entity)
+        if let model = fetchModel(id: id) {
+            mainContext?.delete(model)
             saveContext()
         }
         scheduledTasks.removeAll { $0.id == id }
@@ -160,13 +178,13 @@ final class SchedulerService: ObservableObject {
             if let idx = scheduledTasks.firstIndex(where: { $0.id == task.id }) {
                 scheduledTasks[idx] = updated
             }
-            if let entity = fetchEntity(id: task.id) {
-                entity.nextRunAt = fireDate
+            if let model = fetchModel(id: task.id) {
+                model.nextRunAt = fireDate
                 saveContext()
             }
         }
 
-        let interval = max(fireDate.timeIntervalSinceNow, 1.0) // At least 1 second
+        let interval = max(fireDate.timeIntervalSinceNow, 1.0)
         let taskID = task.id
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -211,7 +229,7 @@ final class SchedulerService: ObservableObject {
 
         // Verify profile exists
         guard let profileID = task.profileID,
-              let profile = BackendProfileStore.shared.fetchProfiles().first(where: { $0.id == profileID }) else {
+              let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == profileID }) else {
             logger.error("Profile not found for task '\(task.displayName)' — marking as failed.")
             updateTaskStatus(id: task.id, status: .failed, summary: "Backend profile not found.")
             return
@@ -227,11 +245,9 @@ final class SchedulerService: ObservableObject {
         var conversationID: UUID
 
         if task.mode == .conversationBound, let linkedID = task.linkedConversationID {
-            // Verify conversation still exists
             if CoreDataPersistenceService.shared.getConversation(withId: linkedID) != nil {
                 conversationID = linkedID
             } else {
-                // Orphaned — reset and create new
                 logger.warning("Linked conversation orphaned for task '\(task.displayName)' — creating new.")
                 conversationID = vm.createConversationForScheduledTask(
                     profileID: profile,
@@ -240,7 +256,6 @@ final class SchedulerService: ObservableObject {
             }
         } else if task.mode == .autonomous, let linkedID = task.linkedConversationID {
             if task.contextWindowMode == .stateless || CoreDataPersistenceService.shared.getConversation(withId: linkedID) == nil {
-                // Stateless mode or orphaned: create new conversation
                 conversationID = vm.createConversationForScheduledTask(
                     profileID: profile,
                     title: "[\(task.displayName)]"
@@ -249,7 +264,6 @@ final class SchedulerService: ObservableObject {
                 conversationID = linkedID
             }
         } else {
-            // First run (autonomous) or no linked conversation
             conversationID = vm.createConversationForScheduledTask(
                 profileID: profile,
                 title: "[\(task.displayName)]"
@@ -280,7 +294,7 @@ final class SchedulerService: ObservableObject {
             updatedTask.nextRunAt = cron.nextFireDate(after: Date())
             updatedTask.status = .pending
         } else if task.isOneShot {
-            updatedTask.isEnabled = false // Disable one-shot after firing
+            updatedTask.isEnabled = false
         }
 
         updateTask(updatedTask)
@@ -311,27 +325,28 @@ final class SchedulerService: ObservableObject {
             if let idx = scheduledTasks.firstIndex(where: { $0.id == id }) {
                 scheduledTasks[idx] = task
             }
-            if let entity = fetchEntity(id: id) {
-                entity.status = status.rawValue
-                if let summary = summary { entity.lastRunSummary = summary }
+            if let model = fetchModel(id: id) {
+                model.status = status.rawValue
+                if let summary = summary { model.lastRunSummary = summary }
                 saveContext()
             }
         }
     }
 
-    private func fetchEntity(id: UUID) -> ScheduledTaskEntity? {
-        let request = NSFetchRequest<ScheduledTaskEntity>(entityName: "ScheduledTaskEntity")
-        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        request.fetchLimit = 1
-        return try? viewContext.fetch(request).first
+    private func fetchModel(id: UUID) -> ScheduledTaskModel? {
+        guard let context = mainContext else { return nil }
+        let predicate = #Predicate<ScheduledTaskModel> { $0.id == id }
+        var descriptor = FetchDescriptor<ScheduledTaskModel>(predicate: predicate)
+        descriptor.fetchLimit = 1
+        return try? context.fetch(descriptor).first
     }
 
     private func saveContext() {
-        guard viewContext.hasChanges else { return }
+        guard let context = mainContext, context.hasChanges else { return }
         do {
-            try viewContext.save()
+            try context.save()
         } catch {
-            logger.error("Failed to save CoreData context: \(error.localizedDescription)")
+            logger.error("Failed to save SwiftData context: \(error.localizedDescription)")
         }
     }
 }

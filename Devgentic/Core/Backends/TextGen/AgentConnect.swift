@@ -49,24 +49,24 @@ class AgentConnect: ObservableObject {
                     let isBotFlow: Bool
                     
                     switch profile.details {
-                    case .bot(let config, let instr):
-                        llmConfig = config
-                        instructions = instr
+                    case .bot(let config):
+                        llmConfig = config.llmConfig
+                        instructions = config.instructions
                         rawTools = []
                         isBotFlow = true
-                        
-                    case .agent(let config, _, let tools, _, let instr, _):
-                        llmConfig = config
-                        instructions = instr
-                        rawTools = tools
+
+                    case .agent(let config):
+                        llmConfig = config.llmConfig
+                        instructions = config.instructions
+                        rawTools = config.tools
                         isBotFlow = false
-                        
-                    case .workflow(let agents):
+
+                    case .workflow(let config):
                         // Workflow: each node resolves its own model, tools, and generator.
                         // Bypass the single-model pipeline entirely.
                         let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
                         let wfStream = workflowExecutor.executeWorkflow(
-                            agents: agents,
+                            agentProfileIDs: config.agentProfileIDs,
                             userInput: userInput,
                             chatHistory: chatHistory,
                             conversationID: conversationID,
@@ -210,7 +210,7 @@ class AgentConnect: ObservableObject {
                     )
                     
                     // 8. Execute & Stream
-                    let traceHandler: (AgentTraceLog) -> Void = { log in
+                    let traceHandler: @Sendable (AgentTraceLog) -> Void = { log in
                         logger.debug("[\(log.state.headline)] \(log.content) (span: \(log.spanID))")
                         if !activeTools.isEmpty {
                             EvaluationLogger.shared.logStep(id: evalSessionID, log: log)
@@ -321,12 +321,16 @@ class AgentConnect: ObservableObject {
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Anthropic API Key is required."])
             }
-            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : URL(string: "https://api.anthropic.com/v1/")!
-            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0)
+            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : ProviderDefaults.anthropicBaseURL
+            var options: [String: JSONValue]? = nil
+            if let advConfig = llmConfig.advancedConfiguration {
+                options = advConfig
+            }
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
             return ClaudeLLMProvider(config: config)
             
         case .ollama:
-            let baseURLString = llmConfig.baseURL ?? "http://127.0.0.1:11434"
+            let baseURLString = llmConfig.baseURL ?? ProviderDefaults.ollamaBaseURL.absoluteString
             guard let baseURL = URL(string: baseURLString) else {
                 throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Base URL: \(baseURLString)"])
             }
@@ -344,18 +348,26 @@ class AgentConnect: ObservableObject {
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API Key is required."])
             }
-            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : URL(string: "https://api.openai.com/v1/")!
-            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0)
+            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : ProviderDefaults.openAIBaseURL
+            var options: [String: JSONValue]? = nil
+            if let advConfig = llmConfig.advancedConfiguration {
+                options = advConfig
+            }
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
             return OpenAILLMProvider(config: config)
             
         case .google:
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Gemini API Key is required."])
             }
-            
+
             // Use native Gemini endpoint exclusively to prevent 429 schema compatibility errors
-            let googleBaseURL = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(llmConfig.modelName)")!
-            let config = LLMProviderConfig(apiKey: apiKey, baseURL: googleBaseURL, modelName: llmConfig.modelName, timeout: 300.0)
+            let googleBaseURL = ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(llmConfig.modelName)")
+            var options: [String: JSONValue]? = nil
+            if let advConfig = llmConfig.advancedConfiguration {
+                options = advConfig
+            }
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: googleBaseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
             return GeminiLLMProvider(config: config)
             
         case .mlx:
@@ -396,9 +408,6 @@ class AgentConnect: ObservableObject {
                 stopSequences: llmConfig.cognitiveProfile.stopSequences,
                 advancedConfig: mlxConfig
             )
-            
-        default:
-            throw NSError(domain: "AgentConnect", code: 501, userInfo: [NSLocalizedDescriptionKey: "Provider \(llmConfig.apiProvider) is not supported in the unified pipeline yet."])
         }
     }
     

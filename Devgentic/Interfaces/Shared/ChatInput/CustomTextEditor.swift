@@ -3,6 +3,8 @@ import SwiftUI
 import AppKit
 import os
 
+private let customTextEditorLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CustomTextEditor")
+
 struct CustomTextEditor: NSViewRepresentable {
     // MARK: - Bindings and Properties
     @Binding var text: String
@@ -22,7 +24,7 @@ struct CustomTextEditor: NSViewRepresentable {
     @Binding var attributedTextInsertion: AttributedTextInsertionAction?
     var textViewRef: ((CustomTextEditor.CustomNSTextView?) -> Void)?
     
-    var onNavigateSuggestions: ((ChatInputAreaView.SuggestionNavigationDirection) -> Void)?
+    var onNavigateSuggestions: ((SuggestionNavigationDirection) -> Void)?
     var onConfirmSuggestion: (() -> Void)?
     var onNavigateQueryHistory: ((MainApplicationViewModel.QueryNavigationDirection) -> Void)?
     var onTextManuallyChanged: (() -> Void)?
@@ -81,10 +83,9 @@ struct CustomTextEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.documentView = textView
         scrollView.drawsBackground = false
-        if let clipView = scrollView.contentView as? NSClipView {
-            clipView.drawsBackground = false
-            clipView.backgroundColor = .clear
-        }
+        let clipView = scrollView.contentView
+        clipView.drawsBackground = false
+        clipView.backgroundColor = .clear
         scrollView.scrollerStyle = .overlay
         scrollView.autohidesScrollers = true
         
@@ -128,6 +129,10 @@ struct CustomTextEditor: NSViewRepresentable {
                     let validLength = min(actionToProcess.range.length, textStorage.length - validLocation)
                     let actualRangeToReplace = NSRange(location: validLocation, length: validLength)
 
+                    if actualRangeToReplace != actionToProcess.range {
+                        customTextEditorLogger.warning("Insertion range clamped: requested \(actionToProcess.range.location)+\(actionToProcess.range.length) → actual \(validLocation)+\(validLength) (textStorage.length=\(textStorage.length))")
+                    }
+
                     textStorage.replaceCharacters(in: actualRangeToReplace, with: actionToProcess.attributedString)
                     let newCursorPosition = actualRangeToReplace.location + actionToProcess.attributedString.length
                     textView.setSelectedRange(NSRange(location: newCursorPosition, length: 0))
@@ -148,6 +153,8 @@ struct CustomTextEditor: NSViewRepresentable {
                     textView.invalidateIntrinsicContentSize()
                     scrollView.invalidateIntrinsicContentSize()
                 }
+            } else {
+                customTextEditorLogger.debug("Skipped duplicate insertion request (id: \(actionToProcess.id))")
             }
         }
 
@@ -280,26 +287,34 @@ struct CustomTextEditor: NSViewRepresentable {
                 if let t = pasteboard.string(forType: .string), !t.isEmpty { return t }
 
                 // 2. HTML — handles web sources with emoji
-                if let data = pasteboard.data(forType: .html),
-                   let attr = try? NSAttributedString(
-                       data: data,
-                       options: [.documentType: NSAttributedString.DocumentType.html,
-                                 .characterEncoding: String.Encoding.utf8.rawValue],
-                       documentAttributes: nil
-                   ) {
-                    let s = attr.string.replacingOccurrences(of: "\u{FFFC}", with: "")
-                    if !s.isEmpty { return s }
+                if let data = pasteboard.data(forType: .html) {
+                    do {
+                        let attr = try NSAttributedString(
+                            data: data,
+                            options: [.documentType: NSAttributedString.DocumentType.html,
+                                      .characterEncoding: String.Encoding.utf8.rawValue],
+                            documentAttributes: nil
+                        )
+                        let s = attr.string.replacingOccurrences(of: "\u{FFFC}", with: "")
+                        if !s.isEmpty { return s }
+                    } catch {
+                        customTextEditorLogger.warning("HTML paste parsing failed: \(error.localizedDescription)")
+                    }
                 }
 
                 // 3. RTF — handles rich text sources
-                if let data = pasteboard.data(forType: .rtf),
-                   let attr = try? NSAttributedString(
-                       data: data,
-                       options: [.documentType: NSAttributedString.DocumentType.rtf],
-                       documentAttributes: nil
-                   ) {
-                    let s = attr.string.replacingOccurrences(of: "\u{FFFC}", with: "")
-                    if !s.isEmpty { return s }
+                if let data = pasteboard.data(forType: .rtf) {
+                    do {
+                        let attr = try NSAttributedString(
+                            data: data,
+                            options: [.documentType: NSAttributedString.DocumentType.rtf],
+                            documentAttributes: nil
+                        )
+                        let s = attr.string.replacingOccurrences(of: "\u{FFFC}", with: "")
+                        if !s.isEmpty { return s }
+                    } catch {
+                        customTextEditorLogger.warning("RTF paste parsing failed: \(error.localizedDescription)")
+                    }
                 }
 
                 return nil

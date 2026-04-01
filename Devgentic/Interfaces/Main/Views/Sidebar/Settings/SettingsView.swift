@@ -14,6 +14,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case account = "Account"
     case notifications = "Notifications"
     case theme = "Theme"
+    case chatOps = "ChatOps"
     case about = "About"
 
     var id: String { self.rawValue }
@@ -31,6 +32,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "bell.badge"
         case .theme:
             return "paintbrush"
+        case .chatOps:
+            return "paperplane.fill"
         case .about:
             return "info.circle"
         }
@@ -44,6 +47,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .account: return "API keys and providers"
         case .notifications: return "Alerts and sounds"
         case .theme: return "Colors and typography"
+        case .chatOps: return "Remote Telegram control"
         case .about: return "Version and licenses"
         }
     }
@@ -62,6 +66,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             NotificationSettingsView()
         case .theme:
             ThemeSettingsView()
+        case .chatOps:
+            ChatOpsSettingsView()
         case .about:
             VStack(spacing: 16) {
                 Image(systemName: "bolt.fill")
@@ -69,7 +75,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
                     .foregroundStyle(.blue)
                 Text("Devgentic")
                     .font(.largeTitle.weight(.bold))
-                Text("Version 1.0.0")
+                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0")")
                     .foregroundColor(.secondary)
             }
         }

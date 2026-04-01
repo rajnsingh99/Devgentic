@@ -65,6 +65,14 @@ struct ChatHistoryView: View {
                             }
 
                             if mainAppViewModel.selectedConversationID != nil {
+                                // Empty conversation placeholder
+                                if chatHistoryViewModel.currentChatMessages.isEmpty
+                                    && !chatHistoryViewModel.isInitiallyLoadingConversation {
+                                    EmptyConversationPlaceholder()
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .frame(minHeight: geometry.size.height - 150)
+                                }
+
                                 // Messages are stored [Newest -> Oldest], reversed for display [Oldest -> Newest].
                                 ForEach(chatHistoryViewModel.currentChatMessages.reversed()) { message in
                                     let isLast = chatHistoryViewModel.currentChatMessages.first?.id == message.id
@@ -283,5 +291,80 @@ struct ScrollToBottomFAB: View {
             }
         }
         .accessibilityLabel("Scroll to bottom")
+    }
+}
+
+// MARK: - Empty Conversation Placeholder
+
+/// Shown when a conversation is selected but has no messages yet.
+/// Provides contextual guidance so the user knows the conversation is ready for input.
+private struct EmptyConversationPlaceholder: View {
+    @Environment(\.appTheme) private var theme
+    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+
+    /// Whether this conversation was created from a remote source (Telegram, Discord).
+    private var isRemoteConversation: Bool {
+        guard let convID = mainAppViewModel.selectedConversationID,
+              let entity = mainAppViewModel.persistenceService.getConversation(withId: convID) else { return false }
+        return entity.userDefinedTitle == "Telegram Chat"
+    }
+
+    private var conversationTitle: String {
+        guard let convID = mainAppViewModel.selectedConversationID,
+              let entity = mainAppViewModel.persistenceService.getConversation(withId: convID),
+              let title = entity.userDefinedTitle, !title.isEmpty else { return "New Conversation" }
+        return title
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            // Icon
+            Image(systemName: isRemoteConversation ? "paperplane.circle" : "bubble.left.and.text.bubble.right")
+                .font(.system(size: 40, weight: .thin))
+                .foregroundStyle(theme.secondaryText.opacity(0.5))
+
+            // Title
+            Text(conversationTitle)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(theme.primaryText.opacity(0.8))
+
+            // Subtitle / guidance
+            Text(isRemoteConversation
+                 ? "This conversation was started from Telegram.\nType here or reply from your phone."
+                 : "Start the conversation by typing a message below."
+            )
+            .font(.system(size: 13))
+            .foregroundStyle(theme.secondaryText.opacity(0.6))
+            .multilineTextAlignment(.center)
+            .lineSpacing(4)
+
+            // Quick hints
+            VStack(spacing: 8) {
+                hintRow(icon: "sparkles", text: "Ask anything — your agent will reason and use tools")
+                hintRow(icon: "doc.text.magnifyingglass", text: "Reference files by attaching context")
+                hintRow(icon: "keyboard", text: "Press Enter to send, Shift+Enter for a new line")
+            }
+            .padding(.top, 8)
+
+            Spacer()
+        }
+        .padding(.horizontal, 40)
+        .transition(.opacity)
+        .animation(.easeIn(duration: 0.3), value: mainAppViewModel.selectedConversationID)
+    }
+
+    private func hintRow(icon: String, text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(theme.accentColor.opacity(0.6))
+                .frame(width: 16, alignment: .center)
+
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.secondaryText.opacity(0.5))
+        }
     }
 }

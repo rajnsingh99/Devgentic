@@ -99,7 +99,10 @@ struct MLXImageGenService: ImageGenProvider, Sendable {
             fullPrompt = prompt
         }
 
-        logger.info("MLX T2I: model=\(model.rawValue), size=\(validWidth)x\(validHeight), steps=\(model.defaultSteps)")
+        let steps = options.steps ?? model.defaultSteps
+        let guidance = Float(options.guidance ?? Double(model.defaultGuidance))
+
+        logger.info("MLX T2I: model=\(model.rawValue), size=\(validWidth)x\(validHeight), steps=\(steps), guidance=\(guidance)")
 
         let pipeline = try await Flux2PipelineManager.shared.getPipeline(for: model, quality: options.quality)
 
@@ -107,8 +110,8 @@ struct MLXImageGenService: ImageGenProvider, Sendable {
             prompt: fullPrompt,
             height: validHeight,
             width: validWidth,
-            steps: model.defaultSteps,
-            guidance: model.defaultGuidance,
+            steps: steps,
+            guidance: guidance,
             onProgress: progressHandler
         )
 
@@ -136,7 +139,10 @@ struct MLXImageGenService: ImageGenProvider, Sendable {
             fullPrompt = prompt
         }
 
-        logger.info("MLX I2I: model=\(model.rawValue), size=\(validWidth)x\(validHeight), inputSize=\(inputImage.count) bytes")
+        let steps = options.steps ?? model.defaultSteps
+        let guidance = Float(options.guidance ?? Double(model.defaultGuidance))
+
+        logger.info("MLX I2I: model=\(model.rawValue), size=\(validWidth)x\(validHeight), steps=\(steps), guidance=\(guidance), inputSize=\(inputImage.count) bytes")
 
         let pipeline = try await Flux2PipelineManager.shared.getPipeline(for: model, quality: options.quality)
 
@@ -145,8 +151,8 @@ struct MLXImageGenService: ImageGenProvider, Sendable {
             imageData: [inputImage],
             height: validHeight,
             width: validWidth,
-            steps: model.defaultSteps,
-            guidance: model.defaultGuidance,
+            steps: steps,
+            guidance: guidance,
             onProgress: progressHandler
         )
 

@@ -116,7 +116,7 @@ struct BackendSelectorPopup: View {
         .frame(maxHeight: 450)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
-            self.profiles = BackendProfileStore.shared.fetchProfiles()
+            self.profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
         }
     }
 }
@@ -166,14 +166,14 @@ private struct ItemCell: View {
 
     private var detailText: String? {
         switch profile.details {
-        case .bot(let llmConfig, _):
-            return llmConfig.modelName
+        case .bot(let config):
+            return config.llmConfig.modelName
         case .agent:
             return "Agent" // Placeholder
         case .workflow:
             return "Workflow" // Placeholder
-        case .imageGen(let llmConfig, _, _, _):
-            return llmConfig.modelName
+        case .imageGen(let config):
+            return config.llmConfig.modelName
         }
     }
 

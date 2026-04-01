@@ -47,7 +47,7 @@ struct PrivilegeEscalationService {
                 return false
             } else {
                 // Even if eventDescriptor is nil, no error means it likely succeeded or the command had no output.
-                logger.info("AppleScript executed successfully (or without error). Event descriptor: \(eventDescriptor.description ?? "nil")")
+                logger.info("AppleScript executed successfully (or without error). Event descriptor: \(eventDescriptor.description)")
                 return true
             }
         } else {

@@ -59,7 +59,8 @@ struct QuickSchedulePopoverView: View {
             Button {
                 isPresented = false
                 // Small delay to ensure popover dismissal doesn't conflict with sheet presentation
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(100))
                     onCustomSchedule()
                 }
             } label: {

@@ -15,18 +15,38 @@ struct ProfileSidebarListView: View {
 
     @EnvironmentObject private var profileService: BackendProfileService
     @EnvironmentObject private var router: MainViewRouter
+    @EnvironmentObject private var toastManager: ToastManager
     @Environment(\.appTheme) private var theme
 
     @State private var searchText = ""
+    @State private var selectedTypeFilter: String = "All"
     @State private var isAddingProfile = false
     @State private var showingDeleteAlert = false
     @State private var profileToDelete: BackendProfileModel? = nil
+    @State private var profileToDuplicate: BackendProfileModel? = nil
+
+    // Unsaved-changes navigation guard
+    @State private var pendingProfileID: UUID? = nil
+    @State private var showingDiscardAlert = false
+
+    private let typeFilters = ["All"] + ProfileType.allCases.map(\.rawValue)
 
     private var filteredProfiles: [BackendProfileModel] {
-        if searchText.isEmpty { return profileService.profiles }
-        return profileService.profiles.filter {
-            $0.displayName.localizedCaseInsensitiveContains(searchText)
+        var result = profileService.profiles
+
+        // Type filter
+        if selectedTypeFilter != "All" {
+            result = result.filter { $0.profileType.rawValue == selectedTypeFilter }
         }
+
+        // Search filter
+        if !searchText.isEmpty {
+            result = result.filter {
+                $0.displayName.localizedCaseInsensitiveContains(searchText)
+            }
+        }
+
+        return result
     }
 
     /// The currently-displayed profile ID (derived from the router destination).
@@ -45,14 +65,29 @@ struct ProfileSidebarListView: View {
                 systemImage: "plus",
                 onAction: { isAddingProfile = true }
             )
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 10)
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
             // Search
             SidebarSearchBarView("Search profiles...", text: $searchText)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
+
+            // Type filter chips
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(typeFilters, id: \.self) { filter in
+                        CategoryChip(
+                            title: filter,
+                            isSelected: selectedTypeFilter == filter,
+                            action: { selectedTypeFilter = filter }
+                        )
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+            .padding(.bottom, 10)
 
             // Profile list
             if filteredProfiles.isEmpty {
@@ -82,7 +117,15 @@ struct ProfileSidebarListView: View {
                                 profile: profile,
                                 isSelected: activeProfileID == profile.id,
                                 onSelect: {
-                                    router.navigateToProfile(profile.id)
+                                    if (profileService.editBuffer?.isDirty == true) && activeProfileID != profile.id {
+                                        pendingProfileID = profile.id
+                                        showingDiscardAlert = true
+                                    } else {
+                                        router.navigateToProfile(profile.id, activatingBufferOn: profileService)
+                                    }
+                                },
+                                onDuplicate: {
+                                    profileToDuplicate = profile
                                 },
                                 onDelete: {
                                     profileToDelete = profile
@@ -92,19 +135,27 @@ struct ProfileSidebarListView: View {
                         }
                     }
                     .padding(.horizontal, 8)
+                    .padding(.top, 4)
+                    .padding(.bottom, 20)
                 }
                 .scrollContentBackground(.hidden)
             }
         }
         .sheet(isPresented: $isAddingProfile) {
-            AddBackendProfileView { newProfile in
-                profileService.saveProfile(newProfile)
-                router.navigateToProfile(newProfile.id)
+            AddBackendProfileView(
+                existingProfileNames: profileService.profiles.map(\.displayName)
+            ) { newProfile in
+                do {
+                    try profileService.saveProfile(newProfile)
+                    router.navigateToProfile(newProfile.id, activatingBufferOn: profileService)
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
+                }
             }
         }
         .alert("Delete Profile?", isPresented: $showingDeleteAlert, presenting: profileToDelete) { profile in
             Button("Delete", role: .destructive) {
-                profileService.deleteProfile(withId: profile.id)
+                try? profileService.deleteProfile(withId: profile.id)
                 if activeProfileID == profile.id {
                     router.returnToChat()
                 }
@@ -112,6 +163,33 @@ struct ProfileSidebarListView: View {
             Button("Cancel", role: .cancel) {}
         } message: { profile in
             Text("Are you sure you want to delete '\(profile.displayName)'? This action cannot be undone.")
+        }
+        .sheet(item: $profileToDuplicate) { source in
+            DuplicateProfileSheet(
+                sourceProfile: source,
+                existingProfileNames: profileService.profiles.map(\.displayName)
+            ) { duplicate in
+                do {
+                    try profileService.saveProfile(duplicate)
+                    router.navigateToProfile(duplicate.id, activatingBufferOn: profileService)
+                    toastManager.show("Profile duplicated", style: .success)
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
+                }
+            }
+        }
+        .confirmationDialog("Unsaved Changes", isPresented: $showingDiscardAlert) {
+            Button("Discard Changes", role: .destructive) {
+                if let id = pendingProfileID {
+                    router.navigateToProfile(id, activatingBufferOn: profileService)
+                }
+                pendingProfileID = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingProfileID = nil
+            }
+        } message: {
+            Text("You have unsaved changes. Discard them?")
         }
     }
 }

@@ -25,7 +25,7 @@ struct OpenAIImageGenService: ImageGenProvider, Sendable {
         if let base = baseURL, !base.isEmpty {
             return URL(string: base)!
         }
-        return URL(string: "https://api.openai.com/v1")!
+        return ProviderDefaults.openAIBaseURL
     }
 
     init(apiKey: String, modelName: String, baseURL: String? = nil) {

@@ -33,7 +33,9 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         conversationID: UUID,
         progressHandler: (@Sendable (Int, Int) -> Void)?
     ) async throws -> MediaArtifact {
-        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelName):generateContent?key=\(apiKey)")!
+        var urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
+        urlComponents.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        let url = urlComponents.url!
 
         var request = URLRequest(url: url, timeoutInterval: 120)
         request.httpMethod = "POST"
@@ -91,7 +93,9 @@ struct GeminiImageGenService: ImageGenProvider, Sendable {
         conversationID: UUID,
         progressHandler: (@Sendable (Int, Int) -> Void)?
     ) async throws -> MediaArtifact {
-        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelName):generateContent?key=\(apiKey)")!
+        var urlComponents = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models/\(modelName):generateContent"), resolvingAgainstBaseURL: false)!
+        urlComponents.queryItems = [URLQueryItem(name: "key", value: apiKey)]
+        let url = urlComponents.url!
 
         var request = URLRequest(url: url, timeoutInterval: 120)
         request.httpMethod = "POST"

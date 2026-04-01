@@ -113,7 +113,11 @@ class WhisperRecognitionService: ObservableObject {
         ) { [weak self] notification in
             guard let modelName = notification.object as? String else { return }
             Task { @MainActor [weak self] in
-                try? await self?.switchModel(to: modelName)
+                do {
+                    try await self?.switchModel(to: modelName)
+                } catch {
+                    self?.logger.error("Failed to switch speech model to '\(modelName)': \(error.localizedDescription)")
+                }
             }
         }
         notificationObservers.append(modelObs)
@@ -252,7 +256,10 @@ class WhisperRecognitionService: ObservableObject {
 
     /// Stops the active streaming transcription and returns the final combined text.
     func stopStreaming() async -> String? {
-        guard let transcriber = streamTranscriber else { return nil }
+        guard let transcriber = streamTranscriber else {
+            logger.warning("stopStreaming called but no active stream transcriber exists.")
+            return nil
+        }
 
         await transcriber.stopStreamTranscription()
 

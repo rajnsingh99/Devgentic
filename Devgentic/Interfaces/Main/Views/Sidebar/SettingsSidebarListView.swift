@@ -25,15 +25,10 @@ struct SettingsSidebarListView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            HStack {
-                Text("Settings")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(theme.primaryText)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 10)
+            SidebarHeaderView(title: "Settings")
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
 
             // Category list
             ScrollView {
@@ -49,6 +44,8 @@ struct SettingsSidebarListView: View {
                     }
                 }
                 .padding(.horizontal, 8)
+                .padding(.top, 4)
+                .padding(.bottom, 20)
             }
             .scrollContentBackground(.hidden)
         }

@@ -114,7 +114,7 @@ class OllamaService: ObservableObject {
     // MARK: - Configuration Properties
     /// These properties are now set by a central authority (like MainApplicationViewModel) based on the active profile.
     @Published var llmModelName: String = "gemma:2b" // Default, but will be overridden by profile
-    @Published var ollamaBaseURL: String = "http://localhost:11434" // Default, but will be overridden by profile
+    @Published var ollamaBaseURL: String = ProviderDefaults.ollamaBaseURL.absoluteString // Default, but will be overridden by profile
 
     /// The initializer is private to enforce the use of the `shared` singleton instance.
     private init() {

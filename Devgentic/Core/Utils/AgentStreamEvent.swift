@@ -35,7 +35,8 @@ enum AgentStreamEvent: Sendable {
     /// The agent pauses and asks the user for permission to proceed.
     /// - toolName: The name of the sensitive tool (e.g. "delete_file")
     /// - params: The parameters needed for the tool (e.g. path)
-    case requestConfirmation(toolName: String, params: String)
+    /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
+    case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID())
     
     /// The tool has finished. Use this to render "Glass Box" artifacts (tables, lists, JSON).
     /// This is the "Observation" phase.
@@ -47,7 +48,8 @@ enum AgentStreamEvent: Sendable {
     
     /// The agent needs clarification from the user before it can proceed.
     /// - question: The question to display to the user
-    case requestClarification(question: String)
+    /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
+    case requestClarification(question: String, operationID: UUID = UUID())
 
     /// A non-fatal warning or error message to display in the trace/debug log.
     case error(String)

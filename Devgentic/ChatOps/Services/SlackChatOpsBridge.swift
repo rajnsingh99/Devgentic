@@ -1,0 +1,479 @@
+//
+//  SlackChatOpsBridge.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 24/03/26.
+//
+
+import Foundation
+import CoreData
+import os
+
+/// The core orchestrator for Slack ChatOps.
+///
+/// Routes incoming Slack Socket Mode events through the security gate, parses them into commands,
+/// and dispatches them to the appropriate handler.
+///
+/// Uses the single-path architecture: remote messages flow through
+/// `MainApplicationViewModel.submitRemoteMessage()` — the same path as the Mac UI.
+/// The `RemoteMirrorService` handles mirroring events back to the transport.
+@MainActor
+final class SlackChatOpsBridge: ObservableObject {
+
+    private let logger = Logger(subsystem: "com.devgentic", category: "SlackChatOpsBridge")
+
+    // MARK: - Dependencies
+
+    private weak var viewModel: MainApplicationViewModel?
+    private var apiClient: SlackAPIClient?
+    private var socketClient: SlackSocketClient?
+    private let securityGate = ChatOpsSecurityGate()
+    private var slackTransport: SlackTransport?
+    var remoteMirrorService: RemoteMirrorService?
+    private let config = ChatOpsConfigManager.shared
+
+    // MARK: - State
+
+    private var listeningTask: Task<Void, Never>?
+    @Published private(set) var isRunning: Bool = false
+    private var awaitingClarification: Bool = false
+
+    init(viewModel: MainApplicationViewModel) {
+        self.viewModel = viewModel
+    }
+
+    // MARK: - Lifecycle
+
+    func start() {
+        guard let botToken = config.slackBotToken, !botToken.isEmpty,
+              let appToken = config.slackAppToken, !appToken.isEmpty else {
+            logger.warning("Cannot start SlackChatOpsBridge — missing bot or app token.")
+            return
+        }
+
+        let client = SlackAPIClient(botToken: botToken)
+        let socket = SlackSocketClient(appToken: appToken)
+        let transport = SlackTransport(apiClient: client)
+
+        self.apiClient = client
+        self.socketClient = socket
+        self.slackTransport = transport
+
+        if let asm = viewModel?.activeStreamManager {
+            self.remoteMirrorService = RemoteMirrorService(activeStreamManager: asm)
+        }
+
+        isRunning = true
+
+        listeningTask = Task { [weak self] in
+            guard let self else { return }
+
+            let stream = await socket.start()
+            self.logger.info("SlackChatOpsBridge started — listening for Slack events.")
+
+            for await event in stream {
+                await self.handleSocketEvent(event)
+            }
+
+            await MainActor.run {
+                self.isRunning = false
+                self.logger.info("SlackChatOpsBridge stopped.")
+            }
+        }
+    }
+
+    func stop() {
+        listeningTask?.cancel()
+        listeningTask = nil
+
+        Task {
+            await socketClient?.stop()
+        }
+
+        isRunning = false
+        logger.info("SlackChatOpsBridge stopped.")
+    }
+
+    // MARK: - Event Routing
+
+    private func handleSocketEvent(_ event: SlackSocketEvent) async {
+        switch event {
+        case .connected:
+            logger.info("Slack Socket Mode connected.")
+
+        case .message(let slackEvent):
+            await handleMessage(slackEvent)
+
+        case .interaction(let payload):
+            await handleInteraction(payload)
+
+        case .slashCommand(let payload):
+            await handleSlashCommand(payload)
+
+        case .disconnected(let error):
+            if let error {
+                logger.error("Slack Socket disconnected: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Message Handling
+
+    private func handleMessage(_ event: SlackEvent) async {
+        // Ignore bot messages
+        guard event.bot_id == nil, event.subtype == nil else { return }
+        guard let channelID = event.channel, let text = event.text else { return }
+
+        // Security gate
+        guard await securityGate.authorizeSlack(channelID: channelID, config: config) else { return }
+
+        // Parse command
+        let command = ChatOpsCommand.parseSlack(
+            text: text,
+            awaitingClarification: awaitingClarification
+        )
+
+        // Tier enforcement
+        guard await securityGate.canExecute(command, tier: config.securityTier) else {
+            let msg = await securityGate.denialMessage(for: command, tier: config.securityTier)
+            _ = try? await apiClient?.postMessage(channel: channelID, text: msg)
+            return
+        }
+
+        await routeCommand(command, channelID: channelID)
+    }
+
+    // MARK: - Interaction Handling
+
+    private func handleInteraction(_ payload: SlackInteractivePayload) async {
+        guard let action = payload.actions?.first else { return }
+        let channelID = payload.channel?.id ?? config.slackAuthorizedChannelID ?? ""
+
+        // Parse action_id using the same callback data format
+        let command = ChatOpsCommand.parseSlack(actionID: action.action_id)
+
+        // Route HITL
+        switch command {
+        case .approveHITL(let operationID):
+            await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
+        case .denyHITL(let operationID):
+            await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
+        case .switchConversation(let uuid):
+            await handleSwitchConversation(to: uuid, channelID: channelID)
+        case .newConversation:
+            await handleNewConversation(channelID: channelID)
+        default:
+            break
+        }
+    }
+
+    // MARK: - Slash Command Handling
+
+    private func handleSlashCommand(_ payload: SlackSlashCommandPayload) async {
+        let channelID = payload.channel_id
+
+        guard await securityGate.authorizeSlack(channelID: channelID, config: config) else { return }
+
+        let command = ChatOpsCommand.parseSlack(slashCommand: payload.command)
+
+        guard await securityGate.canExecute(command, tier: config.securityTier) else {
+            let msg = await securityGate.denialMessage(for: command, tier: config.securityTier)
+            _ = try? await apiClient?.postMessage(channel: channelID, text: msg)
+            return
+        }
+
+        await routeCommand(command, channelID: channelID)
+    }
+
+    // MARK: - Command Routing
+
+    private func routeCommand(_ command: ChatOpsCommand, channelID: String) async {
+        switch command {
+        case .conversations:
+            await handleConversations(channelID: channelID)
+        case .newConversation:
+            await handleNewConversation(channelID: channelID)
+        case .status:
+            await handleStatus(channelID: channelID)
+        case .cancel:
+            await handleCancel(channelID: channelID)
+        case .help:
+            await handleHelp(channelID: channelID)
+        case .switchConversation(let uuid):
+            await handleSwitchConversation(to: uuid, channelID: channelID)
+        case .approveHITL(let operationID):
+            await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
+        case .denyHITL(let operationID):
+            await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
+        case .clarificationResponse(let text):
+            if let convID = config.slackActiveConversationID,
+               let asm = viewModel?.activeStreamManager {
+                let pendingOpID = asm.activeStreams.values
+                    .first(where: { $0.conversationId == convID })?
+                    .pendingClarification?.id
+                if let opID = pendingOpID {
+                    await remoteMirrorService?.handleClarification(operationID: opID, text: text)
+                    awaitingClarification = false
+                }
+            }
+        case .freeText(let text):
+            await handleFreeText(text, channelID: channelID)
+        case .pairingAttempt:
+            break
+        case .unknown:
+            break
+        }
+    }
+
+    // MARK: - Command Handlers
+
+    private func handleConversations(channelID: String) async {
+        let conversations = fetchRecentConversations(limit: 10)
+
+        if conversations.isEmpty {
+            _ = try? await apiClient?.postMessage(channel: channelID, text: "No conversations yet. Use /new to create one.")
+            return
+        }
+
+        var buttons: [SlackBlockElement] = []
+        for entity in conversations.prefix(20) { // Slack allows up to 25 elements per actions block
+            let title = entity.displayTitle
+            let convID = entity.id ?? UUID()
+            let isActive = convID == config.slackActiveConversationID ? "⭐ " : ""
+            let label = String("\(isActive)\(title)".prefix(75))
+
+            buttons.append(SlackBlockElement.button(
+                text: label,
+                actionID: "switch:\(convID.uuidString)",
+                value: convID.uuidString
+            ))
+        }
+
+        buttons.append(SlackBlockElement.button(
+            text: "➕ New Conversation",
+            actionID: "action:new",
+            value: "new",
+            style: SlackBlockElement.primaryStyle
+        ))
+
+        // Slack allows max 25 elements per actions block, max 5 per row is a Discord limit not Slack
+        let blocks: [SlackBlock] = [
+            .sectionBlock(text: "📋 *Your Conversations:*"),
+            .actionsBlock(elements: buttons)
+        ]
+
+        _ = try? await apiClient?.postMessage(channel: channelID, text: "Your Conversations", blocks: blocks)
+    }
+
+    private func handleNewConversation(channelID: String) async {
+        guard let vm = viewModel else { return }
+
+        guard let profile = resolveProfile() else {
+            _ = try? await apiClient?.postMessage(channel: channelID, text: "⚠️ No agent profile configured. Set one in Devgentic Settings.")
+            return
+        }
+
+        if let emptyConv = findReusableEmptyConversation() {
+            let reusedID = emptyConv.id!
+            config.slackActiveConversationID = reusedID
+            vm.selectedConversationID = reusedID
+
+            _ = try? await apiClient?.postMessage(
+                channel: channelID,
+                text: "✅ Switched to existing empty conversation.\nJust type your message to start."
+            )
+            logger.info("[Slack] Reused empty conversation \(reusedID.uuidString).")
+            return
+        }
+
+        let convID = vm.createConversationForScheduledTask(profileID: profile, title: "Slack Chat")
+        config.slackActiveConversationID = convID
+        vm.selectedConversationID = convID
+
+        _ = try? await apiClient?.postMessage(
+            channel: channelID,
+            text: "✅ New conversation created and set as active.\nJust type your message to start."
+        )
+        logger.info("Created new conversation via Slack: \(convID.uuidString)")
+    }
+
+    private func handleStatus(channelID: String) async {
+        guard let vm = viewModel else { return }
+
+        let isStreaming = vm.streamingMessageID != nil
+        let activeConvTitle: String
+        if let activeID = config.slackActiveConversationID,
+           let entity = vm.persistenceService.getConversation(withId: activeID) {
+            activeConvTitle = entity.displayTitle
+        } else {
+            activeConvTitle = "None"
+        }
+
+        let allConversations = fetchRecentConversations(limit: 100)
+
+        let statusText = """
+        📊 *Devgentic Status*
+
+        🗣 Active Conversation: \(activeConvTitle)
+        ⚡ Agent Streaming: \(isStreaming ? "Yes" : "No")
+        🔐 Security Tier: \(config.securityTier.rawValue)
+        📋 Total Conversations: \(allConversations.count)
+        """
+
+        _ = try? await apiClient?.postMessage(channel: channelID, text: statusText)
+    }
+
+    private func handleCancel(channelID: String) async {
+        guard let conversationID = config.slackActiveConversationID else {
+            _ = try? await apiClient?.postMessage(channel: channelID, text: "No active conversation to cancel.")
+            return
+        }
+
+        await ExecutionSuspensionService.shared.cancel(for: conversationID)
+        awaitingClarification = false
+
+        _ = try? await apiClient?.postMessage(channel: channelID, text: "🛑 Cancelled active agent for this conversation.")
+    }
+
+    private func handleHelp(channelID: String) async {
+        let helpText = """
+        🤖 *Devgentic ChatOps (Slack)*
+
+        *Commands:*
+        /conversations — List your conversations
+        /new — Start a new conversation
+        /status — Current agent status
+        /cancel — Stop the active agent
+        /help — Show this message
+
+        *How it works:*
+        1. Use /conversations to pick a conversation
+        2. Type your message — it routes to the agent
+        3. The agent responds right here
+
+        *Security Tier:* \(config.securityTier.rawValue)
+        """
+
+        _ = try? await apiClient?.postMessage(channel: channelID, text: helpText)
+    }
+
+    private func handleSwitchConversation(to uuid: UUID, channelID: String) async {
+        guard let vm = viewModel else { return }
+
+        guard let entity = vm.persistenceService.getConversation(withId: uuid) else {
+            _ = try? await apiClient?.postMessage(channel: channelID, text: "⚠️ Conversation not found.")
+            return
+        }
+
+        config.slackActiveConversationID = uuid
+        awaitingClarification = false
+        vm.selectedConversationID = uuid
+
+        let title = entity.displayTitle
+        _ = try? await apiClient?.postMessage(
+            channel: channelID,
+            text: "✅ Switched to: *\(title)*\n\nJust type your message to continue."
+        )
+    }
+
+    private func handleFreeText(_ text: String, channelID: String) async {
+        guard let vm = viewModel else { return }
+
+        guard let conversationID = config.slackActiveConversationID else {
+            _ = try? await apiClient?.postMessage(
+                channel: channelID,
+                text: "No active conversation. Use /conversations to pick one or /new to create one."
+            )
+            return
+        }
+
+        guard let profile = resolveProfileForConversation(conversationID) else {
+            _ = try? await apiClient?.postMessage(
+                channel: channelID,
+                text: "⚠️ No agent profile found for this conversation."
+            )
+            return
+        }
+
+        let requestConfig = BackendRequestConfig(profile: profile)
+
+        guard let transport = slackTransport else { return }
+
+        remoteMirrorService?.registerSession(
+            conversationID: conversationID,
+            info: RemoteSessionInfo(
+                transport: transport,
+                chatID: channelID,
+                source: .slack
+            )
+        )
+
+        vm.submitRemoteMessage(
+            prompt: text,
+            conversationID: conversationID,
+            source: .slack,
+            config: requestConfig
+        )
+    }
+
+    // MARK: - Profile Resolution
+
+    private func resolveProfileForConversation(_ conversationID: UUID) -> BackendProfileModel? {
+        guard let vm = viewModel else { return nil }
+        let entity = vm.persistenceService.getConversation(withId: conversationID)
+        guard let profileID = entity?.backendEntityId else { return nil }
+        return ((try? BackendProfileStore.shared.fetchProfiles()) ?? []).first { $0.id == profileID }
+    }
+
+    private func resolveProfile() -> BackendProfileModel? {
+        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        if let vm = viewModel,
+           let selectedID = vm.backendConfiguration.selectedProfileID,
+           let profile = profiles.first(where: { $0.id == selectedID }) {
+            return profile
+        }
+        return profiles.first { $0.profileType == .agent } ?? profiles.first
+    }
+
+    // MARK: - Core Data Helpers
+
+    private func findReusableEmptyConversation() -> ConversationEntity? {
+        if let activeID = config.slackActiveConversationID,
+           let activeEntity = viewModel?.persistenceService.getConversation(withId: activeID),
+           activeEntity.messages?.count == 0 {
+            return activeEntity
+        }
+
+        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
+        ]
+        request.fetchLimit = 10
+
+        do {
+            let context = CoreDataPersistenceService.shared.viewContext
+            let results = try context.fetch(request)
+            return results.first { $0.messages?.count == 0 }
+        } catch {
+            logger.error("[Slack] Failed to query for empty conversations: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func fetchRecentConversations(limit: Int) -> [ConversationEntity] {
+        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
+        request.sortDescriptors = [
+            NSSortDescriptor(keyPath: \ConversationEntity.isPinned, ascending: false),
+            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
+        ]
+        request.fetchLimit = limit
+
+        do {
+            let context = CoreDataPersistenceService.shared.viewContext
+            return try context.fetch(request)
+        } catch {
+            logger.error("Failed to fetch conversations for Slack ChatOps: \(error.localizedDescription)")
+            return []
+        }
+    }
+}

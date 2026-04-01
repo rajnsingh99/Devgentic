@@ -21,7 +21,7 @@ struct OllamaImageGenService: ImageGenProvider, Sendable {
     let modelName: String
     let baseURL: String
 
-    init(modelName: String, baseURL: String = "http://localhost:11434") {
+    init(modelName: String, baseURL: String = ProviderDefaults.ollamaBaseURL.absoluteString) {
         self.modelName = modelName
         self.baseURL = baseURL
     }

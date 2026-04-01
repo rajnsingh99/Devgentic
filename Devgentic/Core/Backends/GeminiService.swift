@@ -46,7 +46,7 @@ class GeminiService {
     func verifyAndFetchModels(apiKey: String) async throws -> [String] {
         logger.info("Validating Google API Key and fetching models...")
         
-        guard var components = URLComponents(string: "https://generativelanguage.googleapis.com/v1beta/models") else {
+        guard var components = URLComponents(url: ProviderDefaults.geminiBaseURL.appendingPathComponent("models"), resolvingAgainstBaseURL: false) else {
             throw ApiError.networkError("Invalid URL")
         }
         components.queryItems = [URLQueryItem(name: "key", value: apiKey)]

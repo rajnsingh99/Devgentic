@@ -5,68 +5,134 @@
 //  Created by Raj Singh on 22/08/25.
 //
 //  Refactored to a unified model on 26/08/25.
-//  Fixed on 27/08/25 to correct AnyCodable decoding order.
-//  Fixed on 27/08/25 to correct AnyCodable encoding order to prevent precision loss.
-//  Updated on 05/09/25 to expand Agent configuration.
-//  Updated on 17/09/25 to add executable tool protocols.
-//  Updated on 28/01/26 to add AgentArchitecture.
-//  Updated to add supportsNativeTools to ProviderConfig for dynamic capability routing.
+//  Migrated to SwiftData on 26/03/26:
+//    - ProfileDetails cases now carry single config structs (BotConfig, AgentConfig, etc.)
+//    - BackendProfileModel is a typealias for BackendProfileSnapshot (value-type mirror)
+//    - Workflow switched from embedded copies to UUID references
 //
 
 import Foundation
 
-// MARK: - Unified Backend Profile Model
+// MARK: - Compatibility Typealias
+//
+// The execution layer, ChatOps bridges, and many views still reference `BackendProfileModel`.
+// Rather than renaming 40+ files in one pass, we alias to the Sendable snapshot struct
+// defined in BackendProfileSD.swift. This is functionally identical to the old struct.
+typealias BackendProfileModel = BackendProfileSnapshot
 
-/// A single, unified model to represent any backend configuration: a bot, an agent, or a workflow.
-/// This struct replaces the previous protocol-based approach with a more concrete and type-safe design.
-struct BackendProfileModel: Codable, Identifiable, Hashable {
-    // MARK: Core Properties (Common to all types)
-    let id: UUID
-    var displayName: String
-    var lastSelected: Date?
+// MARK: - Type-Specific Config Structs
 
-    var details: ProfileDetails
+/// Configuration for a simple Bot profile (LLM chat, no tools).
+struct BotConfig: Codable, Hashable, Sendable {
+    var llmConfig: ProviderConfig
+    var instructions: String?
+    var knowledgeSources: [KnowledgeSource]?
+}
 
-    var profileType: ProfileType {
-        switch details {
-        case .bot:
-            return .bot
-        case .agent:
-            return .agent
-        case .workflow:
-            return .workflow
-        case .imageGen:
-            return .imageGen
+/// Configuration for an Agent profile (tool-using, architecture-routed).
+struct AgentConfig: Codable, Hashable, Sendable {
+    var llmConfig: ProviderConfig
+    var architecture: AgentArchitecture
+    var tools: [Tool]
+    var description: String?
+    var instructions: String?
+    var knowledgeSources: [KnowledgeSource]?
+}
+
+/// Configuration for a Workflow profile (DAG of agent references).
+struct WorkflowConfig: Codable, Hashable, Sendable {
+    /// References to agent profiles by UUID — resolved at execution time.
+    var agentProfileIDs: [UUID]
+}
+
+/// Configuration for an Image Generation profile.
+struct ImageGenConfig: Codable, Hashable, Sendable {
+    var llmConfig: ProviderConfig
+    var negativePrompt: String?
+    var defaultAspectRatio: ImageAspectRatio?
+    var advancedSettings: [String: JSONValue]?
+}
+
+// MARK: - Schema Versioning
+
+/// Current schema version for ProfileDetails serialization.
+/// Increment this when the schema changes and add a migration step in `ProfileMigrator`.
+enum ProfileSchemaVersion: Int, Codable, Sendable {
+    case v1 = 1  // Initial versioned schema (pre-existing data treated as v1)
+
+    static let current: ProfileSchemaVersion = .v1
+}
+
+/// Chains versioned transforms to migrate ProfileDetails JSON from older schemas to current.
+/// Each migration step operates on raw JSON dictionaries to avoid coupling to current model types.
+enum ProfileMigrator {
+
+    /// Migrates raw JSON data from any previous schema version to the current version.
+    /// Returns the migrated data ready for decoding, or the original data if already current.
+    static func migrateIfNeeded(_ data: Data) -> Data {
+        guard var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return data
         }
+
+        let storedVersion = (json["schemaVersion"] as? Int) ?? 0
+
+        // Apply migrations in order
+        if storedVersion < 1 {
+            json = migrateToV1(json)
+        }
+        // Future: if storedVersion < 2 { json = migrateToV2(json) }
+
+        guard let migrated = try? JSONSerialization.data(withJSONObject: json) else {
+            return data
+        }
+        return migrated
     }
 
-    // MARK: Initializers
-    init(id: UUID = UUID(), displayName: String, lastSelected: Date? = nil, details: ProfileDetails) {
-        self.id = id
-        self.displayName = displayName
-        self.lastSelected = lastSelected
-        self.details = details
+    // MARK: - Migration Steps
+
+    /// v0 → v1: Stamps schemaVersion, migrates legacy workflow "agents" array to "agentProfileIDs".
+    private static func migrateToV1(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 1
+
+        // Legacy workflow migration: embedded agent snapshots → UUID references
+        if let profileType = result["profileType"] as? String, profileType == "Workflow" {
+            if result["agentProfileIDs"] == nil, let agents = result["agents"] as? [[String: Any]] {
+                let ids = agents.compactMap { $0["id"] as? String }
+                result["agentProfileIDs"] = ids
+                result.removeValue(forKey: "agents")
+            }
+        }
+
+        return result
     }
 }
 
 // MARK: - Profile Details Enum
 
-enum ProfileDetails: Codable, Hashable {
-    case bot(llmConfig: ProviderConfig, instructions: String?)
-    // Updated to include architecture
-    case agent(llmConfig: ProviderConfig, architecture: AgentArchitecture, tools: [Tool], description: String?, instructions: String?, knowledgeSources: [KnowledgeSource]?)
-    case workflow(agents: [BackendProfileModel])
-    case imageGen(llmConfig: ProviderConfig, negativePrompt: String?, defaultAspectRatio: ImageAspectRatio?, advancedSettings: [String: JSONValue]?)
+/// The discriminated union of profile configurations.
+/// Each case now carries a single config struct instead of loose associated values.
+enum ProfileDetails: Codable, Hashable, Sendable {
+    case bot(BotConfig)
+    case agent(AgentConfig)
+    case workflow(WorkflowConfig)
+    case imageGen(ImageGenConfig)
 
     // MARK: - Manual Codable Implementation
-    
+
     private enum CodingKeys: String, CodingKey {
-        case profileType, llmConfig, architecture, tools, agents, description, instructions, knowledgeSources
+        case schemaVersion
+        case profileType
+        // Bot / Agent / ImageGen share llmConfig
+        case llmConfig, instructions
+        // Agent-specific
+        case architecture, tools, description, knowledgeSources
+        // Workflow-specific
+        case agentProfileIDs
+        // ImageGen-specific
         case negativePrompt, defaultAspectRatio, advancedSettings
     }
 
-    // Custom decoder to handle the different cases based on the `profileType` key.
-    // This allows us to parse a single JSON object into the correct enum case.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let type = try container.decode(ProfileType.self, forKey: .profileType)
@@ -75,55 +141,75 @@ enum ProfileDetails: Codable, Hashable {
         case .bot:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
             let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
-            self = .bot(llmConfig: llmConfig, instructions: instructions)
+            let knowledgeSources = try container.decodeIfPresent([KnowledgeSource].self, forKey: .knowledgeSources)
+            self = .bot(BotConfig(llmConfig: llmConfig, instructions: instructions, knowledgeSources: knowledgeSources))
+
         case .agent:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
-            // Decode architecture, default to .reAct for backward compatibility
             let architecture = try container.decodeIfPresent(AgentArchitecture.self, forKey: .architecture) ?? .reAct
             let tools = try container.decode([Tool].self, forKey: .tools)
             let description = try container.decodeIfPresent(String.self, forKey: .description)
             let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
             let knowledgeSources = try container.decodeIfPresent([KnowledgeSource].self, forKey: .knowledgeSources)
-            self = .agent(llmConfig: llmConfig, architecture: architecture, tools: tools, description: description, instructions: instructions, knowledgeSources: knowledgeSources)
+            self = .agent(AgentConfig(
+                llmConfig: llmConfig,
+                architecture: architecture,
+                tools: tools,
+                description: description,
+                instructions: instructions,
+                knowledgeSources: knowledgeSources
+            ))
+
         case .workflow:
-            let agents = try container.decode([BackendProfileModel].self, forKey: .agents)
-            self = .workflow(agents: agents)
+            let ids = try container.decodeIfPresent([UUID].self, forKey: .agentProfileIDs) ?? []
+            self = .workflow(WorkflowConfig(agentProfileIDs: ids))
+
         case .imageGen:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
             let negativePrompt = try container.decodeIfPresent(String.self, forKey: .negativePrompt)
             let defaultAspectRatio = try container.decodeIfPresent(ImageAspectRatio.self, forKey: .defaultAspectRatio)
             let advancedSettings = try container.decodeIfPresent([String: JSONValue].self, forKey: .advancedSettings)
-            self = .imageGen(llmConfig: llmConfig, negativePrompt: negativePrompt, defaultAspectRatio: defaultAspectRatio, advancedSettings: advancedSettings)
+            self = .imageGen(ImageGenConfig(
+                llmConfig: llmConfig,
+                negativePrompt: negativePrompt,
+                defaultAspectRatio: defaultAspectRatio,
+                advancedSettings: advancedSettings
+            ))
         }
     }
 
-    // Custom encoder to write the correct data based on the enum's case.
-    // This ensures the serialized output (e.g., JSON) has a clear type identifier.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        
+
+        // Always stamp the current schema version
+        try container.encode(ProfileSchemaVersion.current, forKey: .schemaVersion)
+
         switch self {
-        case .bot(let llmConfig, let instructions):
+        case .bot(let config):
             try container.encode(ProfileType.bot, forKey: .profileType)
-            try container.encode(llmConfig, forKey: .llmConfig)
-            try container.encodeIfPresent(instructions, forKey: .instructions)
-        case .agent(let llmConfig, let architecture, let tools, let description, let instructions, let knowledgeSources):
+            try container.encode(config.llmConfig, forKey: .llmConfig)
+            try container.encodeIfPresent(config.instructions, forKey: .instructions)
+            try container.encodeIfPresent(config.knowledgeSources, forKey: .knowledgeSources)
+
+        case .agent(let config):
             try container.encode(ProfileType.agent, forKey: .profileType)
-            try container.encode(llmConfig, forKey: .llmConfig)
-            try container.encode(architecture, forKey: .architecture) // Encode architecture
-            try container.encode(tools, forKey: .tools)
-            try container.encodeIfPresent(description, forKey: .description)
-            try container.encodeIfPresent(instructions, forKey: .instructions)
-            try container.encodeIfPresent(knowledgeSources, forKey: .knowledgeSources)
-        case .workflow(let agents):
+            try container.encode(config.llmConfig, forKey: .llmConfig)
+            try container.encode(config.architecture, forKey: .architecture)
+            try container.encode(config.tools, forKey: .tools)
+            try container.encodeIfPresent(config.description, forKey: .description)
+            try container.encodeIfPresent(config.instructions, forKey: .instructions)
+            try container.encodeIfPresent(config.knowledgeSources, forKey: .knowledgeSources)
+
+        case .workflow(let config):
             try container.encode(ProfileType.workflow, forKey: .profileType)
-            try container.encode(agents, forKey: .agents)
-        case .imageGen(let llmConfig, let negativePrompt, let defaultAspectRatio, let advancedSettings):
+            try container.encode(config.agentProfileIDs, forKey: .agentProfileIDs)
+
+        case .imageGen(let config):
             try container.encode(ProfileType.imageGen, forKey: .profileType)
-            try container.encode(llmConfig, forKey: .llmConfig)
-            try container.encodeIfPresent(negativePrompt, forKey: .negativePrompt)
-            try container.encodeIfPresent(defaultAspectRatio, forKey: .defaultAspectRatio)
-            try container.encodeIfPresent(advancedSettings, forKey: .advancedSettings)
+            try container.encode(config.llmConfig, forKey: .llmConfig)
+            try container.encodeIfPresent(config.negativePrompt, forKey: .negativePrompt)
+            try container.encodeIfPresent(config.defaultAspectRatio, forKey: .defaultAspectRatio)
+            try container.encodeIfPresent(config.advancedSettings, forKey: .advancedSettings)
         }
     }
 }
@@ -131,7 +217,7 @@ enum ProfileDetails: Codable, Hashable {
 // MARK: - Agent Architecture Enum
 
 /// Defines the cognitive architecture used by the agent to process tasks.
-enum AgentArchitecture: String, Codable, CaseIterable, Identifiable, Hashable {
+enum AgentArchitecture: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
     case reAct = "ReAct"
     case planAndExecute = "Plan & Execute"
     case reflexion = "Reflexion"
@@ -151,10 +237,10 @@ enum AgentArchitecture: String, Codable, CaseIterable, Identifiable, Hashable {
     }
 }
 
-// MARK: - Supporting Structures (Largely Unchanged)
+// MARK: - Supporting Structures
 
 /// An enum to identify the type of backend configuration.
-enum ProfileType: String, Codable, CaseIterable, Identifiable {
+enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
     case bot = "Bot"
     case agent = "Agent"
     case workflow = "Workflow"
@@ -166,7 +252,7 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable {
 // MARK: - Image Generation Supporting Types
 
 /// Aspect ratio options for image generation.
-enum ImageAspectRatio: String, Codable, CaseIterable, Identifiable, Hashable {
+enum ImageAspectRatio: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
     case square     = "1:1"
     case landscape  = "16:9"
     case portrait   = "9:16"
@@ -190,7 +276,7 @@ enum ImageAspectRatio: String, Codable, CaseIterable, Identifiable, Hashable {
 }
 
 /// Quality setting for image generation.
-enum ImageQuality: String, Codable, CaseIterable, Identifiable, Hashable {
+enum ImageQuality: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
     case standard = "standard"
     case hd = "hd"
 
@@ -198,79 +284,79 @@ enum ImageQuality: String, Codable, CaseIterable, Identifiable, Hashable {
 }
 
 /// A simple representation of a tool that an agent can use.
-struct Tool: Codable, Hashable, Identifiable {
+struct Tool: Codable, Hashable, Identifiable, Sendable {
     var id: String { name }
     let name: String
     let description: String
     var isEnabled: Bool = true
     var requiresConfirmation: Bool = true
-    
+
     let sourceId: UUID
     let parameters: ToolParameters
 }
 
-/// Represents a source of knowledge for an agent, which can be a local file or a remote URL.
-struct KnowledgeSource: Codable, Hashable, Identifiable {
-    let id = UUID()
+/// Represents a source of knowledge for a profile, currently limited to local files.
+/// The SourceType enum is preserved for backward compatibility; only `.file` is implemented.
+struct KnowledgeSource: Codable, Hashable, Identifiable, Sendable {
+    var id = UUID()
     var type: SourceType
     var location: String
 
-    enum SourceType: String, Codable {
+    enum SourceType: String, Codable, Sendable {
         case file = "File"
         case url = "URL"
     }
+
+    var url: URL { URL(fileURLWithPath: location) }
+    var fileName: String { url.lastPathComponent }
+    var isLocalFile: Bool { type == .file }
+    var exists: Bool { type == .file && FileManager.default.fileExists(atPath: location) }
 }
 
 
 /// Represents the detected structural capability of the local LLM model.
-enum ModelCognitiveCapability: String, Codable, CaseIterable, Identifiable, Hashable {
+enum ModelCognitiveCapability: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
     /// No tool support. Must use standard conversational text.
     case none = "None"
-    
+
     /// Supports basic tool calling, but struggles with complex arrays. Needs flat JSON.
     case singleAction = "Single Action"
-    
+
     /// Natively supports complex arrays and multiple parallel tool calls.
     case parallelActions = "Parallel Actions"
-    
+
     var id: String { rawValue }
 }
 
 /// A single, unified list of all supported provider types.
-/// A single, unified list of all supported provider types.
-enum ApiProvider: String, Codable, CaseIterable, Identifiable {
+enum ApiProvider: String, Codable, CaseIterable, Identifiable, Sendable {
    case ollama = "Ollama (Local)"
-   case mlx = "MLX (Apple Silicon)" // <--- NEW CASE
+   case mlx = "MLX (Apple Silicon)"
    case openAI = "OpenAI"
    case anthropic = "Anthropic"
    case google = "Google"
-   
+
    var id: String { self.rawValue }
-    
+
     var providerString: String {
         switch self {
-        case .google:
-            return "google"
-        case .openAI:
-            return "openai"
-        case .ollama:
-            return "ollama"
-        case .anthropic:
-            return "anthropic"
-        case .mlx:
-            return "mlx"
+        case .google:    return "google"
+        case .openAI:    return "openai"
+        case .ollama:    return "ollama"
+        case .anthropic: return "anthropic"
+        case .mlx:       return "mlx"
         }
     }
 }
 
 /// A single, unified configuration model for all LLM providers.
-struct ProviderConfig: Codable, Hashable {
+struct ProviderConfig: Codable, Hashable, Sendable {
     var apiProvider: ApiProvider
     var modelName: String
     var apiKey: String?
     var baseURL: String?
     var advancedConfiguration: [String: JSONValue]?
-    
+
     /// Represents the cognitive capability of the model (e.g. tool calling support).
     /// This state drives the routing decision in AgentConnect.
     var cognitiveCapability: ModelCognitiveCapability = .none
@@ -288,9 +374,6 @@ struct ProviderConfig: Codable, Hashable {
     var chatTemplateSource: ChatTemplateSource = .embedded
 
     /// Custom stop sequences extracted from the model's tokenizer configuration.
-    /// These are turn-boundary tokens that must be detected at the application level
-    /// during generation — if the model emits one, generation should stop immediately.
-    /// Extracted by `MLXTokenizerAnalyzer` and stored as an intrinsic model property.
     var stopSequences: [String] = []
 
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
@@ -336,29 +419,17 @@ struct ProviderConfig: Codable, Hashable {
         self.advancedConfiguration = try container.decodeIfPresent([String: JSONValue].self, forKey: .advancedConfiguration)
 
         // --- COGNITIVE CAPABILITY MIGRATION LOGIC ---
-        // 1. Attempt to decode the new enum directly
         if let capability = try container.decodeIfPresent(ModelCognitiveCapability.self, forKey: .cognitiveCapability) {
             self.cognitiveCapability = capability
-        }
-        // 2. Fallback: decode legacy boolean and map it
-        else if let legacySupported = try container.decodeIfPresent(Bool.self, forKey: .supportsNativeTools) {
+        } else if let legacySupported = try container.decodeIfPresent(Bool.self, forKey: .supportsNativeTools) {
             self.cognitiveCapability = legacySupported ? .parallelActions : .singleAction
-        }
-        // 3. Absolute fallback
-        else {
+        } else {
             self.cognitiveCapability = .none
         }
 
-        // Dialect: decode if present, otherwise default to .nativeJSON (safe for cloud providers)
         self.modelDialect = try container.decodeIfPresent(ModelDialect.self, forKey: .modelDialect) ?? .nativeJSON
-
-        // Metadata: decode if present
         self.modelMetadata = try container.decodeIfPresent(ModelMetadata.self, forKey: .modelMetadata)
-
-        // Chat template source: decode if present, otherwise default to .embedded (backward compat)
         self.chatTemplateSource = try container.decodeIfPresent(ChatTemplateSource.self, forKey: .chatTemplateSource) ?? .embedded
-
-        // Stop sequences: decode if present, otherwise empty (backward compat)
         self.stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences) ?? []
     }
 
@@ -376,6 +447,5 @@ struct ProviderConfig: Codable, Hashable {
         if !stopSequences.isEmpty {
             try container.encode(stopSequences, forKey: .stopSequences)
         }
-        // We do NOT encode supportsNativeTools anymore, effectively dropping it on next save.
     }
 }

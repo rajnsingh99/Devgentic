@@ -51,9 +51,9 @@ struct PromptSuggestionView: View {
                     }
                     .padding(4)
                 }
-                .onChange(of: selectedItemID) { newId in
+                .onChange(of: selectedItemID) { _, newId in
                     // When the selection changes, scroll to make it visible
-                    if let newId = newId {
+                    if let newId {
                         withAnimation {
                             scrollViewProxy.scrollTo(newId, anchor: .center)
                         }

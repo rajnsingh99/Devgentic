@@ -4,217 +4,159 @@
 //
 //  Created by Raj Singh on 28/09/25.
 //
-//  Updated for Phase 1: Mapped requiresConfirmation boolean from CoreData
-//  Updated for Phase 5: Injected serverName as the category for UI grouping
+//  Migrated to SwiftData on 26/03/26.
 //
 
 import Foundation
-import CoreData
+import SwiftData
 import Combine
+import os
 
-/// Manages all Core Data operations for MCP tools (ToolItemEntity and MCPToolEntity).
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MCPToolStore")
+
+/// Manages all SwiftData operations for MCP tools (MCPToolItem and MCPToolDefinitionModel).
 /// This class acts as a single source of truth for tool data and publishes changes to the UI.
 @MainActor
 class MCPToolStore: ObservableObject {
-    
+
     // MARK: - Singleton Instance
     static let shared = MCPToolStore()
 
     /// Published array of tool sources that the UI can observe for changes.
     @Published var sources: [ToolSource] = []
-    
-    private let persistenceService: CoreDataServiceProtocol
-    private var cancellables = Set<AnyCancellable>()
 
-    /// Private initializer to enforce singleton pattern and set up the data pipeline.
-    /// - Parameter persistenceService: The Core Data service for database operations.
-    private init(persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared) {
-        self.persistenceService = persistenceService
+    /// The shared model container, configured once at app startup.
+    private(set) var modelContainer: ModelContainer?
+
+    private var mainContext: ModelContext? {
+        modelContainer?.mainContext
+    }
+
+    /// Call this once from the App init to inject the container.
+    func configureContainer(_ container: ModelContainer) {
+        self.modelContainer = container
         fetchTools()
     }
 
+    /// Private initializer to enforce singleton pattern.
+    private init() {}
+
     // MARK: - Public CRUD Methods
 
-    /// Adds a new tool source and its associated tools to Core Data.
-    /// - Parameters:
-    ///   - serverName: The name of the server providing the tools.
-    ///   - serverDefinition: The configuration containing connection details.
-    ///   - newTools: An array of `ToolDefinition` structs to be saved.
+    /// Adds a new tool source and its associated tools.
     func addTool(serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
-        let context = (persistenceService as! CoreDataPersistenceService).viewContext
-        
-        // Create the parent ToolItemEntity
-        let newToolItemEntity = ToolItemEntity(context: context)
-        newToolItemEntity.id = UUID()
-        newToolItemEntity.serverName = serverName
-        
-        // Encode the entire ServerDefinition object into a single Data attribute.
-        newToolItemEntity.mcpConfig = try? JSONEncoder().encode(serverDefinition)
-        
-        // Create and associate each MCPToolEntity
+        guard let context = mainContext else { return }
+
+        let item = MCPToolItem(
+            id: UUID(),
+            serverName: serverName,
+            mcpConfigData: try? JSONEncoder().encode(serverDefinition)
+        )
+
         for tool in newTools {
-            createAndAttachToolEntity(tool, to: newToolItemEntity, context: context)
+            let child = createToolDefinitionModel(from: tool)
+            item.tools.append(child)
         }
-        
-        persistenceService.saveContext()
-        fetchTools() // Refresh the published list
+
+        context.insert(item)
+        saveContext()
+        fetchTools()
     }
-    
+
     /// Updates an existing tool source configuration and its tools.
-    /// - Parameters:
-    ///   - id: The UUID of the existing tool source to update.
-    ///   - serverName: The new name of the server.
-    ///   - serverDefinition: The new configuration details.
-    ///   - newTools: The fresh list of tools discovered from the server.
     func updateTool(id: UUID, serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
-        let context = (persistenceService as! CoreDataPersistenceService).viewContext
-        let fetchRequest: NSFetchRequest<ToolItemEntity> = ToolItemEntity.fetchRequest()
-        fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        
+        guard let context = mainContext else { return }
+
+        let targetID = id
+        let predicate = #Predicate<MCPToolItem> { $0.id == targetID }
+        var descriptor = FetchDescriptor<MCPToolItem>(predicate: predicate)
+        descriptor.fetchLimit = 1
+
         do {
-            if let entityToUpdate = try context.fetch(fetchRequest).first {
-                // 1. Update basic properties
-                entityToUpdate.serverName = serverName
-                entityToUpdate.mcpConfig = try? JSONEncoder().encode(serverDefinition)
-                
-                // 2. Clear existing tools to ensure synchronization
-                // (e.g., if the server removed a tool or renamed it)
-                if let existingTools = entityToUpdate.tools as? Set<MCPToolEntity> {
-                    for tool in existingTools {
-                        context.delete(tool)
-                    }
-                }
-                
-                // 3. Add the fresh set of tools
-                for tool in newTools {
-                    createAndAttachToolEntity(tool, to: entityToUpdate, context: context)
-                }
-                
-                persistenceService.saveContext()
-                fetchTools() // Refresh the published list
-            } else {
-                print("MCPToolStore: Tool source with ID \(id) not found for update.")
+            guard let item = try context.fetch(descriptor).first else {
+                logger.warning("MCPToolStore: Tool source with ID \(id) not found for update.")
+                return
             }
+
+            // Update basic properties
+            item.serverName = serverName
+            item.mcpConfigData = try? JSONEncoder().encode(serverDefinition)
+
+            // Clear existing tools (cascade doesn't auto-delete in-memory; delete explicitly)
+            for existingTool in item.tools {
+                context.delete(existingTool)
+            }
+            item.tools.removeAll()
+
+            // Add fresh set
+            for tool in newTools {
+                let child = createToolDefinitionModel(from: tool)
+                item.tools.append(child)
+            }
+
+            saveContext()
+            fetchTools()
         } catch {
-            print("MCPToolStore: Failed to fetch tool item for update: \(error.localizedDescription)")
+            logger.error("MCPToolStore: Failed to fetch tool item for update: \(error.localizedDescription)")
         }
     }
 
-    /// Deletes a specific tool source from Core Data.
-    /// - Parameter toolSource: The `ToolSource` to be deleted.
+    /// Deletes a specific tool source.
     func deleteTool(toolSource: ToolSource) {
-        let context = (persistenceService as! CoreDataPersistenceService).viewContext
-        let fetchRequest: NSFetchRequest<ToolItemEntity> = ToolItemEntity.fetchRequest()
-        fetchRequest.predicate = NSPredicate(format: "id == %@", toolSource.id as CVarArg)
-        
+        guard let context = mainContext else { return }
+
+        let targetID = toolSource.id
+        let predicate = #Predicate<MCPToolItem> { $0.id == targetID }
+        var descriptor = FetchDescriptor<MCPToolItem>(predicate: predicate)
+        descriptor.fetchLimit = 1
+
         do {
-            if let entityToDelete = try context.fetch(fetchRequest).first {
-                context.delete(entityToDelete)
-                persistenceService.saveContext()
-                fetchTools() // Refresh the published list
+            if let item = try context.fetch(descriptor).first {
+                context.delete(item) // Cascade deletes children
+                saveContext()
+                fetchTools()
             }
         } catch {
-            print("Failed to fetch tool item for deletion: \(error.localizedDescription)")
+            logger.error("Failed to fetch tool item for deletion: \(error.localizedDescription)")
         }
     }
-    
+
     // MARK: - Private Helper Methods
-    
-    private func createAndAttachToolEntity(_ tool: ToolDefinition, to parent: ToolItemEntity, context: NSManagedObjectContext) {
-        let newMCPToolEntity = MCPToolEntity(context: context)
-        newMCPToolEntity.name = tool.name
-        newMCPToolEntity.toolDescription = tool.description
-        newMCPToolEntity.requiresConfirmation = tool.requiresConfirmation
-        newMCPToolEntity.parametersData = try? JSONEncoder().encode(tool.parameters)
 
-        // MCP v0.11.0 fields
-        newMCPToolEntity.title = tool.title
-        newMCPToolEntity.iconsData = tool.icons.flatMap { try? JSONEncoder().encode($0) }
-        newMCPToolEntity.annotationsData = tool.annotations.flatMap { try? JSONEncoder().encode($0) }
-
-        parent.addToTools(newMCPToolEntity)
+    private func createToolDefinitionModel(from tool: ToolDefinition) -> MCPToolDefinitionModel {
+        MCPToolDefinitionModel(
+            name: tool.name,
+            toolDescription: tool.description,
+            requiresConfirmation: tool.requiresConfirmation,
+            parametersData: try? JSONEncoder().encode(tool.parameters),
+            title: tool.title,
+            iconsData: tool.icons.flatMap { try? JSONEncoder().encode($0) },
+            annotationsData: tool.annotations.flatMap { try? JSONEncoder().encode($0) }
+        )
     }
 
-    /// Fetches all tool items from Core Data and updates the published `sources` array.
+    /// Fetches all tool items and updates the published `sources` array.
     private func fetchTools() {
-        let context = (persistenceService as! CoreDataPersistenceService).viewContext
-        let request: NSFetchRequest<ToolItemEntity> = ToolItemEntity.fetchRequest()
-        
-        // Sort by server name for a consistent order
-        request.sortDescriptors = [NSSortDescriptor(keyPath: \ToolItemEntity.serverName, ascending: true)]
-        
+        guard let context = mainContext else { return }
+
         do {
-            let results = try context.fetch(request)
-            // Map the Core Data entities to the UI model structs
-            self.sources = results.map { $0.toToolSourceStruct() }
+            let descriptor = FetchDescriptor<MCPToolItem>(
+                sortBy: [SortDescriptor(\.serverName, order: .forward)]
+            )
+            let results = try context.fetch(descriptor)
+            self.sources = results.map { $0.toToolSource() }
         } catch {
-            print("Failed to fetch tools: \(error.localizedDescription)")
+            logger.error("Failed to fetch tools: \(error.localizedDescription)")
             self.sources = []
         }
     }
-}
 
-
-// MARK: - Core Data Entity Extension
-
-// This extension provides a convenient way to convert the Core Data managed object
-// into the simple struct that the SwiftUI views use.
-extension ToolItemEntity {
-    
-    /// Converts a `ToolItemEntity` managed object into a `ToolSource` struct.
-    /// - Returns: A `ToolSource` struct representing the data.
-    func toToolSourceStruct() -> ToolSource {
-        // Safely unwrap the related MCPToolEntity set and convert each to a ToolDefinition struct
-        let toolSet = self.tools as? Set<MCPToolEntity> ?? []
-        let mappedTools = toolSet.map { mcpToolEntity -> ToolDefinition in
-            // Decode parameters from Data, providing a default if it fails or is nil.
-            var parameters: ToolParameters
-            if let data = mcpToolEntity.parametersData {
-                do {
-                    parameters = try JSONDecoder().decode(ToolParameters.self, from: data)
-                } catch {
-                    print("Failed to decode parameters for tool \(mcpToolEntity.name ?? "Unknown"): \(error). Using default.")
-                    parameters = ToolParameters(type: "object", properties: [:], required: [])
-                }
-            } else {
-                parameters = ToolParameters(type: "object", properties: [:], required: [])
-            }
-
-            // Hydrate v0.11.0 fields
-            var icons: [ToolIcon]? = nil
-            if let data = mcpToolEntity.iconsData {
-                icons = try? JSONDecoder().decode([ToolIcon].self, from: data)
-            }
-
-            var annotations: ToolAnnotations? = nil
-            if let data = mcpToolEntity.annotationsData {
-                annotations = try? JSONDecoder().decode(ToolAnnotations.self, from: data)
-            }
-
-            return ToolDefinition(
-                name: mcpToolEntity.name ?? "Unknown",
-                description: mcpToolEntity.toolDescription ?? "",
-                category: self.serverName ?? "MCP Server",
-                parameters: parameters,
-                requiresConfirmation: mcpToolEntity.requiresConfirmation,
-                title: mcpToolEntity.title,
-                icons: icons,
-                annotations: annotations
-            )
-        }.sorted { $0.name < $1.name }
-        
-        // Decode the ServerDefinition from the stored Data.
-        var serverDefinition: ServerDefinition?
-        if let data = self.mcpConfig {
-            serverDefinition = try? JSONDecoder().decode(ServerDefinition.self, from: data)
+    private func saveContext() {
+        guard let context = mainContext else { return }
+        do {
+            try context.save()
+        } catch {
+            logger.error("Failed to save SwiftData context: \(error.localizedDescription)")
         }
-        
-        return ToolSource(
-            id: self.id ?? UUID(),
-            type: .mcp, // All persisted items are MCP tools
-            serverName: self.serverName ?? "Unnamed Server",
-            tools: mappedTools,
-            serverDefinition: serverDefinition
-        )
     }
 }

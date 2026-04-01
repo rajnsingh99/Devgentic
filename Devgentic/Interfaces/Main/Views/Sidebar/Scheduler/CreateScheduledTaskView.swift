@@ -59,7 +59,7 @@ struct CreateScheduledTaskView: View {
     }
 
     private var profiles: [BackendProfileModel] {
-        BackendProfileStore.shared.fetchProfiles()
+        (try? BackendProfileStore.shared.fetchProfiles()) ?? []
     }
 
     var body: some View {

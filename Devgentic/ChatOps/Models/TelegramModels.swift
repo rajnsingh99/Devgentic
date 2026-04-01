@@ -1,0 +1,156 @@
+//
+//  TelegramModels.swift
+//  Devgentic
+//
+//  Created by Raj Singh on 23/03/26.
+//
+
+import Foundation
+
+// MARK: - Telegram Bot API Response Wrapper
+
+/// Generic wrapper for all Telegram Bot API responses.
+struct TelegramResponse<T: Decodable>: Decodable {
+    let ok: Bool
+    let result: T?
+    let description: String?
+    let error_code: Int?
+}
+
+// MARK: - Update & Polling
+
+/// Represents a single update received from Telegram's `getUpdates` long-poll.
+struct TelegramUpdate: Codable {
+    let update_id: Int
+    let message: TelegramMessage?
+    let callback_query: TelegramCallbackQuery?
+
+    /// Convenience: the chat ID from either a message or a callback query.
+    var chatID: Int64? {
+        message?.chat.id ?? callback_query?.message?.chat.id
+    }
+}
+
+// MARK: - Message
+
+struct TelegramMessage: Codable {
+    let message_id: Int
+    let from: TelegramUser?
+    let chat: TelegramChat
+    let date: Int
+    let text: String?
+}
+
+// MARK: - Chat
+
+struct TelegramChat: Codable {
+    let id: Int64
+    let type: String
+    let title: String?
+    let first_name: String?
+}
+
+// MARK: - User
+
+struct TelegramUser: Codable {
+    let id: Int64
+    let is_bot: Bool
+    let first_name: String
+    let username: String?
+}
+
+// MARK: - Callback Query (Inline Keyboard Taps)
+
+struct TelegramCallbackQuery: Codable {
+    let id: String
+    let from: TelegramUser
+    let message: TelegramMessage?
+    let data: String?
+}
+
+// MARK: - Keyboard Markup Types
+
+/// Inline keyboard attached below a specific bot message.
+struct InlineKeyboardMarkup: Codable {
+    let inline_keyboard: [[InlineKeyboardButton]]
+}
+
+struct InlineKeyboardButton: Codable {
+    let text: String
+    let callback_data: String?
+
+    init(text: String, callbackData: String) {
+        self.text = text
+        self.callback_data = callbackData
+    }
+}
+
+/// Persistent reply keyboard replacing the user's phone keyboard.
+struct ReplyKeyboardMarkup: Codable {
+    let keyboard: [[KeyboardButton]]
+    let resize_keyboard: Bool?
+    let one_time_keyboard: Bool?
+    let is_persistent: Bool?
+
+    init(keyboard: [[KeyboardButton]], resize: Bool = true, persistent: Bool = true) {
+        self.keyboard = keyboard
+        self.resize_keyboard = resize
+        self.one_time_keyboard = false
+        self.is_persistent = persistent
+    }
+}
+
+struct KeyboardButton: Codable {
+    let text: String
+}
+
+// MARK: - Bot Command (for setMyCommands)
+
+struct BotCommand: Codable {
+    let command: String
+    let description: String
+}
+
+// MARK: - Send Message Request
+
+/// Payload for the `sendMessage` API call.
+struct SendMessagePayload: Encodable {
+    let chat_id: Int64
+    let text: String
+    let parse_mode: String?
+    let reply_markup: ReplyMarkup?
+
+    /// Type-erased reply markup to support both inline and reply keyboards.
+    enum ReplyMarkup: Encodable {
+        case inline(InlineKeyboardMarkup)
+        case reply(ReplyKeyboardMarkup)
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .inline(let markup):
+                try container.encode(markup)
+            case .reply(let markup):
+                try container.encode(markup)
+            }
+        }
+    }
+}
+
+// MARK: - Edit Message Request
+
+/// Payload for the `editMessageText` API call.
+struct EditMessageTextPayload: Encodable {
+    let chat_id: Int64
+    let message_id: Int
+    let text: String
+    let parse_mode: String?
+    let reply_markup: SendMessagePayload.ReplyMarkup?
+}
+
+// MARK: - Chat Action
+
+enum TelegramChatAction: String, Encodable {
+    case typing
+    case uploadDocument = "upload_document"
+}

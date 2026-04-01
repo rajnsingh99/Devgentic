@@ -10,7 +10,7 @@ import UserNotifications
 
 struct NotificationSettingsView: View {
 
-    @StateObject private var config = NotificationConfiguration.shared
+    @ObservedObject private var config = NotificationConfiguration.shared
     @Environment(\.appTheme) private var theme
 
     @State private var testSent = false

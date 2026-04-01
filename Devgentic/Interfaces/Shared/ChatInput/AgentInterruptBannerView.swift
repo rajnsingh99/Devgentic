@@ -144,16 +144,18 @@ private struct ClarificationBanner: View {
         let trimmed = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         withAnimation { isSubmitting = true }
-        mainAppViewModel.submitClarificationResponse(conversationID: message.conversationId, response: trimmed)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        mainAppViewModel.submitClarificationResponse(operationID: message.pendingClarification!.id, response: trimmed)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
             withAnimation { message.pendingClarification = nil }
         }
     }
 
     private func skip() {
         withAnimation { isSubmitting = true }
-        mainAppViewModel.submitClarificationResponse(conversationID: message.conversationId, response: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        mainAppViewModel.submitClarificationResponse(operationID: message.pendingClarification!.id, response: nil)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
             withAnimation { message.pendingClarification = nil }
         }
     }
@@ -258,8 +260,9 @@ private struct PermissionBanner: View {
 
     private func decide(approved: Bool) {
         withAnimation { isProcessing = true }
-        mainAppViewModel.submitToolApproval(conversationID: message.conversationId, approved: approved)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+        mainAppViewModel.submitToolApproval(operationID: confirmation.id, approved: approved)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
             withAnimation { message.pendingToolConfirmation = nil }
         }
     }

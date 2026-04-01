@@ -19,19 +19,21 @@ struct ProfileDetailContainerView: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        if let index = profileService.profiles.firstIndex(where: { $0.id == profileID }) {
-            BackendProfileDetailView(profile: $profileService.profiles[index])
-                .environmentObject(profileService)
-        } else {
-            VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 36))
-                    .foregroundColor(theme.secondaryText)
-                Text("Profile not found")
-                    .font(.title3)
-                    .foregroundColor(theme.secondaryText)
+        Group {
+            if let buffer = profileService.editBuffer, buffer.draft.id == profileID {
+                BackendProfileDetailView(editBuffer: buffer)
+                    .id(profileID)
+                    .environmentObject(profileService)
+            } else {
+                // Fallback: eagerly activate if the buffer wasn't pre-set
+                // (e.g. deep-link, state restoration, or first render edge case).
+                Color.clear
+                    .onAppear {
+                        if profileService.editBuffer?.draft.id != profileID {
+                            profileService.activateEditBuffer(for: profileID)
+                        }
+                    }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

@@ -20,7 +20,9 @@ class ActiveStreamManager: ObservableObject {
     
     // MARK: - Dependencies
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
-    
+    private var permissionResolvedObserver: Any?
+    private var clarificationResolvedObserver: Any?
+
     private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     private let backendOrchestrationService: BackendOrchestrationService
@@ -34,7 +36,54 @@ class ActiveStreamManager: ObservableObject {
         self.backendOrchestrationService = BackendOrchestrationService(
             fileProcessorService: fileProcessorService
         )
+        setupHITLResolvedObservers()
         logger.info("ActiveStreamManager initialized.")
+    }
+
+    // MARK: - Cross-Surface HITL Sync
+
+    /// Observes resolved notifications so the Mac UI clears stale banners
+    /// when Telegram (or a timeout) handles the HITL interaction.
+    private func setupHITLResolvedObservers() {
+        permissionResolvedObserver = NotificationCenter.default.addObserver(
+            forName: .hitlPermissionResolved,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
+                // Find the active stream for this conversation and clear its pending confirmation
+                for (_, message) in self.activeStreams where message.conversationId == conversationID {
+                    if message.pendingToolConfirmation != nil {
+                        message.pendingToolConfirmation = nil
+                        message.agentState = .thinking(.reflecting)
+                        message.thinkingHeadline = "Processing..."
+                        logger.info("Cleared stale tool confirmation banner for conversation \(conversationID) (resolved externally).")
+                    }
+                }
+            }
+        }
+
+        clarificationResolvedObserver = NotificationCenter.default.addObserver(
+            forName: .hitlClarificationResolved,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
+                // Find the active stream for this conversation and clear its pending clarification
+                for (_, message) in self.activeStreams where message.conversationId == conversationID {
+                    if message.pendingClarification != nil {
+                        message.pendingClarification = nil
+                        message.agentState = .thinking(.reflecting)
+                        message.thinkingHeadline = "Processing..."
+                        logger.info("Cleared stale clarification banner for conversation \(conversationID) (resolved externally).")
+                    }
+                }
+            }
+        }
     }
 
     
@@ -125,23 +174,25 @@ class ActiveStreamManager: ObservableObject {
                         agentMessage.timelineEvents.append(.toolExecution(id: callId, name: name, params: params, output: nil, isSuccess: nil, isExecuting: true))
                         
                     // [HITL] Phase 3: Handle Permission Requests
-                    case .requestConfirmation(let toolName, let params):
+                    case .requestConfirmation(let toolName, let params, let operationID):
                         agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
                         agentMessage.agentState = .interaction(.permission(toolName: toolName))
-                        
-                        // Populate the Pending Confirmation Data for the UI
+
+                        // Populate the Pending Confirmation Data for the UI (operationID for multi-surface dedup)
                         agentMessage.pendingToolConfirmation = PendingToolConfirmation(
+                            id: operationID,
                             toolName: toolName,
                             params: params
                         )
-                        
+
                     // [ASK_USER] Handle Clarification Requests
-                    case .requestClarification(let question):
+                    case .requestClarification(let question, let operationID):
                         agentMessage.thinkingHeadline = "Asking you a question..."
                         agentMessage.agentState = .interaction(.clarification)
 
-                        // Populate the Pending Clarification Data for the UI
+                        // Populate the Pending Clarification Data for the UI (operationID for multi-surface dedup)
                         agentMessage.pendingClarification = PendingClarification(
+                            id: operationID,
                             question: question
                         )
 

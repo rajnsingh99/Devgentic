@@ -138,7 +138,7 @@ final class TraceStore: Sendable {
     func insertEvents(_ events: [SpanEvent]) throws {
         guard !events.isEmpty else { return }
         try dbPool.write { db in
-            for var event in events {
+            for event in events {
                 try event.insert(db)
             }
         }
@@ -240,7 +240,6 @@ final class TraceStore: Sendable {
         }
         
         // Build tree: assign children to parents
-        let spansByID = Dictionary(uniqueKeysWithValues: hydratedSpans.map { ($0.spanID, $0) })
         let childrenByParent = Dictionary(grouping: hydratedSpans, by: { $0.parentSpanID ?? "" })
         
         hydratedSpans = hydratedSpans.map { span in

@@ -26,24 +26,25 @@ struct ToolLibraryContainerView: View {
     @State private var isDoneHovered = false
 
     var body: some View {
-        if let index = profileService.profiles.firstIndex(where: { $0.id == profileID }) {
+        if profileService.profiles.contains(where: { $0.id == profileID }) {
             VStack(spacing: 0) {
                 DynamicIslandBar {
                     // CENTER: Search bar
                     searchBar
                 } trailing: {
                     // TRAILING: Action icons
-                    actionIcons(for: index)
+                    actionIcons
                 }
                 .padding(.bottom, 8)
 
                 ToolLibraryView(
-                    configuredTools: toolsBinding(for: index),
-                    instructions: instructions(for: index),
+                    configuredTools: toolsBinding,
+                    instructions: currentInstructions,
                     searchText: $searchText,
                     selectedSidebar: $selectedSidebar
                 )
             }
+            .id(profileID)
             .sheet(isPresented: $isPresentingAddView) {
                 AddMCPServerView(
                     onToolAdded: { serverName, serverDefinition, tools -> Bool in
@@ -92,16 +93,16 @@ struct ToolLibraryContainerView: View {
 
     // MARK: - Action Icons (Trailing Content)
 
-    private func actionIcons(for index: Int) -> some View {
+    private var actionIcons: some View {
         HStack(spacing: 6) {
             // Select All
             iconButton(
-                symbol: allToolsSelected(for: index) ? "checkmark.circle.fill" : "checkmark.circle",
-                color: allToolsSelected(for: index) ? theme.accentColor : theme.primaryText,
+                symbol: allToolsSelected ? "checkmark.circle.fill" : "checkmark.circle",
+                color: allToolsSelected ? theme.accentColor : theme.primaryText,
                 isHovered: $isSelectAllHovered,
-                help: allToolsSelected(for: index) ? "Deselect all tools" : "Select all tools"
+                help: allToolsSelected ? "Deselect all tools" : "Select all tools"
             ) {
-                toggleSelectAll(for: index)
+                toggleSelectAll()
             }
 
             // Add MCP Server
@@ -150,43 +151,51 @@ struct ToolLibraryContainerView: View {
         .help(help)
     }
 
+    // MARK: - Current Profile Lookup
+
+    private var currentProfile: BackendProfileModel? {
+        profileService.profiles.first(where: { $0.id == profileID })
+    }
+
     // MARK: - Select All Logic
 
-    private func allToolsSelected(for index: Int) -> Bool {
-        guard case .agent(_, _, let tools, _, _, _) = profileService.profiles[index].details else { return false }
+    private var allToolsSelected: Bool {
+        guard let profile = currentProfile,
+              case .agent(let config) = profile.details else { return false }
         let rows = currentDisplayedRows()
         guard !rows.isEmpty else { return false }
         return rows.allSatisfy { row in
-            tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
+            config.tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
         }
     }
 
-    private func toggleSelectAll(for index: Int) {
-        guard case .agent(let config, let arch, var tools, let desc, let instr, let sources) = profileService.profiles[index].details else { return }
+    private func toggleSelectAll() {
+        guard let profile = currentProfile,
+              case .agent(var agentConfig) = profile.details else { return }
 
         let rows = currentDisplayedRows()
         let allSelected = rows.allSatisfy { row in
-            tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
+            agentConfig.tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
         }
 
         if allSelected {
             // Deselect all in current view
             for row in rows {
                 // Skip tools referenced in instructions
-                if let instructions = instr, instructions.contains("`\(row.definition.name)`") {
+                if let instructions = agentConfig.instructions, instructions.contains("`\(row.definition.name)`") {
                     continue
                 }
-                tools.removeAll { $0.name == row.definition.name && $0.sourceId == row.source.id }
+                agentConfig.tools.removeAll { $0.name == row.definition.name && $0.sourceId == row.source.id }
             }
         } else {
             // Select all in current view (default to Ask mode)
             for row in rows {
-                if !tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
+                if !agentConfig.tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
                     var confirmation = true
                     if let annotations = row.definition.annotations, annotations.readOnlyHint == true {
                         confirmation = false
                     }
-                    tools.append(Tool(
+                    agentConfig.tools.append(Tool(
                         name: row.definition.name,
                         description: row.definition.description,
                         isEnabled: true,
@@ -198,15 +207,10 @@ struct ToolLibraryContainerView: View {
             }
         }
 
-        profileService.profiles[index].details = .agent(
-            llmConfig: config,
-            architecture: arch,
-            tools: tools,
-            description: desc,
-            instructions: instr,
-            knowledgeSources: sources
-        )
-        profileService.saveProfile(profileService.profiles[index])
+        if let idx = profileService.profiles.firstIndex(where: { $0.id == profileID }) {
+            profileService.profiles[idx].details = .agent(agentConfig)
+            try? profileService.saveProfile(profileService.profiles[idx])
+        }
     }
 
     /// Get the currently visible tool rows based on sidebar selection and search.
@@ -249,34 +253,26 @@ struct ToolLibraryContainerView: View {
 
     // MARK: - Bindings
 
-    private func toolsBinding(for index: Int) -> Binding<[Tool]> {
+    private var toolsBinding: Binding<[Tool]> {
         Binding(
             get: {
-                if case .agent(_, _, let tools, _, _, _) = profileService.profiles[index].details {
-                    return tools
-                }
-                return []
+                guard let profile = self.currentProfile,
+                      case .agent(let config) = profile.details else { return [] }
+                return config.tools
             },
             set: { newTools in
-                if case .agent(let config, let arch, _, let desc, let instr, let sources) = profileService.profiles[index].details {
-                    profileService.profiles[index].details = .agent(
-                        llmConfig: config,
-                        architecture: arch,
-                        tools: newTools,
-                        description: desc,
-                        instructions: instr,
-                        knowledgeSources: sources
-                    )
-                    profileService.saveProfile(profileService.profiles[index])
-                }
+                guard let idx = self.profileService.profiles.firstIndex(where: { $0.id == self.profileID }),
+                      case .agent(var config) = self.profileService.profiles[idx].details else { return }
+                config.tools = newTools
+                self.profileService.profiles[idx].details = .agent(config)
+                try? self.profileService.saveProfile(self.profileService.profiles[idx])
             }
         )
     }
 
-    private func instructions(for index: Int) -> String {
-        if case .agent(_, _, _, _, let instructions, _) = profileService.profiles[index].details {
-            return instructions ?? ""
-        }
-        return ""
+    private var currentInstructions: String {
+        guard let profile = currentProfile,
+              case .agent(let config) = profile.details else { return "" }
+        return config.instructions ?? ""
     }
 }

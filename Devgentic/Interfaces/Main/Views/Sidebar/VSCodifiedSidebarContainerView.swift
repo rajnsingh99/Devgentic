@@ -11,7 +11,6 @@
 //
 
 import SwiftUI
-import Combine
 import os
 
 // MARK: - Main Sidebar Container View
@@ -72,7 +71,7 @@ struct VSCodifiedSidebarContainerView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: isSidebarVisible)
         }
         .frame(maxHeight: .infinity)
-        .onChange(of: selectedTab) { newTab in
+        .onChange(of: selectedTab) { _, newTab in
             if newTab != nil && !isSidebarVisible {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                     isSidebarVisible = true

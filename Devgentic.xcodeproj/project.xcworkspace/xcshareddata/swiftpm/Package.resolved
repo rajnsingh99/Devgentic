@@ -1,5 +1,5 @@
 {
-  "originHash" : "005bdad8efd95cb5157f9e257c9e400164d71d72fc6954e05607bf0e88fbb434",
+  "originHash" : "00668617f5a26ea6010ca10b192dcb3e0188295061bd50732f9e6457a5243e8e",
   "pins" : [
     {
       "identity" : "codeeditlanguages",
@@ -35,6 +35,15 @@
       "state" : {
         "revision" : "d7ac3f11f22ec2e820187acce8f3a3fb7aa8ddec",
         "version" : "0.12.1"
+      }
+    },
+    {
+      "identity" : "corexlsx",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CoreOffice/CoreXLSX",
+      "state" : {
+        "revision" : "1391f3832ea2eeee5186ea8abb81ea49ed0609cc",
+        "version" : "0.14.2"
       }
     },
     {
@@ -254,6 +263,15 @@
       }
     },
     {
+      "identity" : "swiftdocx",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Techopolis/SwiftDocX",
+      "state" : {
+        "revision" : "6643d97733f6f13845d3782b7b15f7564ae3dd39",
+        "version" : "1.0.1"
+      }
+    },
+    {
       "identity" : "swiftlintplugin",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/lukepistrol/SwiftLintPlugin",
@@ -308,6 +326,15 @@
       }
     },
     {
+      "identity" : "xmlcoder",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/maxdesiatov/XMLCoder.git",
+      "state" : {
+        "revision" : "ca932442d7481700f5434a7b138c47dd42d9902b",
+        "version" : "0.14.0"
+      }
+    },
+    {
       "identity" : "yams",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/jpsim/Yams",
@@ -323,6 +350,15 @@
       "state" : {
         "revision" : "8b4a38dc994a110abaec8a400615567bd996105f",
         "version" : "0.12.0"
+      }
+    },
+    {
+      "identity" : "zipfoundation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/weichsel/ZIPFoundation.git",
+      "state" : {
+        "revision" : "22787ffb59de99e5dc1fbfe80b19c97a904ad48d",
+        "version" : "0.9.20"
       }
     }
   ],

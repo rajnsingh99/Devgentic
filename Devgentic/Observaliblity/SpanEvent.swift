@@ -255,7 +255,7 @@ extension TraceRecord: FetchableRecord, PersistableRecord {
 
 /// Aggregated statistics for a trace or set of spans.
 /// Computed from queries, never persisted directly.
-struct TraceSummary: Sendable {
+struct TraceSummary: Codable, Sendable {
     var totalIterations: Int = 0
     var totalLLMCalls: Int = 0
     var totalToolCalls: Int = 0

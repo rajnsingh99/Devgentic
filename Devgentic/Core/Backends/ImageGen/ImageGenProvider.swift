@@ -17,17 +17,23 @@ struct ImageGenOptions: Sendable {
     let aspectRatio: ImageAspectRatio
     let numberOfImages: Int
     let quality: ImageQuality
+    let steps: Int?
+    let guidance: Double?
     let advancedSettings: [String: JSONValue]?
 
     init(
         aspectRatio: ImageAspectRatio = .square,
         numberOfImages: Int = 1,
         quality: ImageQuality = .standard,
+        steps: Int? = nil,
+        guidance: Double? = nil,
         advancedSettings: [String: JSONValue]? = nil
     ) {
         self.aspectRatio = aspectRatio
         self.numberOfImages = numberOfImages
         self.quality = quality
+        self.steps = steps
+        self.guidance = guidance
         self.advancedSettings = advancedSettings
     }
 }

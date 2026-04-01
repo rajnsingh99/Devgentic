@@ -30,7 +30,7 @@ protocol CoreDataServiceProtocol {
 
 
 // MARK: - Core Data Persistence Service
-class CoreDataPersistenceService: CoreDataServiceProtocol {
+class CoreDataPersistenceService: CoreDataServiceProtocol, @unchecked Sendable {
 
     // MARK: - Singleton Instance
     static let shared = CoreDataPersistenceService()
@@ -193,7 +193,8 @@ class CoreDataPersistenceService: CoreDataServiceProtocol {
 
     func addMessages(_ messages: [ChatMessage], to conversation: ConversationEntity) async {
         let context = conversation.managedObjectContext ?? self.viewContext
-        
+        nonisolated(unsafe) let conversation = conversation
+
         await context.perform {
             for message in messages {
                 let fetchRequest: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
@@ -431,21 +432,6 @@ extension AttachedImageFileEntity {
             fileExtension: fileExtension,
             binaryData: binaryData,
             size: self.size
-        )
-    }
-}
-
-extension PromptEntity {
-    func toPromptStruct() -> DevPrompt {
-        return DevPrompt(
-            id: self.id ?? UUID(),
-            title: self.title ?? "Untitled Prompt",
-            text: self.text ?? "",
-            category: self.category ?? "General",
-            createdAt: self.createdAt ?? Date(),
-            lastUsedAt: self.lastUsedAt,
-            isUserDefined: self.isUserDefined,
-            tags: self.tags as? [String]
         )
     }
 }

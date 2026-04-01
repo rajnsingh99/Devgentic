@@ -54,13 +54,12 @@ class BackendOrchestrationService: ObservableObject {
         onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
-        // Automatic Trace Aggregation for UI monitoring
+        // Forward trace updates to the caller (TraceLogAggregator is superseded by TraceRecorder)
         let aggregatedTraceUpdate: (AgentTraceLog) -> Void = { log in
-            Task { await TraceLogAggregator.shared.append(log) }
             onTraceUpdate?(log)
         }
         
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream<AgentStreamEvent, Error> { continuation in
             // [CRITICAL FIX] Capture the task to allow cancellation propagation
             let task = Task {
                 logger.info("ORCHESTRATION START (Stream): Routing with profile '\(config.profile.displayName)' (\(config.profile.profileType.rawValue)). TraceID: \(context.traceID)")
@@ -88,21 +87,44 @@ class BackendOrchestrationService: ObservableObject {
                 }
                 
                 var queryForRequest = userQuery
-                
-                // 2. File Context Assembly
-                // Read and attach content from supported text files.
+                let fileContextStrategy = config.profile.resolvedFileContextStrategy
+
+                // 2. File Context Handling — strategy-based routing
                 if !files.isEmpty {
-                    logger.info("Assembling content for \(files.count) attached files. (Trace: \(context.traceID))")
-                    let fileContext = self.assembleTextFileContent(for: files)
-                    if !fileContext.isEmpty {
-                        queryForRequest = fileContext + "\n\n" + queryForRequest
+                    logger.info("Processing \(files.count) attached files with strategy: \(fileContextStrategy.rawValue). (Trace: \(context.traceID))")
+
+                    switch fileContextStrategy {
+                    case .contextualRAG:
+                        // Chunk, embed, and store for vector retrieval
+                        await RAGIndexingService.shared.indexAttachedFiles(
+                            files: files,
+                            conversationID: conversationID,
+                            messageID: UUID()
+                        )
+
+                    case .directInjection:
+                        // Extract full text and inject into prompt context
+                        let (fileContext, skippedFiles) = await self.assembleTextFileContent(for: files)
+                        if !fileContext.isEmpty {
+                            queryForRequest = fileContext + "\n\n" + queryForRequest
+                        }
+                        if !skippedFiles.isEmpty {
+                            let warning = "[System] Could not extract text from: \(skippedFiles.joined(separator: ", ")). These files were not included in the context."
+                            continuation.yield(.content(warning + "\n\n"))
+                        }
+
+                    case .stateless:
+                        // No extraction — note file paths for agent tool access
+                        let paths = files.map { $0.url.path }.joined(separator: "\n")
+                        let fileNote = "The user has attached the following files. Use the read_file tool to access them when needed:\n\(paths)"
+                        queryForRequest = fileNote + "\n\n" + queryForRequest
                     }
                 }
-                
+
                 // 3. RAG Retrieval
-                // Fetch long-term memory context if applicable.
+                // Fetch long-term memory context when using contextualRAG strategy.
                 var ragContextString: String? = nil
-                if config.profile.profileType == .bot || config.profile.profileType == .agent {
+                if fileContextStrategy == .contextualRAG {
 
                     // --- UI Progress: RAG preparation ---
                     continuation.yield(.thought("Searching knowledge base…"))
@@ -133,7 +155,36 @@ class BackendOrchestrationService: ObservableObject {
 
                     ragContextString = await self.retrieveRAGContext(for: queryForRAG, conversationID: conversationID, history: conversationHistory)
                 }
-                
+
+                // 4. Knowledge Sources — strategy-aware handling of pre-configured reference documents
+                if let knowledgeSources = self.resolveKnowledgeSources(from: config.profile),
+                   !knowledgeSources.isEmpty {
+                    let localSources = knowledgeSources.filter { $0.isLocalFile && $0.exists }
+                    if !localSources.isEmpty {
+                        switch fileContextStrategy {
+                        case .contextualRAG:
+                            // Freshness check + indexing handled by KnowledgeSourceMonitor
+                            await KnowledgeSourceMonitor.shared.ensureFreshness(
+                                sources: localSources,
+                                conversationID: conversationID
+                            )
+
+                        case .directInjection:
+                            // Extract text from knowledge sources and inject into prompt
+                            let knowledgeText = await self.assembleKnowledgeSourceContent(sources: localSources)
+                            if !knowledgeText.isEmpty {
+                                queryForRequest = knowledgeText + "\n\n" + queryForRequest
+                            }
+
+                        case .stateless:
+                            // Note paths for agent tool access
+                            let paths = localSources.map { $0.location }.joined(separator: "\n")
+                            let note = "Knowledge sources available via read_file:\n\(paths)"
+                            queryForRequest = note + "\n\n" + queryForRequest
+                        }
+                    }
+                }
+
                 // Check cancellation before heavy lifting
                 if Task.isCancelled {
                     continuation.finish(throwing: CancellationError())
@@ -200,10 +251,10 @@ class BackendOrchestrationService: ObservableObject {
                             case .toolCall(let name, let params):
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
-                            case .requestConfirmation(let toolName, _):
+                            case .requestConfirmation(let toolName, _, _):
                                 logger.debug("[HITL] Permission requested for \(toolName)")
                                 continuation.yield(event)
-                            case .requestClarification(let question):
+                            case .requestClarification(let question, _):
                                 logger.debug("[ASK_USER] Clarification requested: \(question)")
                                 continuation.yield(event)
                             case .error(let err):
@@ -247,11 +298,15 @@ class BackendOrchestrationService: ObservableObject {
                     case .imageGen:
                         logger.info("Routing IMAGE GENERATOR profile '\(config.profile.displayName)' to ImageGenExecutor.")
 
-                        guard case .imageGen(let llmConfig, _, let defaultAspectRatio, let advancedSettings) = config.profile.details else {
+                        guard case .imageGen(let imgConfig) = config.profile.details else {
                             continuation.yield(.error("Invalid ImageGen profile configuration."))
                             continuation.finish()
                             return
                         }
+
+                        let llmConfig = imgConfig.llmConfig
+                        let defaultAspectRatio = imgConfig.defaultAspectRatio
+                        let advancedSettings = imgConfig.advancedSettings
 
                         do {
                             // 1. Create provider
@@ -280,11 +335,20 @@ class BackendOrchestrationService: ObservableObject {
                                 chatHistory: conversationHistory
                             )
 
-                            // 4. Build options from profile defaults
+                            // 4. Build options from profile defaults + advanced config
+                            let advConfig: ImageGenAdvancedConfig? = {
+                                guard let dict = advancedSettings else { return nil }
+                                let unwrapped = dict.mapValues { $0.rawValue }
+                                guard let data = try? JSONSerialization.data(withJSONObject: unwrapped) else { return nil }
+                                return try? JSONDecoder().decode(ImageGenAdvancedConfig.self, from: data)
+                            }()
+
                             let options = ImageGenOptions(
                                 aspectRatio: defaultAspectRatio ?? .square,
                                 numberOfImages: 1,
-                                quality: .standard,
+                                quality: advConfig?.quality ?? .standard,
+                                steps: advConfig?.steps,
+                                guidance: advConfig?.guidance,
                                 advancedSettings: advancedSettings
                             )
 
@@ -330,9 +394,9 @@ class BackendOrchestrationService: ObservableObject {
     
     private func isMLXProfile(_ profile: BackendProfileModel) -> Bool {
         switch profile.details {
-        case .bot(let config, _): return config.apiProvider == .mlx
-        case .agent(let config, _, _, _, _, _): return config.apiProvider == .mlx
-        case .imageGen(let config, _, _, _): return config.apiProvider == .mlx
+        case .bot(let config): return config.llmConfig.apiProvider == .mlx
+        case .agent(let config): return config.llmConfig.apiProvider == .mlx
+        case .imageGen(let config): return config.llmConfig.apiProvider == .mlx
         case .workflow: return false
         }
     }
@@ -375,15 +439,75 @@ class BackendOrchestrationService: ObservableObject {
         return filteredParents.map { $0.fullTextContent }.joined(separator: "\n\n")
     }
     
-    private func assembleTextFileContent(for files: [FileSystemItem]) -> String {
+    // MARK: - Direct Injection Budget
+
+    /// Maximum characters to inject per file (~12.5K tokens)
+    private let directInjectionBudgetPerFile: Int = 50_000
+    /// Maximum total characters to inject across all files (~50K tokens)
+    private let directInjectionTotalBudget: Int = 200_000
+
+    private func assembleTextFileContent(for files: [FileSystemItem]) async -> (content: String, skippedFiles: [String]) {
         var assembledContent = ""
+        var skippedFiles: [String] = []
+
         for file in files {
-            if fileProcessorService.isTextFile(mimeType: fileProcessorService.getFileMimeType(for: file.url), url: file.url) {
-                if let content = fileProcessorService.readFileContent(for: file.url) {
-                    assembledContent += "\n\n--- Start of file: \(file.name) ---\n\(content)\n--- End of file: \(file.name) ---"
-                }
+            // Check total budget
+            guard assembledContent.count < directInjectionTotalBudget else {
+                skippedFiles.append("\(file.name) (context budget exceeded)")
+                continue
+            }
+
+            let info = fileProcessorService.extractionInfo(for: file.url)
+            guard info.canExtract else {
+                skippedFiles.append(file.name)
+                continue
+            }
+
+            let remainingBudget = min(
+                directInjectionBudgetPerFile,
+                directInjectionTotalBudget - assembledContent.count
+            )
+
+            if let content = await fileProcessorService.readFileContent(
+                for: file.url,
+                maxSize: remainingBudget
+            ) {
+                assembledContent += "\n\n--- Start of file: \(file.name) ---\n\(content)\n--- End of file: \(file.name) ---"
+            } else {
+                skippedFiles.append(file.name)
             }
         }
-        return assembledContent
+
+        return (assembledContent, skippedFiles)
+    }
+
+    // MARK: - Knowledge Source Helpers
+
+    /// Resolves knowledge sources from the profile, handling both bot and agent configs.
+    private func resolveKnowledgeSources(from profile: BackendProfileModel) -> [KnowledgeSource]? {
+        switch profile.details {
+        case .bot(let config):   return config.knowledgeSources
+        case .agent(let config): return config.knowledgeSources
+        default:                 return nil
+        }
+    }
+
+    /// Extracts text from knowledge source files for direct injection.
+    private func assembleKnowledgeSourceContent(sources: [KnowledgeSource]) async -> String {
+        var assembled = ""
+        for source in sources {
+            guard assembled.count < directInjectionTotalBudget else { break }
+            let remainingBudget = min(
+                directInjectionBudgetPerFile,
+                directInjectionTotalBudget - assembled.count
+            )
+            if let content = await fileProcessorService.readFileContent(
+                for: source.url,
+                maxSize: remainingBudget
+            ) {
+                assembled += "\n\n--- Knowledge: \(source.fileName) ---\n\(content)"
+            }
+        }
+        return assembled
     }
 }

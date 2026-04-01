@@ -23,9 +23,7 @@ struct AnthropicService {
     
     /// Fetches the available models from the Anthropic /v1/models endpoint using the provided API key.
     func verifyAndFetchModels(apiKey: String) async throws -> [String] {
-        guard let url = URL(string: "https://api.anthropic.com/v1/models") else {
-            throw URLError(.badURL)
-        }
+        let url = ProviderDefaults.anthropicBaseURL.appendingPathComponent("models")
         
         var request = URLRequest(url: url, timeoutInterval: 15.0)
         request.httpMethod = "GET"

@@ -85,6 +85,24 @@ struct OllamaAdvancedConfig: Codable, Hashable {
         }
     }
     
+    /// Returns a preset optimized for conversational bot use (higher creativity, no fixed seed).
+    static func botPreset(for tier: ModelTier) -> OllamaAdvancedConfig {
+        switch tier {
+        case .tiny:
+            return OllamaAdvancedConfig(
+                temperature: 0.5, topP: 0.8, topK: 40,
+                numCtx: 4096, stop: [], seed: nil, repeatPenalty: 1.1)
+        case .smallMedium:
+            return OllamaAdvancedConfig(
+                temperature: 0.7, topP: 0.9, topK: 50,
+                numCtx: 8192, stop: [], seed: nil, repeatPenalty: 1.05)
+        case .large:
+            return OllamaAdvancedConfig(
+                temperature: 0.7, topP: 0.9, topK: 50,
+                numCtx: 16384, stop: [], seed: nil, repeatPenalty: 1.0)
+        }
+    }
+
     // MARK: - Codable Implementation
     
     private enum CodingKeys: String, CodingKey {

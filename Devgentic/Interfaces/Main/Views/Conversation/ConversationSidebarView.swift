@@ -128,13 +128,14 @@ struct ConversationSidebarRow: View {
                 renamingConversationID = nil
             },
             onPin: {
-                viewModel.togglePinStatus(for: conversation.id ?? UUID())
+                guard let id = conversation.id else { return }
+                viewModel.togglePinStatus(for: id)
             },
             onDelete: {
                 triggerDelete()
             },
             isSelectionMode: isSelectionMode,
-            isBatchSelected: (conversation.id != nil) ? selectedIDs.contains(conversation.id!) : false
+            isBatchSelected: conversation.id.map { selectedIDs.contains($0) } ?? false
         )
         .contextMenu {
             contextMenuContent
@@ -177,12 +178,13 @@ struct ConversationSidebarRow: View {
     @ViewBuilder
     private var contextMenuContent: some View {
         if isSelectionMode {
+            let isSelected = conversation.id.map { selectedIDs.contains($0) } ?? false
             Button {
                 toggleBatchSelection()
             } label: {
                 Label(
-                    selectedIDs.contains(conversation.id ?? UUID()) ? "Deselect" : "Select",
-                    systemImage: selectedIDs.contains(conversation.id ?? UUID()) ? "minus.circle" : "checkmark.circle"
+                    isSelected ? "Deselect" : "Select",
+                    systemImage: isSelected ? "minus.circle" : "checkmark.circle"
                 )
             }
         } else {
@@ -196,7 +198,8 @@ struct ConversationSidebarRow: View {
         Divider()
 
         Button {
-            viewModel.togglePinStatus(for: conversation.id ?? UUID())
+            guard let id = conversation.id else { return }
+            viewModel.togglePinStatus(for: id)
         } label: {
             if conversation.isPinned {
                 Label("Unpin", systemImage: "pin.slash")
@@ -233,9 +236,10 @@ struct ConversationSidebarRow: View {
     private func prepareForRename() {
         self.editableConversationName = conversation.displayTitle
         self.renamingConversationID = conversation.id
-        
+
         // Slight delay ensures the TextField is rendered before forcing focus
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(100))
             self.isRenameFieldFocused.wrappedValue = true
         }
     }
@@ -263,6 +267,13 @@ struct ConversationSidebarView: View {
         animation: .default)
     private var conversations: FetchedResults<ConversationEntity>
 
+    // MARK: - Filter
+    private enum ConversationFilter: String, CaseIterable {
+        case all = "All"
+        case pinned = "Pinned"
+    }
+    @State private var selectedFilter: ConversationFilter = .all
+
     // MARK: - View State
     @State private var searchText = ""
     @State private var showingDeleteAlert = false
@@ -278,6 +289,7 @@ struct ConversationSidebarView: View {
     // Batch Selection State
     @State private var selectedConversationIDs: Set<UUID> = []
     @State private var isSelectionMode: Bool = false
+    @State private var showingBatchDeleteAlert: Bool = false
 
     // MARK: - Body
     var body: some View {
@@ -297,6 +309,21 @@ struct ConversationSidebarView: View {
             SidebarSearchBarView("Search conversations...", text: $searchText)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
+
+            // MARK: - Filter Chips
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(ConversationFilter.allCases, id: \.self) { filter in
+                        CategoryChip(
+                            title: filter.rawValue,
+                            isSelected: selectedFilter == filter,
+                            action: { selectedFilter = filter }
+                        )
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+            .padding(.bottom, 10)
 
             if isSelectionMode {
                 batchSelectionToolbar
@@ -324,59 +351,65 @@ struct ConversationSidebarView: View {
                     viewModel.deleteConversation(conversationID: id)
                 }
             }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Delete \(selectedConversationIDs.count) Conversations?", isPresented: $showingBatchDeleteAlert) {
+            Button("Delete All", role: .destructive) {
+                confirmBatchDelete()
+            }
+        } message: {
+            Text("This will permanently delete \(selectedConversationIDs.count) conversations. This cannot be undone.")
         }
         .onAppear {
             isPinnedExpanded = UserDefaults.standard.object(forKey: "sidebarPinnedExpanded_v2") as? Bool ?? true
-        }
-        .onChange(of: isPinnedExpanded) { newValue in
-            UserDefaults.standard.set(newValue, forKey: "sidebarPinnedExpanded_v2")
         }
     }
     
     // MARK: - List Component
     private var conversationList: some View {
-        ScrollView {
+        let data = partitioned
+        return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                // Pinned Section
-                if !pinnedConversations.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        SidebarGroupHeaderView(
-                            title: "Pinned",
-                            count: pinnedConversations.count,
-                            isExpanded: $isPinnedExpanded
+                switch selectedFilter {
+                case .pinned:
+                    // Pinned-only flat list
+                    if data.pinned.isEmpty {
+                        SidebarEmptyStateView(
+                            title: "No Pinned Chats",
+                            subtitle: "Right-click a conversation to pin it",
+                            buttonTitle: "New Chat",
+                            systemImage: "pin",
+                            onAction: { viewModel.startNewConversation() }
                         )
-                        
-                        if isPinnedExpanded {
-                            VStack(spacing: 2) {
-                                ForEach(pinnedConversations) { conversation in
-                                    row(for: conversation)
-                                }
+                    } else {
+                        VStack(spacing: 2) {
+                            ForEach(data.pinned) { conversation in
+                                row(for: conversation)
                             }
-                            .padding(.leading, 12)
                         }
                     }
-                }
 
-                // Date-Grouped Sections
-                ForEach(Array(dateGroupedSections.enumerated()), id: \.element.title) { index, section in
-                    VStack(alignment: .leading, spacing: 2) {
-                        // Subtle divider between sections
-                        if index > 0 || !pinnedConversations.isEmpty {
-                            Divider()
-                                .background(theme.dividerColor)
+                case .all:
+                    // Date-Grouped Sections (non-pinned only)
+                    ForEach(Array(data.dateSections.enumerated()), id: \.element.title) { index, section in
+                        VStack(alignment: .leading, spacing: 2) {
+                            if index > 0 {
+                                Divider()
+                                    .background(theme.dividerColor)
+                                    .padding(.horizontal, 8)
+                                    .padding(.top, 4)
+                            }
+
+                            Text(section.title)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(theme.secondaryText)
                                 .padding(.horizontal, 8)
-                                .padding(.top, 4)
-                        }
+                                .padding(.top, 10)
+                                .padding(.bottom, 4)
 
-                        Text(section.title)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(theme.secondaryText)
-                            .padding(.horizontal, 8)
-                            .padding(.top, 10)
-                            .padding(.bottom, 4)
-
-                        ForEach(section.conversations) { conversation in
-                            row(for: conversation)
+                            ForEach(section.conversations) { conversation in
+                                row(for: conversation)
+                            }
                         }
                     }
                 }
@@ -406,27 +439,12 @@ struct ConversationSidebarView: View {
         ))
     }
 
-    // MARK: - Filtering Logic
+    // MARK: - Filtering Logic (single-pass partition)
 
-    /// All filtered conversations.
-    private var filteredConversations: [ConversationEntity] {
-        conversations.filter { conversation in
-            guard !searchText.isEmpty else { return true }
-            return conversation.displayTitle.localizedCaseInsensitiveContains(searchText)
-        }
+    private struct PartitionedConversations {
+        let pinned: [ConversationEntity]
+        let dateSections: [DateSection]
     }
-
-    /// Conversations that are pinned.
-    private var pinnedConversations: [ConversationEntity] {
-        filteredConversations.filter { $0.isPinned }
-    }
-
-    /// Conversations that are NOT pinned.
-    private var otherConversations: [ConversationEntity] {
-        filteredConversations.filter { !$0.isPinned }
-    }
-
-    // MARK: - Date Grouping
 
     private struct DateSection: Equatable {
         let title: String
@@ -437,17 +455,31 @@ struct ConversationSidebarView: View {
         }
     }
 
-    private var dateGroupedSections: [DateSection] {
+    /// Single-pass partition: filters, splits pinned/unpinned, and date-groups in one traversal.
+    private var partitioned: PartitionedConversations {
         let calendar = Calendar.current
         let now = Date()
+        let weekAgo = calendar.date(byAdding: .day, value: -7, to: now)
+        let monthAgo = calendar.date(byAdding: .month, value: -1, to: now)
 
+        var pinned: [ConversationEntity] = []
         var today: [ConversationEntity] = []
         var yesterday: [ConversationEntity] = []
         var thisWeek: [ConversationEntity] = []
         var thisMonth: [ConversationEntity] = []
         var earlier: [ConversationEntity] = []
 
-        for conversation in otherConversations {
+        for conversation in conversations {
+            if !searchText.isEmpty,
+               !conversation.displayTitle.localizedCaseInsensitiveContains(searchText) {
+                continue
+            }
+
+            if conversation.isPinned {
+                pinned.append(conversation)
+                continue
+            }
+
             guard let date = conversation.timestamp else {
                 earlier.append(conversation)
                 continue
@@ -457,9 +489,9 @@ struct ConversationSidebarView: View {
                 today.append(conversation)
             } else if calendar.isDateInYesterday(date) {
                 yesterday.append(conversation)
-            } else if let weekAgo = calendar.date(byAdding: .day, value: -7, to: now), date >= weekAgo {
+            } else if let weekAgo, date >= weekAgo {
                 thisWeek.append(conversation)
-            } else if let monthAgo = calendar.date(byAdding: .month, value: -1, to: now), date >= monthAgo {
+            } else if let monthAgo, date >= monthAgo {
                 thisMonth.append(conversation)
             } else {
                 earlier.append(conversation)
@@ -472,8 +504,11 @@ struct ConversationSidebarView: View {
         if !thisWeek.isEmpty { sections.append(DateSection(title: "This Week", conversations: thisWeek)) }
         if !thisMonth.isEmpty { sections.append(DateSection(title: "This Month", conversations: thisMonth)) }
         if !earlier.isEmpty { sections.append(DateSection(title: "Earlier", conversations: earlier)) }
-        return sections
+        return PartitionedConversations(pinned: pinned, dateSections: sections)
     }
+
+    private var pinnedConversations: [ConversationEntity] { partitioned.pinned }
+    private var dateGroupedSections: [DateSection] { partitioned.dateSections }
 
     // MARK: - Batch Selection Components
     @ViewBuilder
@@ -525,11 +560,12 @@ struct ConversationSidebarView: View {
 
     private func deleteSelectedConversations() {
         guard !selectedConversationIDs.isEmpty else { return }
-        
+        showingBatchDeleteAlert = true
+    }
+
+    private func confirmBatchDelete() {
         let count = selectedConversationIDs.count
         viewModel.deleteMultipleConversations(ids: selectedConversationIDs)
-        
-        // Success notification or just exit mode
         cancelSelectionMode()
         logger.info("Deleted \(count) conversations in batch.")
     }

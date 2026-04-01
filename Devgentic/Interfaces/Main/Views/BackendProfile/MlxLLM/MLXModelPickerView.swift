@@ -41,17 +41,25 @@ struct MLXModelPickerView: View {
                         .foregroundColor(theme.secondaryText)
                         .font(.caption)
                 } else {
-                    Picker("Model", selection: $selectedModel) {
-                        ForEach(service.installedModels) { model in
-                            let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: model.displayName)
-                            let isUnsupported = filterForTools && profile.capability == .none
-
-                            Text(isUnsupported ? "\(model.displayName) (Chat Only)" : model.displayName)
-                                .tag(model.displayName)
-                                .disabled(isUnsupported)
+                    let visibleModels = filterForTools
+                        ? service.installedModels.filter {
+                            MLXTokenizerAnalyzer.detectCognitiveProfile(for: $0.localPath, modelName: $0.displayName).capability != .none
                         }
+                        : service.installedModels
+
+                    if visibleModels.isEmpty && filterForTools {
+                        Text("No tool-capable models found.")
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                    } else {
+                        Picker("Model", selection: $selectedModel) {
+                            ForEach(visibleModels) { model in
+                                Text(model.displayName)
+                                    .tag(model.displayName)
+                            }
+                        }
+                        .labelsHidden()
                     }
-                    .labelsHidden()
                 }
             }
 
@@ -65,7 +73,7 @@ struct MLXModelPickerView: View {
             attemptAutoSelect()
         }
         // Listen for async updates (e.g. scan completing)
-        .onChange(of: selectedModel) { newValue in
+        .onChange(of: selectedModel) { _, newValue in
             evaluateCognitiveCapability(for: newValue)
         }
         .alert("Unsupported Model", isPresented: $showUnsupportedAlert) {

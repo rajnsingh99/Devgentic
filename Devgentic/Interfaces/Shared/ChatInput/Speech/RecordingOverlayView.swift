@@ -23,26 +23,35 @@ struct RecordingOverlayView: View {
     @State private var isCancelHovering: Bool = false
     @State private var isConfirmHovering: Bool = false
 
+    @Environment(\.appTheme) private var theme
+
+    // Match DynamicActionButton / toolbar sizing
+    private let buttonSize: CGFloat = 30
+
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             // Each child observes only what it needs from the store
             LiveTranscriptionTextView(store: displayStore)
 
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
                 cancelButton
                 WaveformBarView(store: displayStore)
                 TimerTextView(store: displayStore)
                 confirmButton
             }
-            .padding(.horizontal, 15)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
         }
         .frame(minHeight: 58)
-        .background(VisualEffectBlur(material: .underWindowBackground, blendingMode: .withinWindow))
-        .cornerRadius(20)
+        // Match mainInputArea chrome exactly
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(theme.controlBackground)
+                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
+        )
         .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(theme.surfaceOverlay, lineWidth: 1)
         )
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
@@ -52,33 +61,36 @@ struct RecordingOverlayView: View {
     private var cancelButton: some View {
         Button(action: onCancel) {
             Image(systemName: "xmark")
-                .font(.system(size: 14, weight: .bold))
-                .foregroundColor(.white)
-                .frame(width: 28, height: 28)
-                .background(isCancelHovering ? Color.red.opacity(0.9) : Color.gray.opacity(0.5))
-                .clipShape(Circle())
-                .scaleEffect(isCancelHovering ? 1.1 : 1.0)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(isCancelHovering ? .white : theme.primaryText)
+                .frame(width: buttonSize, height: buttonSize)
+                .background(
+                    Circle()
+                        .fill(isCancelHovering ? theme.errorColor.opacity(0.9) : theme.secondaryText.opacity(0.18))
+                )
         }
         .buttonStyle(.plain)
-        .onHover { isCancelHovering = $0 }
-        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isCancelHovering)
+        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isCancelHovering = hover } }
         .help("Cancel recording")
+        .accessibilityLabel("Cancel recording")
     }
 
     private var confirmButton: some View {
         Button(action: onConfirm) {
             Image(systemName: "checkmark")
-                .font(.system(size: 14, weight: .bold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(.white)
-                .frame(width: 28, height: 28)
-                .background(isConfirmHovering ? Color.accentColor.opacity(0.9) : Color.accentColor)
-                .clipShape(Circle())
-                .scaleEffect(isConfirmHovering ? 1.1 : 1.0)
+                .frame(width: buttonSize, height: buttonSize)
+                .background(
+                    Circle()
+                        .fill(isConfirmHovering ? theme.controlAccent.opacity(0.85) : theme.controlAccent)
+                        .shadow(color: theme.controlAccent.opacity(0.3), radius: 3, x: 0, y: 2)
+                )
         }
         .buttonStyle(.plain)
-        .onHover { isConfirmHovering = $0 }
-        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isConfirmHovering)
+        .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isConfirmHovering = hover } }
         .help("Stop and transcribe")
+        .accessibilityLabel("Stop and transcribe")
     }
 }
 
@@ -88,42 +100,46 @@ struct RecordingOverlayView: View {
 private struct WaveformBarView: View {
     let store: RecordingDisplayStore
     @State private var powerLevels: [Float] = []
-    
+    @Environment(\.appTheme) private var theme
+
     private let maxBarHeight: CGFloat = 40.0
 
     var body: some View {
         Canvas { context, size in
             let count = powerLevels.count
             guard count > 0 else { return }
-            
+
             let barWidth: CGFloat = 2.0
             let spacing: CGFloat = 2.0
-            
+
             // Total width requested by the bars
             let totalNeededWidth = CGFloat(count) * barWidth + CGFloat(count - 1) * spacing
-            
+
             // Scale down width and spacing gracefully if the parent view is compressed
             let scale = min(1.0, size.width / totalNeededWidth)
             let actualBarWidth = barWidth * scale
             let actualSpacing = spacing * scale
-            
+
             let totalActualWidth = CGFloat(count) * actualBarWidth + CGFloat(count - 1) * actualSpacing
             let startX = (size.width - totalActualWidth) / 2.0
-            
+
+            // Resolve themed color for Canvas rendering
+            let barColor = theme.controlAccent.opacity(0.7)
+
             for (index, level) in powerLevels.enumerated() {
                 // Sanitize values to protect against NaN/Infinity layout crashes
                 let safeLevel = level.isFinite && !level.isNaN ? CGFloat(max(0.0, min(1.0, level))) : 0.0
-                
+
                 // Keep a baseline height of 1px for flatlines
                 let height = max(1.0, safeLevel * size.height)
-                
+
                 let x = startX + CGFloat(index) * (actualBarWidth + actualSpacing)
                 let y = (size.height - height) / 2.0
-                
+
                 let rect = CGRect(x: x, y: y, width: actualBarWidth, height: height)
                 let path = Path(roundedRect: rect, cornerRadius: 1.5 * scale)
-                
-                context.fill(path, with: .color(.white))
+
+                context.fill(path, with: .color(barColor))
             }
         }
         .frame(height: maxBarHeight, alignment: .center)
@@ -139,15 +155,28 @@ private struct WaveformBarView: View {
 private struct TimerTextView: View {
     let store: RecordingDisplayStore
     @State private var recordingTime: TimeInterval = 0.0
+    @State private var isPulsing = false
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
-        Text(formatTime(recordingTime))
-            .font(.system(.body, design: .monospaced))
-            .foregroundColor(.secondary)
-            // Only update this specific view when recordingTime changes
-            .onReceive(store.$recordingTime) { newTime in
-                self.recordingTime = newTime
-            }
+        HStack(spacing: 6) {
+            // Pulsing recording indicator dot
+            Circle()
+                .fill(theme.errorColor)
+                .frame(width: 8, height: 8)
+                .scaleEffect(isPulsing ? 1.3 : 1.0)
+                .opacity(isPulsing ? 0.6 : 1.0)
+                .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
+                .onAppear { isPulsing = true }
+
+            Text(formatTime(recordingTime))
+                .font(.system(.body, design: .monospaced))
+                .foregroundColor(theme.secondaryText)
+        }
+        // Only update this specific view when recordingTime changes
+        .onReceive(store.$recordingTime) { newTime in
+            self.recordingTime = newTime
+        }
     }
 
     private func formatTime(_ interval: TimeInterval) -> String {
@@ -163,6 +192,7 @@ private struct LiveTranscriptionTextView: View {
     let store: RecordingDisplayStore
     @State private var liveTranscriptionText: String = ""
     @State private var clearTask: Task<Void, Never>?
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         Group {
@@ -170,15 +200,15 @@ private struct LiveTranscriptionTextView: View {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
                         Text(liveTranscriptionText)
-                            .font(.system(.body, design: .rounded))
-                            .foregroundColor(.primary)
+                            .font(.system(size: 14))
+                            .foregroundColor(theme.primaryText)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 15)
+                            .padding(.horizontal, 12)
                             .id("liveTextBottom")
                     }
                     .frame(maxHeight: 80)
-                    .onChange(of: liveTranscriptionText) { _ in
+                    .onChange(of: liveTranscriptionText) { _, _ in
                         withAnimation(.easeOut(duration: 0.1)) {
                             proxy.scrollTo("liveTextBottom", anchor: .bottom)
                         }
@@ -192,7 +222,7 @@ private struct LiveTranscriptionTextView: View {
         .animation(.easeInOut(duration: 0.2), value: liveTranscriptionText.isEmpty)
         // Smoothly animate height changes when text wraps to new lines
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: liveTranscriptionText)
-        
+
         // MARK: ARCHITECTURE UPDATE - Smart UI Buffering for Sliding Windows
         // WhisperKit's sliding window frequently drops unconfirmed text during pauses,
         // causing the text to "shrink" or "vanish" completely. We add a smart delay
@@ -200,13 +230,13 @@ private struct LiveTranscriptionTextView: View {
         .onReceive(
             store.$liveTranscriptionText
                 .removeDuplicates()
-                .throttle(for: .milliseconds(250), scheduler: DispatchQueue.main, latest: true)
+                .throttle(for: .milliseconds(250), scheduler: RunLoop.main, latest: true)
         ) { newText in
             if newText.isEmpty && !self.liveTranscriptionText.isEmpty {
                 // Total buffer reset (e.g., long silence). Wait 2.5s before clearing.
                 clearTask?.cancel()
                 clearTask = Task {
-                    try? await Task.sleep(nanoseconds: 2_500_000_000) // 2.5s tolerance
+                    try? await Task.sleep(for: .seconds(2.5))
                     if !Task.isCancelled {
                         await MainActor.run { self.liveTranscriptionText = "" }
                     }
@@ -216,7 +246,7 @@ private struct LiveTranscriptionTextView: View {
                 // for 1.5s to see if Whisper catches back up before shrinking the UI.
                 clearTask?.cancel()
                 clearTask = Task {
-                    try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s tolerance
+                    try? await Task.sleep(for: .seconds(1.5))
                     if !Task.isCancelled {
                         await MainActor.run { self.liveTranscriptionText = newText }
                     }

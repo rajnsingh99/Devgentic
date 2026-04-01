@@ -18,6 +18,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.speechModelKey) private var selectedModel: String = "base.en"
     @AppStorage(AppSettings.speechLanguageKey) private var selectedLanguage: String = ""
     @AppStorage(AppSettings.speechAutoStopOnSilenceKey) private var autoStopOnSilence: Bool = true
+    @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
     @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
     // Available Whisper models (shared catalog)
@@ -53,7 +54,21 @@ struct GeneralSettingsView: View {
         ScrollView {
             VStack(spacing: 32) {
                 
-                // 1. Language Model Section
+                // 1. Developer Mode Section
+                SettingsCard(title: "Developer", icon: "hammer.fill", theme: theme) {
+                    SettingsRow(
+                        title: "Developer Mode",
+                        description: "When enabled, the Report button on messages opens a detailed execution trace inspector with span trees, event timelines, and JSON export. When disabled, a simplified feedback view is shown instead.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $developerMode)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+                }
+
+                // 2. Language Model Section
                 SettingsCard(title: "Language Model", icon: "text.bubble.fill", theme: theme) {
                     SettingsRow(
                         title: "Stream LLM Responses",
@@ -100,7 +115,7 @@ struct GeneralSettingsView: View {
                         }
                         .labelsHidden()
                         .fixedSize()
-                        .onChange(of: selectedModel) { newModel in
+                        .onChange(of: selectedModel) { _, newModel in
                             NotificationCenter.default.post(
                                 name: GlobalConstants.speechModelChangedNotification,
                                 object: newModel
@@ -129,7 +144,7 @@ struct GeneralSettingsView: View {
                         .labelsHidden()
                         .disabled(isEnglishOnlyModel)
                         .fixedSize()
-                        .onChange(of: selectedLanguage) { newLanguage in
+                        .onChange(of: selectedLanguage) { _, newLanguage in
                             NotificationCenter.default.post(
                                 name: GlobalConstants.speechLanguageChangedNotification,
                                 object: newLanguage
@@ -149,7 +164,7 @@ struct GeneralSettingsView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)
-                            .onChange(of: autoStopOnSilence) { newValue in
+                            .onChange(of: autoStopOnSilence) { _, newValue in
                                 NotificationCenter.default.post(
                                     name: GlobalConstants.speechAutoStopChangedNotification,
                                     object: newValue

@@ -1,14 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="24512" systemVersion="25C56" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
-    <entity name="AgentConfigEntity" representedClassName="AgentConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="agentArchitecture" optional="YES" attributeType="String"/>
-        <attribute name="agentDescription" optional="YES" attributeType="String"/>
-        <attribute name="instructions" optional="YES" attributeType="String"/>
-        <attribute name="knowledgeSources" optional="YES" attributeType="Binary"/>
-        <attribute name="llmConfig" optional="YES" attributeType="Binary"/>
-        <attribute name="tools" optional="YES" attributeType="Binary"/>
-        <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="agentConfig" inverseEntity="BackendProfileEntity"/>
-    </entity>
     <entity name="AttachedImageFileEntity" representedClassName="AttachedImageFileEntity" syncable="YES" codeGenerationType="class">
         <attribute name="content" optional="YES" attributeType="Binary"/>
         <attribute name="fileExtension" optional="YES" attributeType="String"/>
@@ -26,21 +17,6 @@
         <attribute name="size" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
         <attribute name="url" optional="YES" attributeType="String"/>
         <relationship name="chatMessage" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="attachedTextFiles" inverseEntity="ChatMessageEntity"/>
-    </entity>
-    <entity name="BackendProfileEntity" representedClassName="BackendProfileEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="displayName" optional="YES" attributeType="String"/>
-        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="lastSelected" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="profileType" attributeType="String"/>
-        <relationship name="agentConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="AgentConfigEntity" inverseName="parentProfile" inverseEntity="AgentConfigEntity"/>
-        <relationship name="botConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BotConfigEntity" inverseName="parentProfile" inverseEntity="BotConfigEntity"/>
-        <relationship name="imageGenConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ImageGenConfigEntity" inverseName="parentProfile" inverseEntity="ImageGenConfigEntity"/>
-        <relationship name="workflowConfig" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="WorkflowConfigEntity" inverseName="parentProfile" inverseEntity="WorkflowConfigEntity"/>
-    </entity>
-    <entity name="BotConfigEntity" representedClassName="BotConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="instructions" optional="YES" attributeType="String"/>
-        <attribute name="llmConfig" optional="YES" attributeType="Binary"/>
-        <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="botConfig" inverseEntity="BackendProfileEntity"/>
     </entity>
     <entity name="ChatMessageEntity" representedClassName="ChatMessageEntity" syncable="YES" codeGenerationType="class">
         <attribute name="agentResponse" optional="YES" attributeType="Transformable" valueTransformerName="AgentResponseTransformer"/>
@@ -73,87 +49,5 @@
         <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="userDefinedTitle" optional="YES" attributeType="String"/>
         <relationship name="messages" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="ChatMessageEntity" inverseName="conversation" inverseEntity="ChatMessageEntity"/>
-    </entity>
-    <entity name="ImageGenConfigEntity" representedClassName="ImageGenConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="advancedSettings" optional="YES" attributeType="Binary"/>
-        <attribute name="defaultAspectRatio" optional="YES" attributeType="String"/>
-        <attribute name="llmConfig" optional="YES" attributeType="Binary"/>
-        <attribute name="negativePrompt" optional="YES" attributeType="String"/>
-        <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="imageGenConfig" inverseEntity="BackendProfileEntity"/>
-    </entity>
-    <entity name="LLMIntegrationEntity" representedClassName="LLMIntegrationEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="displayName" attributeType="String"/>
-        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="lastSelected" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="providerType" optional="YES" attributeType="String"/>
-        <relationship name="ollamaConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="OllamaConfigEntity" inverseName="integration" inverseEntity="OllamaConfigEntity"/>
-        <relationship name="remoteConfig" optional="YES" maxCount="1" deletionRule="Cascade" destinationEntity="RemoteConfigEntity" inverseName="integration" inverseEntity="RemoteConfigEntity"/>
-    </entity>
-    <entity name="MCPToolEntity" representedClassName="MCPToolEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="annotationsData" optional="YES" attributeType="Binary"/>
-        <attribute name="iconsData" optional="YES" attributeType="Binary"/>
-        <attribute name="name" optional="YES" attributeType="String"/>
-        <attribute name="parametersData" optional="YES" attributeType="Binary"/>
-        <attribute name="requiresConfirmation" optional="YES" attributeType="Boolean" usesScalarValueType="YES"/>
-        <attribute name="title" optional="YES" attributeType="String"/>
-        <attribute name="toolDescription" optional="YES" attributeType="String"/>
-        <relationship name="toolItem" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="ToolItemEntity" inverseName="tools" inverseEntity="ToolItemEntity"/>
-    </entity>
-    <entity name="OllamaConfigEntity" representedClassName="OllamaConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="baseURL" attributeType="String"/>
-        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="generationType" optional="YES" attributeType="Transformable" valueTransformerName="GenerationTypeArrayTransformer" customClassName="NSArray"/>
-        <attribute name="modelName" attributeType="String"/>
-        <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
-        <relationship name="integration" maxCount="1" deletionRule="Nullify" destinationEntity="LLMIntegrationEntity" inverseName="ollamaConfig" inverseEntity="LLMIntegrationEntity"/>
-    </entity>
-    <entity name="PromptEntity" representedClassName="PromptEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="category" optional="YES" attributeType="String"/>
-        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="isUserDefined" optional="YES" attributeType="Boolean" usesScalarValueType="YES"/>
-        <attribute name="lastUsedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="tags" optional="YES" attributeType="Transformable" valueTransformerName="StringArrayTransformer" customClassName="NSArray"/>
-        <attribute name="text" optional="YES" attributeType="String"/>
-        <attribute name="title" optional="YES" attributeType="String"/>
-    </entity>
-    <entity name="RemoteConfigEntity" representedClassName="RemoteConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="apiKey" attributeType="String"/>
-        <attribute name="contextWindowSize" optional="YES" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="generationType" optional="YES" attributeType="Transformable" valueTransformerName="GenerationTypeArrayTransformer" customClassName="NSArray"/>
-        <attribute name="modelName" attributeType="String"/>
-        <attribute name="provider" attributeType="String"/>
-        <attribute name="temperature" optional="YES" attributeType="Double" defaultValueString="0" usesScalarValueType="YES"/>
-        <relationship name="integration" maxCount="1" deletionRule="Nullify" destinationEntity="LLMIntegrationEntity" inverseName="remoteConfig" inverseEntity="LLMIntegrationEntity"/>
-    </entity>
-    <entity name="ToolItemEntity" representedClassName="ToolItemEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="mcpConfig" optional="YES" attributeType="Binary"/>
-        <attribute name="serverName" optional="YES" attributeType="String"/>
-        <relationship name="tools" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="MCPToolEntity" inverseName="toolItem" inverseEntity="MCPToolEntity"/>
-    </entity>
-    <entity name="ScheduledTaskEntity" representedClassName="ScheduledTaskEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="attachedFileURLsJSON" optional="YES" attributeType="String"/>
-        <attribute name="contextWindowMode" optional="YES" attributeType="String"/>
-        <attribute name="createdAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="cronExpression" optional="YES" attributeType="String"/>
-        <attribute name="displayName" optional="YES" attributeType="String"/>
-        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="isEnabled" optional="YES" attributeType="Boolean" defaultValueString="YES" usesScalarValueType="YES"/>
-        <attribute name="isPaused" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
-        <attribute name="lastRunAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="lastRunSummary" optional="YES" attributeType="String"/>
-        <attribute name="linkedConversationID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="mode" optional="YES" attributeType="String"/>
-        <attribute name="nextRunAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="profileID" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
-        <attribute name="promptTemplate" optional="YES" attributeType="String"/>
-        <attribute name="runCount" optional="YES" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
-        <attribute name="scheduledAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
-        <attribute name="status" optional="YES" attributeType="String"/>
-    </entity>
-    <entity name="WorkflowConfigEntity" representedClassName="WorkflowConfigEntity" syncable="YES" codeGenerationType="class">
-        <attribute name="agents" optional="YES" attributeType="Binary"/>
-        <relationship name="parentProfile" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="BackendProfileEntity" inverseName="workflowConfig" inverseEntity="BackendProfileEntity"/>
     </entity>
 </model>

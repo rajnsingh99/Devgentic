@@ -10,25 +10,30 @@
 //
 
 import SwiftUI
+import os
 #if canImport(AppKit) && !targetEnvironment(macCatalyst)
 import AppKit
 #endif
 
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WorkflowCanvasView")
+
 struct WorkflowCanvasView: View {
     @Binding var profile: BackendProfileModel
+    var onDelete: ((UUID) -> Void)? = nil
     @EnvironmentObject var profileService: BackendProfileService
     @Environment(\.appTheme) private var theme
 
     @StateObject private var canvasState: WorkflowCanvasState
     @State private var showingProfilePicker = false
     @State private var showingClearAlert = false
-    
+
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     @State private var scrollMonitor: Any?
     #endif
 
-    init(profile: Binding<BackendProfileModel>) {
+    init(profile: Binding<BackendProfileModel>, onDelete: ((UUID) -> Void)? = nil) {
         self._profile = profile
+        self.onDelete = onDelete
         self._canvasState = StateObject(wrappedValue: WorkflowCanvasState(profileID: profile.wrappedValue.id))
     }
 
@@ -297,8 +302,14 @@ struct WorkflowCanvasView: View {
         let referencedProfiles = profileService.profiles.filter { p in
             layout.nodes.contains(where: { $0.profileID == p.id })
         }
-        profile.details = .workflow(agents: referencedProfiles)
-        profileService.saveProfile(profile)
+        let referencedIDs = referencedProfiles.map(\.id)
+        profile.details = .workflow(WorkflowConfig(agentProfileIDs: referencedIDs))
+        do {
+            try profileService.saveProfile(profile)
+        } catch {
+            // Workflow save failures are logged; the layout is already persisted locally
+            logger.error("Failed to save workflow profile: \(error.localizedDescription)")
+        }
 
         canvasState.markSaved()
     }

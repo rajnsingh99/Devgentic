@@ -13,139 +13,120 @@
 //  Updated on 28/02/26 to add editable Base URL endpoint field with default placeholders.
 //  Updated on 28/02/26 to align inputs right matching Modern Settings UI.
 //  Updated on 28/02/26 to fix MLX native tool toggle auto-enable bug.
+//  Refactored on 27/03/26 to use ProfileEditBuffer (single source of truth for dirty tracking).
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct AgentConfigDetailView: View {
-    @Binding var profile: BackendProfileModel
+    @Bindable var editBuffer: ProfileEditBuffer
+    var onDelete: ((UUID) -> Void)? = nil
     @EnvironmentObject var profileService: BackendProfileService
     @EnvironmentObject private var router: MainViewRouter
+    @EnvironmentObject private var toastManager: ToastManager
     @Environment(\.appTheme) private var theme
-    
-    // State to track unsaved changes
-    @State private var initialProfileState: BackendProfileModel?
-    private var hasChanges: Bool {
-        profile != initialProfileState
-    }
-    
+
     // Local state for editing advanced configurations
     @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
     @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
     @State private var localMlxConfig: MLXAdvancedConfig = .default()
+    @State private var localAnthropicConfig: AnthropicAdvancedConfig = .default()
+    @State private var localOpenAIConfig: OpenAIAdvancedConfig = .default()
 
     // Guard flag: prevents onChange(of: localOllamaConfig/localGeminiConfig/localMlxConfig) from writing
-    // back to providerConfig during initial load, which would create phantom "unsaved changes".
+    // back to providerConfig during initial load.
     @State private var isLoadingAdvancedConfig = false
-    
-    // UI State for API Key Visibility and Endpoint Editing
-    @State private var isApiKeyVisible: Bool = false
-    @State private var isEditingBaseURL: Bool = false
-    
+
     // Tool Library (now navigated via router)
-    
+
     // Prompt Library for the inline editor
     @StateObject private var promptLibraryVM = PromptLibraryViewModel()
-    
+
     // Deletion State
     @State private var showingDeleteAlert = false
-    
+
+    // File Importer State
+    @State private var showingKnowledgeImporter = false
+
     // Button Hover States
     @State private var isDeleteHovered = false
     @State private var isRevertHovered = false
     @State private var isSaveHovered = false
-    
+
     // [PHASE 1 REFACTOR]: Enriched Default Persona
     private let defaultSystemPersona = """
     You are Devgentic, a specialized macOS System Agent and Senior DevOps Engineer.
-    
+
     ## CORE BEHAVIORS
     1. **Prudence**: Always verify file existence before modification. Use `ls` or `stat` first.
     2. **Unix Philosophy**: Prefer chaining small, standard tools (grep, sed, awk) over complex, fragile scripts.
     3. **Transparency**: Explain your plan briefly before executing destructive actions.
-    
+
     ## SAFETY PROTOCOLS
     1. **NON-INTERACTIVE ONLY**: You operate in a non-interactive shell. Do NOT use interactive commands like `nano`, `vim`, `top`, or `sudo` without `-n`.
     2. **DESTRUCTIVE ACTIONS**: Double-check absolute paths before executing `rm -rf` or file deletions.
-    
+
     ## ERROR HANDLING
     - If a command fails, do NOT immediately retry the exact same command.
     - Analyze the error code/message.
     - Formulate a hypothesis (e.g., "Missing permissions", "Path incorrect").
     - Try a corrective action (e.g., "Check permissions", "Find correct path").
     """
-    
+
+    // MARK: - Convenience Accessors
+
+    private var profile: Binding<BackendProfileModel> {
+        $editBuffer.draft
+    }
+
     // MARK: - Computed Bindings
-    
+
     private var providerConfig: Binding<ProviderConfig> {
         Binding<ProviderConfig>(
             get: {
-                switch profile.details {
-                case .bot(let llmConfig, _): return llmConfig
-                case .agent(let llmConfig, _, _, _, _, _): return llmConfig
-                case .imageGen(let llmConfig, _, _, _): return llmConfig
+                switch editBuffer.draft.details {
+                case .bot(let config): return config.llmConfig
+                case .agent(let config): return config.llmConfig
+                case .imageGen(let config): return config.llmConfig
                 case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
             },
             set: { newConfig in
-                if case .agent(_, let arch, let tools, let desc, let instr, let sources) = profile.details {
-                    profile.details = .agent(
-                        llmConfig: newConfig,
-                        architecture: arch,
-                        tools: tools,
-                        description: desc,
-                        instructions: instr,
-                        knowledgeSources: sources
-                    )
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.llmConfig = newConfig
+                    editBuffer.draft.details = .agent(config)
                 }
             }
         )
     }
-    
-    private var baseURLBinding: Binding<String> {
-        Binding<String>(
-            get: { providerConfig.wrappedValue.baseURL ?? "" },
-            set: { newValue in
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                providerConfig.wrappedValue.baseURL = trimmed.isEmpty ? nil : trimmed
-            }
-        )
-    }
-    
+
     private var architectureBinding: Binding<AgentArchitecture> {
         Binding<AgentArchitecture>(
             get: {
-                if case .agent(_, let architecture, _, _, _, _) = profile.details { return architecture }
+                if case .agent(let config) = editBuffer.draft.details { return config.architecture }
                 return .reAct
             },
             set: { newValue in
-                if case .agent(let config, _, let tools, let desc, let instr, let sources) = profile.details {
-                    profile.details = .agent(
-                        llmConfig: config,
-                        architecture: newValue,
-                        tools: tools,
-                        description: desc,
-                        instructions: instr,
-                        knowledgeSources: sources
-                    )
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.architecture = newValue
+                    editBuffer.draft.details = .agent(config)
                 }
             }
         )
     }
-    
+
     private var descriptionBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .agent(_, _, _, let description, _, _) = profile.details { return description ?? "" }
+                if case .agent(let config) = editBuffer.draft.details { return config.description ?? "" }
                 return ""
             },
             set: { newValue in
                 let val = String(newValue.prefix(250))
-                if case .agent(let c, let a, let t, _, let i, let k) = profile.details {
-                    profile.details = .agent(
-                        llmConfig: c, architecture: a, tools: t,
-                        description: val.isEmpty ? nil : val, instructions: i, knowledgeSources: k
-                    )
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.description = val.isEmpty ? nil : val
+                    editBuffer.draft.details = .agent(config)
                 }
             }
         )
@@ -154,16 +135,13 @@ struct AgentConfigDetailView: View {
     private var instructionsBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .agent(_, _, _, _, let instructions, _) = profile.details { return instructions ?? "" }
+                if case .agent(let config) = editBuffer.draft.details { return config.instructions ?? "" }
                 return ""
             },
             set: { newValue in
-                let val = String(newValue.prefix(5000))
-                if case .agent(let c, let a, let t, let d, _, let k) = profile.details {
-                    profile.details = .agent(
-                        llmConfig: c, architecture: a, tools: t,
-                        description: d, instructions: val, knowledgeSources: k
-                    )
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.instructions = newValue
+                    editBuffer.draft.details = .agent(config)
                 }
             }
         )
@@ -172,32 +150,28 @@ struct AgentConfigDetailView: View {
     private var knowledgeSourcesBinding: Binding<[KnowledgeSource]> {
         Binding<[KnowledgeSource]>(
             get: {
-                if case .agent(_, _, _, _, _, let sources) = profile.details { return sources ?? [] }
+                if case .agent(let config) = editBuffer.draft.details { return config.knowledgeSources ?? [] }
                 return []
             },
             set: { newValue in
-                 if case .agent(let c, let a, let t, let d, let i, _) = profile.details {
-                    profile.details = .agent(
-                        llmConfig: c, architecture: a, tools: t,
-                        description: d, instructions: i, knowledgeSources: newValue.isEmpty ? nil : newValue
-                    )
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.knowledgeSources = newValue.isEmpty ? nil : newValue
+                    editBuffer.draft.details = .agent(config)
                 }
             }
         )
     }
-    
+
     private var toolsBinding: Binding<[Tool]> {
         Binding<[Tool]>(
             get: {
-                if case .agent(_, _, let tools, _, _, _) = profile.details { return tools }
+                if case .agent(let config) = editBuffer.draft.details { return config.tools }
                 return []
             },
             set: { newTools in
-                if case .agent(let c, let a, _, let d, let i, let k) = profile.details {
-                    profile.details = .agent(
-                        llmConfig: c, architecture: a, tools: newTools,
-                        description: d, instructions: i, knowledgeSources: k
-                    )
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.tools = newTools
+                    editBuffer.draft.details = .agent(config)
                 }
             }
         )
@@ -211,7 +185,7 @@ struct AgentConfigDetailView: View {
             }
 
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(spacing: 32) {
 
                     // 1. Identity Header
                 HStack(alignment: .center, spacing: 16) {
@@ -220,14 +194,14 @@ struct AgentConfigDetailView: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 48, height: 48)
                         .foregroundColor(.accentColor)
-                        
+
                     VStack(alignment: .leading) {
-                        TextField("Agent Name", text: $profile.displayName)
+                        TextField("Agent Name", text: profile.displayName)
                             .font(.title2)
                             .fontWeight(.bold)
                             .textFieldStyle(.plain)
                             .foregroundColor(theme.primaryText)
-                        
+
                         Text("Define your agent's personality, logic, and tools.")
                             .font(.subheadline)
                             .foregroundColor(theme.secondaryText)
@@ -237,8 +211,9 @@ struct AgentConfigDetailView: View {
                 .padding(.bottom, 8)
 
                 // 2. Cognitive Architecture (The Brain)
-                ModernSection(title: "Cognitive Architecture", icon: "brain.head.profile") {
-                    
+                SettingsCard(title: "Cognitive Architecture", icon: "brain.head.profile", theme: theme) {
+                  VStack(alignment: .leading, spacing: 16) {
+
                     // Strategy Picker
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -248,9 +223,9 @@ struct AgentConfigDetailView: View {
                                 .font(.caption)
                                 .foregroundColor(theme.secondaryText)
                         }
-                        
+
                         Spacer(minLength: 16)
-                        
+
                         Picker("", selection: architectureBinding) {
                             ForEach(AgentArchitecture.allCases) { arch in
                                 Text(arch.rawValue).tag(arch)
@@ -259,9 +234,9 @@ struct AgentConfigDetailView: View {
                         .labelsHidden()
                         .fixedSize()
                     }
-                    
+
                     Divider()
-                    
+
                     // Instructions Editor
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -269,13 +244,13 @@ struct AgentConfigDetailView: View {
                                 .font(.subheadline)
                                 .fontWeight(.medium)
                                 .foregroundColor(theme.secondaryText)
-                            
+
                             Spacer()
-                            
+
                             Button {
                                 AdvancedPromptWindowManager.shared.showEditor(
                                     text: instructionsBinding,
-                                    agentName: profile.displayName,
+                                    agentName: editBuffer.draft.displayName,
                                     configuredTools: toolsBinding,
                                     theme: theme
                                 )
@@ -284,16 +259,16 @@ struct AgentConfigDetailView: View {
                             }
                             .font(.caption)
                             .buttonStyle(.link)
-                            
+
                             Text("|").foregroundColor(theme.secondaryText).font(.caption)
-                            
+
                             Button("Use Default Persona") {
                                 instructionsBinding.wrappedValue = defaultSystemPersona
                             }
                             .font(.caption)
                             .buttonStyle(.link)
                         }
-                        
+
                         ZStack(alignment: .topLeading) {
                             TokenizingTextEditor(
                                 text: instructionsBinding,
@@ -307,7 +282,7 @@ struct AgentConfigDetailView: View {
                             .background(theme.textBackground)
                             .cornerRadius(8)
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
-                            
+
                             if instructionsBinding.wrappedValue.isEmpty {
                                 Text("Define persona, reasoning strategy, and tool guidelines...")
                                     .font(.system(.body, design: .monospaced))
@@ -317,121 +292,83 @@ struct AgentConfigDetailView: View {
                                     .allowsHitTesting(false)
                             }
                         }
+
+                        let instrCount = instructionsBinding.wrappedValue.count
+                        let instrLimit = ProfileValidationLimits.maxInstructionsLength
+                        Text("\(instrCount) characters · ~\(instrCount / 4) tokens")
+                            .font(.caption2)
+                            .foregroundColor(
+                                instrCount > instrLimit ? .red :
+                                instrCount > Int(Double(instrLimit) * 0.9) ? .orange :
+                                theme.secondaryText
+                            )
                     }
-                    
+
                     // Description
                      VStack(alignment: .leading, spacing: 8) {
                         Label("Internal Description", systemImage: "info.circle")
                             .font(.subheadline)
                             .fontWeight(.medium)
                             .foregroundColor(theme.secondaryText)
-                        
+
                         TextField("Brief description of this agent's purpose...", text: descriptionBinding)
                             .textFieldStyle(.roundedBorder)
                             .foregroundColor(theme.primaryText)
                     }
+                  }
+                  .padding(16)
                 }
-                
+
                 // 3. Inference Engine (Provider)
-                ModernSection(title: "Inference Engine", icon: "cpu") {
-                    
+                SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
+                  VStack(alignment: .leading, spacing: 16) {
+                    ProviderConfigSection(
+                        providerConfig: providerConfig,
+                        profileID: editBuffer.draft.id,
+                        profileType: .agent,
+                        onProviderChanged: { _, newProvider in
+                            providerConfig.wrappedValue.cognitiveCapability =
+                                ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
+                        }
+                    )
+
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    // Capability Status Badge (Agent-specific)
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("LLM Provider")
+                            Text("Inference Capability")
                                 .fontWeight(.medium)
-                            Text("The underlying model powering this agent.")
+                            Text("Detected architectural support for complex structured reasoning.")
                                 .font(.caption)
                                 .foregroundColor(theme.secondaryText)
                         }
-                        
+
                         Spacer(minLength: 16)
-                        
-                        providerPicker
-                            .labelsHidden()
-                            .fixedSize()
-                    }
-                    
-                    Divider()
-                    
-                    // Dynamic Fields
-                    VStack(alignment: .leading, spacing: 12) {
-                        switch providerConfig.wrappedValue.apiProvider {
-                        case .ollama:
-                            ollamaFields
-                        case .mlx:
-                            HStack(alignment: .center) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Model Selection")
-                                        .fontWeight(.medium)
-                                }
-                                Spacer(minLength: 16)
-                                MLXModelPickerView(
-                                    selectedModel: providerConfig.modelName,
-                                    cognitiveCapability: Binding(
-                                        get: { providerConfig.wrappedValue.cognitiveCapability },
-                                        set: { newValue in providerConfig.wrappedValue.cognitiveCapability = newValue }
-                                    ),
-                                    modelDialect: Binding(
-                                        get: { providerConfig.wrappedValue.modelDialect },
-                                        set: { providerConfig.wrappedValue.modelDialect = $0 }
-                                    ),
-                                    modelMetadata: Binding(
-                                        get: { providerConfig.wrappedValue.modelMetadata },
-                                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
-                                    ),
-                                    chatTemplateSource: Binding(
-                                        get: { providerConfig.wrappedValue.chatTemplateSource },
-                                        set: { providerConfig.wrappedValue.chatTemplateSource = $0 }
-                                    ),
-                                    stopSequences: Binding(
-                                        get: { providerConfig.wrappedValue.stopSequences },
-                                        set: { providerConfig.wrappedValue.stopSequences = $0 }
-                                    ),
-                                    profileID: profile.id,
-                                    filterForTools: true
-                                )
-                                .labelsHidden()
-                                .frame(maxWidth: 350, alignment: .trailing)
-                            }
-                        default:
-                            remoteFields
+
+                        HStack(spacing: 6) {
+                            let capability = providerConfig.wrappedValue.cognitiveCapability
+                            Image(systemName: capabilityIcon(for: capability))
+                            Text(capability.rawValue)
+                                .font(.caption)
+                                .fontWeight(.semibold)
                         }
-                        
-                        Divider()
-                            .padding(.vertical, 4)
-                        
-                        // [NEW] Capability Status Badge
-                        HStack(alignment: .center) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Inference Capability")
-                                    .fontWeight(.medium)
-                                Text("Detected architectural support for complex structured reasoning.")
-                                    .font(.caption)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-                            
-                            Spacer(minLength: 16)
-                            
-                            HStack(spacing: 6) {
-                                let capability = providerConfig.wrappedValue.cognitiveCapability
-                                Image(systemName: capabilityIcon(for: capability))
-                                Text(capability.rawValue)
-                                    .font(.caption)
-                                    .fontWeight(.semibold)
-                            }
-                            .padding(.vertical, 4)
-                            .padding(.horizontal, 10)
-                            .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
-                            .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
-                            .cornerRadius(8)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
-                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 10)
+                        .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
+                        .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
                     }
+                  }
+                  .padding(16)
                 }
-                
+
                 // 4. Capabilities (Tools & Knowledge)
-                ModernSection(title: "Capabilities", icon: "hammer.fill") {
-                    
+                SettingsCard(title: "Capabilities", icon: "hammer.fill", theme: theme) {
+                  VStack(alignment: .leading, spacing: 16) {
+
                     // Tools Header
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -442,16 +379,16 @@ struct AgentConfigDetailView: View {
                                 .font(.caption)
                                 .foregroundColor(theme.secondaryText)
                         }
-                        
+
                         Spacer(minLength: 16)
-                        
+
                         Button("Manage Library...") {
-                            router.navigate(to: .toolLibrary(profileID: profile.id))
+                            router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
-                    
+
                     // Tool Chips
                     if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -480,43 +417,83 @@ struct AgentConfigDetailView: View {
                             .italic()
                             .foregroundColor(theme.secondaryText)
                     }
-                    
+
                     Divider()
-                    
+
+                    // File Handling Strategy
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("File Handling")
+                            .fontWeight(.medium)
+                        Text("How attached files and knowledge sources are processed")
+                            .font(.caption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    FileContextStrategyPicker(
+                        strategy: $editBuffer.draft.fileContextStrategy,
+                        profileType: .agent
+                    )
+
+                    Divider()
+
                     // Knowledge Header
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Knowledge Base")
                                 .fontWeight(.medium)
-                            Text("RAG sources for context awareness")
+                            Text("Pre-configured reference documents")
                                 .font(.caption)
                                 .foregroundColor(theme.secondaryText)
                         }
-                        
+
                         Spacer(minLength: 16)
-                        
-                        Menu {
-                            Button("Add File") { /* Not implemented */ }
-                            Button("Add URL") { /* Not implemented */ }
+
+                        Button {
+                            showingKnowledgeImporter = true
                         } label: {
-                            Label("Add Source", systemImage: "plus")
+                            Label("Add File", systemImage: "plus")
                         }
-                        .fixedSize()
-                        .menuStyle(.borderedButton)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .fileImporter(
+                            isPresented: $showingKnowledgeImporter,
+                            allowedContentTypes: [.item],
+                            allowsMultipleSelection: true
+                        ) { result in
+                            if case let .success(urls) = result {
+                                for url in urls {
+                                    let source = KnowledgeSource(type: .file, location: url.path)
+                                    if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
+                                        knowledgeSourcesBinding.wrappedValue.append(source)
+                                    }
+                                }
+                            }
+                        }
                     }
-                    
+
                     // Knowledge List
                     if !knowledgeSourcesBinding.wrappedValue.isEmpty {
                         VStack(spacing: 8) {
                             ForEach(knowledgeSourcesBinding.wrappedValue) { source in
                                 HStack {
-                                    Image(systemName: source.type == .file ? "doc.text.fill" : "link")
-                                        .foregroundColor(source.type == .file ? .orange : .blue)
-                                    Text(source.location)
-                                        .font(.callout)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
+                                    Image(systemName: "doc.text.fill")
+                                        .foregroundColor(source.exists ? .orange : .red)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(source.fileName)
+                                            .font(.callout)
+                                            .lineLimit(1)
+                                        if !source.exists {
+                                            Text("File not found")
+                                                .font(.caption2)
+                                                .foregroundColor(.red)
+                                        } else {
+                                            Text(source.location)
+                                                .font(.caption2)
+                                                .foregroundColor(theme.secondaryText)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                    }
                                     Spacer()
                                     Button {
                                         knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
@@ -529,103 +506,111 @@ struct AgentConfigDetailView: View {
                                 .padding(10)
                                 .background(theme.secondaryBackground.opacity(0.5))
                                 .cornerRadius(8)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(
+                                    source.exists ? theme.dividerColor : Color.red.opacity(0.3), lineWidth: 1
+                                ))
                             }
                         }
                     } else {
-                         Text("No documents or URLs added.")
+                         Text("No reference documents added.")
                             .font(.caption)
                             .foregroundColor(theme.secondaryText)
                             .italic()
                     }
+                  }
+                  .padding(16)
                 }
-                
+
                 // 5. Advanced Configuration
-                ModernSection(title: "Advanced Configuration", icon: "gearshape.2.fill") {
-                   advancedSettingsView
+                SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        advancedSettingsView
+                    }
+                    .padding(16)
                 }
             }
-            .padding()
+            .padding(24)
+            .padding(.bottom, 24)
             .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity)
         }
         } // end outer VStack
-        .alert("Delete '\(profile.displayName)'?", isPresented: $showingDeleteAlert) {
+        .alert("Delete '\(editBuffer.draft.displayName)'?", isPresented: $showingDeleteAlert) {
             Button("Delete", role: .destructive) {
-                profileService.deleteProfile(withId: profile.id)
+                do {
+                    try profileService.deleteProfile(withId: editBuffer.draft.id)
+                } catch {
+                    toastManager.show(error.localizedDescription, style: .error)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Are you sure you want to delete this agent? This action cannot be undone.")
         }
-        .onAppear {
+        .task {
             // Auto-populate default instructions if nil (first time setup)
-            if case .agent(let c, let a, let t, let d, let i, let k) = profile.details, i == nil {
-                profile.details = .agent(
-                    llmConfig: c, architecture: a, tools: t,
-                    description: d, instructions: defaultSystemPersona, knowledgeSources: k
-                )
+            if case .agent(var config) = editBuffer.draft.details, config.instructions == nil {
+                config.instructions = defaultSystemPersona
+                editBuffer.draft.details = .agent(config)
+                // Since this is a first-time auto-populate on an unsaved profile,
+                // promote the change to the original so it doesn't show as dirty.
+                editBuffer.load(editBuffer.draft)
             }
 
-            // Load advanced configs FIRST (with guard flag on) so the onChange handlers
-            // don't write back to providerConfig, then snapshot the initial state AFTER.
             isLoadingAdvancedConfig = true
             loadAdvancedConfigs()
             isLoadingAdvancedConfig = false
-
-            initialProfileState = profile
         }
         .onDisappear {
             // Cleanup: Close the floating window if the user leaves the panel entirely
             AdvancedPromptWindowManager.shared.closeWindow()
         }
-        .onChange(of: profile.id) { _ in
-            // Cleanup: Close the floating window if the user switches to a different agent
-            AdvancedPromptWindowManager.shared.closeWindow()
-
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfigs()
-            isLoadingAdvancedConfig = false
-
-            initialProfileState = profile
-        }
-        .onChange(of: providerConfig.wrappedValue.apiProvider) { _ in
-            // Reset edit state when switching providers
-            isEditingBaseURL = false
-
+        .onChange(of: providerConfig.wrappedValue.apiProvider) { oldValue, newValue in
             isLoadingAdvancedConfig = true
             loadAdvancedConfigs()
             isLoadingAdvancedConfig = false
         }
-        .onChange(of: localOllamaConfig) { _ in
+        .onChange(of: localOllamaConfig) { oldValue, newValue in
             guard !isLoadingAdvancedConfig else { return }
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
             }
         }
-        .onChange(of: localGeminiConfig) { _ in
+        .onChange(of: localGeminiConfig) { oldValue, newValue in
             guard !isLoadingAdvancedConfig else { return }
             if providerConfig.wrappedValue.apiProvider == .google {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
             }
         }
-        .onChange(of: localMlxConfig) { _ in
+        .onChange(of: localMlxConfig) { oldValue, newValue in
             guard !isLoadingAdvancedConfig else { return }
             if providerConfig.wrappedValue.apiProvider == .mlx {
                 providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localMlxConfig)
             }
         }
-        .onChange(of: providerConfig.wrappedValue.modelName) { newModel in
+        .onChange(of: localAnthropicConfig) { oldValue, newValue in
+            guard !isLoadingAdvancedConfig else { return }
+            if providerConfig.wrappedValue.apiProvider == .anthropic {
+                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localAnthropicConfig)
+            }
+        }
+        .onChange(of: localOpenAIConfig) { oldValue, newValue in
+            guard !isLoadingAdvancedConfig else { return }
+            if providerConfig.wrappedValue.apiProvider == .openAI {
+                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOpenAIConfig)
+            }
+        }
+        .onChange(of: providerConfig.wrappedValue.modelName) { oldValue, newValue in
             if providerConfig.wrappedValue.apiProvider == .ollama {
-                detectAndApplyOllamaPreset(for: newModel)
+                detectAndApplyOllamaPreset(for: newValue)
             }
         }
     }
-    
+
     private func detectAndApplyOllamaPreset(for modelName: String) {
         let name = modelName.lowercased()
         var tier: OllamaAdvancedConfig.ModelTier? = nil
-        
+
         if name.contains("1b") || name.contains("3b") || name.contains("tiny") || name.contains("phi-3") {
             tier = .tiny
         } else if name.contains("7b") || name.contains("8b") || name.contains("14b") || name.contains("mistral") || name.contains("llama-3-8b") || name.contains("small") {
@@ -633,29 +618,30 @@ struct AgentConfigDetailView: View {
         } else if name.contains("70b") || name.contains("72b") || name.contains("large") {
             tier = .large
         }
-        
+
         if let tier = tier {
             localOllamaConfig = OllamaAdvancedConfig.preset(for: tier)
             // The onChange(of: localOllamaConfig) will update providerConfig.wrappedValue.advancedConfiguration
         }
     }
-    
+
     // MARK: - Subviews & Helpers
-    
+
     private var actionButtons: some View {
         HStack(spacing: 8) {
-            if hasChanges {
+            if editBuffer.isDirty {
                 Button {
-                    if let initialState = initialProfileState {
-                        profile = initialState
-                        loadAdvancedConfigs()
-                    }
+                    editBuffer.revert()
+                    isLoadingAdvancedConfig = true
+                    loadAdvancedConfigs()
+                    isLoadingAdvancedConfig = false
                 } label: {
                     Text("Revert")
                         .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
+                .accessibilityLabel("Revert unsaved changes")
                 .foregroundColor(theme.primaryText)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -663,14 +649,20 @@ struct AgentConfigDetailView: View {
                 .onHover { isRevertHovered = $0 }
 
                 Button {
-                    profileService.saveProfile(profile)
-                    initialProfileState = profile
+                    do {
+                        try profileService.saveProfile(editBuffer.draft)
+                        editBuffer.markSaved()
+                        toastManager.show("Profile saved", style: .success)
+                    } catch {
+                        toastManager.show(error.localizedDescription, style: .error)
+                    }
                 } label: {
                     Text("Save")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Save profile changes")
                 .foregroundColor(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
@@ -690,228 +682,13 @@ struct AgentConfigDetailView: View {
                     )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Delete this profile")
             .onHover { isDeleteHovered = $0 }
             .animation(.easeInOut(duration: 0.15), value: isDeleteHovered)
         }
     }
-    
-    private var providerPicker: some View {
-        Picker("", selection: Binding(
-            get: { providerConfig.wrappedValue.apiProvider },
-            set: { newValue in
-                let oldValue = providerConfig.wrappedValue.apiProvider
-                providerConfig.wrappedValue.apiProvider = newValue
-                
-                if newValue != oldValue {
-                    if [.openAI, .google, .anthropic].contains(newValue) {
-                        providerConfig.wrappedValue.cognitiveCapability = .parallelActions
-                    } else if newValue == .mlx {
-                        // Default to singleAction for MLX, user must opt-in manually to parallelActions or auto-detect
-                        providerConfig.wrappedValue.cognitiveCapability = .singleAction
-                    } else if newValue == .ollama {
-                        providerConfig.wrappedValue.cognitiveCapability = .singleAction
-                    }
-                }
-            }
-        )) {
-            ForEach(ApiProvider.allCases) { provider in
-                Text(provider.rawValue).tag(provider)
-            }
-        }
-    }
-    
-    private func defaultBaseURL(for provider: ApiProvider) -> String {
-        switch provider {
-        case .google: return "https://generativelanguage.googleapis.com/v1beta/"
-        case .anthropic: return "https://api.anthropic.com/v1/"
-        case .openAI: return "https://api.openai.com/v1/"
-        case .ollama: return "http://localhost:11434"
-        case .mlx: return "Local Engine"
-        default: return ""
-        }
-    }
-    
-    @ViewBuilder
-    private func endpointField(for provider: ApiProvider) -> some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("API Endpoint")
-                    .fontWeight(.medium)
-                Text("Optional override for custom gateways.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
-            }
-            
-            Spacer(minLength: 16)
-            
-            HStack {
-                if isEditingBaseURL || (providerConfig.wrappedValue.baseURL != nil && !providerConfig.wrappedValue.baseURL!.isEmpty) {
-                    TextField(defaultBaseURL(for: provider), text: baseURLBinding)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                    
-                    Button(action: {
-                        // Clear the custom URL and exit edit mode
-                        providerConfig.wrappedValue.baseURL = nil
-                        isEditingBaseURL = false
-                    }) {
-                        Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .foregroundColor(theme.secondaryText)
-                            .help("Reset to Default")
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.leading, 4)
-                } else {
-                    Text(defaultBaseURL(for: provider))
-                        .foregroundColor(theme.secondaryText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 5)
-                        .padding(.horizontal, 8)
-                        .background(theme.secondaryBackground.opacity(0.5))
-                        .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.dividerColor, lineWidth: 1))
-                    
-                    Button("Edit") {
-                        isEditingBaseURL = true
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-            .frame(maxWidth: 350)
-        }
-    }
-    
-    @ViewBuilder
-    private var ollamaFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            
-            endpointField(for: providerConfig.wrappedValue.apiProvider)
-            
-            Divider()
 
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection")
-                        .fontWeight(.medium)
-                }
-                Spacer(minLength: 16)
-                OllamaModelPickerView(
-                    selectedModel: providerConfig.modelName,
-                    cognitiveCapability: Binding(
-                        get: { providerConfig.wrappedValue.cognitiveCapability },
-                        set: { providerConfig.wrappedValue.cognitiveCapability = $0 }
-                    ),
-                    modelDialect: Binding(
-                        get: { providerConfig.wrappedValue.modelDialect },
-                        set: { providerConfig.wrappedValue.modelDialect = $0 }
-                    ),
-                    modelMetadata: Binding(
-                        get: { providerConfig.wrappedValue.modelMetadata },
-                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
-                    ),
-                    baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
-                    profileID: profile.id,
-                    filterForTools: true
-                )
-                .labelsHidden()
-                .frame(maxWidth: 350, alignment: .trailing)
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private var remoteFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            
-            // API Key Input
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("API Key").fontWeight(.medium)
-                }
-                
-                Spacer(minLength: 16)
-                
-                ZStack(alignment: .trailing) {
-                    Group {
-                        if isApiKeyVisible {
-                            TextField("Enter API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                                .textFieldStyle(.roundedBorder)
-                        } else {
-                            SecureField("Enter API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                                .textFieldStyle(.roundedBorder)
-                        }
-                    }
-                    
-                    Button(action: { isApiKeyVisible.toggle() }) {
-                        Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
-                            .foregroundColor(.secondary)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 8)
-                    .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
-                }
-                .frame(maxWidth: 350)
-            }
-            
-            Divider()
-            
-            // Endpoint URL Selection / Override
-            endpointField(for: providerConfig.wrappedValue.apiProvider)
-            
-            Divider()
-            
-            // Model Selection
-            let currentApiKey = providerConfig.wrappedValue.apiKey ?? ""
-            
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection").fontWeight(.medium)
-                }
-                
-                Spacer(minLength: 16)
-                
-                if currentApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("Enter a valid API Key to select a model.")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
-                } else {
-                    if providerConfig.wrappedValue.apiProvider == .google {
-                        GeminiModelPickerView(
-                            selectedModel: providerConfig.modelName,
-                            apiKey: currentApiKey
-                        )
-                        .labelsHidden()
-                        .frame(maxWidth: 350, alignment: .trailing)
-                        
-                    } else if providerConfig.wrappedValue.apiProvider == .anthropic {
-                        AnthropicModelPickerView(
-                            selectedModel: providerConfig.modelName,
-                            apiKey: currentApiKey
-                        )
-                        .labelsHidden()
-                        .frame(maxWidth: 350, alignment: .trailing)
-                        
-                    } else if providerConfig.wrappedValue.apiProvider == .openAI {
-                        OpenAIModelPickerView(
-                            selectedModel: providerConfig.modelName,
-                            apiKey: currentApiKey
-                        )
-                        .labelsHidden()
-                        .frame(maxWidth: 350, alignment: .trailing)
-                        
-                    } else {
-                        // Fallback for other remote providers lacking a dynamic picker yet
-                        TextField("e.g. gpt-4o", text: providerConfig.modelName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 350)
-                    }
-                }
-            }
-        }
-    }
-    
+
     @ViewBuilder
     private var advancedSettingsView: some View {
         switch providerConfig.wrappedValue.apiProvider {
@@ -921,14 +698,13 @@ struct AgentConfigDetailView: View {
             GeminiSettingsView(config: $localGeminiConfig)
         case .mlx:
             MLXSettingsView(config: $localMlxConfig)
-        case .openAI, .anthropic:
-            Text("No advanced settings available for \(providerConfig.wrappedValue.apiProvider.rawValue).")
-                .foregroundColor(.secondary)
-                .italic()
-                .frame(maxWidth: .infinity, alignment: .leading)
+        case .anthropic:
+            AnthropicSettingsView(config: $localAnthropicConfig)
+        case .openAI:
+            OpenAISettingsView(config: $localOpenAIConfig)
         }
     }
-    
+
     private func loadAdvancedConfigs() {
         switch providerConfig.wrappedValue.apiProvider {
         case .ollama:
@@ -945,12 +721,25 @@ struct AgentConfigDetailView: View {
             self.localMlxConfig = profileService.decodeConfig(
                 from: providerConfig.wrappedValue.advancedConfiguration,
                 as: MLXAdvancedConfig.self
+            ) ?? {
+                if let metadata = providerConfig.wrappedValue.modelMetadata {
+                    return .recommended(for: metadata)
+                }
+                return .default()
+            }()
+        case .anthropic:
+            self.localAnthropicConfig = profileService.decodeConfig(
+                from: providerConfig.wrappedValue.advancedConfiguration,
+                as: AnthropicAdvancedConfig.self
             ) ?? .default()
-        default:
-            break
+        case .openAI:
+            self.localOpenAIConfig = profileService.decodeConfig(
+                from: providerConfig.wrappedValue.advancedConfiguration,
+                as: OpenAIAdvancedConfig.self
+            ) ?? .default()
         }
     }
-    
+
     private func capabilityIcon(for capability: ModelCognitiveCapability) -> String {
         switch capability {
         case .none: return "text.bubble"
@@ -958,7 +747,7 @@ struct AgentConfigDetailView: View {
         case .parallelActions: return "bolt.shield.fill"
         }
     }
-    
+
     private func capabilityColor(for capability: ModelCognitiveCapability) -> Color {
         switch capability {
         case .none: return theme.secondaryText

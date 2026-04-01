@@ -116,7 +116,7 @@ struct ListDirectoryTool: DevgenticTool {
 struct ReadFileTool: DevgenticTool {
     let name = "read_file"
     let category = "File System"
-    let description = "Reads the plain text content of a file. Best for code, logs, and documents."
+    let description = "Reads the content of a file. Supports plain text, code, PDF, DOCX, XLSX, CSV, PPTX, and RTF formats."
     
     struct Arguments: Decodable, Sendable {
         let path: String
@@ -170,10 +170,37 @@ struct ReadFileTool: DevgenticTool {
     func call(arguments: Arguments) async throws -> String {
         // FIX: Support Tilde Expansion
         let resolvedPath = (arguments.path as NSString).expandingTildeInPath
+        let url = URL(fileURLWithPath: resolvedPath)
 
+        guard FileManager.default.fileExists(atPath: resolvedPath) else {
+            return "Error: File not found at '\(resolvedPath)'"
+        }
+
+        // Try document extraction first (PDF, DOCX, XLSX, CSV, PPTX, RTF)
+        let registry = DocumentExtractionRegistry.shared
+        if registry.canExtract(from: url) {
+            do {
+                let result = try await registry.extract(from: url, maxSize: 500_000)
+                var output = "📄 Contents of \(result.metadata.format.uppercased()) file '\(resolvedPath)'"
+                if let pages = result.metadata.pageCount {
+                    output += " (\(pages) pages)"
+                }
+                if let sheets = result.metadata.sheetNames, !sheets.isEmpty {
+                    output += " (sheets: \(sheets.joined(separator: ", ")))"
+                }
+                if result.metadata.wasTruncated {
+                    output += " [truncated]"
+                }
+                output += ":\n\(result.text)"
+                return output
+            } catch {
+                return "Error extracting document: \(error.localizedDescription)"
+            }
+        }
+
+        // Fallback: plain text reading
         do {
             let content = try String(contentsOfFile: resolvedPath, encoding: .utf8)
-            // FIX: Explicitly label the file source
             return "📄 Contents of file '\(resolvedPath)':\n\(content)"
         } catch {
             return "Error reading file: \(error.localizedDescription)"

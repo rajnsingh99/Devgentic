@@ -41,16 +41,16 @@ struct TaskSchedulerSidebarView: View {
             // Search
             SidebarSearchBarView("Search tasks...", text: $viewModel.searchText)
                 .padding(.horizontal, 12)
-                .padding(.bottom, 8)
+                .padding(.bottom, 10)
 
             // Filter chips
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     ForEach(SchedulerFilter.allCases) { filter in
-                        FilterChip(
+                        CategoryChip(
                             title: filter.rawValue,
                             isSelected: viewModel.selectedFilter == filter,
-                            onTap: { viewModel.selectedFilter = filter }
+                            action: { viewModel.selectedFilter = filter }
                         )
                     }
                 }
@@ -64,7 +64,7 @@ struct TaskSchedulerSidebarView: View {
                     title: "No Scheduled Tasks",
                     subtitle: "Schedule tasks to run automatically at specific times",
                     buttonTitle: "Create Task",
-                    systemImage: "clock.badge.plus",
+                    systemImage: "clock.badge",
                     onAction: { showingCreateSheet = true }
                 )
             } else {
@@ -177,35 +177,6 @@ struct TaskSchedulerSidebarView: View {
             insertion: .opacity.combined(with: .scale(scale: 0.95)),
             removal: .opacity.combined(with: .scale(scale: 0.95))
         ))
-    }
-}
-
-// MARK: - Filter Chip
-
-private struct FilterChip: View {
-    let title: String
-    let isSelected: Bool
-    let onTap: () -> Void
-
-    @Environment(\.appTheme) private var theme
-
-    var body: some View {
-        Button(action: onTap) {
-            Text(title)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText.opacity(0.7))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule()
-                        .fill(isSelected ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
-                )
-                .overlay(
-                    Capsule()
-                        .stroke(isSelected ? theme.accentColor.opacity(0.3) : Color.clear, lineWidth: 0.5)
-                )
-        }
-        .buttonStyle(.plain)
     }
 }
 

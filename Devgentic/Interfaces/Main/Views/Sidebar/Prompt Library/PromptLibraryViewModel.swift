@@ -36,8 +36,9 @@ class PromptLibraryViewModel: ObservableObject {
         logger.info("PromptLibraryViewModel initialized.")
         
         // Subscribe to changes in searchText, selectedCategory, and the main prompt list
+        // Note: search debounce is handled at the SidebarSearchBarView level (300ms)
         Publishers.CombineLatest3(
-            $searchText.debounce(for: .milliseconds(300), scheduler: DispatchQueue.main),
+            $searchText,
             $selectedCategory,
             promptService.$prompts
         )

@@ -40,7 +40,13 @@ actor TraceRecorder {
             logger.error("Failed to initialize TraceStore: \(error.localizedDescription). Recording disabled.")
         }
         
-        // Start the periodic flush loop
+        // Start the periodic flush loop after initialization completes
+        Task {
+            await self.startFlushLoop()
+        }
+    }
+    
+    private func startFlushLoop() {
         flushTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {

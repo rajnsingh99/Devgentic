@@ -48,6 +48,31 @@ struct AppSettings {
     static let speechPlaybackRateKey = "speechPlaybackRate"
     static let speechPlaybackVoiceKey = "speechPlaybackVoice"
     static let speechPauseOnCodeKey = "speechPauseOnCode"
+
+    // ChatOps — Telegram
+    static let chatOpsBotTokenKey = "chatOpsBotToken"
+    static let chatOpsAuthorizedChatIDKey = "chatOpsAuthorizedChatID"
+    static let chatOpsSecurityTierKey = "chatOpsSecurityTier"
+    static let chatOpsEnabledKey = "chatOpsEnabled"
+    static let chatOpsActiveConversationIDKey = "chatOpsActiveConversationID"
+
+    // ChatOps — Discord
+    static let chatOpsDiscordBotTokenKey = "chatOpsDiscordBotToken"
+    static let chatOpsDiscordChannelIDKey = "chatOpsDiscordChannelID"
+    static let chatOpsDiscordApplicationIDKey = "chatOpsDiscordApplicationID"
+    static let chatOpsDiscordGuildIDKey = "chatOpsDiscordGuildID"
+    static let chatOpsDiscordEnabledKey = "chatOpsDiscordEnabled"
+    static let chatOpsDiscordActiveConversationIDKey = "chatOpsDiscordActiveConversationID"
+
+    // Developer Mode
+    static let developerModeKey = "developerMode"
+
+    // ChatOps — Slack
+    static let chatOpsSlackBotTokenKey = "chatOpsSlackBotToken"
+    static let chatOpsSlackAppTokenKey = "chatOpsSlackAppToken"
+    static let chatOpsSlackChannelIDKey = "chatOpsSlackChannelID"
+    static let chatOpsSlackEnabledKey = "chatOpsSlackEnabled"
+    static let chatOpsSlackActiveConversationIDKey = "chatOpsSlackActiveConversationID"
 }
 
 enum AgentViewVariant: String, Codable, CaseIterable, Identifiable {

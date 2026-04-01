@@ -14,30 +14,24 @@ struct WorkflowProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
     @EnvironmentObject var profileService: BackendProfileService
-    
-    @State private var draftProfile: BackendProfileModel
-    
+
+    @State private var localBuffer: ProfileEditBuffer
+
     init(profile: BackendProfileModel) {
-        // Create a working draft so edits aren't global until "Save" is explicitly pressed
-        // inside the child detail view.
-        if let data = try? JSONEncoder().encode(profile),
-           let copy = try? JSONDecoder().decode(BackendProfileModel.self, from: data) {
-            self._draftProfile = State(initialValue: copy)
-        } else {
-            self._draftProfile = State(initialValue: profile)
-        }
+        // Create a local edit buffer so edits aren't global until "Save" is explicitly pressed.
+        _localBuffer = State(wrappedValue: ProfileEditBuffer(profile: profile))
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Modal Header
             HStack {
-                Text(draftProfile.displayName)
+                Text(localBuffer.draft.displayName)
                     .font(.headline)
                     .foregroundColor(theme.primaryText)
-                
+
                 Spacer()
-                
+
                 Button {
                     dismiss()
                 } label: {
@@ -49,25 +43,25 @@ struct WorkflowProfileEditorView: View {
             }
             .padding()
             .background(theme.secondaryBackground)
-            
+
             Divider()
-            
+
             // Reused Detail Views
             // These views encapsulate their own Save/Revert action bars that mutate the local draft
             // and commit to profileService explicitly when Save is verified or pressed.
-            switch draftProfile.details {
+            switch localBuffer.draft.details {
             case .agent:
-                AgentConfigDetailView(profile: $draftProfile)
+                AgentConfigDetailView(editBuffer: localBuffer)
                     .environmentObject(profileService)
             case .bot:
-                BotConfigDetailView(profile: $draftProfile)
+                BotConfigDetailView(editBuffer: localBuffer)
                     .environmentObject(profileService)
             case .workflow:
                 Text("Workflow configuration not supported here.")
                     .foregroundColor(theme.secondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .imageGen:
-                ImageGenConfigDetailView(profile: $draftProfile)
+                ImageGenConfigDetailView(editBuffer: localBuffer)
                     .environmentObject(profileService)
             }
         }

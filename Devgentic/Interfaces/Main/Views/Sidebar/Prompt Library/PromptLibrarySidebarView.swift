@@ -67,12 +67,8 @@ struct PromptLibrarySidebarView: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 12)
             }
-            .frame(height: 44)
-
-            Divider()
-                .background(theme.surfaceOverlayStrong)
+            .padding(.bottom, 10)
 
             // MARK: - Prompt List
             if viewModel.filteredPrompts.isEmpty {

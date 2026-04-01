@@ -19,42 +19,23 @@ struct DownloadSidebarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
-            HStack {
-                Text("Downloads")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(theme.primaryText)
-
-                Spacer()
-
-                if !manager.completedDownloads.isEmpty {
-                    Button {
-                        withAnimation { manager.clearCompleted() }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "trash")
-                                .font(.system(size: 12, weight: .semibold))
-                            Text("Clear")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(theme.accentColor.opacity(0.15))
-                        .foregroundColor(theme.accentColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Clear completed downloads")
+            SidebarHeaderView(
+                title: "Downloads",
+                buttonTitle: manager.completedDownloads.isEmpty ? nil : "Clear",
+                systemImage: manager.completedDownloads.isEmpty ? nil : "trash",
+                onAction: manager.completedDownloads.isEmpty ? nil : {
+                    withAnimation { manager.clearCompleted() }
                 }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 10)
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
 
             if manager.activeDownloads.isEmpty && manager.completedDownloads.isEmpty {
-                PlaceholderSidebarView(
-                    icon: "arrow.down.circle",
+                SidebarEmptyStateView(
                     title: "No Downloads",
-                    description: "Model downloads will appear here."
+                    subtitle: "Model downloads will appear here.",
+                    systemImage: "arrow.down.circle"
                 )
             } else {
                 ScrollView {
@@ -65,7 +46,7 @@ struct DownloadSidebarView: View {
                             sectionHeader("Active")
 
                             ForEach(manager.activeDownloads) { entry in
-                                ActiveDownloadRowView(entry: entry)
+                                ActiveDownloadRowView(entry: entry, manager: manager)
                             }
                         }
 
@@ -74,12 +55,13 @@ struct DownloadSidebarView: View {
                             sectionHeader("Recent")
 
                             ForEach(manager.completedDownloads) { entry in
-                                CompletedDownloadRowView(entry: entry)
+                                CompletedDownloadRowView(entry: entry, manager: manager)
                             }
                         }
                     }
                     .padding(.horizontal, 8)
                     .padding(.top, 4)
+                    .padding(.bottom, 20)
                 }
             }
         }
@@ -102,7 +84,7 @@ struct DownloadSidebarView: View {
 private struct ActiveDownloadRowView: View {
 
     let entry: DownloadEntry
-    @ObservedObject private var manager = DownloadManager.shared
+    let manager: DownloadManager
     @Environment(\.appTheme) private var theme
     @State private var isHovering = false
 
@@ -163,7 +145,7 @@ private struct ActiveDownloadRowView: View {
 private struct CompletedDownloadRowView: View {
 
     let entry: DownloadEntry
-    @ObservedObject private var manager = DownloadManager.shared
+    let manager: DownloadManager
     @Environment(\.appTheme) private var theme
     @State private var isHovering = false
 

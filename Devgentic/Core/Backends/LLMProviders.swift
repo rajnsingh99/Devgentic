@@ -105,7 +105,7 @@ enum LLMProviderError: LocalizedError {
     }
     
     /// Translates raw HTTP API errors into clean, user-facing guidance.
-    private static func formatHTTPError(status: Int, body: String) -> String {
+    static func formatHTTPError(status: Int, body: String) -> String {
         let lowerBody = body.lowercased()
         
         // 1. Specific Interception: Gemini 429 Quota / Billing Error
@@ -154,5 +154,30 @@ enum LLMProviderError: LocalizedError {
         // 4. Fallback for unparseable or unknown errors
         let truncatedBody = body.count > 300 ? String(body.prefix(300)) + "..." : body
         return "HTTP \(status): \(truncatedBody)"
+    }
+}
+
+// MARK: - Cloud Provider Error (Structured)
+
+/// A structured error type for cloud LLM providers that carries rich metadata
+/// for retry strategies and debugging. Thrown by `CloudRequestPipeline`.
+struct CloudProviderError: Error, LocalizedError, Sendable {
+    /// The HTTP status code from the provider response.
+    let statusCode: Int
+
+    /// Seconds to wait before retrying, extracted from the `retry-after` response header.
+    let retryAfterSeconds: TimeInterval?
+
+    /// The provider-assigned request ID for debugging and support tickets.
+    let requestId: String?
+
+    /// The raw response body string for error message extraction.
+    let rawBody: String
+
+    /// The rate limit category this request belongs to (for `GlobalRateLimiter` coordination).
+    let provider: RateLimitCategory
+
+    var errorDescription: String? {
+        LLMProviderError.formatHTTPError(status: statusCode, body: rawBody)
     }
 }

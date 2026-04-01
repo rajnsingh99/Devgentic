@@ -136,7 +136,7 @@ struct DiffLine: Identifiable {
 class DiffEngine {
     static func computeDiff(oldLines: [String], newLines: [String]) -> [DiffLine] {
         let lcsMatrix = longestCommonSubsequence(oldLines, newLines)
-        var result: [DiffLine] = []
+        var _: [DiffLine] = []
 
         var i = oldLines.count
         var j = newLines.count

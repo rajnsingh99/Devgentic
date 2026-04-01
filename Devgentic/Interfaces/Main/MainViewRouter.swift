@@ -56,7 +56,12 @@ final class MainViewRouter: ObservableObject {
 
     /// Navigate to a profile detail, clearing any existing non-chat stack first.
     /// Used when tapping a different profile in the sidebar while already viewing one.
-    func navigateToProfile(_ profileID: UUID) {
+    ///
+    /// Eagerly activates the edit buffer **before** publishing the new destination
+    /// so `ProfileDetailContainerView` has the buffer ready on its first render
+    /// (no "Profile not found" flash).
+    func navigateToProfile(_ profileID: UUID, activatingBufferOn service: BackendProfileService) {
+        service.activateEditBuffer(for: profileID)
         navigationStack.removeAll()
         navigationStack.append(.chat)
         activeDestination = .profileDetail(profileID: profileID)

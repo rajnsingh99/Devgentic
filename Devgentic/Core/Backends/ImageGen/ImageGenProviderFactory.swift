@@ -49,7 +49,7 @@ enum ImageGenProviderFactory {
             return MLXImageGenService(modelName: config.modelName)
 
         case .ollama:
-            let baseURL = config.baseURL ?? "http://localhost:11434"
+            let baseURL = config.baseURL ?? ProviderDefaults.ollamaBaseURL.absoluteString
             logger.info("Creating Ollama image provider for model: \(config.modelName)")
             return OllamaImageGenService(
                 modelName: config.modelName,

@@ -51,7 +51,7 @@ final class BackendConfiguration: ObservableObject {
     // Helper to get an immutable snapshot for requests
     func getRequestConfig() -> BackendRequestConfig? {
         guard let profileID = selectedProfileID,
-              let profile = BackendProfileStore.shared.fetchProfiles().first(where: { $0.id == profileID }) else {
+              let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == profileID }) else {
             logger.warning("Could not create request config: Profile ID is nil or profile not found in store.")
             return nil
         }

@@ -60,6 +60,16 @@ actor GlobalRateLimiter {
                 lastRefill: Date()
             ),
             
+            // Anthropic Claude: ~50 RPM (Conservative for Tier 1)
+            // Rate: 50/60 = 0.83 tokens/sec
+            // Burst: 5 tokens
+            .anthropic: Bucket(
+                maxBurst: 5.0,
+                tokensPerSecond: 50.0 / 60.0,
+                currentTokens: 5.0,
+                lastRefill: Date()
+            ),
+
             // Local (Ollama/MLX):
             // Hardware limited. We throttle slightly to keep the UI responsive.
             // 60 RPM (1/sec)

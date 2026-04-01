@@ -84,4 +84,123 @@ class RAGIndexingService {
             logger.warning("Failed to generate any embeddings for message \(message.id.uuidString). Vector ingestion failed.")
         }
     }
+
+    // MARK: - Batch File Indexing (Awaitable)
+
+    /// Index multiple attached files for RAG-based retrieval.
+    /// Unlike `indexFileAttachment()`, this is awaitable — the contextualRAG pipeline
+    /// needs indexing to complete before retrieval can return relevant chunks.
+    func indexAttachedFiles(
+        files: [FileSystemItem],
+        conversationID: UUID,
+        messageID: UUID
+    ) async {
+        let fileProcessor = FileProcessorService()
+
+        for file in files {
+            let registry = DocumentExtractionRegistry.shared
+            let canExtract = registry.canExtract(from: file.url)
+            let isText = fileProcessor.isTextFile(
+                mimeType: fileProcessor.getFileMimeType(for: file.url),
+                url: file.url
+            )
+
+            guard canExtract || isText else {
+                logger.info("Skipping non-extractable file for RAG: \(file.name)")
+                continue
+            }
+
+            guard let text = await fileProcessor.readFileContent(for: file.url) else {
+                logger.warning("Failed to extract text from \(file.name) for RAG indexing")
+                continue
+            }
+
+            let sanitizedText = OutputSanitizer.stripThinkBlocksAndTokens(text)
+            guard !sanitizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            // Chunk the extracted text
+            let blocks = [ContentBlock(id: "file-\(file.id)", type: .paragraph(sanitizedText))]
+            let chunks = SemanticChunker(maxChunkSize: 512, overlap: 50).chunk(blocks: blocks)
+            guard !chunks.isEmpty else { continue }
+
+            // Generate embeddings for each chunk
+            var childEntities: [ChildChunkEntity] = []
+            for (index, chunkText) in chunks.enumerated() {
+                guard !chunkText.isEmpty else { continue }
+                if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
+                    childEntities.append(ChildChunkEntity(
+                        chunkText: chunkText,
+                        embedding: embedding,
+                        chunkIndex: index
+                    ))
+                }
+            }
+
+            guard !childEntities.isEmpty else { continue }
+
+            // Create parent document referencing the file
+            let parentDoc = ParentDocumentEntity(
+                sourceMessageID: messageID,
+                conversationID: conversationID,
+                fullTextContent: "[File: \(file.name)]\n\(sanitizedText)",
+                timestamp: Date()
+            )
+
+            vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
+            logger.info("RAG-indexed attachment: \(file.name) → \(childEntities.count) chunks")
+        }
+    }
+
+    // MARK: - Single File Attachment Indexing (Fire-and-Forget)
+
+    /// Index attached file content for semantic retrieval.
+    /// Called after successful document extraction to enable RAG search across uploaded documents.
+    func indexFileAttachment(
+        fileURL: URL,
+        extractedText: String,
+        conversationID: UUID,
+        messageID: UUID
+    ) {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+
+            let sanitizedText = OutputSanitizer.stripThinkBlocksAndTokens(extractedText)
+            guard !sanitizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+            // Chunk the extracted file content using paragraph-based semantic chunking
+            let blocks = [ContentBlock(id: "file-0", type: .paragraph(sanitizedText))]
+            let chunks = SemanticChunker(maxChunkSize: 512, overlap: 50).chunk(blocks: blocks)
+
+            guard !chunks.isEmpty else { return }
+
+            // Generate embeddings for each chunk
+            var childEntities: [ChildChunkEntity] = []
+            for (index, chunkText) in chunks.enumerated() {
+                guard !chunkText.isEmpty else { continue }
+                if let embedding = await embeddingService.generateEmbedding(for: chunkText) {
+                    let child = ChildChunkEntity(
+                        chunkText: chunkText,
+                        embedding: embedding,
+                        chunkIndex: index
+                    )
+                    childEntities.append(child)
+                }
+            }
+
+            guard !childEntities.isEmpty else { return }
+
+            // Create parent document referencing the file
+            let parentDoc = ParentDocumentEntity(
+                sourceMessageID: messageID,
+                conversationID: conversationID,
+                fullTextContent: "[File: \(fileURL.lastPathComponent)]\n\(sanitizedText)",
+                timestamp: Date()
+            )
+
+            vectorStoreService.addSemanticDocument(parent: parentDoc, children: childEntities)
+            self.logger.info("Indexed file attachment: \(fileURL.lastPathComponent) (\(childEntities.count) chunks)")
+        }
+    }
 }

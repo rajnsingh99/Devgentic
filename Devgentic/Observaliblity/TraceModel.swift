@@ -24,15 +24,14 @@ struct ProfileInfo {
         // Extract the provider only if the profile is a bot or an agent,
         // as workflows don't have a single, direct provider.
         switch profile.details {
-        case .bot(let llmConfig, _):
-            self.provider = llmConfig.apiProvider
-        // FIXED: Added an extra wildcard `_` to account for 'architecture'
-        case .agent(let llmConfig, _, _, _, _, _):
-            self.provider = llmConfig.apiProvider
+        case .bot(let config):
+            self.provider = config.llmConfig.apiProvider
+        case .agent(let config):
+            self.provider = config.llmConfig.apiProvider
         case .workflow:
             self.provider = nil
-        case .imageGen(let llmConfig, _, _, _):
-            self.provider = llmConfig.apiProvider
+        case .imageGen(let config):
+            self.provider = config.llmConfig.apiProvider
         }
     }
 }

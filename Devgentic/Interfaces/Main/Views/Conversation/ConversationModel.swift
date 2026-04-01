@@ -172,7 +172,7 @@ struct Conversation: Identifiable, Codable, Equatable {
         lhs.id == rhs.id && lhs.messages == rhs.messages && lhs.isPinned == rhs.isPinned
     }
 
-    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, isPinned: Bool = false, openAIThreadID: String? = nil, backendType: BackendType? = .none, backendEntityId: UUID? = nil) {
+    init(id: UUID = UUID(), messages: [ChatMessage] = [], timestamp: Date = Date(), userDefinedTitle: String? = nil, isPinned: Bool = false, openAIThreadID: String? = nil, backendType: BackendType? = nil, backendEntityId: UUID? = nil) {
         self.id = id
         self.messages = messages
         self.timestamp = timestamp

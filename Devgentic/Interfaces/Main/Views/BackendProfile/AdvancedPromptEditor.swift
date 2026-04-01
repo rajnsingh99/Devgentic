@@ -110,19 +110,19 @@ struct AvailableTool: Identifiable, Equatable {
     }
 }
 
-/// An ObservableObject to manage the state of the active popover for keyboard navigation.
-@MainActor
-class MentionState: ObservableObject {
-    @Published var selectedIndex: Int = 0
-    @Published var maxIndex: Int = 0
+/// Manages the state of the active tool mention popover for keyboard navigation.
+@Observable @MainActor
+class MentionState {
+    var selectedIndex: Int = 0
+    var maxIndex: Int = 0
     var activeTools: [AvailableTool] = []
 }
 
-/// An ObservableObject to manage the state of the active prompt popover for keyboard navigation.
-@MainActor
-class PromptMentionState: ObservableObject {
-    @Published var selectedIndex: Int = 0
-    @Published var maxIndex: Int = 0
+/// Manages the state of the active prompt mention popover for keyboard navigation.
+@Observable @MainActor
+class PromptMentionState {
+    var selectedIndex: Int = 0
+    var maxIndex: Int = 0
     var activePrompts: [DevPrompt] = []
 }
 
@@ -368,7 +368,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
     }
 
     @MainActor
-    class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
+    class Coordinator: NSObject, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
         var parent: TokenizingTextEditor
         var popover: NSPopover?
         var promptPopover: NSPopover?
@@ -686,7 +686,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
 // MARK: - Popover UI Components
 
 struct ToolMentionListView: View {
-    @ObservedObject var state: MentionState
+    @Bindable var state: MentionState
     let onSelect: (AvailableTool) -> Void
     @Environment(\.appTheme) private var theme
 
@@ -714,9 +714,9 @@ struct ToolMentionListView: View {
                         }
                     }
                 }
-                .onChange(of: state.selectedIndex) { newIndex in
+                .onChange(of: state.selectedIndex) { oldValue, newValue in
                     withAnimation(.easeInOut(duration: 0.1)) {
-                        proxy.scrollTo(newIndex, anchor: .center)
+                        proxy.scrollTo(newValue, anchor: .center)
                     }
                 }
             }
@@ -774,7 +774,7 @@ struct ToolMentionRow: View {
 }
 
 struct PromptMentionListView: View {
-    @ObservedObject var state: PromptMentionState
+    @Bindable var state: PromptMentionState
     let onSelect: (DevPrompt) -> Void
     @Environment(\.appTheme) private var theme
 
@@ -802,9 +802,9 @@ struct PromptMentionListView: View {
                         }
                     }
                 }
-                .onChange(of: state.selectedIndex) { newIndex in
+                .onChange(of: state.selectedIndex) { oldValue, newValue in
                     withAnimation(.easeInOut(duration: 0.1)) {
-                        proxy.scrollTo(newIndex, anchor: .center)
+                        proxy.scrollTo(newValue, anchor: .center)
                     }
                 }
             }

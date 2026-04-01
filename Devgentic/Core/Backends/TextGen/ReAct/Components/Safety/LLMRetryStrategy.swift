@@ -23,19 +23,38 @@ struct LLMRetryStrategy: LLMRetryHandling {
     // MARK: - Error Handling
     
     mutating func handleError(_ error: Error) -> RetryAction {
+        // --- Structured Cloud Provider Error (from CloudRequestPipeline) ---
+        // This is the preferred path for cloud providers (Anthropic, OpenAI, Gemini)
+        // which provides exact status codes and retry-after headers.
+        if let cloudError = error as? CloudProviderError {
+            if cloudError.statusCode == 429 {
+                consecutiveRetries += 1
+                let retryAfter = cloudError.retryAfterSeconds ?? pow(2.0, Double(min(consecutiveRetries, 6)))
+                let retrySecs = Int(retryAfter)
+                logger.warning("Cloud 429 (\(String(describing: cloudError.provider))). request-id: \(cloudError.requestId ?? "n/a"). Throttling for \(retrySecs)s.")
+                return .throttle(seconds: retryAfter, message: "🛑 API Quota Hit. Pausing for \(retrySecs)s...")
+            }
+            if cloudError.statusCode >= 500 {
+                logger.warning("Cloud server error (\(cloudError.statusCode)). request-id: \(cloudError.requestId ?? "n/a"). Retrying.")
+                return .networkRetry(message: "⏳ Server Error (\(cloudError.statusCode)). Retrying...")
+            }
+            // For 4xx errors other than 429 (e.g., 400 bad request, 401 auth),
+            // these are not retryable — fall through to parse failure handling.
+        }
+
+        // --- Legacy String-Based Detection (for local providers: Ollama, MLX) ---
         let errorDesc = error.localizedDescription
         let isRateLimit = errorDesc.contains("429") || errorDesc.localizedCaseInsensitiveContains("rate limit")
         let isTimeout = (error as? URLError)?.code == .timedOut || errorDesc.contains("timed out")
-        
+
         if isRateLimit {
             consecutiveRetries += 1
             let retryAfter = extractRetryAfter(from: error, consecutiveRetries: consecutiveRetries)
-            // Local capture for OSLog
             let retrySecs = Int(retryAfter)
             logger.warning("Rate limit hit (HTTP 429). Throttling for \(retrySecs)s.")
             return .throttle(seconds: retryAfter, message: "🛑 API Quota Hit. Pausing for \(retrySecs)s...")
         }
-        
+
         if isTimeout {
             logger.warning("Network timeout. Retrying request.")
             return .networkRetry(message: "⏳ Network Timeout. Retrying request...")

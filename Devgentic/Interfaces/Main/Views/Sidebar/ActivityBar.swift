@@ -59,6 +59,7 @@ struct HomeButton: View {
         .buttonStyle(ScaleButtonStyle())
         .foregroundColor(theme.secondaryText)
         .help("Home")
+        .accessibilityLabel("Home")
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
@@ -130,6 +131,7 @@ struct ActivityBarButton: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isActive)
         .animation(.easeInOut(duration: 0.3), value: showBadge)
         .help(tab.title)
+        .accessibilityLabel(tab.title)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering

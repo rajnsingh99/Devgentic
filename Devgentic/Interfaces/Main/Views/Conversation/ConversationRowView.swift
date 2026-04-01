@@ -103,14 +103,6 @@ struct ConversationRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 // Title row with timestamp
                 HStack(spacing: 5) {
-                    // Inline pin icon
-                    if conversation.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 9))
-                            .foregroundColor(theme.secondaryText.opacity(0.6))
-                            .rotationEffect(.degrees(-45))
-                    }
-
                     // Backend colored dot
                     if let backendType = conversation.backendType, backendType != .none {
                         Circle()
@@ -140,7 +132,7 @@ struct ConversationRowView: View {
                     .font(.system(size: 11))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
-                    .padding(.leading, conversation.isPinned ? 14 : (conversation.backendType != nil && conversation.backendType != .none ? 11 : 0))
+                    .padding(.leading, (conversation.backendType != nil && conversation.backendType != .none) ? 11 : 0)
             }
         }
     }

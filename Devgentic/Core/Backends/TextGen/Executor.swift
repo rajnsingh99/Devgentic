@@ -43,8 +43,8 @@ enum ExecutorFactory {
         case .agent:
             // Route to the correct architecture based on the profile's configuration.
             let architecture: AgentArchitecture
-            if case .agent(_, let arch, _, _, _, _) = profile.details {
-                architecture = arch
+            if case .agent(let config) = profile.details {
+                architecture = config.architecture
             } else {
                 architecture = .reAct
             }
@@ -65,6 +65,10 @@ enum ExecutorFactory {
 
         case .workflow:
             return WorkflowExecutor()
+
+        case .imageGen:
+            // ImageGen profiles use a simple pass-through executor.
+            return ChatExecutor()
 
         @unknown default:
             // Safety fallback for future enum cases

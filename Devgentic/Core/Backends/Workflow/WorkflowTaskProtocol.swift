@@ -36,6 +36,9 @@ struct WorkflowTaskEnvelope: Sendable {
     /// The downstream model's supported modalities (for context compilation).
     let targetModalities: SupportedModalities
 
+    /// Extracted content from user-attached files (available to every node).
+    let fileContext: String?
+
     init(
         taskID: UUID = UUID(),
         nodeID: UUID,
@@ -43,7 +46,8 @@ struct WorkflowTaskEnvelope: Sendable {
         query: String,
         upstreamContext: [NodeResultEnvelope] = [],
         constraints: ExecutionConstraints = .default,
-        targetModalities: SupportedModalities = .textOnly
+        targetModalities: SupportedModalities = .textOnly,
+        fileContext: String? = nil
     ) {
         self.taskID = taskID
         self.nodeID = nodeID
@@ -52,6 +56,7 @@ struct WorkflowTaskEnvelope: Sendable {
         self.upstreamContext = upstreamContext
         self.constraints = constraints
         self.targetModalities = targetModalities
+        self.fileContext = fileContext
     }
 }
 

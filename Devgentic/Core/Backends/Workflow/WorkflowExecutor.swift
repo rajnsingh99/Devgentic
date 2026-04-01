@@ -40,7 +40,7 @@ actor WorkflowExecutor: Executor {
         // Delegate to the workflow-specific entry point with empty agents.
         // In practice, this path is never hit — AgentConnect calls executeWorkflow() directly.
         return executeWorkflow(
-            agents: [],
+            agentProfileIDs: [],
             userInput: input.userInput,
             chatHistory: input.chatHistory,
             conversationID: input.conversationID,
@@ -65,7 +65,7 @@ actor WorkflowExecutor: Executor {
     ///   - onTraceUpdate: Callback for trace log events.
     /// - Returns: An `AsyncThrowingStream` of `AgentStreamEvent` for UI consumption.
     nonisolated func executeWorkflow(
-        agents: [BackendProfileModel],
+        agentProfileIDs: [UUID],
         userInput: String,
         chatHistory: [ChatMessage],
         conversationID: UUID,
@@ -76,7 +76,7 @@ actor WorkflowExecutor: Executor {
 
         let profileID = workflowProfileID
 
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream<AgentStreamEvent, Error> { continuation in
             let task = Task {
                 do {
                     logger.info("Workflow execution initiated for profile: \(profileID)")
@@ -98,13 +98,13 @@ actor WorkflowExecutor: Executor {
                     logger.info("DAG validated: \(layout.nodes.count) nodes, \(layout.edges.count) edges. Execution order: \(sortedNodeIDs.map(\.uuidString).joined(separator: " → "))")
 
                     // =====================================================================
-                    // 2. BUILD PROFILE LOOKUP
+                    // 2. BUILD PROFILE LOOKUP (resolve UUIDs → snapshots)
                     // =====================================================================
 
-                    // The `agents` array is the live set of BackendProfileModels
-                    // embedded in ProfileDetails.workflow at canvas save time.
+                    // Resolve agent profile UUIDs to live snapshots from the profile store.
+                    let resolvedProfiles = await MainActor.run { (try? BackendProfileStore.shared.fetchProfiles()) ?? [] }
                     let profileMap = Dictionary(
-                        agents.map { ($0.id, $0) },
+                        resolvedProfiles.filter { agentProfileIDs.contains($0.id) }.map { ($0.id, $0) },
                         uniquingKeysWith: { first, _ in first }
                     )
 
@@ -236,13 +236,13 @@ actor WorkflowExecutor: Executor {
                                 case .toolCall(let name, let params):
                                     continuation.yield(.toolCall(name: name, params: params))
 
-                                case .requestConfirmation(let toolName, let params):
-                                    // Bubble up HITL permission requests
-                                    continuation.yield(.requestConfirmation(toolName: toolName, params: params))
+                                case .requestConfirmation(let toolName, let params, let operationID):
+                                    // Bubble up HITL permission requests (preserve operationID)
+                                    continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID))
 
-                                case .requestClarification(let question):
-                                    // Prefix clarification with node name for context
-                                    continuation.yield(.requestClarification(question: "[\(node.displayName)] \(question)"))
+                                case .requestClarification(let question, let operationID):
+                                    // Prefix clarification with node name for context (preserve operationID)
+                                    continuation.yield(.requestClarification(question: "[\(node.displayName)] \(question)", operationID: operationID))
 
                                 case .error(let errMsg):
                                     continuation.yield(.error("[\(node.displayName)] \(errMsg)"))

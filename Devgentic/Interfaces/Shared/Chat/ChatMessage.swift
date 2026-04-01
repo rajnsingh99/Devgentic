@@ -52,6 +52,11 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     /// The distributed trace ID for the request that produced this message.
     /// Set when agent execution begins; used to retrieve trace data for the Report UI.
     var traceID: String?
+
+    /// Where this message originated from (local Mac UI, Telegram, Discord, etc.).
+    /// Transient — not persisted to CoreData. Used by RemoteMirrorService to decide
+    /// whether to mirror stream events to a remote transport.
+    var messageSource: MessageSource = .localUI
     
     @Published var content: MessageContent
     @Published var agentResponse: AgentResponse?

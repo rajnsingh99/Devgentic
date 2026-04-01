@@ -3,133 +3,106 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 19/03/26.
+//  Redesigned: dual-view dispatch based on Developer Mode toggle.
 //
 
 import SwiftUI
 
 struct ReportInspectorView: View {
     @State private var viewModel: ReportViewModel
+    @AppStorage(AppSettings.developerModeKey) private var isDeveloperMode: Bool = false
     @Environment(\.dismiss) private var dismiss
-    
+    @Environment(\.appTheme) private var theme
+
     init(messageID: UUID, conversationID: UUID, traceID: String?) {
-        _viewModel = State(initialValue: ReportViewModel(messageID: messageID, conversationID: conversationID, traceID: traceID))
+        _viewModel = State(initialValue: ReportViewModel(
+            messageID: messageID,
+            conversationID: conversationID,
+            traceID: traceID
+        ))
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Execution Report")
-                        .font(.headline)
-                    if let profileName = viewModel.activeTraceRecord?.profileName {
-                        Text("Profile: \(profileName)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                
-                Spacer()
-                
-                Picker("Scope", selection: $viewModel.scope) {
-                    ForEach(ReportScope.allCases) { scope in
-                        Text(scope.rawValue).tag(scope)
-                    }
-                }
-                .pickerStyle(.menu)
-                .frame(width: 150)
-                
-                Toggle("Debug", isOn: $viewModel.showDebugEvents)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                
-                Button(action: exportReport) {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                .buttonStyle(.plain)
-                .help("Export JSON")
-                
-                Button(action: { dismiss() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding()
-            .background(Color(NSColor.windowBackgroundColor))
-            
-            Divider()
-            
-            if viewModel.isLoading {
-                Spacer()
-                ProgressView("Loading trace data...")
-                Spacer()
-            } else if let error = viewModel.error {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.largeTitle)
-                        .foregroundStyle(.red)
-                    Text(error)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
+            // Shared header
+            header
+
+            Divider().background(theme.dividerColor)
+
+            // Mode-dispatched content
+            if isDeveloperMode {
+                DeveloperReportView(viewModel: viewModel, onExport: exportDeveloperReport)
             } else {
-                HSplitView {
-                    // Left Panel: Span Tree
-                    SpanTreeView(
-                        spans: viewModel.visibleSpans,
-                        selectedSpanID: $viewModel.selectedSpanID
-                    )
-                    .frame(minWidth: 200, idealWidth: 300)
-                    
-                    // Right Panel: Event Timeline
-                    if viewModel.isEventsLoading {
-                        VStack {
-                            Spacer()
-                            ProgressView("Fetching events...")
-                                .controlSize(.small)
-                            Spacer()
-                        }
-                        .frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        EventTimelineView(events: viewModel.visibleEvents)
-                            .frame(minWidth: 300, idealWidth: 500)
-                    }
-                }
-            }
-            
-            // Footer (Summary)
-            if !viewModel.isLoading, viewModel.activeTraceRecord != nil {
-                Divider()
-                HStack(spacing: 16) {
-                    summaryItem(icon: "clock", text: "\(viewModel.summary.totalDurationMs)ms")
-                    summaryItem(icon: "bolt", text: "\(viewModel.summary.totalIterations) Steps")
-                    summaryItem(icon: "exclamationmark.triangle", text: "\(viewModel.summary.parseErrors) Errors", color: viewModel.summary.parseErrors > 0 ? .red : .secondary)
-                    Spacer()
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(Color(NSColor.controlBackgroundColor))
+                UserFeedbackView(viewModel: viewModel)
             }
         }
-        .frame(minWidth: 700, minHeight: 400)
+        .frame(
+            minWidth: isDeveloperMode ? 700 : 420,
+            minHeight: isDeveloperMode ? 400 : 340
+        )
+        .background(theme.primaryBackground)
         .task {
             await viewModel.loadData()
         }
     }
-    
-    private func summaryItem(icon: String, text: String, color: Color = .secondary) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-            Text(text)
+
+    // MARK: - Shared Header
+
+    private var header: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(isDeveloperMode ? "Execution Trace" : "Feedback")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(theme.primaryText)
+
+                if let profileName = viewModel.activeTraceRecord?.profileName {
+                    Text(profileName)
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.secondaryText)
+                }
+            }
+
+            Spacer()
+
+            // Mode indicator pill
+            HStack(spacing: 4) {
+                Image(systemName: isDeveloperMode ? "hammer.fill" : "person.fill")
+                    .font(.system(size: 9))
+                Text(isDeveloperMode ? "Developer" : "User")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(theme.secondaryText)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(theme.surfaceOverlay)
+            .clipShape(Capsule())
+
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(theme.secondaryText)
+                    .frame(width: 22, height: 22)
+                    .background(theme.secondaryBackground)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Close")
         }
-        .font(.caption)
-        .foregroundStyle(color)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
-    
-    private func exportReport() {
-        guard let url = viewModel.exportAsJSON() else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+
+    // MARK: - Export
+
+    private func exportDeveloperReport() {
+        guard let trace = viewModel.activeTraceRecord else { return }
+
+        if let url = ReportExporter.export(
+            trace: trace,
+            summary: viewModel.summary,
+            isDeveloperMode: true
+        ) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
     }
 }

@@ -6,53 +6,49 @@
 //
 //  Configuration detail view for Image Generator profiles.
 //  Updated to adopt Modern Dashboard UI, Model Pickers, and dynamic capabilities.
+//  Refactored on 27/03/26 to use ProfileEditBuffer (single source of truth for dirty tracking).
 //
 
 import SwiftUI
 import Flux2Core
 
 struct ImageGenConfigDetailView: View {
-    @Binding var profile: BackendProfileModel
+    @Bindable var editBuffer: ProfileEditBuffer
+    var onDelete: ((UUID) -> Void)? = nil
     @EnvironmentObject var profileService: BackendProfileService
+    @EnvironmentObject private var toastManager: ToastManager
     @Environment(\.appTheme) private var theme
 
-    // State to track unsaved changes
-    @State private var initialProfileState: BackendProfileModel?
-    private var hasChanges: Bool {
-        profile != initialProfileState
-    }
+    // Advanced config local state
+    @State private var localAdvancedConfig: ImageGenAdvancedConfig = .default()
 
     // Guard flag: prevents onChange handlers from writing during initial load
     @State private var isLoadingAdvancedConfig = false
 
-    // UI State for API Key Visibility and Endpoint Editing
-    @State private var isApiKeyVisible: Bool = false
-    @State private var isEditingBaseURL: Bool = false
-    
     // Deletion State
     @State private var showingDeleteAlert = false
 
     // Button Hover States
     @State private var isDeleteHovered = false
-    @State private var isRevertHovered = false
-    @State private var isSaveHovered = false
+
+    // MARK: - Convenience Accessors
+
+    private var profile: Binding<BackendProfileModel> {
+        $editBuffer.draft
+    }
 
     // MARK: - Computed Bindings
 
     private var providerConfig: Binding<ProviderConfig> {
         Binding<ProviderConfig>(
             get: {
-                if case .imageGen(let llmConfig, _, _, _) = profile.details { return llmConfig }
+                if case .imageGen(let config) = editBuffer.draft.details { return config.llmConfig }
                 return ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
             },
             set: { newConfig in
-                if case .imageGen(_, let negativePrompt, let aspectRatio, let advancedSettings) = profile.details {
-                    profile.details = .imageGen(
-                        llmConfig: newConfig,
-                        negativePrompt: negativePrompt,
-                        defaultAspectRatio: aspectRatio,
-                        advancedSettings: advancedSettings
-                    )
+                if case .imageGen(var config) = editBuffer.draft.details {
+                    config.llmConfig = newConfig
+                    editBuffer.draft.details = .imageGen(config)
                 }
             }
         )
@@ -61,18 +57,13 @@ struct ImageGenConfigDetailView: View {
     private var negativePromptBinding: Binding<String> {
         Binding<String>(
             get: {
-                if case .imageGen(_, let negativePrompt, _, _) = profile.details { return negativePrompt ?? "" }
+                if case .imageGen(let config) = editBuffer.draft.details { return config.negativePrompt ?? "" }
                 return ""
             },
             set: { newValue in
-                let val = String(newValue.prefix(2000))
-                if case .imageGen(let config, _, let aspectRatio, let advancedSettings) = profile.details {
-                    profile.details = .imageGen(
-                        llmConfig: config,
-                        negativePrompt: val.isEmpty ? nil : val,
-                        defaultAspectRatio: aspectRatio,
-                        advancedSettings: advancedSettings
-                    )
+                if case .imageGen(var config) = editBuffer.draft.details {
+                    config.negativePrompt = newValue.isEmpty ? nil : newValue
+                    editBuffer.draft.details = .imageGen(config)
                 }
             }
         )
@@ -81,28 +72,29 @@ struct ImageGenConfigDetailView: View {
     private var aspectRatioBinding: Binding<ImageAspectRatio> {
         Binding<ImageAspectRatio>(
             get: {
-                if case .imageGen(_, _, let ratio, _) = profile.details { return ratio ?? .square }
+                if case .imageGen(let config) = editBuffer.draft.details { return config.defaultAspectRatio ?? .square }
                 return .square
             },
             set: { newValue in
-                if case .imageGen(let config, let negativePrompt, _, let advancedSettings) = profile.details {
-                    profile.details = .imageGen(
-                        llmConfig: config,
-                        negativePrompt: negativePrompt,
-                        defaultAspectRatio: newValue,
-                        advancedSettings: advancedSettings
-                    )
+                if case .imageGen(var config) = editBuffer.draft.details {
+                    config.defaultAspectRatio = newValue
+                    editBuffer.draft.details = .imageGen(config)
                 }
             }
         )
     }
 
-    private var baseURLBinding: Binding<String> {
-        Binding<String>(
-            get: { providerConfig.wrappedValue.baseURL ?? "" },
+    private var advancedSettingsBinding: Binding<[String: JSONValue]?> {
+        Binding<[String: JSONValue]?>(
+            get: {
+                if case .imageGen(let config) = editBuffer.draft.details { return config.advancedSettings }
+                return nil
+            },
             set: { newValue in
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                providerConfig.wrappedValue.baseURL = trimmed.isEmpty ? nil : trimmed
+                if case .imageGen(var config) = editBuffer.draft.details {
+                    config.advancedSettings = newValue
+                    editBuffer.draft.details = .imageGen(config)
+                }
             }
         )
     }
@@ -125,8 +117,8 @@ struct ImageGenConfigDetailView: View {
             }
 
             ScrollView {
-                VStack(spacing: 24) {
-                
+                VStack(spacing: 32) {
+
                 // 1. Identity Header
                 HStack(alignment: .center, spacing: 16) {
                     Image(systemName: "paintbrush.fill")
@@ -134,14 +126,14 @@ struct ImageGenConfigDetailView: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 48, height: 48)
                         .foregroundColor(.orange)
-                        
+
                     VStack(alignment: .leading) {
-                        TextField("Profile Name", text: $profile.displayName)
+                        TextField("Profile Name", text: profile.displayName)
                             .font(.title2)
                             .fontWeight(.bold)
                             .textFieldStyle(.plain)
                             .foregroundColor(theme.primaryText)
-                        
+
                         Text("AI-powered image generation")
                             .font(.subheadline)
                             .foregroundColor(theme.secondaryText)
@@ -151,49 +143,45 @@ struct ImageGenConfigDetailView: View {
                 .padding(.bottom, 8)
 
                 // 2. Inference Engine (Provider)
-                ModernSection(title: "Inference Engine", icon: "server.rack") {
-                    
-                    HStack(alignment: .center) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Image Provider")
-                                .fontWeight(.medium)
-                            Text("The underlying engine generating the visuals.")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        
-                        Spacer(minLength: 16)
-                        
-                        providerPicker
-                            .labelsHidden()
-                            .fixedSize()
+                SettingsCard(title: "Inference Engine", icon: "server.rack", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ProviderConfigSection(
+                        providerConfig: providerConfig,
+                        profileID: editBuffer.draft.id,
+                        profileType: .imageGen,
+                        customMLXContent: AnyView(
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(alignment: .center) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text("Model Selection")
+                                            .fontWeight(.medium)
+                                        Text("Flux2 models run fully on-device via Apple Silicon.")
+                                            .font(.caption)
+                                            .foregroundColor(theme.secondaryText)
+                                    }
+                                    Spacer(minLength: 16)
+                                    Flux2ModelPickerView(selectedModel: providerConfig.modelName)
+                                        .frame(maxWidth: 260, alignment: .trailing)
+                                }
+                            }
+                            .onAppear { snapToValidFlux2Model() }
+                        )
+                    )
                     }
-                    
-                    Divider()
-                    
-                    // Dynamic Fields
-                    VStack(alignment: .leading, spacing: 12) {
-                        switch providerConfig.wrappedValue.apiProvider {
-                        case .ollama:
-                            ollamaFields
-                        case .mlx:
-                            mlxFields
-                        default:
-                            remoteFields
-                        }
-                    }
+                    .padding(16)
                 }
-                
+
                 // 3. Generation Defaults
-                ModernSection(title: "Generation Defaults", icon: "slider.horizontal.3") {
+                SettingsCard(title: "Generation Defaults", icon: "slider.horizontal.3", theme: theme) {
+                  VStack(alignment: .leading, spacing: 16) {
                     HStack(alignment: .center) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Aspect Ratio")
                                 .fontWeight(.medium)
                         }
-                        
+
                         Spacer(minLength: 16)
-                        
+
                         Picker("", selection: aspectRatioBinding) {
                             ForEach(ImageAspectRatio.allCases) { ratio in
                                 Text(ratio.rawValue).tag(ratio)
@@ -203,7 +191,7 @@ struct ImageGenConfigDetailView: View {
                         .frame(maxWidth: 120)
                         .labelsHidden()
                     }
-                    
+
                     // Aspect Ratio Preview
                     HStack {
                         Spacer()
@@ -219,17 +207,19 @@ struct ImageGenConfigDetailView: View {
                         Spacer()
                     }
                     .padding(.top, 8)
+                  }
+                  .padding(16)
                 }
 
                 // 4. Negative Prompt
-                ModernSection(title: "Negative Prompt", icon: "xmark.circle") {
+                SettingsCard(title: "Negative Prompt", icon: "xmark.circle", theme: theme) {
                     VStack(alignment: .leading, spacing: 8) {
                         if providerConfig.wrappedValue.apiProvider == .mlx {
                             HStack(spacing: 6) {
                                 Image(systemName: "info.circle")
                                     .foregroundColor(.orange)
                                     .font(.caption)
-                                Text("Flux2 models don't have a native negative prompt parameter. This text is appended to your prompt as \"Avoid: …\" for soft guidance.")
+                                Text("Flux2 models don't have a native negative prompt parameter. This text is appended to your prompt as \"Avoid: \u{2026}\" for soft guidance.")
                                     .font(.caption)
                                     .foregroundColor(theme.secondaryText)
                             }
@@ -253,11 +243,28 @@ struct ImageGenConfigDetailView: View {
                                 RoundedRectangle(cornerRadius: 8)
                                     .stroke(theme.dividerColor, lineWidth: 1)
                             )
+
+                        let npCount = negativePromptBinding.wrappedValue.count
+                        if npCount > 0 {
+                            Text("\(npCount) characters")
+                                .font(.caption2)
+                                .foregroundColor(npCount > 5_000 ? .orange : theme.secondaryText)
+                        }
                     }
+                    .padding(16)
                 }
 
-                // 5. Capability Badge
-                ModernSection(title: "Model Capabilities", icon: "checkmark.shield") {
+                // 5. Advanced Configuration
+                SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
+                    ImageGenSettingsView(
+                        config: $localAdvancedConfig,
+                        provider: providerConfig.wrappedValue.apiProvider
+                    )
+                    .padding(16)
+                }
+
+                // 6. Capability Badge
+                SettingsCard(title: "Model Capabilities", icon: "checkmark.shield", theme: theme) {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(spacing: 16) {
                             capabilityBadge(
@@ -276,120 +283,34 @@ struct ImageGenConfigDetailView: View {
                                 .foregroundColor(theme.secondaryText)
                         }
                     }
+                    .padding(16)
                 }
             }
-            .padding()
+            .padding(24)
+            .padding(.bottom, 24)
             .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity)
         }
         } // end outer VStack
-        .onAppear {
+        .task {
             isLoadingAdvancedConfig = true
+            loadAdvancedConfig()
             isLoadingAdvancedConfig = false
-            initialProfileState = profile
         }
-        .onChange(of: profile.id) { _ in
-            isLoadingAdvancedConfig = true
-            isLoadingAdvancedConfig = false
-            initialProfileState = profile
-        }
-        .onChange(of: providerConfig.wrappedValue.apiProvider) { _ in
-            isEditingBaseURL = false
+        .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
             // When switching to MLX, immediately correct any invalid model name
             if providerConfig.wrappedValue.apiProvider == .mlx {
                 snapToValidFlux2Model()
             }
+            // Reload advanced config with provider-appropriate defaults
+            isLoadingAdvancedConfig = true
+            loadAdvancedConfig()
+            isLoadingAdvancedConfig = false
         }
-    }
-
-    // MARK: - Dynamic Inference Fields
-    
-    private var providerPicker: some View {
-        Picker("", selection: providerConfig.apiProvider) {
-            Text("OpenAI").tag(ApiProvider.openAI)
-            Text("Google Gemini").tag(ApiProvider.google)
-            Text("MLX (Apple Silicon)").tag(ApiProvider.mlx)
-            Text("Ollama (Local)").tag(ApiProvider.ollama)
+        .onChange(of: localAdvancedConfig) { _, _ in
+            guard !isLoadingAdvancedConfig else { return }
+            advancedSettingsBinding.wrappedValue = profileService.encodeConfig(from: localAdvancedConfig)
         }
-    }
-    
-    private func defaultBaseURL(for provider: ApiProvider) -> String {
-        switch provider {
-        case .google: return "https://generativelanguage.googleapis.com/v1beta/"
-        case .anthropic: return "https://api.anthropic.com/v1/"
-        case .openAI: return "https://api.openai.com/v1/"
-        case .ollama: return "http://localhost:11434"
-        case .mlx: return "Local Engine"
-        }
-    }
-    
-    @ViewBuilder
-    private func endpointField(for provider: ApiProvider) -> some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("API Endpoint")
-                    .fontWeight(.medium)
-                Text("Optional override for custom gateways.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
-            }
-            
-            Spacer(minLength: 16)
-            
-            HStack {
-                if isEditingBaseURL || (providerConfig.wrappedValue.baseURL != nil && !providerConfig.wrappedValue.baseURL!.isEmpty) {
-                    TextField(defaultBaseURL(for: provider), text: baseURLBinding)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                    
-                    Button(action: {
-                        providerConfig.wrappedValue.baseURL = nil
-                        isEditingBaseURL = false
-                    }) {
-                        Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .foregroundColor(theme.secondaryText)
-                            .help("Reset to Default")
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.leading, 4)
-                } else {
-                    Text(defaultBaseURL(for: provider))
-                        .foregroundColor(theme.secondaryText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 5)
-                        .padding(.horizontal, 8)
-                        .background(theme.secondaryBackground.opacity(0.5))
-                        .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.dividerColor, lineWidth: 1))
-                    
-                    Button("Edit") {
-                        isEditingBaseURL = true
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-            .frame(maxWidth: 350)
-        }
-    }
-
-    @ViewBuilder
-    private var mlxFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection")
-                        .fontWeight(.medium)
-                    Text("Flux2 models run fully on-device via Apple Silicon.")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
-                }
-                Spacer(minLength: 16)
-                Flux2ModelPickerView(selectedModel: providerConfig.modelName)
-                    .frame(maxWidth: 260, alignment: .trailing)
-            }
-        }
-        .onAppear { snapToValidFlux2Model() }
     }
 
     /// If the stored model name isn't a valid Flux2 inference model, reset to klein-4b.
@@ -401,118 +322,15 @@ struct ImageGenConfigDetailView: View {
             providerConfig.wrappedValue.modelName = Flux2Model.klein4B.rawValue
         }
     }
-    
-    @ViewBuilder
-    private var ollamaFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            endpointField(for: providerConfig.wrappedValue.apiProvider)
-            
-            Divider()
 
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection")
-                        .fontWeight(.medium)
-                }
-                Spacer(minLength: 16)
-                
-                // Directly embeds the Ollama Picker (Provides the Manager Store capability)
-                OllamaModelPickerView(
-                    selectedModel: providerConfig.modelName,
-                    cognitiveCapability: .constant(.none),
-                    modelDialect: .constant(.nativeJSON),
-                    modelMetadata: Binding(
-                        get: { providerConfig.wrappedValue.modelMetadata },
-                        set: { providerConfig.wrappedValue.modelMetadata = $0 }
-                    ),
-                    baseURL: providerConfig.wrappedValue.baseURL ?? defaultBaseURL(for: .ollama),
-                    profileID: profile.id,
-                    filterForTools: false
-                )
-                .labelsHidden()
-                .frame(maxWidth: 350, alignment: .trailing)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var remoteFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // API Key Input
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("API Key").fontWeight(.medium)
-                }
-                
-                Spacer(minLength: 16)
-                
-                ZStack(alignment: .trailing) {
-                    Group {
-                        if isApiKeyVisible {
-                            TextField("Enter API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                                .textFieldStyle(.roundedBorder)
-                        } else {
-                            SecureField("Enter API Key", text: providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                                .textFieldStyle(.roundedBorder)
-                        }
-                    }
-                    
-                    Button(action: { isApiKeyVisible.toggle() }) {
-                        Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
-                            .foregroundColor(.secondary)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 8)
-                    .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
-                }
-                .frame(maxWidth: 350)
-            }
-            
-            Divider()
-            
-            endpointField(for: providerConfig.wrappedValue.apiProvider)
-            
-            Divider()
-
-            // Model Selection
-            let currentApiKey = providerConfig.wrappedValue.apiKey ?? ""
-            
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Model Selection").fontWeight(.medium)
-                }
-                
-                Spacer(minLength: 16)
-                
-                if currentApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("Enter a valid API Key to select a model.")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
-                } else {
-                    if providerConfig.wrappedValue.apiProvider == .google {
-                        GeminiModelPickerView(
-                            selectedModel: providerConfig.modelName,
-                            apiKey: currentApiKey
-                        )
-                        .labelsHidden()
-                        .frame(maxWidth: 350, alignment: .trailing)
-                        
-                    } else if providerConfig.wrappedValue.apiProvider == .openAI {
-                        OpenAIModelPickerView(
-                            selectedModel: providerConfig.modelName,
-                            apiKey: currentApiKey
-                        )
-                        .labelsHidden()
-                        .frame(maxWidth: 350, alignment: .trailing)
-                    } else {
-                        TextField("e.g. dall-e-3", text: providerConfig.modelName)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 350)
-                    }
-                }
-            }
-        }
+    private func loadAdvancedConfig() {
+        let defaultConfig: ImageGenAdvancedConfig = providerConfig.wrappedValue.apiProvider == .mlx
+            ? .mlxDefault()
+            : .default()
+        self.localAdvancedConfig = profileService.decodeConfig(
+            from: advancedSettingsBinding.wrappedValue,
+            as: ImageGenAdvancedConfig.self
+        ) ?? defaultConfig
     }
 
     private func capabilityBadge(label: String, supported: Bool) -> some View {
@@ -536,31 +354,39 @@ struct ImageGenConfigDetailView: View {
 
     private var actionBar: some View {
         HStack(spacing: 8) {
-            if hasChanges {
+            if editBuffer.isDirty {
                 Button {
-                    if let initialState = initialProfileState {
-                        profile = initialState
-                    }
+                    editBuffer.revert()
+                    isLoadingAdvancedConfig = true
+                    loadAdvancedConfig()
+                    isLoadingAdvancedConfig = false
                 } label: {
                     Text("Revert")
                         .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
+                .accessibilityLabel("Revert unsaved changes")
                 .foregroundColor(theme.primaryText)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(Capsule().fill(theme.surfaceOverlay))
 
                 Button {
-                    profileService.saveProfile(profile)
-                    initialProfileState = profile
+                    do {
+                        try profileService.saveProfile(editBuffer.draft)
+                        editBuffer.markSaved()
+                        toastManager.show("Profile saved", style: .success)
+                    } catch {
+                        toastManager.show(error.localizedDescription, style: .error)
+                    }
                 } label: {
                     Text("Save")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
+                .accessibilityLabel("Save profile changes")
                 .foregroundColor(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 6)
@@ -580,6 +406,7 @@ struct ImageGenConfigDetailView: View {
                     )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Delete this profile")
             .onHover { isDeleteHovered = $0 }
             .animation(.easeInOut(duration: 0.15), value: isDeleteHovered)
         }

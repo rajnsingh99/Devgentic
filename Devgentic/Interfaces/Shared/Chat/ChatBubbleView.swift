@@ -101,7 +101,7 @@ struct ChatBubbleView: View {
             return false
         }
 
-        let profiles = BackendProfileStore.shared.fetchProfiles()
+        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
         return profiles.first(where: { $0.id == entityId })?.profileType == .agent
     }
 }
@@ -328,6 +328,7 @@ struct AgentMessageActionsView: View {
     @State private var didCopy: Bool = false
     @State private var showVariantsPopover: Bool = false
     @State private var showReportInspector: Bool = false
+    @AppStorage(AppSettings.developerModeKey) private var isDeveloperMode: Bool = false
 
     /// Whether this specific message is currently being read aloud.
     private var isSpeaking: Bool {
@@ -387,11 +388,14 @@ struct AgentMessageActionsView: View {
 
                 if message.traceID != nil || message.agentResponse != nil {
                     ChatActionButton(action: { showReportInspector = true }) {
-                        Label("Report", systemImage: "chart.bar.doc.horizontal")
+                        Label(
+                            isDeveloperMode ? "Trace" : "Feedback",
+                            systemImage: isDeveloperMode ? "chart.bar.doc.horizontal" : "bubble.left.and.exclamationmark.bubble.right"
+                        )
                     }
                     .foregroundColor(theme.secondaryText)
-                    .help("View Execution Trace Report")
-                    .accessibilityLabel("View execution trace report")
+                    .help(isDeveloperMode ? "View Execution Trace" : "Share Feedback")
+                    .accessibilityLabel(isDeveloperMode ? "View execution trace" : "Share feedback on this response")
                 }
 
                 // Read Aloud

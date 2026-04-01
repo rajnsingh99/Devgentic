@@ -23,7 +23,7 @@ struct FileProcessorService {
     ///              Defaults to 500,000 characters.
     /// - Returns: The content of the file as a String, or `nil` if reading fails, the file exceeds `maxSize`,
     ///            or security-scoped access cannot be obtained.
-    func readFileContent(for url: URL, maxSize: Int = 500_000) -> String? {
+    func readFileContent(for url: URL, maxSize: Int = 500_000) async -> String? {
         logger.debug("Attempting to read content for file: \(url.path, privacy: .public)")
 
         let didStartAccess = url.startAccessingSecurityScopedResource()
@@ -32,7 +32,7 @@ struct FileProcessorService {
         } else if didStartAccess {
             logger.debug("Successfully started security-scoped access for \(url.path, privacy: .public)")
         }
-        
+
         defer {
             if didStartAccess {
                 url.stopAccessingSecurityScopedResource()
@@ -40,43 +40,26 @@ struct FileProcessorService {
             }
         }
 
-        do {
-            // --- NEW: PDF Handling Logic ---
-            // Check if the file is a PDF using its UTType.
-            if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .pdf) {
-                guard let pdfDocument = PDFDocument(url: url) else {
-                    logger.warning("Could not initialize PDFDocument for: \(url.lastPathComponent, privacy: .public)")
-                    return nil
+        // Try document extraction for rich formats first (PDF, DOCX, XLSX, CSV, PPTX, RTF)
+        let registry = DocumentExtractionRegistry.shared
+        if registry.canExtract(from: url) {
+            do {
+                let result = try await registry.extract(from: url, maxSize: maxSize)
+                if result.metadata.wasTruncated {
+                    logger.warning("Document \(url.lastPathComponent, privacy: .public) was truncated at \(maxSize) chars")
                 }
-
-                var fullText = ""
-                // Iterate through each page of the PDF.
-                for i in 0..<pdfDocument.pageCount {
-                    guard let page = pdfDocument.page(at: i), let pageText = page.string else {
-                        continue
-                    }
-                    
-                    // Ensure we don't exceed the maximum size.
-                    if fullText.count + pageText.count > maxSize {
-                        logger.warning("PDF content for \(url.lastPathComponent, privacy: .public) exceeds maxSize of \(maxSize). Truncating.")
-                        let remainingSpace = maxSize - fullText.count
-                        if remainingSpace > 0 {
-                            fullText.append(String(pageText.prefix(remainingSpace)))
-                        }
-                        break // Stop processing further pages.
-                    }
-                    fullText.append(pageText + "\n") // Add a newline to separate content from different pages.
-                }
-                logger.info("Successfully extracted text from PDF: \(url.lastPathComponent, privacy: .public) (length: \(fullText.count) chars)")
-                return fullText
+                logger.info("Extracted \(result.metadata.format) content from \(url.lastPathComponent, privacy: .public) (\(result.metadata.wordCount) words via \(result.metadata.extractionMethod))")
+                return result.text
+            } catch {
+                logger.warning("Document extraction failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public), falling back to text read")
+                // Fall through to existing text reading logic
             }
-            // --- END of PDF Handling Logic ---
+        }
 
-            // --- Existing logic for other text files ---
+        // Existing logic for plain text files
+        do {
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             if let fileSize = attributes[.size] as? NSNumber {
-                // Estimate max bytes to avoid reading huge files into memory unnecessarily.
-                // A character can be up to 4 bytes.
                 if fileSize.intValue > maxSize * 4 {
                     logger.warning("File \(url.lastPathComponent, privacy: .public) is potentially too large (size: \(fileSize.intValue) bytes) to inline, exceeding estimated limit for \(maxSize) chars.")
                 }
@@ -153,12 +136,17 @@ struct FileProcessorService {
         
         // Check based on UTType conformance from the URL first
         if let type = UTType(filenameExtension: url.pathExtension) {
-            // UPDATED: Added UTType.pdf to the list of types we consider "text files"
-            // because we can now extract their text content.
+            // Text, source code, and PDF types are all readable
             if type.conforms(to: .text) || type.conforms(to: .sourceCode) || type.conforms(to: .pdf) {
                 logger.trace("File '\(url.lastPathComponent, privacy: .public)' (UTType) is text/source code/pdf.")
                 return true
             }
+        }
+
+        // Rich document formats (extractable to text via DocumentExtractionRegistry)
+        let documentExtensions: Set<String> = ["docx", "xlsx", "xls", "csv", "tsv", "pptx", "rtf", "rtfd"]
+        if documentExtensions.contains(url.pathExtension.lowercased()) {
+            return true
         }
 
         // Check based on MIME type string
@@ -214,5 +202,18 @@ struct FileProcessorService {
         }
         logger.trace("MIME type '\(mimeType)' for URL '\(url.lastPathComponent, privacy: .public)' evaluated as non-image.")
         return false
+    }
+
+    /// Returns extraction capability info for a file
+    func extractionInfo(for url: URL) -> (canExtract: Bool, format: String?) {
+        let ext = url.pathExtension.lowercased()
+        let registry = DocumentExtractionRegistry.shared
+        if registry.canExtract(from: url) {
+            return (true, ext.uppercased())
+        }
+        if isTextFile(mimeType: getFileMimeType(for: url), url: url) {
+            return (true, "Text")
+        }
+        return (false, nil)
     }
 }

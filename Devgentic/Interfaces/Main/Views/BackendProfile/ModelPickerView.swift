@@ -33,7 +33,7 @@ struct GeminiModelPickerView: View {
                 }
             }
         }
-        .onChange(of: apiKey) {
+        .onChange(of: apiKey) { _, _ in
              // Debounce the API call slightly to avoid firing on every keystroke
             Task {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
@@ -106,7 +106,7 @@ struct AnthropicModelPickerView: View {
                 }
             }
         }
-        .onChange(of: apiKey) {
+        .onChange(of: apiKey) { _, _ in
              // Debounce the API call slightly to avoid firing on every keystroke
             Task {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
@@ -178,7 +178,7 @@ struct OpenAIModelPickerView: View {
                 }
             }
         }
-        .onChange(of: apiKey) {
+        .onChange(of: apiKey) { _, _ in
              // Debounce the API call slightly to avoid firing on every keystroke
             Task {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
@@ -266,16 +266,23 @@ struct OllamaModelPickerView: View {
                         .foregroundColor(.secondary)
                         .font(.caption)
                 } else {
-                    Picker("Available Models", selection: $selectedModel) {
-                        ForEach(loadedLocalModels, id: \.name) { model in
-                            let isUnsupported = filterForTools && model.cognitiveCapability == .none
+                    let visibleModels = filterForTools
+                        ? loadedLocalModels.filter { $0.cognitiveCapability != .none }
+                        : loadedLocalModels
 
-                            Text(isUnsupported ? "\(model.name) (Chat Only)" : model.name)
-                                .tag(model.name)
-                                .disabled(isUnsupported)
+                    if visibleModels.isEmpty && filterForTools {
+                        Text("No tool-capable models found.")
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                    } else {
+                        Picker("Available Models", selection: $selectedModel) {
+                            ForEach(visibleModels, id: \.name) { model in
+                                Text(model.name)
+                                    .tag(model.name)
+                            }
                         }
+                        .labelsHidden()
                     }
-                    .labelsHidden()
                 }
             }
 
@@ -285,10 +292,10 @@ struct OllamaModelPickerView: View {
             }
         }
         .onAppear(perform: fetchModels)
-        .onChange(of: baseURL) {
+        .onChange(of: baseURL) { _, _ in
             fetchModels()
         }
-        .onChange(of: selectedModel) { newValue in
+        .onChange(of: selectedModel) { _, newValue in
             handleSelectionChange(newValue: newValue)
         }
         .alert("Unsupported Model", isPresented: $showUnsupportedAlert) {
@@ -385,20 +392,9 @@ struct OllamaModelPickerView: View {
         }
     }
     
-    /// Validates the user's selection and throws an alert if they pick an incompatible model
+    /// Updates capability bindings when user changes selection.
     private func handleSelectionChange(newValue: String) {
-        // Prevent validating if we haven't loaded models yet
         guard !loadedLocalModels.isEmpty else { return }
-        
-        let currentModel = loadedLocalModels.first(where: { $0.name == newValue })
-        let isUnsupported = filterForTools && (currentModel?.cognitiveCapability == .none)
-        
-        if isUnsupported {
-            // Trigger the alert immediately, but let the user keep their selection
-            self.showUnsupportedAlert = true
-        }
-        
-        // Update the capability level and dialect immediately to remain the Single Source of Truth
         updateCapabilityLevel(for: newValue)
     }
     

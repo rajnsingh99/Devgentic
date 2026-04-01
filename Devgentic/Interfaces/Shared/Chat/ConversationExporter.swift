@@ -14,7 +14,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct ConversationExporter {
 
     /// Exports a conversation's messages to a Markdown string.
-    static func toMarkdown(title: String, messages: [ChatMessage]) -> String {
+    /// - Parameter includeFileContent: When true, embeds extracted document content inline (up to 10K chars per file).
+    static func toMarkdown(title: String, messages: [ChatMessage], includeFileContent: Bool = false) async -> String {
         var lines: [String] = []
 
         lines.append("# \(title)")
@@ -40,6 +41,25 @@ struct ConversationExporter {
                     lines.append("> Attached: `\(file.name)`")
                 }
                 lines.append("")
+
+                // Optionally embed extracted content
+                if includeFileContent {
+                    let registry = DocumentExtractionRegistry.shared
+                    for file in files {
+                        if registry.canExtract(from: file.url) {
+                            if let result = try? await registry.extract(from: file.url, maxSize: 10_000) {
+                                lines.append("<details>")
+                                lines.append("<summary>Content of \(file.name)</summary>")
+                                lines.append("")
+                                lines.append("```")
+                                lines.append(result.text)
+                                lines.append("```")
+                                lines.append("</details>")
+                                lines.append("")
+                            }
+                        }
+                    }
+                }
             }
 
             // Content
@@ -75,8 +95,8 @@ struct ConversationExporter {
 
     /// Presents an NSSavePanel and writes the Markdown export to disk.
     @MainActor
-    static func exportToFile(title: String, messages: [ChatMessage]) {
-        let markdown = toMarkdown(title: title, messages: messages)
+    static func exportToFile(title: String, messages: [ChatMessage], includeFileContent: Bool = false) async {
+        let markdown = await toMarkdown(title: title, messages: messages, includeFileContent: includeFileContent)
 
         let savePanel = NSSavePanel()
         savePanel.title = "Export Conversation"

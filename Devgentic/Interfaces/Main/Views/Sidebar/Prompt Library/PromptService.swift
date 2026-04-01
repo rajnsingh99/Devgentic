@@ -23,7 +23,7 @@ class PromptService: ObservableObject {
     @Published var prompts: [DevPrompt] = []
 
     // Update the initializer to accept a PromptStoreProtocol
-    private init(promptStore: PromptStoreProtocol = PromptStore()) {
+    private init(promptStore: PromptStoreProtocol = PromptStore.shared) {
         self.promptStore = promptStore
         
         // Load all prompts from the new prompt store.

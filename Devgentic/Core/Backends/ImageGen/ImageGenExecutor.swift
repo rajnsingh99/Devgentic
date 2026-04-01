@@ -141,8 +141,8 @@ struct ImageGenExecutor: Sendable {
     /// Extracts the model name from the profile's details.
     private func extractModelName(from profile: BackendProfileModel) -> String {
         switch profile.details {
-        case .imageGen(let llmConfig, _, _, _):
-            return llmConfig.modelName
+        case .imageGen(let config):
+            return config.llmConfig.modelName
         default:
             return "Unknown"
         }
@@ -151,8 +151,8 @@ struct ImageGenExecutor: Sendable {
     /// Extracts the negative prompt from the profile's imageGen details.
     private func extractNegativePrompt(from profile: BackendProfileModel) -> String? {
         switch profile.details {
-        case .imageGen(_, let negativePrompt, _, _):
-            return negativePrompt
+        case .imageGen(let config):
+            return config.negativePrompt
         default:
             return nil
         }

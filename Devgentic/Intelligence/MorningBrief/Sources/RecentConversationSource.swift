@@ -12,7 +12,7 @@ import os
 /// Gathers raw message content from the most recent conversations.
 /// This content is fed to the Intelligence Core for AI summarization —
 /// the source itself does NOT display anything directly.
-final class RecentConversationSource: MorningBriefSource {
+final class RecentConversationSource: MorningBriefSource, Sendable {
 
     let id = "recent_conversations"
     let displayName = "Recent Conversations"

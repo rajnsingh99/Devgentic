@@ -28,7 +28,7 @@ struct CoreIntelligenceSettingsView: View {
     // Custom prompt
     @AppStorage(AppSettings.ciCustomPromptKey) private var customPrompt: String = ""
 
-    @StateObject private var modelService = MLXModelService.shared
+    @ObservedObject private var modelService = MLXModelService.shared
     @State private var currentFitAssessment: ModelFitAssessment?
 
     // Debug test state
@@ -272,7 +272,7 @@ struct CoreIntelligenceSettingsView: View {
             modelService.refreshInstalledModels()
             updateFitAssessment()
         }
-        .onChange(of: selectedModel) { _ in
+        .onChange(of: selectedModel) { _, _ in
             // Unload previous model when selection changes so next inference loads the new one
             Task { await IntelligenceCoreService.shared.unload() }
             updateFitAssessment()

@@ -18,12 +18,24 @@ struct AddBackendProfileView: View {
     // MARK: - State Management
     @State private var displayName: String = ""
     @State private var selectedType: ProfileType = .bot
-    
+
+    /// Existing profile names used for duplicate detection.
+    var existingProfileNames: [String] = []
+
     /// The callback now passes the concrete `BackendProfileModel` back.
     var onContinue: (BackendProfileModel) -> Void
 
+    private var trimmedName: String {
+        displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isDuplicateName: Bool {
+        let lower = trimmedName.lowercased()
+        return !lower.isEmpty && existingProfileNames.contains(where: { $0.lowercased() == lower })
+    }
+
     private var isContinueButtonDisabled: Bool {
-        displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        trimmedName.isEmpty
     }
 
     // MARK: - Body
@@ -45,14 +57,26 @@ struct AddBackendProfileView: View {
                             .foregroundColor(theme.primaryText)
                         
                         TextField("Profile Name (e.g. 'Coding Assistant')", text: $displayName)
+                            .accessibilityLabel("Profile name")
                             .textFieldStyle(.plain)
                             .padding(12)
                             .background(theme.secondaryBackground)
                             .cornerRadius(10)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10)
-                                    .stroke(theme.dividerColor, lineWidth: 1)
+                                    .stroke(isDuplicateName ? Color.orange : theme.dividerColor, lineWidth: 1)
                             )
+
+                        if isDuplicateName {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11))
+                                Text("A profile named '\(trimmedName)' already exists.")
+                                    .font(.system(size: 12))
+                            }
+                            .foregroundColor(.orange)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
                     }
                     
                     // Type Selection Section
@@ -106,6 +130,7 @@ struct AddBackendProfileView: View {
                     .controlSize(.large)
                     .disabled(isContinueButtonDisabled)
                     .keyboardShortcut(.defaultAction)
+                    .accessibilityLabel("Create new profile")
             }
             .padding()
             .background(theme.secondaryBackground)
@@ -124,32 +149,26 @@ struct AddBackendProfileView: View {
     
     /// Creates the appropriate default `BackendProfileModel` with the correct `ProfileDetails` case.
     private func createDefaultProfile() -> BackendProfileModel {
-        let defaultLLMConfig = ProviderConfig(apiProvider: .ollama, modelName: "", apiKey: nil, baseURL: "http://localhost:11434")
+        let defaultLLMConfig = ProviderConfig(apiProvider: .ollama, modelName: "", apiKey: nil, baseURL: ProviderDefaults.baseURLString(for: .ollama))
         
         let details: ProfileDetails
         switch selectedType {
         case .bot:
-            details = .bot(llmConfig: defaultLLMConfig, instructions: nil)
+            details = .bot(BotConfig(llmConfig: defaultLLMConfig))
         case .agent:
-            // FIXED: Added default architecture: .reAct
-            details = .agent(
+            details = .agent(AgentConfig(
                 llmConfig: defaultLLMConfig,
                 architecture: .reAct,
-                tools: [],
-                description: nil,
-                instructions: nil,
-                knowledgeSources: nil
-            )
+                tools: []
+            ))
         case .workflow:
-            details = .workflow(agents: [])
+            details = .workflow(WorkflowConfig(agentProfileIDs: []))
         case .imageGen:
             let imageGenConfig = ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
-            details = .imageGen(
+            details = .imageGen(ImageGenConfig(
                 llmConfig: imageGenConfig,
-                negativePrompt: nil,
-                defaultAspectRatio: .square,
-                advancedSettings: nil
-            )
+                defaultAspectRatio: .square
+            ))
         }
         
         return BackendProfileModel(displayName: displayName, details: details)
@@ -245,6 +264,7 @@ struct ProfileTypeCard: View {
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(type.rawValue). \(description)")
         .onHover { hover in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovering = hover
@@ -304,7 +324,7 @@ struct ProfileTypeCard: View {
 // MARK: - Preview Provider
 struct AddBackendProfileView_Previews: PreviewProvider {
     static var previews: some View {
-        AddBackendProfileView { profile in
+        AddBackendProfileView(existingProfileNames: ["MLX Bot"]) { profile in
             print("Profile created: \(profile.displayName)")
         }
     }

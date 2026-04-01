@@ -10,6 +10,7 @@
 //
 
 import SwiftUI
+import SwiftData
 import CoreData
 import UserNotifications
 
@@ -20,13 +21,41 @@ struct DevgenticApp: App {
     @Environment(\.openWindow) var openWindow  // Retained for File Viewer window
     
     private let coreDataService = CoreDataPersistenceService.shared
-    
+
+    /// Unified SwiftData container for all migrated subsystems.
+    /// Core Data continues to serve Chat entities only.
+    private let swiftDataContainer: ModelContainer = {
+        do {
+            let schema = Schema([
+                BackendProfile.self,
+                MCPToolItem.self,
+                MCPToolDefinitionModel.self,
+                PromptModel.self,
+                ScheduledTaskModel.self
+            ])
+            // Store alongside Core Data's DevgenticDB.sqlite in Application Support,
+            // but with a distinct filename to avoid any collision.
+            let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let storeURL = appSupportURL.appendingPathComponent("DevgenticSD.store")
+            let config = ModelConfiguration("DevgenticSD", schema: schema, url: storeURL)
+            let container = try ModelContainer(for: schema, configurations: [config])
+            // Inject into singleton stores so non-SwiftUI code can access the container.
+            BackendProfileStore.shared.configureContainer(container)
+            MCPToolStore.shared.configureContainer(container)
+            PromptStore.shared.configureContainer(container)
+            return container
+        } catch {
+            fatalError("Failed to create SwiftData ModelContainer: \(error)")
+        }
+    }()
+
     @StateObject private var themeManager = ThemeManager()
 
     @StateObject private var mainApplicationViewModel: MainApplicationViewModel
     @StateObject private var chatHistoryViewModel: ChatHistoryViewModel
     @StateObject private var mainViewRouter = MainViewRouter()
     @StateObject private var backendProfileService = BackendProfileService()
+    @StateObject private var toastManager = ToastManager()
 
     init() {
         let persistence = CoreDataPersistenceService.shared
@@ -63,7 +92,9 @@ struct DevgenticApp: App {
         // MARK: - Scheduler bootstrap
         // Load persisted tasks and arm their timers so recurring / one-shot tasks
         // survive an app restart without needing any user interaction.
+        let sdContainer = swiftDataContainer
         Task { @MainActor in
+            SchedulerService.shared.configureContainer(sdContainer)
             SchedulerService.shared.mainViewModel = mainVM
             SchedulerService.shared.loadAllTasks()
             SchedulerService.shared.rescheduleAll()
@@ -81,7 +112,9 @@ struct DevgenticApp: App {
                 .environmentObject(chatHistoryViewModel)
                 .environmentObject(mainViewRouter)
                 .environmentObject(backendProfileService)
+                .environmentObject(toastManager)
                 .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
+                .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     // Catch up any scheduled tasks that fired while the app was in the background.
@@ -112,7 +145,8 @@ struct DevgenticApp: App {
 
                 Button("Backend Profiles...") {
                     mainViewRouter.navigateToProfile(
-                        backendProfileService.profiles.first?.id ?? UUID()
+                        backendProfileService.profiles.first?.id ?? UUID(),
+                        activatingBufferOn: backendProfileService
                     )
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])

@@ -35,10 +35,7 @@ struct ExplorerSidebarView: View {
                 SidebarSearchBarView("Search files...", text: $viewModel.searchText)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
-                
-                Divider()
-                    .background(theme.surfaceOverlayStrong)
-                
+
                 // MARK: - File Tree
                 if let errorMessage = viewModel.errorMessage, viewModel.rootItems.isEmpty && !viewModel.isLoading {
                     // Error State
@@ -159,14 +156,16 @@ struct FileOutlineView: NSViewRepresentable {
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         if let outlineView = nsView.documentView as? NSOutlineView {
             context.coordinator.parent = self
-            
-            // Only reload if needed or perform a lightweight update
-            // For now, let's keep it but ensure we don't redundantly expand
-            outlineView.reloadData()
-            
-            // Apply expansion state from viewModel
-            for item in viewModel.rootItems {
-                applyExpansionState(for: item, in: outlineView)
+
+            // Only reload when tree data actually changes (not on every SwiftUI update)
+            let currentSnapshot = viewModel.filteredRootItems.map(\.id)
+            if currentSnapshot != context.coordinator.lastRootSnapshot {
+                context.coordinator.lastRootSnapshot = currentSnapshot
+                outlineView.reloadData()
+
+                for item in viewModel.rootItems {
+                    applyExpansionState(for: item, in: outlineView)
+                }
             }
         }
     }
@@ -197,6 +196,7 @@ struct FileOutlineView: NSViewRepresentable {
         var viewModel: ExplorerViewModel
         var themeManager: ThemeManager
         weak var outlineView: NSOutlineView?
+        var lastRootSnapshot: [URL] = []
 
         init(parent: FileOutlineView, viewModel: ExplorerViewModel, themeManager: ThemeManager) {
             self.parent = parent
@@ -212,10 +212,17 @@ struct FileOutlineView: NSViewRepresentable {
         }
 
         func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-            if let fileItem = item as? FileSystemItem {
-                return fileItem.children![index]
+            if let fileItem = item as? FileSystemItem,
+               let children = fileItem.children,
+               index < children.count {
+                return children[index]
             }
-            return viewModel.filteredRootItems[index]
+            let items = viewModel.filteredRootItems
+            guard index < items.count else {
+                let placeholder = URL(fileURLWithPath: "/dev/null")
+                return FileSystemItem(id: placeholder, name: "", url: placeholder, isDirectory: false)
+            }
+            return items[index]
         }
 
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -290,10 +297,9 @@ struct ExplorerItemContentRow: View {
                              viewModel.cancelRename()
                         }
                     }
-                    .onAppear {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            isTextFieldFocused = true
-                        }
+                    .task {
+                        try? await Task.sleep(for: .milliseconds(50))
+                        isTextFieldFocused = true
                     }
                     .padding(.horizontal, 4)
                     .background(theme.controlBackground)

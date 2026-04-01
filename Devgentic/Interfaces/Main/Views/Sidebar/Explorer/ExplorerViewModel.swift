@@ -63,36 +63,7 @@ final class ExplorerViewModel: ObservableObject {
     }
     
     @Published var searchText: String = ""
-    
-    var filteredRootItems: [FileSystemItem] {
-        if searchText.isEmpty {
-            return rootItems
-        }
-        
-        let query = searchText.lowercased()
-        
-        // Deep search in the visible tree
-        func filterItems(_ items: [FileSystemItem]) -> [FileSystemItem] {
-            var result: [FileSystemItem] = []
-            
-            for item in items {
-                if item.name.lowercased().contains(query) {
-                    result.append(item)
-                } else if let children = item.children {
-                    let filteredChildren = filterItems(children)
-                    if !filteredChildren.isEmpty {
-                        var itemWithFilteredChildren = item
-                        itemWithFilteredChildren.children = filteredChildren
-                        result.append(itemWithFilteredChildren)
-                    }
-                }
-            }
-            
-            return result
-        }
-        
-        return filterItems(rootItems)
-    }
+    @Published private(set) var filteredRootItems: [FileSystemItem] = []
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
     
@@ -121,7 +92,36 @@ final class ExplorerViewModel: ObservableObject {
     init() {
         logger.info("ExplorerViewModel initializing.")
         setupDebouncer()
+        setupFilteredItemsCache()
         loadLastOpenedFolder()
+    }
+
+    private func setupFilteredItemsCache() {
+        // Recompute filteredRootItems whenever rootItems or searchText changes
+        Publishers.CombineLatest($rootItems, $searchText)
+            .map { items, searchText -> [FileSystemItem] in
+                guard !searchText.isEmpty else { return items }
+                let query = searchText.lowercased()
+                func filterItems(_ items: [FileSystemItem]) -> [FileSystemItem] {
+                    var result: [FileSystemItem] = []
+                    for item in items {
+                        if item.name.lowercased().contains(query) {
+                            result.append(item)
+                        } else if let children = item.children {
+                            let filteredChildren = filterItems(children)
+                            if !filteredChildren.isEmpty {
+                                var copy = item
+                                copy.children = filteredChildren
+                                result.append(copy)
+                            }
+                        }
+                    }
+                    return result
+                }
+                return filterItems(items)
+            }
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$filteredRootItems)
     }
 
     deinit {
@@ -389,7 +389,9 @@ final class ExplorerViewModel: ObservableObject {
                     return true
                 }
                 if items[i].isDirectory, items[i].children != nil {
-                    if findAndUpdate(items: &items[i].children!) {
+                    var childItems = items[i].children!
+                    if findAndUpdate(items: &childItems) {
+                        items[i].children = childItems
                         return true
                     }
                 }
@@ -458,10 +460,7 @@ final class ExplorerViewModel: ObservableObject {
             logger.info("Successfully opened file with system default app: \(item.name)")
         } else {
             logger.error("Failed to open file with system default app: \(item.name) at \(url.path)")
-            // Optionally update errorMessage if you want UI feedback for failure
-            DispatchQueue.main.async {
-                self.errorMessage = "Could not open '\(item.name)' with the system default application."
-            }
+            self.errorMessage = "Could not open '\(item.name)' with the system default application."
         }
     }
     func revealInFinder(_ item: FileSystemItem) {
@@ -534,9 +533,10 @@ final class ExplorerViewModel: ObservableObject {
         currentEditName = ""
         renameErrorMessage = nil
     }
-    func deleteItem(_ item: FileSystemItem) { logger.info("Delete action triggered for: \(item.name).") }
-    func createNewFile(in parent: FileSystemItem?) { logger.info("Create New File action triggered in directory: \(parent?.url.path ?? self.selectedRootURL?.path ?? "root").") }
-    func createNewFolder(in parent: FileSystemItem?) { logger.info("Create New Folder action triggered in directory: \(parent?.url.path ?? self.selectedRootURL?.path ?? "root").") }
+    // TODO: Implement file operations
+    func deleteItem(_ item: FileSystemItem) { logger.warning("Delete not yet implemented for: \(item.name).") }
+    func createNewFile(in parent: FileSystemItem?) { logger.warning("Create New File not yet implemented.") }
+    func createNewFolder(in parent: FileSystemItem?) { logger.warning("Create New Folder not yet implemented.") }
     private func findItem(by id: URL, in items: [FileSystemItem]) -> FileSystemItem? {
         for item in items {
             if item.id == id { return item }
@@ -571,14 +571,12 @@ final class ExplorerViewModel: ObservableObject {
             "\(path)/.DS_Store"
         ]
         
-        fileSystemMonitor = FileSystemMonitor { [weak self] urls in
-            guard let self = self else { return }
-            
-            // Send each changed URL to the debouncer
-            // If multiple changed, the debouncer (Phase 1) will collapse them.
-            // For now, we take the most relevant common ancestor or just the first for simplicity.
+        // Capture the subject to avoid referencing @MainActor-isolated self from @Sendable callback.
+        // The callback is dispatched on main by FileSystemMonitor.handleEvents.
+        let subject = fileSystemEventSubject
+        fileSystemMonitor = FileSystemMonitor { urls in
             if let firstURL = urls.first {
-                self.fileSystemEventSubject.send(firstURL)
+                subject.send(firstURL)
             }
         }
         fileSystemMonitor?.start(path: path, excludedPaths: excludedPaths)
@@ -595,6 +593,7 @@ final class ExplorerViewModel: ObservableObject {
     private func indexAllFiles(from url: URL) async {
         await MainActor.run { self.isIndexing = true }
         
+        let indexLogger = self.logger
         let allFiles = await Task.detached(priority: .userInitiated) { () -> [FileSystemItem] in
             var collectedFiles: [FileSystemItem] = []
             let resourceKeys: [URLResourceKey] = [.nameKey, .isDirectoryKey, .isHiddenKey]
@@ -605,7 +604,7 @@ final class ExplorerViewModel: ObservableObject {
                 includingPropertiesForKeys: resourceKeys,
                 options: [.skipsPackageDescendants, .skipsHiddenFiles],
                 errorHandler: { url, error -> Bool in
-                    self.logger.error("Enumeration error at \(url.path): \(error.localizedDescription)")
+                    indexLogger.error("Enumeration error at \(url.path): \(error.localizedDescription)")
                     return true
                 }
             ) else {
@@ -667,6 +666,21 @@ final class ExplorerViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Document Preview
+
+    /// Extract a preview of document content (first 2000 chars) for rich file types.
+    func previewContent(for item: FileSystemItem) async -> String? {
+        let registry = DocumentExtractionRegistry.shared
+        guard registry.canExtract(from: item.url) else { return nil }
+
+        do {
+            let result = try await registry.extract(from: item.url, maxSize: 2_000)
+            return result.text
+        } catch {
+            return nil
+        }
+    }
+
     private func fetchAllFiles(under url: URL) async -> [FileSystemItem] {
         await Task.detached(priority: .userInitiated) { () -> [FileSystemItem] in
             var collectedFiles: [FileSystemItem] = []

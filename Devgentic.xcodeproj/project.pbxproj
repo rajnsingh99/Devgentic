@@ -11,6 +11,8 @@
 		3516AAA22F54A01300CFA72D /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 3516AAA12F54A01300CFA72D /* Tokenizers */; };
 		35243D372E26F08800602933 /* CodeEditSourceEditor in Frameworks */ = {isa = PBXBuildFile; productRef = 35243D362E26F08800602933 /* CodeEditSourceEditor */; settings = {ATTRIBUTES = (Required, ); }; };
 		355A5D9F2E882BA0007C22CC /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 355A5D9E2E882BA0007C22CC /* MCP */; };
+		35983B412F78DD4400A7AD62 /* CoreXLSX in Frameworks */ = {isa = PBXBuildFile; productRef = 35983B402F78DD4400A7AD62 /* CoreXLSX */; };
+		35983B442F78DD6800A7AD62 /* SwiftDocX in Frameworks */ = {isa = PBXBuildFile; productRef = 35983B432F78DD6800A7AD62 /* SwiftDocX */; };
 		35A33CE42F66F6270020A8BE /* Flux2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 35F2A0022F60000000AABB02 /* Flux2Core */; };
 		35A33CE52F66F6270020A8BE /* FluxTextEncoders in Frameworks */ = {isa = PBXBuildFile; productRef = 35F2A0032F60000000AABB03 /* FluxTextEncoders */; };
 		35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = 35CDA7422E2A2A3400564AB7 /* Highlightr */; };
@@ -76,8 +78,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				35A33CE52F66F6270020A8BE /* FluxTextEncoders in Frameworks */,
+				35983B412F78DD4400A7AD62 /* CoreXLSX in Frameworks */,
 				35A33CE42F66F6270020A8BE /* Flux2Core in Frameworks */,
 				35EB3F662F32967000555A83 /* MLX in Frameworks */,
+				35983B442F78DD6800A7AD62 /* SwiftDocX in Frameworks */,
 				35EB3F682F32967000555A83 /* MLXFast in Frameworks */,
 				35CDA7432E2A2A3400564AB7 /* Highlightr in Frameworks */,
 				3516A8692F519D3500CFA72D /* Markdown in Frameworks */,
@@ -188,6 +192,8 @@
 				35F2A0022F60000000AABB02 /* Flux2Core */,
 				35F2A0032F60000000AABB03 /* FluxTextEncoders */,
 				35D1206D2F6B285900AF3813 /* GRDB */,
+				35983B402F78DD4400A7AD62 /* CoreXLSX */,
+				35983B432F78DD6800A7AD62 /* SwiftDocX */,
 			);
 			productName = devgentic;
 			productReference = 35FCBA882DB5526B00D39123 /* devgentic.app */;
@@ -284,6 +290,8 @@
 				3516AAA02F54A01300CFA72D /* XCRemoteSwiftPackageReference "swift-transformers" */,
 				35F2A0012F60000000AABB01 /* XCRemoteSwiftPackageReference "flux-2-swift-mlx" */,
 				35D1206C2F6B285900AF3813 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+				35983B3F2F78DD4400A7AD62 /* XCRemoteSwiftPackageReference "CoreXLSX" */,
+				35983B422F78DD6800A7AD62 /* XCRemoteSwiftPackageReference "SwiftDocX" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 35FCBA892DB5526B00D39123 /* Products */;
@@ -678,6 +686,22 @@
 				version = 0.11.0;
 			};
 		};
+		35983B3F2F78DD4400A7AD62 /* XCRemoteSwiftPackageReference "CoreXLSX" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/CoreOffice/CoreXLSX";
+			requirement = {
+				kind = exactVersion;
+				version = 0.14.2;
+			};
+		};
+		35983B422F78DD6800A7AD62 /* XCRemoteSwiftPackageReference "SwiftDocX" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Techopolis/SwiftDocX";
+			requirement = {
+				kind = exactVersion;
+				version = 1.0.1;
+			};
+		};
 		35CDA7412E2A2A3400564AB7 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/raspu/Highlightr.git";
@@ -764,6 +788,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 355A5D9D2E882BA0007C22CC /* XCRemoteSwiftPackageReference "swift-sdk" */;
 			productName = MCP;
+		};
+		35983B402F78DD4400A7AD62 /* CoreXLSX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35983B3F2F78DD4400A7AD62 /* XCRemoteSwiftPackageReference "CoreXLSX" */;
+			productName = CoreXLSX;
+		};
+		35983B432F78DD6800A7AD62 /* SwiftDocX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 35983B422F78DD6800A7AD62 /* XCRemoteSwiftPackageReference "SwiftDocX" */;
+			productName = SwiftDocX;
 		};
 		35CDA7422E2A2A3400564AB7 /* Highlightr */ = {
 			isa = XCSwiftPackageProductDependency;

@@ -21,7 +21,7 @@ class OllamaCapabilityService {
     private init() {}
     
     /// Fetches all local models and filters for those that support tools.
-    func getAgentReadyModels(baseURL: URL = URL(string: "http://127.0.0.1:11434")!) async -> [String] {
+    func getAgentReadyModels(baseURL: URL = ProviderDefaults.ollamaBaseURL) async -> [String] {
         do {
             // 1. Fetch list of all models
             let allModels = try await fetchLocalModelNames(baseURL: baseURL)

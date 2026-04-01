@@ -155,9 +155,10 @@ private func executeSingleTool(
 
     // Intercept ask_user
     if let question = AskUserInterceptor.extractQuestion(toolName: toolName, arguments: arguments) {
-        continuation.yield(.requestClarification(question: question))
+        let operationID = UUID()
+        continuation.yield(.requestClarification(question: question, operationID: operationID))
 
-        let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: conversationID)
+        let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: operationID, conversationID: conversationID)
         let didAnswer = userResponse != nil
         let answerText = userResponse ?? "System: The user skipped or did not respond."
 
@@ -190,8 +191,10 @@ private func executeSingleTool(
 
     switch dispatchOutcome {
     case .requiresConfirmation(let ps):
-        continuation.yield(.requestConfirmation(toolName: toolName, params: ps))
-        let approved = await ExecutionSuspensionService.shared.suspend(for: conversationID)
+        let operationID = UUID()
+        continuation.yield(.requestConfirmation(toolName: toolName, params: ps, operationID: operationID))
+
+        let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID)
         if !approved {
             let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
             continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: denialResult.llmObservation, isSuccess: false)))

@@ -12,6 +12,25 @@ import os
 import WhisperKit
 import AppKit
 
+// MARK: - Main ViewModel Delegate Protocol
+// Decouples ChatInputViewModel from MainApplicationViewModel so the chat input
+// subsystem can be tested in isolation and the view doesn't observe two VMs.
+
+@MainActor
+protocol ChatInputMainDelegate: AnyObject {
+    var attachedFiles: [FileSystemItem] { get }
+    var streamingMessageID: UUID? { get }
+    var attachedFilesPublisher: AnyPublisher<[FileSystemItem], Never> { get }
+    var streamingMessageIDPublisher: AnyPublisher<UUID?, Never> { get }
+
+    func addAttachedFile(fileItem: FileSystemItem)
+    func addAttachedFiles(fileItems: [FileSystemItem])
+    func removeAttachedFile(fileItem: FileSystemItem)
+    func cancelStreamingResponse()
+    func getQueryFromHistory(direction: MainApplicationViewModel.QueryNavigationDirection) -> String?
+    func resetQueryHistoryIndex()
+}
+
 // MARK: - Protocols for Dependency Injection
 
 protocol RecognitionServiceProtocol {
@@ -113,7 +132,22 @@ class ChatInputViewModel: ObservableObject {
     @Published var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
 
     // MARK: - Delegates
+    weak var mainDelegate: (any ChatInputMainDelegate)?
     var onFileSearchRequest: ((String) -> (candidates: [FileSystemItem], attached: [FileSystemItem]))?
+
+    // MARK: - Mediated Main ViewModel Access
+    // These mirror mainDelegate state as @Published so SwiftUI re-renders when they change.
+    // Updated via setupMainDelegateObservers().
+
+    @Published private(set) var attachedFiles: [FileSystemItem] = []
+    @Published private(set) var isStreaming: Bool = false
+
+    func addAttachedFile(fileItem: FileSystemItem) { mainDelegate?.addAttachedFile(fileItem: fileItem) }
+    func addAttachedFiles(fileItems: [FileSystemItem]) { mainDelegate?.addAttachedFiles(fileItems: fileItems) }
+    func removeAttachedFile(fileItem: FileSystemItem) { mainDelegate?.removeAttachedFile(fileItem: fileItem) }
+    func cancelStreamingResponse() { mainDelegate?.cancelStreamingResponse() }
+    func getQueryFromHistory(direction: MainApplicationViewModel.QueryNavigationDirection) -> String? { mainDelegate?.getQueryFromHistory(direction: direction) }
+    func resetQueryHistoryIndex() { mainDelegate?.resetQueryHistoryIndex() }
 
     // MARK: - Services
     private var recognitionService: RecognitionServiceProtocol?
@@ -170,7 +204,7 @@ class ChatInputViewModel: ObservableObject {
         Task {
             await checkMicPermissions()
             self.recognitionService?.loadingStatePublisher
-                .receive(on: DispatchQueue.main)
+                .receive(on: RunLoop.main)
                 .sink { [weak self] newState in
                     self?.handleModelLoadingState(newState)
                 }
@@ -178,7 +212,41 @@ class ChatInputViewModel: ObservableObject {
         }
     }
 
+    /// Call once after setting `mainDelegate` to mirror its published state and
+    /// refresh file suggestions on changes. Replaces the .onReceive calls that were in the view.
+    func setupMainDelegateObservers() {
+        guard let delegate = mainDelegate else {
+            logger.warning("setupMainDelegateObservers called but mainDelegate is nil — attached files and streaming state will not update.")
+            return
+        }
+
+        // Mirror attached files
+        delegate.attachedFilesPublisher
+            .receive(on: RunLoop.main)
+            .sink { [weak self] files in
+                guard let self = self else { return }
+                self.attachedFiles = files
+                if self.fileSuggestionState.isShowing {
+                    self.performFileSearch(query: self.fileSuggestionState.query)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Mirror streaming state
+        delegate.streamingMessageIDPublisher
+            .receive(on: RunLoop.main)
+            .map { $0 != nil }
+            .removeDuplicates()
+            .sink { [weak self] streaming in
+                self?.isStreaming = streaming
+            }
+            .store(in: &cancellables)
+    }
+
     deinit {
+        if streamingTask != nil { logger.info("Cancelling active streaming task during deinit.") }
+        if searchTask != nil { logger.debug("Cancelling active search task during deinit.") }
+        if fileSearchTask != nil { logger.debug("Cancelling active file search task during deinit.") }
         logger.info("ChatInputViewModel deinitialized.")
         recordingTimer?.invalidate()
         streamingTask?.cancel()
@@ -209,7 +277,7 @@ class ChatInputViewModel: ObservableObject {
         $promptSuggestionState
             .map(\.query)
             .removeDuplicates()
-            .debounce(for: .milliseconds(150), scheduler: DispatchQueue.main)
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
             .sink { [weak self] newQuery in
                 self?.performAsyncPromptFilter(query: newQuery)
             }
@@ -218,7 +286,7 @@ class ChatInputViewModel: ObservableObject {
         $fileSuggestionState
             .map(\.query)
             .removeDuplicates()
-            .debounce(for: .milliseconds(150), scheduler: DispatchQueue.main)
+            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
             .sink { [weak self] newQuery in
                 self?.performFileSearch(query: newQuery)
             }
@@ -247,8 +315,17 @@ class ChatInputViewModel: ObservableObject {
     }
 
     private func performFileSearch(query: String) {
-        guard let context = onFileSearchRequest?(query) else { return }
+        guard let context = onFileSearchRequest?(query) else {
+            logger.warning("File search skipped: onFileSearchRequest callback is nil (delegate not wired?).")
+            return
+        }
         processFileCandidates(context.candidates, attachedFiles: context.attached)
+    }
+
+    /// Called by the view when ExplorerViewModel changes while file suggestions are showing.
+    func refreshFileSuggestions(using explorer: ExplorerViewModel) {
+        let candidates = explorer.suggestableFiles(query: fileSuggestionState.query)
+        processFileCandidates(candidates, attachedFiles: attachedFiles)
     }
 
     func processFileCandidates(_ candidates: [FileSystemItem], attachedFiles: [FileSystemItem]) {
@@ -314,7 +391,7 @@ class ChatInputViewModel: ObservableObject {
         resetFileState()
     }
 
-    func navigateSuggestions(direction: ChatInputAreaView.SuggestionNavigationDirection, type: TextTriggerAnalyzer.TriggerType) {
+    func navigateSuggestions(direction: SuggestionNavigationDirection, type: TextTriggerAnalyzer.TriggerType) {
         switch type {
         case .prompt:
             navigateGeneric(
@@ -331,7 +408,7 @@ class ChatInputViewModel: ObservableObject {
         }
     }
 
-    private func navigateGeneric<T: Identifiable>(items: [T], selectedID: inout T.ID?, direction: ChatInputAreaView.SuggestionNavigationDirection) {
+    private func navigateGeneric<T: Identifiable>(items: [T], selectedID: inout T.ID?, direction: SuggestionNavigationDirection) {
         guard !items.isEmpty else { return }
 
         guard let currentId = selectedID,

@@ -4,10 +4,14 @@
 //
 //  Created by Raj Singh on 27/08/25.
 //
+//  Migrated to SwiftData on 26/03/26.
+//
 
 import Foundation
-import CoreData
+import SwiftData
 import os
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptStore")
 
 protocol PromptStoreProtocol {
     func fetchPrompts() -> [DevPrompt]
@@ -17,82 +21,110 @@ protocol PromptStoreProtocol {
 }
 
 class PromptStore: PromptStoreProtocol {
-    
-    private let coreDataService: CoreDataPersistenceService
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptStore")
 
-    init(coreDataService: CoreDataPersistenceService = .shared) {
-        self.coreDataService = coreDataService
+    static let shared = PromptStore()
+
+    /// The shared model container, injected during app init via the SwiftData container.
+    private var modelContainer: ModelContainer?
+
+    @MainActor
+    private var mainContext: ModelContext? {
+        modelContainer?.mainContext
     }
 
-    private var viewContext: NSManagedObjectContext {
-        coreDataService.viewContext
+    private init() {}
+
+    /// Call this once from the App init to inject the container.
+    func configureContainer(_ container: ModelContainer) {
+        self.modelContainer = container
     }
 
+    @MainActor
     func fetchPrompts() -> [DevPrompt] {
-        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
-        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
-        
+        guard let context = mainContext else { return [] }
+
         do {
-            let entities = try viewContext.fetch(request)
-            let prompts = entities.map { $0.toPromptStruct() }
-            logger.info("Successfully fetched \(prompts.count) prompts from Core Data.")
+            let descriptor = FetchDescriptor<PromptModel>(
+                sortBy: [SortDescriptor(\.createdAt, order: .reverse)]
+            )
+            let models = try context.fetch(descriptor)
+            let prompts = models.map { $0.toDevPrompt() }
+            logger.info("Successfully fetched \(prompts.count) prompts.")
             return prompts
         } catch {
-            logger.error("Failed to fetch prompts from Core Data: \(error.localizedDescription)")
+            logger.error("Failed to fetch prompts: \(error.localizedDescription)")
             return []
         }
     }
-    
+
+    @MainActor
     func addPrompt(from model: DevPrompt) {
-        let newPromptEntity = PromptEntity(context: viewContext)
-        configure(entity: newPromptEntity, with: model)
-        logger.info("Adding new prompt '\(model.title)' to Core Data.")
-        coreDataService.saveContext()
+        guard let context = mainContext else { return }
+
+        let newModel = PromptModel(
+            id: model.id,
+            title: model.title,
+            text: model.text,
+            category: model.category,
+            createdAt: model.createdAt,
+            lastUsedAt: model.lastUsedAt,
+            isUserDefined: model.isUserDefined,
+            tags: model.tags
+        )
+        context.insert(newModel)
+        logger.info("Adding new prompt '\(model.title)'.")
+        saveContext()
     }
-    
+
+    @MainActor
     func updatePrompt(from model: DevPrompt) {
-        guard let promptToUpdate = getPromptEntity(withId: model.id) else {
-            logger.warning("Attempted to update a prompt that does not exist in Core Data (ID: \(model.id.uuidString)). Adding it instead.")
-            addPrompt(from: model)
-            return
-        }
-        configure(entity: promptToUpdate, with: model)
-        logger.info("Updating prompt '\(model.title)' in Core Data.")
-        coreDataService.saveContext()
-    }
-    
-    func deletePrompt(withId id: UUID) {
-        guard let promptToDelete = getPromptEntity(withId: id) else {
-            logger.warning("Attempted to delete a prompt that does not exist in Core Data (ID: \(id.uuidString)).")
-            return
-        }
-        viewContext.delete(promptToDelete)
-        logger.info("Deleting prompt with ID \(id.uuidString) from Core Data.")
-        coreDataService.saveContext()
-    }
-    
-    private func getPromptEntity(withId id: UUID) -> PromptEntity? {
-        let request: NSFetchRequest<PromptEntity> = PromptEntity.fetchRequest()
-        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-        request.fetchLimit = 1
-        
+        guard let context = mainContext else { return }
+
+        let targetID = model.id
+        let predicate = #Predicate<PromptModel> { $0.id == targetID }
+        var descriptor = FetchDescriptor<PromptModel>(predicate: predicate)
+        descriptor.fetchLimit = 1
+
         do {
-            return try viewContext.fetch(request).first
+            if let existing = try context.fetch(descriptor).first {
+                existing.apply(from: model)
+                logger.info("Updating prompt '\(model.title)'.")
+                saveContext()
+            } else {
+                logger.warning("Prompt not found for update (ID: \(model.id.uuidString)). Adding instead.")
+                addPrompt(from: model)
+            }
         } catch {
-            logger.error("Failed to fetch PromptEntity with ID \(id.uuidString): \(error.localizedDescription)")
-            return nil
+            logger.error("Failed to fetch prompt for update: \(error.localizedDescription)")
         }
     }
-    
-    private func configure(entity: PromptEntity, with model: DevPrompt) {
-        entity.id = model.id
-        entity.title = model.title
-        entity.text = model.text
-        entity.category = model.category
-        entity.createdAt = model.createdAt
-        entity.lastUsedAt = model.lastUsedAt
-        entity.isUserDefined = model.isUserDefined
-        entity.tags = model.tags as NSArray?
+
+    @MainActor
+    func deletePrompt(withId id: UUID) {
+        guard let context = mainContext else { return }
+
+        let predicate = #Predicate<PromptModel> { $0.id == id }
+        var descriptor = FetchDescriptor<PromptModel>(predicate: predicate)
+        descriptor.fetchLimit = 1
+
+        do {
+            if let toDelete = try context.fetch(descriptor).first {
+                context.delete(toDelete)
+                logger.info("Deleting prompt with ID \(id.uuidString).")
+                saveContext()
+            }
+        } catch {
+            logger.error("Failed to fetch prompt for deletion: \(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
+    private func saveContext() {
+        guard let context = mainContext else { return }
+        do {
+            try context.save()
+        } catch {
+            logger.error("Failed to save SwiftData context: \(error.localizedDescription)")
+        }
     }
 }
