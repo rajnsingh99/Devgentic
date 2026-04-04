@@ -8,9 +8,9 @@
 import SwiftUI
 
 struct UserBubbleContentView: View {
-    @ObservedObject var message: ChatMessage
+    var message: ChatMessage
 
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @EnvironmentObject private var searchViewModel: ChatSearchViewModel
     @Environment(\.appTheme) private var theme
 

@@ -14,6 +14,14 @@ struct ProfileInfo {
     let type: ProfileType
     let provider: ApiProvider? // Optional, as a workflow itself doesn't have a single provider
 
+    /// Memberwise initializer for lightweight contexts (e.g., inline sub-agents).
+    init(id: UUID, name: String, type: ProfileType, provider: ApiProvider?) {
+        self.id = id
+        self.name = name
+        self.type = type
+        self.provider = provider
+    }
+
     /// Initializes the descriptor by extracting essential data from the main BackendProfileModel.
     /// This avoids carrying the entire heavy model throughout the trace.
     init(from profile: BackendProfileModel) {
@@ -70,6 +78,16 @@ struct TraceContext: Sendable {
         self.requestStartTime = Date()
         self.profileInfo = ProfileInfo(from: profile)
         self.messageID = messageID
+    }
+
+    /// Initializes a trace context for an inline sub-agent (no full BackendProfileModel).
+    init(subAgentName: String, provider: ApiProvider) {
+        self.traceID = UUID().uuidString
+        self.spanID = UUID().uuidString
+        self.parentSpanID = nil
+        self.requestStartTime = Date()
+        self.profileInfo = ProfileInfo(id: UUID(), name: subAgentName, type: .agent, provider: provider)
+        self.messageID = nil
     }
 
     /// Creates a new context for a child operation (a new span).

@@ -99,6 +99,7 @@ enum AgentState: Codable, Equatable, Sendable {
     enum InteractionDetail: Codable, Equatable, Sendable {
         case permission(toolName: String)
         case clarification
+        case planReview
     }
     
     var category: AgentStateCategory {
@@ -120,6 +121,7 @@ enum AgentState: Codable, Equatable, Sendable {
         case .acting(.subtask(let c, let t)): return "Step \(c) of \(t)"
         case .interaction(.permission(let tool)): return "Awaiting Permission: \(tool)"
         case .interaction(.clarification): return "Awaiting Clarification"
+        case .interaction(.planReview): return "Awaiting Plan Approval"
         case .completed: return "Completed"
         case .error(let msg): return "Error: \(msg)"
         }
@@ -201,6 +203,12 @@ struct AgentTool: Sendable {
     /// If true, the Executor will pause and ask the user before running this tool.
     let requiresConfirmation: Bool
 
+    // Per-tool execution limits
+    /// Optional per-tool timeout in seconds. Nil means no per-tool limit.
+    let timeout: TimeInterval?
+    /// Custom message sent to the LLM when this tool times out. Nil uses the default timeout message.
+    let timeoutMessage: String?
+
     /// The closure to execute the tool.
     /// Takes JSON Data (arguments) and returns text output + optional media artifacts.
     let run: @Sendable (Data) async throws -> (output: String, artifacts: [MediaArtifact])
@@ -211,12 +219,16 @@ struct AgentTool: Sendable {
         description: String,
         parameters: ToolParameters,
         requiresConfirmation: Bool = false,
+        timeout: TimeInterval? = nil,
+        timeoutMessage: String? = nil,
         run: @escaping @Sendable (Data) async throws -> (output: String, artifacts: [MediaArtifact])
     ) {
         self.name = name
         self.description = description
         self.parameters = parameters
         self.requiresConfirmation = requiresConfirmation
+        self.timeout = timeout
+        self.timeoutMessage = timeoutMessage
         self.run = run
     }
 
@@ -226,12 +238,16 @@ struct AgentTool: Sendable {
         description: String,
         parameters: ToolParameters,
         requiresConfirmation: Bool = false,
+        timeout: TimeInterval? = nil,
+        timeoutMessage: String? = nil,
         textOnlyRun: @escaping @Sendable (Data) async throws -> String
     ) {
         self.name = name
         self.description = description
         self.parameters = parameters
         self.requiresConfirmation = requiresConfirmation
+        self.timeout = timeout
+        self.timeoutMessage = timeoutMessage
         self.run = { data in
             let text = try await textOnlyRun(data)
             return (text, [])
@@ -341,6 +357,10 @@ struct AgentInput: Sendable {
 
     let instructions: String?
 
+    // Resilience configuration from AgentConfig
+    let retryPolicy: RetryPolicy
+    let errorRecovery: ErrorRecovery
+
     // The Trace Context for distributed observability
     let traceContext: TraceContext
 
@@ -362,6 +382,8 @@ struct AgentInput: Sendable {
         workingMemory: (any WorkingMemoryStrategy)? = nil,
         rateLimitCategory: RateLimitCategory = .geminiFlash, // Default to strict for safety
         instructions: String? = nil,
+        retryPolicy: RetryPolicy = RetryPolicy(),
+        errorRecovery: ErrorRecovery = ErrorRecovery(),
         traceContext: TraceContext
     ) {
         self.userInput = userInput
@@ -378,6 +400,8 @@ struct AgentInput: Sendable {
         self.rateLimitCategory = rateLimitCategory
 
         self.instructions = instructions
+        self.retryPolicy = retryPolicy
+        self.errorRecovery = errorRecovery
         self.traceContext = traceContext
     }
 }
@@ -412,14 +436,67 @@ struct SemanticContext: Sendable {
     
     // 5. Capabilities
     let availableTools: [AgentTool]
+
+    // 6. User Personal Profile
+    let userProfile: String?
+}
+
+// MARK: - Agent Failure Reasons
+
+/// Typed failure signals enabling intelligent retry/skip/reroute decisions.
+/// Replaces opaque error strings with structured reasons the workflow layer can act on.
+enum AgentFailureReason: Sendable, Codable, Equatable {
+    case iterationBudgetExhausted(iterations: Int, bestEffortOutput: String?)
+    case consecutiveParseFailures(count: Int, lastError: String)
+    case consecutiveToolFailures(count: Int, lastTool: String, lastError: String)
+    case repetitiveActionLoop(action: String, count: Int)
+    case executionTimeout(elapsed: TimeInterval, limit: TimeInterval)
+    case modelError(provider: String, error: String)
+    case cancelled
+
+    var isRetryable: Bool {
+        switch self {
+        case .iterationBudgetExhausted: true
+        case .consecutiveParseFailures: true
+        case .consecutiveToolFailures: false
+        case .repetitiveActionLoop: false
+        case .executionTimeout: true
+        case .modelError: true
+        case .cancelled: false
+        }
+    }
+
+    var localizedDescription: String {
+        switch self {
+        case .iterationBudgetExhausted(let iterations, _):
+            "Iteration budget exhausted after \(iterations) iterations"
+        case .consecutiveParseFailures(let count, let lastError):
+            "\(count) consecutive parse failures (last: \(lastError))"
+        case .consecutiveToolFailures(let count, let lastTool, let lastError):
+            "\(count) consecutive tool failures on \(lastTool) (last: \(lastError))"
+        case .repetitiveActionLoop(let action, let count):
+            "Repetitive action loop detected: \(action) repeated \(count) times"
+        case .executionTimeout(let elapsed, let limit):
+            "Execution timeout after \(Int(elapsed))s (limit: \(Int(limit))s)"
+        case .modelError(let provider, let error):
+            "Model error from \(provider): \(error)"
+        case .cancelled:
+            "Execution cancelled"
+        }
+    }
+}
+
+/// Error type wrapping an AgentFailureReason for throwing contexts.
+struct AgentExecutionError: Error, Sendable {
+    let reason: AgentFailureReason
 }
 
 // MARK: - Plan & Execute Models
 
-struct SubTask: Sendable, Codable, Identifiable {
+struct SubTask: Sendable, Codable, Identifiable, Equatable, Hashable {
     let id: String
-    let description: String
-    let toolHint: String?
+    var description: String
+    var toolHint: String?
     var status: SubTaskStatus
     var result: String?
     var dependsOn: [String]?

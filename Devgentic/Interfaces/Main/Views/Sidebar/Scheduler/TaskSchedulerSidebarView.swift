@@ -14,8 +14,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct TaskSchedulerSidebarView: View {
 
     @StateObject private var viewModel = SchedulerViewModel()
-    @EnvironmentObject var mainViewModel: MainApplicationViewModel
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) var mainViewModel
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     @State private var showingCreateSheet = false

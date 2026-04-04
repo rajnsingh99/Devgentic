@@ -15,7 +15,7 @@ struct ScheduledTaskDetailContainerView: View {
 
     let taskID: UUID
 
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     private var task: ScheduledTask? {

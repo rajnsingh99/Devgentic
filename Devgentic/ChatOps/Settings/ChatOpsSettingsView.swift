@@ -48,7 +48,7 @@ private enum ChatOpsPlatform: String, CaseIterable, Identifiable {
 
 struct ChatOpsSettingsView: View {
 
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
 
     @StateObject private var config = ChatOpsConfigManager.shared

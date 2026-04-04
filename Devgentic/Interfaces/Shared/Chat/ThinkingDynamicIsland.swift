@@ -19,20 +19,28 @@ struct ThinkingDynamicIsland: View {
     @State private var gradientRotation: Double = 0
     @Environment(\.appTheme) private var theme
 
-    /// Returns a static headline for states that shouldn't cycle (tool use, interactions, workflow).
-    /// Returns nil for thinking states, which triggers CyclingWordsView's animated word rotation.
+    /// Returns a static headline for states that shouldn't cycle (tool use, interactions, workflow, capabilities).
+    /// Returns nil for generic thinking states, which triggers CyclingWordsView's animated word rotation.
     private var concreteHeadline: String? {
         switch agentState {
         case .acting(.tool(let name)):
             return "Using tool: \(name)"
+        case .acting(.subtask):
+            return currentHeadline // Capability: subtask progress or workflow node
         case .interaction(.permission(let tool)):
             return "Waiting for approval: \(tool)"
         case .interaction(.clarification):
             return "Asking you a question..."
+        case .thinking(.planning):
+            return currentHeadline // Capability: "Planned 3 subtasks"
+        case .thinking(.reflecting):
+            return currentHeadline // Capability: "Evaluating attempt 1..."
         default:
-            // Check if the headline is a concrete status (workflow, media, etc.)
+            // Check if the headline is a concrete status (workflow, media, delegation, etc.)
             if let headline = currentHeadline,
-               headline.contains("/") || headline.contains("completed") || headline.contains("failed") || headline.contains("%") {
+               headline.contains("/") || headline.contains("completed") || headline.contains("failed") ||
+               headline.contains("%") || headline.contains("Delegating") || headline.contains("Subtask") ||
+               headline.contains("Planned") || headline.contains("Retrying") || headline.contains("accepted") {
                 return headline
             }
             return nil // Let CyclingWordsView animate

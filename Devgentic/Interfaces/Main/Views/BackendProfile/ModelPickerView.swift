@@ -230,7 +230,7 @@ struct OllamaModelPickerView: View {
     /// If true, incompatible models will be disabled/dimmed (Agents). If false, all are available (Bots).
     var filterForTools: Bool = false
 
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
     @State private var models: [String] = []
     @State private var loadedLocalModels: [LocalModel] = [] // Cache to look up capabilities
     @State private var isLoading: Bool = false

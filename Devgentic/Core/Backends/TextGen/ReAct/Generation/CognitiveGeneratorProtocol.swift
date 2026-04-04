@@ -59,7 +59,17 @@ extension CognitiveGenerator {
         - Date: \(context.environmentFacts.currentDate)
         </semantic_context>
         """
-        
+
+        // Inject User Personal profile if available
+        if let profile = context.userProfile, !profile.isEmpty {
+            systemContent += """
+            \n
+            <user_profile>
+            \(profile)
+            </user_profile>
+            """
+        }
+
         // Inject the specific Dialect Rules (Execution Contract) if not native
         if !isNativeFlow, let rules = dialectRules {
             let toolsMarkdown = context.availableTools.map { $0.toMarkdownDefinition() }.joined(separator: "\n\n")

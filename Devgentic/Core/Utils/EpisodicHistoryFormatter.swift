@@ -90,15 +90,14 @@ struct EpisodicHistoryFormatter {
 
                 // Extract tool executions from timeline events
                 for event in message.timelineEvents {
-                    if case .toolExecution(let id, let name, let params, let output, let isSuccess, let isExecuting) = event,
-                       !isExecuting {
+                    if case .toolExecution(let data) = event, !data.isExecuting {
 
-                        usedTools.append(name)
-                        let success = isSuccess ?? false
+                        usedTools.append(data.name)
+                        let success = data.isSuccess ?? false
 
                         // Ghost Protocol: track failed tools
                         if !success {
-                            negativeConstraints.insert(name)
+                            negativeConstraints.insert(data.name)
                         }
 
                         // Determine status and error reason
@@ -107,21 +106,21 @@ struct EpisodicHistoryFormatter {
 
                         if success {
                             status = "SUCCESS"
-                        } else if let out = output, out.contains("denied") || out.contains("User explicitly") {
+                        } else if let out = data.output, out.contains("denied") || out.contains("User explicitly") {
                             status = "DENIED"
                             errorReason = truncate(out, maxLength: 150)
-                            userCorrection = "User denied: \(name)"
+                            userCorrection = "User denied: \(data.name)"
                         } else {
                             status = "FAILED"
-                            errorReason = output.map { truncate($0, maxLength: 150) }
+                            errorReason = data.output.map { truncate($0, maxLength: 150) }
                         }
 
                         let action = MemoryAction(
-                            id: id,
-                            toolName: name,
-                            intent: name,
+                            id: data.id,
+                            toolName: data.name,
+                            intent: data.name,
                             status: status,
-                            params: parseParams(params),
+                            params: parseParams(data.params),
                             errorReason: errorReason
                         )
                         actions.append(action)
@@ -258,30 +257,29 @@ struct EpisodicHistoryFormatter {
                 var userCorrection: String? = nil
 
                 for event in message.timelineEvents {
-                    if case .toolExecution(let id, let name, let params, let output, let isSuccess, let isExecuting) = event,
-                       !isExecuting {
+                    if case .toolExecution(let data) = event, !data.isExecuting {
 
-                        let success = isSuccess ?? false
+                        let success = data.isSuccess ?? false
                         let status: String
                         var errorReason: String? = nil
 
                         if success {
                             status = "SUCCESS"
-                        } else if let out = output, out.contains("denied") || out.contains("User explicitly") {
+                        } else if let out = data.output, out.contains("denied") || out.contains("User explicitly") {
                             status = "DENIED"
                             errorReason = truncate(out, maxLength: 150)
-                            userCorrection = "User denied: \(name)"
+                            userCorrection = "User denied: \(data.name)"
                         } else {
                             status = "FAILED"
-                            errorReason = output.map { truncate($0, maxLength: 150) }
+                            errorReason = data.output.map { truncate($0, maxLength: 150) }
                         }
 
                         actions.append(MemoryAction(
-                            id: id,
-                            toolName: name,
-                            intent: name,
+                            id: data.id,
+                            toolName: data.name,
+                            intent: data.name,
                             status: status,
-                            params: parseParams(params),
+                            params: parseParams(data.params),
                             errorReason: errorReason
                         ))
                     }

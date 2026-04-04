@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct AgentTimelineView: View {
-    @ObservedObject var message: ChatMessage
+    var message: ChatMessage
     @Environment(\.appTheme) private var theme
     
     var body: some View {
@@ -48,6 +48,13 @@ struct AgentTimelineView: View {
 
             case .mediaGeneration:
                 currentActionGroup.append(event)
+
+            case .capabilityMilestone(let id, let kind, let detail):
+                if !currentActionGroup.isEmpty {
+                    nodes.append(.actionGroup(currentActionGroup))
+                    currentActionGroup = []
+                }
+                nodes.append(.capabilityMilestone(id: id, kind: kind, detail: detail))
             }
         }
         
@@ -64,11 +71,13 @@ struct AgentTimelineView: View {
 enum TimelineNode: Identifiable {
     case thought(id: UUID, text: String)
     case actionGroup([TimelineEvent])
-    
+    case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
+
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
         case .actionGroup(let actions): return actions.first?.id ?? UUID()
+        case .capabilityMilestone(let id, _, _): return id
         }
     }
 }
@@ -89,7 +98,10 @@ struct TimelineNodeGroupView: View {
                 .lineSpacing(4)
                 .padding(.horizontal, 4)
                 .fixedSize(horizontal: false, vertical: true)
-                
+
+        case .capabilityMilestone(_, let kind, let detail):
+            CapabilityMilestoneRow(kind: kind, detail: detail)
+
         case .actionGroup(let actions):
             VStack(alignment: .leading, spacing: 8) {
                 // Group Header
@@ -131,14 +143,14 @@ struct TimelineNodeGroupView: View {
         
         // Single action case
         if actions.count == 1 {
-            if case .toolExecution(_, let name, _, _, _, _) = actions[0] {
-                return formatToolName(name)
+            if case .toolExecution(let data) = actions[0] {
+                return formatToolName(data.name)
             }
         }
-        
+
         // Multiple actions - try to find common category
         let tools = actions.compactMap { (event: TimelineEvent) -> String? in
-            if case .toolExecution(_, let name, _, _, _, _) = event { return name }
+            if case .toolExecution(let data) = event { return data.name }
             return nil
         }
         
@@ -190,22 +202,22 @@ struct ActionDetailView: View {
     @State private var isOutputExpanded: Bool = false
     
     var body: some View {
-        if case .toolExecution(_, let name, let params, let output, let isSuccess, let isExecuting) = event {
+        if case .toolExecution(let data) = event {
             VStack(alignment: .leading, spacing: 6) {
                 // Tool Execution Row
                 HStack(alignment: .top, spacing: 8) {
-                    Text(name.replacingOccurrences(of: "_", with: " ").capitalized)
+                    Text(data.name.replacingOccurrences(of: "_", with: " ").capitalized)
                         .font(theme.fontCode.weight(.medium))
                         .foregroundColor(theme.secondaryText)
-                    
-                    if !params.isEmpty && params != "{}" {
-                        ParameterPillsView(params: params)
+
+                    if !data.params.isEmpty && data.params != "{}" {
+                        ParameterPillsView(params: data.params)
                     }
                     
-                    if isExecuting {
+                    if data.isExecuting {
                         ProgressView().controlSize(.small).scaleEffect(0.7)
-                    } else if let success = isSuccess {
-                        if name == "ask_user" {
+                    } else if let success = data.isSuccess {
+                        if data.name == "ask_user" {
                             // send = user answered, deny/skip = user skipped
                             Image(systemName: success ? "bubble.left.fill" : "arrow.uturn.left")
                                 .font(.system(size: 10))
@@ -217,9 +229,9 @@ struct ActionDetailView: View {
                         }
                     }
                 }
-                
+
                 // Indented Observation Result
-                if let out = output, !out.isEmpty {
+                if let out = data.output, !out.isEmpty {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(out)
                             .font(theme.fontCodeCaption)
@@ -284,6 +296,47 @@ struct ParameterPillsView: View {
                 return "\(key): \(valStr.prefix(22))..."
             }
             return "\(key): \(valStr)"
+        }
+    }
+}
+
+// MARK: - Capability Milestone Row
+
+struct CapabilityMilestoneRow: View {
+    let kind: CapabilityMilestoneKind
+    let detail: String
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: kind.icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(milestoneColor)
+                .frame(width: 18, alignment: .center)
+
+            Text(detail)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(theme.primaryText.opacity(0.85))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(milestoneColor.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(milestoneColor.opacity(0.2), lineWidth: 0.5)
+        )
+    }
+
+    private var milestoneColor: Color {
+        switch kind.colorCategory {
+        case .planning: return .blue
+        case .reflection: return .purple
+        case .delegation: return .green
         }
     }
 }

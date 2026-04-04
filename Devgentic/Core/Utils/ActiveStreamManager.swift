@@ -6,29 +6,39 @@
 //
 
 import Foundation
-import Combine
 import AppKit
 import os
 
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ActiveStreamManager")
 
+/// Delegate protocol for RemoteMirrorService to observe stream lifecycle.
 @MainActor
-class ActiveStreamManager: ObservableObject {
+protocol ActiveStreamMirrorDelegate: AnyObject {
+    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, for conversationID: UUID)
+    func activeStreamManager(_ manager: ActiveStreamManager, didEndStream message: ChatMessage)
+}
 
-    @Published private(set) var activeStreams: [UUID: ChatMessage] = [:]
-    
+@Observable @MainActor
+final class ActiveStreamManager {
+
+    private(set) var activeStreams: [UUID: ChatMessage] = [:]
+
     // MARK: - Dependencies
-    private var activeTasks: [UUID: Task<Void, Never>] = [:]
-    private var permissionResolvedObserver: Any?
-    private var clarificationResolvedObserver: Any?
+    @ObservationIgnored private var activeTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var permissionResolvedObserver: Any?
+    @ObservationIgnored private var clarificationResolvedObserver: Any?
+    @ObservationIgnored private var planReviewResolvedObserver: Any?
 
-    private let persistenceService: CoreDataServiceProtocol
-    private let fileProcessorService: FileProcessorService
-    private let backendOrchestrationService: BackendOrchestrationService
+    @ObservationIgnored private let persistenceService: ChatPersistenceProtocol
+    @ObservationIgnored private let fileProcessorService: FileProcessorService
+    @ObservationIgnored private let backendOrchestrationService: BackendOrchestrationService
+
+    /// Delegate for RemoteMirrorService to observe stream lifecycle without Combine.
+    weak var mirrorDelegate: ActiveStreamMirrorDelegate?
 
     init(
-        persistenceService: CoreDataServiceProtocol,
+        persistenceService: ChatPersistenceProtocol,
         fileProcessorService: FileProcessorService
     ) {
         self.persistenceService = persistenceService
@@ -38,6 +48,18 @@ class ActiveStreamManager: ObservableObject {
         )
         setupHITLResolvedObservers()
         logger.info("ActiveStreamManager initialized.")
+    }
+
+    deinit {
+        if let observer = permissionResolvedObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = clarificationResolvedObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = planReviewResolvedObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Cross-Surface HITL Sync
@@ -55,8 +77,8 @@ class ActiveStreamManager: ObservableObject {
                       let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
                 // Find the active stream for this conversation and clear its pending confirmation
                 for (_, message) in self.activeStreams where message.conversationId == conversationID {
-                    if message.pendingToolConfirmation != nil {
-                        message.pendingToolConfirmation = nil
+                    if case .toolConfirmation = message.pendingInteraction {
+                        message.pendingInteraction = nil
                         message.agentState = .thinking(.reflecting)
                         message.thinkingHeadline = "Processing..."
                         logger.info("Cleared stale tool confirmation banner for conversation \(conversationID) (resolved externally).")
@@ -75,11 +97,31 @@ class ActiveStreamManager: ObservableObject {
                       let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
                 // Find the active stream for this conversation and clear its pending clarification
                 for (_, message) in self.activeStreams where message.conversationId == conversationID {
-                    if message.pendingClarification != nil {
-                        message.pendingClarification = nil
+                    if case .clarification = message.pendingInteraction {
+                        message.pendingInteraction = nil
                         message.agentState = .thinking(.reflecting)
                         message.thinkingHeadline = "Processing..."
                         logger.info("Cleared stale clarification banner for conversation \(conversationID) (resolved externally).")
+                    }
+                }
+            }
+        }
+
+        planReviewResolvedObserver = NotificationCenter.default.addObserver(
+            forName: .hitlPlanReviewResolved,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                guard let self,
+                      let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
+                // Find the active stream for this conversation and clear its pending plan review
+                for (_, message) in self.activeStreams where message.conversationId == conversationID {
+                    if case .planReview = message.pendingInteraction {
+                        message.pendingInteraction = nil
+                        message.agentState = .thinking(.planning)
+                        message.thinkingHeadline = "Executing plan..."
+                        logger.info("Cleared stale plan review banner for conversation \(conversationID) (resolved externally).")
                     }
                 }
             }
@@ -115,6 +157,7 @@ class ActiveStreamManager: ObservableObject {
         }
         
         activeStreams[agentMessage.id] = agentMessage
+        mirrorDelegate?.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
 
         // Defer initial state mutations to the next run loop tick.
         // This prevents "Modifying state during view update" warnings when the returned
@@ -170,30 +213,24 @@ class ActiveStreamManager: ObservableObject {
                     case .toolCall(let name, let params):
                         agentMessage.thinkingHeadline = "Using tool: \(name)"
                         agentMessage.agentState = .acting(.tool(name: name))
-                        let callId = UUID()
-                        agentMessage.timelineEvents.append(.toolExecution(id: callId, name: name, params: params, output: nil, isSuccess: nil, isExecuting: true))
+                        agentMessage.timelineEvents.append(.toolExecution(
+                            ToolExecutionData(id: UUID(), name: name, params: params, output: nil, isSuccess: nil, isExecuting: true)
+                        ))
                         
                     // [HITL] Phase 3: Handle Permission Requests
                     case .requestConfirmation(let toolName, let params, let operationID):
                         agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
                         agentMessage.agentState = .interaction(.permission(toolName: toolName))
-
-                        // Populate the Pending Confirmation Data for the UI (operationID for multi-surface dedup)
-                        agentMessage.pendingToolConfirmation = PendingToolConfirmation(
-                            id: operationID,
-                            toolName: toolName,
-                            params: params
+                        agentMessage.pendingInteraction = .toolConfirmation(
+                            PendingToolConfirmation(id: operationID, toolName: toolName, params: params)
                         )
 
                     // [ASK_USER] Handle Clarification Requests
                     case .requestClarification(let question, let operationID):
                         agentMessage.thinkingHeadline = "Asking you a question..."
                         agentMessage.agentState = .interaction(.clarification)
-
-                        // Populate the Pending Clarification Data for the UI (operationID for multi-surface dedup)
-                        agentMessage.pendingClarification = PendingClarification(
-                            id: operationID,
-                            question: question
+                        agentMessage.pendingInteraction = .clarification(
+                            PendingClarification(id: operationID, question: question)
                         )
 
                     case .toolOutput(let output):
@@ -203,31 +240,28 @@ class ActiveStreamManager: ObservableObject {
 
                         // Update timeline event
                         if let index = agentMessage.timelineEvents.lastIndex(where: {
-                            if case .toolExecution(_, let name, _, _, _, let isExecuting) = $0 {
-                                return name == output.toolName && isExecuting
+                            if case .toolExecution(let data) = $0 {
+                                return data.name == output.toolName && data.isExecuting
                             }
                             return false
                         }) {
-                            if case .toolExecution(let id, let name, let params, _, _, _) = agentMessage.timelineEvents[index] {
-                                agentMessage.timelineEvents[index] = .toolExecution(
-                                    id: id,
-                                    name: name,
-                                    params: params,
-                                    output: output.output,
-                                    isSuccess: output.isSuccess,
-                                    isExecuting: false
-                                )
+                            if case .toolExecution(var data) = agentMessage.timelineEvents[index] {
+                                data.output = output.output
+                                data.isSuccess = output.isSuccess
+                                data.isExecuting = false
+                                agentMessage.timelineEvents[index] = .toolExecution(data)
                             }
                         }
 
                         // Clear only the specific pending interaction that matches this tool output.
-                        // Blanket clearing both flags caused a deadlock when interactive tools
-                        // ran sequentially — completing one tool would erase the other's pending UI.
-                        if output.toolName == "ask_user" {
-                            agentMessage.pendingClarification = nil
-                        }
-                        if let pending = agentMessage.pendingToolConfirmation, pending.toolName == output.toolName {
-                            agentMessage.pendingToolConfirmation = nil
+                        // Blanket clearing caused a deadlock when interactive tools ran sequentially.
+                        switch agentMessage.pendingInteraction {
+                        case .clarification where output.toolName == "ask_user":
+                            agentMessage.pendingInteraction = nil
+                        case .toolConfirmation(let pending) where pending.toolName == output.toolName:
+                            agentMessage.pendingInteraction = nil
+                        default:
+                            break
                         }
                         
                     case .content(let textChunk):
@@ -283,6 +317,82 @@ class ActiveStreamManager: ObservableObject {
 
                     case .workflowProgress(let completed, let total):
                         agentMessage.thinkingHeadline = "Workflow progress: \(completed)/\(total)"
+
+                    // MARK: Capability Events (Planning, Self-Reflection, Delegation)
+
+                    case .planGenerated(let count):
+                        agentMessage.thinkingHeadline = "Planned \(count) subtask\(count == 1 ? "" : "s")"
+                        agentMessage.agentState = .thinking(.planning)
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .planGenerated, detail: "Planned \(count) subtask\(count == 1 ? "" : "s")"
+                        ))
+
+                    case .requestPlanReview(let subtasks, let operationID):
+                        agentMessage.thinkingHeadline = "Plan ready for review"
+                        agentMessage.agentState = .interaction(.planReview)
+                        agentMessage.pendingInteraction = .planReview(
+                            PendingPlanReview(id: operationID, subtasks: subtasks)
+                        )
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .planReviewRequested,
+                            detail: "Plan with \(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s") awaiting approval"
+                        ))
+
+                    case .subtaskStarted(let index, let total, let description):
+                        agentMessage.thinkingHeadline = "Subtask \(index)/\(total): \(description)"
+                        agentMessage.agentState = .acting(.subtask(current: index, total: total))
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .subtaskStarted, detail: "Subtask \(index)/\(total): \(description)"
+                        ))
+
+                    case .subtaskCompleted(let index, let total, let summary):
+                        agentMessage.thinkingHeadline = "Subtask \(index)/\(total) complete"
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .subtaskCompleted, detail: "Subtask \(index)/\(total): \(summary)"
+                        ))
+
+                    case .reflectionTrialStarted(let trial, let maxTrials):
+                        agentMessage.thinkingHeadline = "Attempt \(trial)/\(maxTrials)"
+                        agentMessage.agentState = .thinking(.reasoning)
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .reflectionTrialStarted, detail: "Trial \(trial) of \(maxTrials)"
+                        ))
+
+                    case .reflectionEvaluating(let trial):
+                        agentMessage.thinkingHeadline = "Evaluating attempt \(trial)..."
+                        agentMessage.agentState = .thinking(.reflecting)
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .reflectionEvaluating, detail: "Evaluating trial \(trial)"
+                        ))
+
+                    case .reflectionRetrying(let trial, let critique):
+                        let shortCritique = String(critique.prefix(80))
+                        agentMessage.thinkingHeadline = "Retrying with feedback (\(trial + 1))..."
+                        agentMessage.agentState = .thinking(.reflecting)
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .reflectionRetrying, detail: "Retry: \(shortCritique)"
+                        ))
+
+                    case .reflectionAccepted(let trial):
+                        agentMessage.thinkingHeadline = "Result accepted (attempt \(trial))"
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .reflectionAccepted, detail: "Accepted on trial \(trial)"
+                        ))
+
+                    case .delegationStarted(let name, let task):
+                        let shortTask = String(task.prefix(60))
+                        agentMessage.thinkingHeadline = "Delegating to \(name)..."
+                        agentMessage.agentState = .acting(.tool(name: "call_agent"))
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .delegationStarted, detail: "\(name): \(shortTask)"
+                        ))
+
+                    case .delegationCompleted(let name, let summary):
+                        let shortSummary = String(summary.prefix(80))
+                        agentMessage.thinkingHeadline = "\(name) completed"
+                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                            id: UUID(), kind: .delegationCompleted, detail: "\(name): \(shortSummary)"
+                        ))
 
                     // MARK: Multimodal Events
                     case .mediaProgress(let toolName, let percent, let status):
@@ -360,7 +470,7 @@ class ActiveStreamManager: ObservableObject {
         message.isStreaming = false
         message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
-        message.pendingToolConfirmation = nil // Clear any pending UI state
+        message.pendingInteraction = nil
         
         if let traceID = message.traceID {
             let traceStatus: TraceStatus = error != nil ? .error : .completed
@@ -382,9 +492,7 @@ class ActiveStreamManager: ObservableObject {
         }
         
         // Persist final message
-        if let targetEntity = persistenceService.getConversation(withId: conversationID) {
-            await persistenceService.addMessage(message, to: targetEntity)
-        }
+        await persistenceService.addMessage(message, toConversation: conversationID)
         
         // [RAG UPGRADE] Event-Driven Vectorization
         // Fire-and-forget: Index the final message into the vector database without blocking the UI.
@@ -395,6 +503,7 @@ class ActiveStreamManager: ObservableObject {
         }
         
         activeStreams.removeValue(forKey: message.id)
+        mirrorDelegate?.activeStreamManager(self, didEndStream: message)
 
         // Dispatch notification if app is in background
         let notifConversationID = conversationID

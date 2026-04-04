@@ -22,7 +22,7 @@ struct MLXModelPickerView: View {
     var filterForTools: Bool = false
 
     @Environment(\.appTheme) private var theme
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
 
     @StateObject private var service = MLXModelService.shared
     @State private var showUnsupportedAlert = false

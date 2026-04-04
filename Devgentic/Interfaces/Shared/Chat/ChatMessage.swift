@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Combine
 
 enum GenerationType: String, Codable, CaseIterable, Identifiable {
     case text
@@ -29,21 +28,88 @@ struct AgentResponse: Codable, Equatable {
     var generationAttempts: Int = 1
 }
 
+/// Data model for a tool execution event in the agent timeline.
+/// Mutable fields (`output`, `isSuccess`, `isExecuting`) are updated when
+/// the tool completes — the struct is replaced in-place in the timeline array.
+struct ToolExecutionData: Codable, Equatable, Identifiable, Sendable {
+    let id: UUID
+    let name: String
+    let params: String
+    var output: String?
+    var isSuccess: Bool?
+    var isExecuting: Bool
+}
+
 enum TimelineEvent: Codable, Equatable, Identifiable {
     case thought(id: UUID, text: String)
-    case toolExecution(id: UUID, name: String, params: String, output: String?, isSuccess: Bool?, isExecuting: Bool)
+    case toolExecution(ToolExecutionData)
     case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
+
+    // Capability milestones
+    case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
 
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
-        case .toolExecution(let id, _, _, _, _, _): return id
+        case .toolExecution(let data): return data.id
         case .mediaGeneration(let id, _, _, _): return id
+        case .capabilityMilestone(let id, _, _): return id
         }
     }
 }
 
-class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecked Sendable {
+/// Describes the type of capability milestone for timeline rendering.
+enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
+    // Planning
+    case planGenerated          // "Planned 3 subtasks"
+    case planReviewRequested    // "Plan awaiting approval"
+    case subtaskStarted         // "Subtask 1/3: Research APIs"
+    case subtaskCompleted       // "Subtask 1/3 complete"
+
+    // Self-Reflection
+    case reflectionTrialStarted // "Trial 1/3 started"
+    case reflectionEvaluating   // "Evaluating trial 1..."
+    case reflectionRetrying     // "Retrying — critique: ..."
+    case reflectionAccepted     // "Result accepted (trial 2)"
+
+    // Agent Delegation
+    case delegationStarted      // "Delegating to SecurityReviewer"
+    case delegationCompleted    // "SecurityReviewer completed"
+
+    /// SF Symbol for rendering in the timeline.
+    var icon: String {
+        switch self {
+        case .planGenerated: return "list.bullet.clipboard"
+        case .planReviewRequested: return "checklist.checked"
+        case .subtaskStarted: return "arrow.right.circle"
+        case .subtaskCompleted: return "checkmark.circle"
+        case .reflectionTrialStarted: return "arrow.trianglehead.2.counterclockwise"
+        case .reflectionEvaluating: return "magnifyingglass"
+        case .reflectionRetrying: return "arrow.counterclockwise"
+        case .reflectionAccepted: return "checkmark.seal"
+        case .delegationStarted: return "person.line.dotted.person"
+        case .delegationCompleted: return "person.fill.checkmark"
+        }
+    }
+
+    /// Accent color category for visual distinction.
+    var colorCategory: MilestoneColor {
+        switch self {
+        case .planGenerated, .planReviewRequested, .subtaskStarted, .subtaskCompleted: return .planning
+        case .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted: return .reflection
+        case .delegationStarted, .delegationCompleted: return .delegation
+        }
+    }
+
+    enum MilestoneColor: String, Codable, Sendable {
+        case planning    // blue tint
+        case reflection  // purple tint
+        case delegation  // green tint
+    }
+}
+
+@Observable
+final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     let id: UUID
     let conversationId: UUID
     let timestamp: Date
@@ -58,9 +124,9 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     /// whether to mirror stream events to a remote transport.
     var messageSource: MessageSource = .localUI
     
-    @Published var content: MessageContent
-    @Published var agentResponse: AgentResponse?
-    @Published var isStreaming: Bool = false
+    var content: MessageContent
+    var agentResponse: AgentResponse?
+    var isStreaming: Bool = false
     
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
@@ -76,25 +142,64 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     
     var artifacts: [ToolOutput] {
         timelineEvents.compactMap { event in
-            if case .toolExecution(_, let name, _, let output, let isSuccess, let isExecuting) = event, !isExecuting {
-                return ToolOutput(toolName: name, output: output ?? "", isSuccess: isSuccess ?? false)
+            if case .toolExecution(let data) = event, !data.isExecuting {
+                return ToolOutput(toolName: data.name, output: data.output ?? "", isSuccess: data.isSuccess ?? false)
             }
             return nil
         }
     }
 
-    @Published var timelineEvents: [TimelineEvent] = []
+    /// Chronological timeline of agent reasoning steps, tool executions, and capability milestones.
+    /// Ordering is guaranteed by @MainActor serialization in ActiveStreamManager's event loop.
+    /// SwiftUI ForEach preserves insertion order via unique UUID identities.
+    var timelineEvents: [TimelineEvent] = []
     
     // MARK: - Transient UI State (Not Persisted)
-    @Published var thinkingHeadline: String? = nil
-    @Published var agentState: AgentState = .idle
-    @Published var isThinkingExpanded: Bool = false // UI toggle for the accordion
-    
-    // [HITL] New Property for Permission Card
-    @Published var pendingToolConfirmation: PendingToolConfirmation? = nil
+    var thinkingHeadline: String? = nil
+    var agentState: AgentState = .idle
+    var isThinkingExpanded: Bool = false
 
-    // [ASK_USER] Property for Clarification Card
-    @Published var pendingClarification: PendingClarification? = nil
+    // MARK: - HITL Interaction State (Unified)
+    /// The single pending Human-in-the-Loop interaction for this message.
+    /// Only one interaction type can be active at a time.
+    var pendingInteraction: PendingInteraction? = nil
+
+    // Deprecated shims — use `pendingInteraction` directly. Remove after full migration.
+    @available(*, deprecated, message: "Use pendingInteraction instead")
+    var pendingToolConfirmation: PendingToolConfirmation? {
+        get {
+            if case .toolConfirmation(let c) = pendingInteraction { return c }
+            return nil
+        }
+        set {
+            if let v = newValue { pendingInteraction = .toolConfirmation(v) }
+            else if case .toolConfirmation = pendingInteraction { pendingInteraction = nil }
+        }
+    }
+
+    @available(*, deprecated, message: "Use pendingInteraction instead")
+    var pendingClarification: PendingClarification? {
+        get {
+            if case .clarification(let c) = pendingInteraction { return c }
+            return nil
+        }
+        set {
+            if let v = newValue { pendingInteraction = .clarification(v) }
+            else if case .clarification = pendingInteraction { pendingInteraction = nil }
+        }
+    }
+
+    @available(*, deprecated, message: "Use pendingInteraction instead")
+    var pendingPlanReview: PendingPlanReview? {
+        get {
+            if case .planReview(let p) = pendingInteraction { return p }
+            return nil
+        }
+        set {
+            if let v = newValue { pendingInteraction = .planReview(v) }
+            else if case .planReview = pendingInteraction { pendingInteraction = nil }
+        }
+    }
     
     // MARK: - RAG Indexing State
     // No longer polled; index occurs on stream completion.
@@ -108,11 +213,11 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     }
 
     // MARK: - Performance Caching
-    var cachedMarkdownBlocks: [ContentBlock]? = nil
-    
+    @ObservationIgnored var cachedMarkdownBlocks: [ContentBlock]? = nil
+
     var attachedTextFiles: [AttachedTextFile]?
     var attachedImageFiles: [AttachedImageFile]?
-    private var streamTask: Task<Void, Never>?
+    @ObservationIgnored private var streamTask: Task<Void, Never>?
 
     /// Computed property to get the currently displayed content for an agent message.
     var currentAgentContent: MessageContent? {
@@ -166,29 +271,42 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        return lhs.id == rhs.id &&
-               lhs.content == rhs.content &&
-               lhs.isStreaming == rhs.isStreaming &&
-               lhs.agentResponse == rhs.agentResponse &&
-               lhs.thoughts == rhs.thoughts &&
-               lhs.artifacts == rhs.artifacts &&
-               lhs.pendingToolConfirmation == rhs.pendingToolConfirmation &&
-               lhs.pendingClarification == rhs.pendingClarification
+        lhs.id == rhs.id &&
+        lhs.conversationId == rhs.conversationId &&
+        lhs.content == rhs.content &&
+        lhs.isStreaming == rhs.isStreaming &&
+        lhs.agentResponse == rhs.agentResponse &&
+        lhs.timelineEvents == rhs.timelineEvents &&
+        lhs.pendingInteraction == rhs.pendingInteraction
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {
         // Lifecycle management placeholder
     }
     
+    // MARK: - Codable (Schema Versioned)
+
+    /// Current schema version. Increment when adding/removing persisted fields.
+    /// - v1: Legacy format with separate `thoughts`/`artifacts` arrays + `agentState` encoded
+    /// - v2: Unified `timelineEvents`, removed `thoughts`/`artifacts`/`agentState` from encoding
+    private static let currentSchemaVersion = 2
+
     private enum CodingKeys: String, CodingKey {
-        case id, conversationId, timestamp, sender, content, agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        case timelineEvents, thoughts, artifacts, agentState, traceID
+        case schemaVersion
+        case id, conversationId, timestamp, sender, content
+        case agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
+        case timelineEvents, traceID
     }
 
-    // Manual Decodable conformance
+    /// Legacy keys only used for v1 migration — never encoded.
+    private enum LegacyCodingKeys: String, CodingKey {
+        case thoughts, artifacts, agentState
+    }
+
     required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        
+        let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+
         self.id = try container.decode(UUID.self, forKey: .id)
         self.conversationId = try container.decode(UUID.self, forKey: .conversationId)
         self.timestamp = try container.decode(Date.self, forKey: .timestamp)
@@ -199,33 +317,25 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
         self.traceID = try container.decodeIfPresent(String.self, forKey: .traceID)
-        
-        self.timelineEvents = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
-        self.agentState = try container.decodeIfPresent(AgentState.self, forKey: .agentState) ?? .idle
-        
-        // Migration logic: If no timelineEvents but legacy data exists, reconstruct timeline
-        if self.timelineEvents.isEmpty {
-            let legacyThoughts = try container.decodeIfPresent([AgentThought].self, forKey: .thoughts) ?? []
-            let legacyArtifacts = try container.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
-            
-            // Note: Since we don't know the exact order of legacy data, we append thoughts then artifacts.
-            // This is a one-time migration for old local data.
-            self.timelineEvents = legacyThoughts.map { .thought(id: $0.id, text: $0.text) }
-            self.timelineEvents.append(contentsOf: legacyArtifacts.map { .toolExecution(id: UUID(), name: $0.toolName, params: "", output: $0.output, isSuccess: $0.isSuccess, isExecuting: false) })
+
+        if version == 1 {
+            self.timelineEvents = try Self.migrateV1Timeline(from: decoder)
+        } else {
+            self.timelineEvents = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
         }
-        
-        // Transient properties initialize to default
+
+        // Transient properties always initialize to defaults
         self.thinkingHeadline = nil
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
         self.isThinkingExpanded = false
-        self.pendingToolConfirmation = nil
-        self.pendingClarification = nil
+        self.pendingInteraction = nil
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        
+
+        try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
         try container.encode(id, forKey: .id)
         try container.encode(conversationId, forKey: .conversationId)
         try container.encode(timestamp, forKey: .timestamp)
@@ -236,10 +346,31 @@ class ChatMessage: ObservableObject, Identifiable, Codable, Equatable, @unchecke
         try container.encodeIfPresent(attachedTextFiles, forKey: .attachedTextFiles)
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
         try container.encodeIfPresent(traceID, forKey: .traceID)
-        
         try container.encode(timelineEvents, forKey: .timelineEvents)
-        try container.encode(agentState, forKey: .agentState)
-        // Note: thoughts and artifacts are now computed and NOT encoded.
+        // agentState, thoughts, artifacts are NOT encoded (transient / computed)
+    }
+
+    // MARK: - V1 Migration
+
+    /// Reconstructs `timelineEvents` from legacy v1 format that stored separate
+    /// `thoughts` and `artifacts` arrays alongside `timelineEvents`.
+    /// Only invoked when `schemaVersion` is absent or 1.
+    private static func migrateV1Timeline(from decoder: Decoder) throws -> [TimelineEvent] {
+        // Try the modern key first — v1 data may already have timelineEvents
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let existing = try container.decodeIfPresent([TimelineEvent].self, forKey: .timelineEvents) ?? []
+        guard existing.isEmpty else { return existing }
+
+        // Fall back to legacy keys
+        let legacyContainer = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        let legacyThoughts = try legacyContainer.decodeIfPresent([AgentThought].self, forKey: .thoughts) ?? []
+        let legacyArtifacts = try legacyContainer.decodeIfPresent([ToolOutput].self, forKey: .artifacts) ?? []
+
+        var events: [TimelineEvent] = legacyThoughts.map { .thought(id: $0.id, text: $0.text) }
+        events.append(contentsOf: legacyArtifacts.map {
+            .toolExecution(ToolExecutionData(id: UUID(), name: $0.toolName, params: "", output: $0.output, isSuccess: $0.isSuccess, isExecuting: false))
+        })
+        return events
     }
 }
 

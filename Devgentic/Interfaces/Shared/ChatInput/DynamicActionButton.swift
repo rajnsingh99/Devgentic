@@ -38,7 +38,7 @@ struct DynamicActionButton: View {
     let editorTextView: CustomTextEditor.CustomNSTextView?
     let backendProfileSelected: Bool
 
-    @ObservedObject var inputViewModel: ChatInputViewModel
+    var inputViewModel: ChatInputViewModel
 
     let onSend: (NSAttributedString, [NSAttributedString.Key: Any]) -> Void
     let onToggleVoice: () -> Void
@@ -66,9 +66,9 @@ struct DynamicActionButton: View {
         .disabled(isDisabled)
         .help(helpText)
         .accessibilityLabel(helpText)
-        .popover(isPresented: $inputViewModel.showModelSelectorPopover, arrowEdge: .top) {
+        .popover(isPresented: Bindable(inputViewModel).showModelSelectorPopover, arrowEdge: .top) {
             WhisperModelSelectorPopover(
-                isPresented: $inputViewModel.showModelSelectorPopover,
+                isPresented: Bindable(inputViewModel).showModelSelectorPopover,
                 currentModelName: inputViewModel.currentSpeechModelName,
                 onSelectModel: { modelName in
                     inputViewModel.selectAndDownloadModel(modelName)

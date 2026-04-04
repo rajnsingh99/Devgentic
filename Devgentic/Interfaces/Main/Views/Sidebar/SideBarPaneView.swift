@@ -52,7 +52,7 @@ struct SideBarPaneView: View {
     @Binding var sidebarWidth: CGFloat
 
     @EnvironmentObject var themeManager: ThemeManager
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.openWindow) var openWindow
     @Environment(\.appTheme) private var theme
 
@@ -78,7 +78,7 @@ struct SideBarPaneView: View {
                     Spacer()
                 }
             }
-            .environmentObject(viewModel)
+            .environment(viewModel)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         // Use clear background to allow the parent container's material/vibrancy to show through

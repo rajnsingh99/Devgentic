@@ -84,6 +84,26 @@ final class DiscordTransport: ChatOpsTransport, @unchecked Sendable {
                 content: messageText
             )
             return message.id
+
+        case .planReview(let subtaskDescriptions):
+            let planList = subtaskDescriptions.enumerated()
+                .map { "  \($0.offset + 1). \($0.element)" }
+                .joined(separator: "\n")
+            let messageText = """
+            📋 **Plan Review Required**
+
+            The agent has generated a plan with \(subtaskDescriptions.count) step(s):
+
+            \(planList)
+
+            Please approve or edit this plan from the Mac app.
+            """
+
+            let message = try await apiClient.sendMessage(
+                channelID: chatID,
+                content: messageText
+            )
+            return message.id
         }
     }
 

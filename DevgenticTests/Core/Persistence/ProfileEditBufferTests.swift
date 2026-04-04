@@ -47,7 +47,6 @@ final class ProfileEditBufferTests: XCTestCase {
             displayName: name,
             details: .agent(AgentConfig(
                 llmConfig: ProviderConfig(apiProvider: .ollama, modelName: modelName),
-                architecture: .reAct,
                 tools: [],
                 instructions: instructions
             ))
@@ -244,16 +243,16 @@ final class ProfileEditBufferTests: XCTestCase {
 
     // MARK: - Profile Type Preservation
 
-    func testAgentArchitectureChangeMakesDirty() {
+    func testAgentCapabilitiesChangeMakesDirty() {
         let profile = makeAgent()
         let buffer = ProfileEditBuffer(profile: profile)
 
         if case .agent(var config) = buffer.draft.details {
-            config.architecture = .planAndExecute
+            config.capabilities.planning = PlanningCapabilityConfig()
             buffer.draft.details = .agent(config)
         }
 
-        XCTAssertTrue(buffer.isDirty, "Changing architecture should mark buffer dirty")
+        XCTAssertTrue(buffer.isDirty, "Changing capabilities should mark buffer dirty")
     }
 
     // MARK: - Equality Edge Cases

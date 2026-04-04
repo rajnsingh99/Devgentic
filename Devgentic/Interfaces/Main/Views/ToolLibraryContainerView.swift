@@ -14,8 +14,8 @@ struct ToolLibraryContainerView: View {
 
     let profileID: UUID
 
-    @EnvironmentObject private var profileService: BackendProfileService
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(BackendProfileService.self) private var profileService
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     @State private var searchText = ""
@@ -24,6 +24,9 @@ struct ToolLibraryContainerView: View {
     @State private var isSelectAllHovered = false
     @State private var isAddHovered = false
     @State private var isDoneHovered = false
+    @State private var isSelectionMode = false
+    @State private var selectedToolIDs: Set<String> = []
+    @State private var isSelectionHovered = false
 
     var body: some View {
         if profileService.profiles.contains(where: { $0.id == profileID }) {
@@ -41,7 +44,9 @@ struct ToolLibraryContainerView: View {
                     configuredTools: toolsBinding,
                     instructions: currentInstructions,
                     searchText: $searchText,
-                    selectedSidebar: $selectedSidebar
+                    selectedSidebar: $selectedSidebar,
+                    isSelectionMode: $isSelectionMode,
+                    selectedToolIDs: $selectedToolIDs
                 )
             }
             .id(profileID)
@@ -95,6 +100,17 @@ struct ToolLibraryContainerView: View {
 
     private var actionIcons: some View {
         HStack(spacing: 6) {
+            // Bulk Selection Mode
+            iconButton(
+                symbol: isSelectionMode ? "checklist.checked" : "checklist",
+                color: isSelectionMode ? theme.accentColor : theme.primaryText,
+                isHovered: $isSelectionHovered,
+                help: isSelectionMode ? "Exit selection mode" : "Bulk select tools"
+            ) {
+                isSelectionMode.toggle()
+                if !isSelectionMode { selectedToolIDs.removeAll() }
+            }
+
             // Select All
             iconButton(
                 symbol: allToolsSelected ? "checkmark.circle.fill" : "checkmark.circle",
@@ -159,13 +175,22 @@ struct ToolLibraryContainerView: View {
 
     // MARK: - Select All Logic
 
-    private var allToolsSelected: Bool {
+    private var currentTools: [Tool] {
+        if let buffer = profileService.editBuffer, buffer.draft.id == profileID,
+           case .agent(let config) = buffer.draft.details {
+            return config.tools
+        }
         guard let profile = currentProfile,
-              case .agent(let config) = profile.details else { return false }
+              case .agent(let config) = profile.details else { return [] }
+        return config.tools
+    }
+
+    private var allToolsSelected: Bool {
+        let tools = currentTools
         let rows = currentDisplayedRows()
         guard !rows.isEmpty else { return false }
         return rows.allSatisfy { row in
-            config.tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
+            tools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
         }
     }
 
@@ -207,6 +232,11 @@ struct ToolLibraryContainerView: View {
             }
         }
 
+        // Sync to edit buffer
+        if let buffer = profileService.editBuffer, buffer.draft.id == profileID {
+            buffer.draft.details = .agent(agentConfig)
+        }
+        // Persist
         if let idx = profileService.profiles.firstIndex(where: { $0.id == profileID }) {
             profileService.profiles[idx].details = .agent(agentConfig)
             try? profileService.saveProfile(profileService.profiles[idx])
@@ -223,6 +253,18 @@ struct ToolLibraryContainerView: View {
             for source in toolStore.sources {
                 for tool in source.tools where matchesSearch(tool) {
                     rows.append(ToolTableRow(source: source, definition: tool))
+                }
+            }
+        case .favorites:
+            guard let profile = currentProfile,
+                  case .agent(let config) = profile.details else { break }
+            let favoriteKeys = Set(config.tools.filter(\.isFavorite).map { "\($0.sourceId)-\($0.name)" })
+            for source in toolStore.sources {
+                for tool in source.tools {
+                    let key = "\(source.id)-\(tool.name)"
+                    if favoriteKeys.contains(key) && matchesSearch(tool) {
+                        rows.append(ToolTableRow(source: source, definition: tool))
+                    }
                 }
             }
         case .localCategory(let groupName):
@@ -256,11 +298,23 @@ struct ToolLibraryContainerView: View {
     private var toolsBinding: Binding<[Tool]> {
         Binding(
             get: {
+                // Read from edit buffer if active, otherwise fall back to profile service
+                if let buffer = self.profileService.editBuffer, buffer.draft.id == self.profileID,
+                   case .agent(let config) = buffer.draft.details {
+                    return config.tools
+                }
                 guard let profile = self.currentProfile,
                       case .agent(let config) = profile.details else { return [] }
                 return config.tools
             },
             set: { newTools in
+                // Write to edit buffer (keeps AgentConfigDetailView in sync)
+                if let buffer = self.profileService.editBuffer, buffer.draft.id == self.profileID,
+                   case .agent(var config) = buffer.draft.details {
+                    config.tools = newTools
+                    buffer.draft.details = .agent(config)
+                }
+                // Also write to profile service for persistence
                 guard let idx = self.profileService.profiles.firstIndex(where: { $0.id == self.profileID }),
                       case .agent(var config) = self.profileService.profiles[idx].details else { return }
                 config.tools = newTools

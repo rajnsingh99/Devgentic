@@ -15,6 +15,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 extension Notification.Name {
     static let hitlPermissionResolved = Notification.Name("hitlPermissionResolved")
     static let hitlClarificationResolved = Notification.Name("hitlClarificationResolved")
+    static let hitlPlanReviewResolved = Notification.Name("hitlPlanReviewResolved")
 }
 
 /// UserInfo keys for HITL resolved notifications.
@@ -38,6 +39,8 @@ actor ExecutionSuspensionService {
     private var activeContinuations: [UUID: CheckedContinuation<Bool, Never>] = [:]
     // Maps operationID -> continuation (clarification gates)
     private var clarificationContinuations: [UUID: CheckedContinuation<String?, Never>] = [:]
+    // Maps operationID -> continuation (plan review gates — no timeout)
+    private var planReviewContinuations: [UUID: CheckedContinuation<[SubTask]?, Never>] = [:]
     // Maps operationID -> timeout task
     private var timeoutTasks: [UUID: Task<Void, Never>] = [:]
     // Reverse lookup: operationID -> conversationID (for cancel-by-conversation)
@@ -101,15 +104,7 @@ actor ExecutionSuspensionService {
         logger.info("[Suspension] Resuming operation \(operationID) with approval: \(approved)")
         continuation.resume(returning: approved)
 
-        // Notify both surfaces (Mac UI + remote) so the non-responding surface clears its stale state.
-        Task { @MainActor in
-            var userInfo: [String: Any] = [
-                HITLResolvedKey.operationID: operationID,
-                HITLResolvedKey.approved: approved
-            ]
-            if let conversationID { userInfo[HITLResolvedKey.conversationID] = conversationID }
-            NotificationCenter.default.post(name: .hitlPermissionResolved, object: nil, userInfo: userInfo)
-        }
+        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: approved])
     }
 
     // MARK: - Clarification Suspension (ask_user)
@@ -159,12 +154,7 @@ actor ExecutionSuspensionService {
         logger.info("[Clarification] Resuming operation \(operationID) with user input.")
         continuation.resume(returning: userInput)
 
-        // Notify both surfaces so the non-responding surface clears its stale state.
-        Task { @MainActor in
-            var userInfo: [String: Any] = [HITLResolvedKey.operationID: operationID]
-            if let conversationID { userInfo[HITLResolvedKey.conversationID] = conversationID }
-            NotificationCenter.default.post(name: .hitlClarificationResolved, object: nil, userInfo: userInfo)
-        }
+        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID)
     }
 
     private func handleClarificationTimeout(for operationID: UUID) {
@@ -174,11 +164,48 @@ actor ExecutionSuspensionService {
         guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else { return }
         continuation.resume(returning: nil)
 
-        Task { @MainActor in
-            var userInfo: [String: Any] = [HITLResolvedKey.operationID: operationID]
-            if let conversationID { userInfo[HITLResolvedKey.conversationID] = conversationID }
-            NotificationCenter.default.post(name: .hitlClarificationResolved, object: nil, userInfo: userInfo)
+        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID)
+    }
+
+    // MARK: - Plan Review Suspension (No Timeout)
+
+    /// Pauses execution until the user reviews, edits, and approves the generated plan.
+    /// Unlike tool confirmations, plan review has **no timeout** — it stays indefinitely.
+    /// - Parameters:
+    ///   - operationID: Unique identifier for this HITL operation.
+    ///   - conversationID: The conversation this operation belongs to.
+    /// - Returns: The user-edited subtask array, or `nil` if the user rejected the plan.
+    func suspendForPlanReview(for operationID: UUID, conversationID: UUID) async -> [SubTask]? {
+        // Safety: prevent double-suspension leaks
+        if let existing = planReviewContinuations[operationID] {
+            logger.warning("[PlanReview] Overwriting existing plan review for operation \(operationID). Auto-cancelling previous.")
+            existing.resume(returning: nil)
+            planReviewContinuations.removeValue(forKey: operationID)
         }
+
+        operationToConversation[operationID] = conversationID
+
+        logger.info("[PlanReview] Suspending operation \(operationID) for conversation: \(conversationID). No timeout — awaiting user action.")
+
+        // NO timeout task — plan review stays indefinitely until user acts or stream is cancelled
+        return await withCheckedContinuation { continuation in
+            planReviewContinuations[operationID] = continuation
+        }
+    }
+
+    /// Resumes a plan review suspension with the user-edited plan or nil for rejection.
+    func resumePlanReview(for operationID: UUID, editedPlan: [SubTask]?) {
+        let conversationID = operationToConversation.removeValue(forKey: operationID)
+
+        guard let continuation = planReviewContinuations.removeValue(forKey: operationID) else {
+            logger.warning("[PlanReview] Attempted to resume non-existent plan review for operation: \(operationID)")
+            return
+        }
+
+        logger.info("[PlanReview] Resuming operation \(operationID) with \(editedPlan != nil ? "approved plan (\(editedPlan!.count) subtasks)" : "rejection").")
+        continuation.resume(returning: editedPlan)
+
+        postResolved(name: .hitlPlanReviewResolved, operationID: operationID, conversationID: conversationID)
     }
 
     // MARK: - Cancellation & Status
@@ -203,6 +230,11 @@ actor ExecutionSuspensionService {
                 logger.info("[Suspension] Force-cancelling clarification for operation: \(opID)")
                 continuation.resume(returning: nil)
             }
+
+            if let continuation = planReviewContinuations.removeValue(forKey: opID) {
+                logger.info("[Suspension] Force-cancelling plan review for operation: \(opID)")
+                continuation.resume(returning: nil)
+            }
         }
     }
 
@@ -215,18 +247,29 @@ actor ExecutionSuspensionService {
         guard let continuation = activeContinuations.removeValue(forKey: operationID) else { return }
         continuation.resume(returning: false)
 
-        Task { @MainActor in
-            var userInfo: [String: Any] = [
-                HITLResolvedKey.operationID: operationID,
-                HITLResolvedKey.approved: false
-            ]
-            if let conversationID { userInfo[HITLResolvedKey.conversationID] = conversationID }
-            NotificationCenter.default.post(name: .hitlPermissionResolved, object: nil, userInfo: userInfo)
-        }
+        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: false])
     }
 
     /// Checks if a conversation has any pending suspension.
     func isSuspended(for conversationID: UUID) -> Bool {
         return operationToConversation.values.contains(conversationID)
+    }
+
+    // MARK: - Notification Helper
+
+    /// Posts an HITL resolved notification on the main actor for cross-surface deduplication.
+    /// Centralizes the pattern used by all resume/timeout paths to prevent drift.
+    private func postResolved(
+        name: Notification.Name,
+        operationID: UUID,
+        conversationID: UUID?,
+        extraInfo: [String: Any] = [:]
+    ) {
+        Task { @MainActor in
+            var userInfo: [String: Any] = [HITLResolvedKey.operationID: operationID]
+            if let conversationID { userInfo[HITLResolvedKey.conversationID] = conversationID }
+            for (key, value) in extraInfo { userInfo[key] = value }
+            NotificationCenter.default.post(name: name, object: nil, userInfo: userInfo)
+        }
     }
 }

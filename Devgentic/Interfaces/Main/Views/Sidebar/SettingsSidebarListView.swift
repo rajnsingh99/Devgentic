@@ -13,7 +13,7 @@ import SwiftUI
 
 struct SettingsSidebarListView: View {
 
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     /// The currently-displayed settings category (derived from the router).

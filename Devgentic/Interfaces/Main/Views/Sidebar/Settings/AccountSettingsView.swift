@@ -9,7 +9,7 @@ import SwiftUI
 
 /// A view for managing user account settings, specifically Google Sign-In.
 struct AccountSettingsView: View {
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
 
     // Mock state for Google Sign-In

@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import CoreData
+import SwiftData
 import os
 
 /// The core orchestrator for Slack ChatOps.
@@ -236,9 +236,9 @@ final class SlackChatOpsBridge: ObservableObject {
         }
 
         var buttons: [SlackBlockElement] = []
-        for entity in conversations.prefix(20) { // Slack allows up to 25 elements per actions block
-            let title = entity.displayTitle
-            let convID = entity.id ?? UUID()
+        for conversationSD in conversations.prefix(20) { // Slack allows up to 25 elements per actions block
+            let title = conversationSD.toStruct().displayTitle
+            let convID = conversationSD.id
             let isActive = convID == config.slackActiveConversationID ? "⭐ " : ""
             let label = String("\(isActive)\(title)".prefix(75))
 
@@ -274,7 +274,7 @@ final class SlackChatOpsBridge: ObservableObject {
         }
 
         if let emptyConv = findReusableEmptyConversation() {
-            let reusedID = emptyConv.id!
+            let reusedID = emptyConv.id
             config.slackActiveConversationID = reusedID
             vm.selectedConversationID = reusedID
 
@@ -303,8 +303,8 @@ final class SlackChatOpsBridge: ObservableObject {
         let isStreaming = vm.streamingMessageID != nil
         let activeConvTitle: String
         if let activeID = config.slackActiveConversationID,
-           let entity = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = entity.displayTitle
+           let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
+            activeConvTitle = conversationSD.toStruct().displayTitle
         } else {
             activeConvTitle = "None"
         }
@@ -360,7 +360,7 @@ final class SlackChatOpsBridge: ObservableObject {
     private func handleSwitchConversation(to uuid: UUID, channelID: String) async {
         guard let vm = viewModel else { return }
 
-        guard let entity = vm.persistenceService.getConversation(withId: uuid) else {
+        guard let conversationSD = vm.persistenceService.getConversation(withId: uuid) else {
             _ = try? await apiClient?.postMessage(channel: channelID, text: "⚠️ Conversation not found.")
             return
         }
@@ -369,7 +369,7 @@ final class SlackChatOpsBridge: ObservableObject {
         awaitingClarification = false
         vm.selectedConversationID = uuid
 
-        let title = entity.displayTitle
+        let title = conversationSD.toStruct().displayTitle
         _ = try? await apiClient?.postMessage(
             channel: channelID,
             text: "✅ Switched to: *\(title)*\n\nJust type your message to continue."
@@ -420,8 +420,8 @@ final class SlackChatOpsBridge: ObservableObject {
 
     private func resolveProfileForConversation(_ conversationID: UUID) -> BackendProfileModel? {
         guard let vm = viewModel else { return nil }
-        let entity = vm.persistenceService.getConversation(withId: conversationID)
-        guard let profileID = entity?.backendEntityId else { return nil }
+        let conversationSD = vm.persistenceService.getConversation(withId: conversationID)
+        guard let profileID = conversationSD?.backendEntityId else { return nil }
         return ((try? BackendProfileStore.shared.fetchProfiles()) ?? []).first { $0.id == profileID }
     }
 
@@ -435,42 +435,43 @@ final class SlackChatOpsBridge: ObservableObject {
         return profiles.first { $0.profileType == .agent } ?? profiles.first
     }
 
-    // MARK: - Core Data Helpers
+    // MARK: - SwiftData Helpers
 
-    private func findReusableEmptyConversation() -> ConversationEntity? {
+    private func findReusableEmptyConversation() -> ConversationSD? {
         if let activeID = config.slackActiveConversationID,
            let activeEntity = viewModel?.persistenceService.getConversation(withId: activeID),
-           activeEntity.messages?.count == 0 {
+           activeEntity.messages.count == 0 {
             return activeEntity
         }
 
-        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ]
-        request.fetchLimit = 10
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
+
+        var descriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        descriptor.fetchLimit = 10
 
         do {
-            let context = CoreDataPersistenceService.shared.viewContext
-            let results = try context.fetch(request)
-            return results.first { $0.messages?.count == 0 }
+            let results = try context.fetch(descriptor)
+            return results.first { $0.messages.count == 0 }
         } catch {
             logger.error("[Slack] Failed to query for empty conversations: \(error.localizedDescription)")
             return nil
         }
     }
 
-    private func fetchRecentConversations(limit: Int) -> [ConversationEntity] {
-        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \ConversationEntity.isPinned, ascending: false),
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ]
-        request.fetchLimit = limit
+    private func fetchRecentConversations(limit: Int) -> [ConversationSD] {
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return [] }
+
+        var descriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [
+                SortDescriptor(\.timestamp, order: .reverse)
+            ]
+        )
+        descriptor.fetchLimit = limit
 
         do {
-            let context = CoreDataPersistenceService.shared.viewContext
-            return try context.fetch(request)
+            return try context.fetch(descriptor)
         } catch {
             logger.error("Failed to fetch conversations for Slack ChatOps: \(error.localizedDescription)")
             return []

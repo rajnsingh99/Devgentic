@@ -86,35 +86,25 @@ final class MockPromptService: PromptServiceProtocol {
 
 // MARK: - Mock Main Delegate
 
-@MainActor
+@Observable @MainActor
 final class MockChatInputMainDelegate: ChatInputMainDelegate {
     var attachedFiles: [FileSystemItem] = []
     var streamingMessageID: UUID? = nil
 
-    private let attachedFilesSubject = CurrentValueSubject<[FileSystemItem], Never>([])
-    private let streamingMessageIDSubject = CurrentValueSubject<UUID?, Never>(nil)
-
-    var attachedFilesPublisher: AnyPublisher<[FileSystemItem], Never> {
-        attachedFilesSubject.eraseToAnyPublisher()
-    }
-    var streamingMessageIDPublisher: AnyPublisher<UUID?, Never> {
-        streamingMessageIDSubject.eraseToAnyPublisher()
-    }
-
-    var addFileCallCount = 0
+    @ObservationIgnored var addFileCallCount = 0
     func addAttachedFile(fileItem: FileSystemItem) { addFileCallCount += 1 }
 
-    var addFilesCallCount = 0
+    @ObservationIgnored var addFilesCallCount = 0
     func addAttachedFiles(fileItems: [FileSystemItem]) { addFilesCallCount += 1 }
 
-    var removeFileCallCount = 0
+    @ObservationIgnored var removeFileCallCount = 0
     func removeAttachedFile(fileItem: FileSystemItem) { removeFileCallCount += 1 }
 
-    var cancelStreamingCallCount = 0
+    @ObservationIgnored var cancelStreamingCallCount = 0
     func cancelStreamingResponse() { cancelStreamingCallCount += 1 }
 
-    var historyResponses: [String] = []
-    private var historyIndex = 0
+    @ObservationIgnored var historyResponses: [String] = []
+    @ObservationIgnored private var historyIndex = 0
     func getQueryFromHistory(direction: MainApplicationViewModel.QueryNavigationDirection) -> String? {
         guard historyIndex < historyResponses.count else { return nil }
         let result = historyResponses[historyIndex]
@@ -122,23 +112,19 @@ final class MockChatInputMainDelegate: ChatInputMainDelegate {
         return result
     }
 
-    var resetHistoryCallCount = 0
+    @ObservationIgnored var resetHistoryCallCount = 0
     func resetQueryHistoryIndex() { resetHistoryCallCount += 1 }
 
     func simulateStreamingStart() {
-        let id = UUID()
-        streamingMessageID = id
-        streamingMessageIDSubject.send(id)
+        streamingMessageID = UUID()
     }
 
     func simulateStreamingEnd() {
         streamingMessageID = nil
-        streamingMessageIDSubject.send(nil)
     }
 
     func simulateAttachedFiles(_ files: [FileSystemItem]) {
         attachedFiles = files
-        attachedFilesSubject.send(files)
     }
 }
 
@@ -313,32 +299,30 @@ final class ChatInputViewModelTests: XCTestCase {
     func testStreamingStateMirrorsDelegate() {
         let expectation = XCTestExpectation(description: "isStreaming becomes true")
 
-        let cancellable = sut.$isStreaming
-            .dropFirst()
-            .sink { streaming in
-                if streaming { expectation.fulfill() }
-            }
+        withObservationTracking {
+            _ = sut.isStreaming
+        } onChange: {
+            Task { @MainActor in expectation.fulfill() }
+        }
 
         mockDelegate.simulateStreamingStart()
 
         wait(for: [expectation], timeout: 2.0)
-        cancellable.cancel()
     }
 
     func testAttachedFilesMirrorDelegate() {
         let expectation = XCTestExpectation(description: "attachedFiles updated")
         let file = makeFileItem(name: "mirrored.swift")
 
-        let cancellable = sut.$attachedFiles
-            .dropFirst()
-            .sink { files in
-                if !files.isEmpty { expectation.fulfill() }
-            }
+        withObservationTracking {
+            _ = sut.attachedFiles
+        } onChange: {
+            Task { @MainActor in expectation.fulfill() }
+        }
 
         mockDelegate.simulateAttachedFiles([file])
 
         wait(for: [expectation], timeout: 2.0)
-        cancellable.cancel()
     }
 
     // MARK: - Suggestion Navigation
@@ -483,18 +467,15 @@ final class ChatInputViewModelTests: XCTestCase {
         let fileB = makeFileItem(name: "b.swift")
         let fileC = makeFileItem(name: "c.swift")
 
-        let cancellable = sut.$fileSuggestionState
-            .dropFirst()
-            .sink { state in
-                if !state.filteredItems.isEmpty || state.filteredItems.count == 0 {
-                    expectation.fulfill()
-                }
-            }
+        withObservationTracking {
+            _ = sut.fileSuggestionState
+        } onChange: {
+            Task { @MainActor in expectation.fulfill() }
+        }
 
         sut.processFileCandidates([fileA, fileB, fileC], attachedFiles: [fileB])
 
         wait(for: [expectation], timeout: 2.0)
-        cancellable.cancel()
 
         // fileB was attached, so should be excluded
         let ids = sut.fileSuggestionState.filteredItems.map(\.name)

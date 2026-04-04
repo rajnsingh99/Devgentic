@@ -123,7 +123,7 @@ struct AddMCPServerView: View {
         } message: {
             Text("A tool with this server name already exists in your library.")
         }
-        .onAppear(perform: setupView)
+        .task { setupView() }
         .onDisappear {
             Task {
                 await MCPClientService.shared.disconnect(sourceId: tempSourceId)

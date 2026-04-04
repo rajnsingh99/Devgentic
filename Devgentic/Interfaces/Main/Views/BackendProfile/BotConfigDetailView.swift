@@ -29,7 +29,7 @@ You are a helpful, knowledgeable assistant.
 struct BotConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
-    @EnvironmentObject var profileService: BackendProfileService
+    @Environment(BackendProfileService.self) var profileService
     @EnvironmentObject private var toastManager: ToastManager
     @Environment(\.appTheme) private var theme
 

@@ -13,8 +13,8 @@ import SwiftUI
 
 struct ProfileSidebarListView: View {
 
-    @EnvironmentObject private var profileService: BackendProfileService
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(BackendProfileService.self) private var profileService
+    @Environment(MainViewRouter.self) private var router
     @EnvironmentObject private var toastManager: ToastManager
     @Environment(\.appTheme) private var theme
 

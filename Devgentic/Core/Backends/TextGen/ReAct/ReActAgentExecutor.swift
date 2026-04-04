@@ -58,8 +58,14 @@ actor ReActAgentExecutor: Executor {
                     let executionTrace = input.traceContext
                     
                     var memoryStrategy = input.workingMemory
-                    var circuitBreaker = CognitiveCircuitBreaker()
-                    var retryStrategy = LLMRetryStrategy()
+                    var circuitBreaker = CognitiveCircuitBreaker(
+                        maxConsecutiveToolFailures: input.retryPolicy.maxRetries,
+                        maxRepetitiveActions: input.retryPolicy.maxRetries
+                    )
+                    var retryStrategy = LLMRetryStrategy(
+                        maxConsecutiveParseFailures: input.retryPolicy.maxRetries,
+                        backoffStrategy: input.retryPolicy.backoffStrategy
+                    )
                     let toolMediator = ToolExecutionMediator()
                     let terminationEvaluator = EpisodeTerminationEvaluator()
                     
@@ -113,6 +119,14 @@ actor ReActAgentExecutor: Executor {
                             currentDate: Date().formatted(date: .numeric, time: .shortened)
                         )
                         
+                        // Read User Personal profile for prompt injection (first iteration only to save tokens)
+                        let userProfile: String? = currentIteration == 1
+                            ? await MainActor.run {
+                                guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
+                                return UserPersonalService.shared.getProfileForInjection()
+                            }
+                            : nil
+
                         let context = SemanticContext(
                             instructions: input.instructions,
                             environmentFacts: envFacts,
@@ -124,7 +138,8 @@ actor ReActAgentExecutor: Executor {
                             latestClarification: latestClarification,
                             negativeConstraints: currentConstraints,
                             hallucinatedTools: circuitBreaker.hallucinatedTools,
-                            availableTools: input.tools
+                            availableTools: input.tools,
+                            userProfile: userProfile
                         )
                         
                         try Task.checkCancellation()

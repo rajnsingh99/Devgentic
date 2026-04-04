@@ -19,16 +19,26 @@ struct ToolInvocationKey: Hashable, Sendable {
 /// Manages friction counters, loop prevention, and hallucination tracking.
 /// By returning `CircuitBreakerAction`, it dictates the orchestrator's next move.
 struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
-    
-    // MARK: - Limits
-    // Converted to static to prevent escaping autoclosure errors during logging
-    private static let maxConsecutiveAskUser = 3
-    private static let maxConsecutiveIdle = 5
-    private static let maxToolRetries = 2
-    private static let maxConsecutiveToolFailures = 3
-    /// Maximum consecutive iterations that produce the same (tool, args, observation) fingerprint
-    /// before forcing termination. Catches "successful but useless" infinite loops.
-    static let maxRepetitiveActions = 3
+
+    // MARK: - Limits (configurable via AgentConfig.retryPolicy)
+
+    private let maxConsecutiveAskUser: Int
+    private let maxConsecutiveIdle: Int
+    private let maxToolRetries: Int
+    let maxConsecutiveToolFailures: Int
+    let maxRepetitiveActions: Int
+
+    init(maxConsecutiveToolFailures: Int = 3,
+         maxRepetitiveActions: Int = 3,
+         maxConsecutiveAskUser: Int = 3,
+         maxConsecutiveIdle: Int = 5,
+         maxToolRetries: Int = 2) {
+        self.maxConsecutiveToolFailures = maxConsecutiveToolFailures
+        self.maxRepetitiveActions = maxRepetitiveActions
+        self.maxConsecutiveAskUser = maxConsecutiveAskUser
+        self.maxConsecutiveIdle = maxConsecutiveIdle
+        self.maxToolRetries = maxToolRetries
+    }
     
     // MARK: - State Tracking
     
@@ -51,9 +61,9 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         let invocationKey = ToolInvocationKey(toolName: toolName, paramsHash: paramsHash)
         recentInvocations[invocationKey, default: 0] += 1
         
-        if recentInvocations[invocationKey]! > Self.maxToolRetries {
+        if recentInvocations[invocationKey]! > maxToolRetries {
             logger.warning("🚫 Tool '\(toolName)' retried too many times. Intervening.")
-            let msg = "🚫 Tool '\(toolName)' already failed \(Self.maxToolRetries) times with identical parameters. Skipping. Return tool_name: null immediately."
+            let msg = "🚫 Tool '\(toolName)' already failed \(maxToolRetries) times with identical parameters. Skipping. Return tool_name: null immediately."
             return .intervene(systemMessage: msg)
         }
         
@@ -70,7 +80,7 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         
         // Capture local copies to avoid mutating 'self' escaping in OSLog autoclosure
         let currentFailures = consecutiveToolFailures
-        let maxFailures = Self.maxConsecutiveToolFailures
+        let maxFailures = maxConsecutiveToolFailures
         
         if currentFailures >= maxFailures {
             logger.warning("🚫 Consecutive tool failure limit (\(maxFailures)) reached. Aborting.")
@@ -116,7 +126,7 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         }
 
         let current = consecutiveIdenticalIterations
-        let limit = Self.maxRepetitiveActions
+        let limit = maxRepetitiveActions
 
         if current >= limit {
             let toolNames = observations.map(\.toolName).joined(separator: ", ")
@@ -138,11 +148,11 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         consecutiveAskUserCalls += 1
         consecutiveIdleSteps += 1
         
-        if consecutiveIdleSteps >= Self.maxConsecutiveIdle {
+        if consecutiveIdleSteps >= maxConsecutiveIdle {
             return .abort(reason: "Max idle steps reached during user clarification.")
         }
         
-        if consecutiveAskUserCalls > Self.maxConsecutiveAskUser {
+        if consecutiveAskUserCalls > maxConsecutiveAskUser {
             let msg = "SYSTEM INTERVENTION: You have asked the user \(consecutiveAskUserCalls) questions without making progress. You MUST now return tool_name: null. Do NOT call ask_user."
             return .intervene(systemMessage: msg)
         }
@@ -152,7 +162,7 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     
     mutating func evaluateMemoryHydration() -> CircuitBreakerAction {
         consecutiveIdleSteps += 1
-        if consecutiveIdleSteps >= Self.maxConsecutiveIdle {
+        if consecutiveIdleSteps >= maxConsecutiveIdle {
             return .abort(reason: "Max idle steps reached during memory hydration.")
         }
         return .proceed

@@ -15,7 +15,7 @@ struct ProfileDetailContainerView: View {
 
     let profileID: UUID
 
-    @EnvironmentObject private var profileService: BackendProfileService
+    @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -23,7 +23,7 @@ struct ProfileDetailContainerView: View {
             if let buffer = profileService.editBuffer, buffer.draft.id == profileID {
                 BackendProfileDetailView(editBuffer: buffer)
                     .id(profileID)
-                    .environmentObject(profileService)
+                    .environment(profileService)
             } else {
                 // Fallback: eagerly activate if the buffer wasn't pre-set
                 // (e.g. deep-link, state restoration, or first render edge case).

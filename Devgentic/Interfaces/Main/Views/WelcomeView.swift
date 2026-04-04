@@ -11,8 +11,8 @@ import SwiftUI
 
 struct WelcomeView: View {
     @Environment(\.appTheme) private var theme
-    @EnvironmentObject private var viewModel: MainApplicationViewModel
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) private var viewModel
+    @Environment(MainViewRouter.self) private var router
     @StateObject private var briefService = MorningBriefService.shared
 
     @State private var briefChecked = false
@@ -54,6 +54,14 @@ struct WelcomeView: View {
                         removal: .opacity
                     ))
                     .padding(.bottom, 28)
+                }
+
+                // MARK: - User Personal Profile Card
+                if UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) {
+                    UserPersonalWelcomeCard()
+                        .opacity(showActions ? 1 : 0)
+                        .offset(y: showActions ? 0 : 10)
+                        .padding(.bottom, 16)
                 }
 
                 // MARK: - Quick Actions

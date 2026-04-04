@@ -22,8 +22,8 @@ import UniformTypeIdentifiers
 struct AgentConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
-    @EnvironmentObject var profileService: BackendProfileService
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(BackendProfileService.self) var profileService
+    @Environment(MainViewRouter.self) private var router
     @EnvironmentObject private var toastManager: ToastManager
     @Environment(\.appTheme) private var theme
 
@@ -48,6 +48,9 @@ struct AgentConfigDetailView: View {
 
     // File Importer State
     @State private var showingKnowledgeImporter = false
+
+    // Guide
+    @State private var showingAgentGuide = false
 
     // Button Hover States
     @State private var isDeleteHovered = false
@@ -101,15 +104,75 @@ struct AgentConfigDetailView: View {
         )
     }
 
-    private var architectureBinding: Binding<AgentArchitecture> {
-        Binding<AgentArchitecture>(
+    private var capabilitiesBinding: Binding<AgentCapabilities> {
+        Binding<AgentCapabilities>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.architecture }
-                return .reAct
+                if case .agent(let config) = editBuffer.draft.details { return config.capabilities }
+                return AgentCapabilities()
             },
             set: { newValue in
                 if case .agent(var config) = editBuffer.draft.details {
-                    config.architecture = newValue
+                    config.capabilities = newValue
+                    editBuffer.draft.details = .agent(config)
+                }
+            }
+        )
+    }
+
+    private var maxIterationsBinding: Binding<Int?> {
+        Binding<Int?>(
+            get: {
+                if case .agent(let config) = editBuffer.draft.details { return config.maxIterations }
+                return nil
+            },
+            set: { newValue in
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.maxIterations = newValue
+                    editBuffer.draft.details = .agent(config)
+                }
+            }
+        )
+    }
+
+    private var executionTimeoutBinding: Binding<TimeInterval?> {
+        Binding<TimeInterval?>(
+            get: {
+                if case .agent(let config) = editBuffer.draft.details { return config.executionTimeout }
+                return nil
+            },
+            set: { newValue in
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.executionTimeout = newValue
+                    editBuffer.draft.details = .agent(config)
+                }
+            }
+        )
+    }
+
+    private var retryPolicyBinding: Binding<RetryPolicy?> {
+        Binding<RetryPolicy?>(
+            get: {
+                if case .agent(let config) = editBuffer.draft.details { return config.retryPolicy }
+                return nil
+            },
+            set: { newValue in
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.retryPolicy = newValue
+                    editBuffer.draft.details = .agent(config)
+                }
+            }
+        )
+    }
+
+    private var errorRecoveryBinding: Binding<ErrorRecovery?> {
+        Binding<ErrorRecovery?>(
+            get: {
+                if case .agent(let config) = editBuffer.draft.details { return config.errorRecovery }
+                return nil
+            },
+            set: { newValue in
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.errorRecovery = newValue
                     editBuffer.draft.details = .agent(config)
                 }
             }
@@ -207,44 +270,49 @@ struct AgentConfigDetailView: View {
                             .foregroundColor(theme.secondaryText)
                     }
                     Spacer()
+
+                    Button(action: { showingAgentGuide = true }) {
+                        Image(systemName: "questionmark.circle")
+                            .font(.title3)
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Agent configuration guide")
                 }
                 .padding(.bottom, 8)
+                .sheet(isPresented: $showingAgentGuide) {
+                    AgentConfigGuideView()
+                }
 
-                // 2. Cognitive Architecture (The Brain)
-                SettingsCard(title: "Cognitive Architecture", icon: "brain.head.profile", theme: theme) {
+                // 2. Agent Capabilities (composable toggles)
+                SettingsCard(title: "Agent Capabilities", icon: "brain.head.profile", theme: theme) {
+                    AgentCapabilitiesSection(capabilities: capabilitiesBinding)
+                        .padding(16)
+                }
+
+                // 3. Execution Limits & Error Recovery
+                SettingsCard(title: "Execution Limits", icon: "gauge.with.dots.needle.33percent", theme: theme) {
+                    ExecutionLimitsSection(
+                        maxIterations: maxIterationsBinding,
+                        executionTimeout: executionTimeoutBinding
+                    )
+                    .padding(16)
+                }
+
+                SettingsCard(title: "Error Recovery", icon: "arrow.counterclockwise", theme: theme) {
+                    ErrorRecoverySection(
+                        retryPolicy: retryPolicyBinding,
+                        errorRecovery: errorRecoveryBinding
+                    )
+                    .padding(16)
+                }
+
+                // 4. System Instructions & Identity
+                SettingsCard(title: "System Instructions", icon: "text.quote", theme: theme) {
                   VStack(alignment: .leading, spacing: 16) {
-
-                    // Strategy Picker
-                    HStack(alignment: .center) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Reasoning Strategy")
-                                .fontWeight(.medium)
-                            Text(architectureBinding.wrappedValue.description)
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-
-                        Spacer(minLength: 16)
-
-                        Picker("", selection: architectureBinding) {
-                            ForEach(AgentArchitecture.allCases) { arch in
-                                Text(arch.rawValue).tag(arch)
-                            }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-
-                    Divider()
-
                     // Instructions Editor
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Label("System Instructions", systemImage: "text.quote")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-                                .foregroundColor(theme.secondaryText)
-
                             Spacer()
 
                             Button {
@@ -319,7 +387,7 @@ struct AgentConfigDetailView: View {
                   .padding(16)
                 }
 
-                // 3. Inference Engine (Provider)
+                // 5. Inference Engine (Provider)
                 SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
                   VStack(alignment: .leading, spacing: 16) {
                     ProviderConfigSection(
@@ -365,7 +433,7 @@ struct AgentConfigDetailView: View {
                   .padding(16)
                 }
 
-                // 4. Capabilities (Tools & Knowledge)
+                // 6. Tools & Knowledge
                 SettingsCard(title: "Capabilities", icon: "hammer.fill", theme: theme) {
                   VStack(alignment: .leading, spacing: 16) {
 
@@ -521,7 +589,7 @@ struct AgentConfigDetailView: View {
                   .padding(16)
                 }
 
-                // 5. Advanced Configuration
+                // 7. Advanced Configuration
                 SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
                     VStack(alignment: .leading, spacing: 16) {
                         advancedSettingsView

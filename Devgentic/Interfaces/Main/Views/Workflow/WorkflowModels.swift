@@ -79,15 +79,9 @@ struct WorkflowEdge: Identifiable, Codable, Hashable {
     }
 
     /// Validates the connection against communication constraints.
-    /// - Bot → Agent: BLOCKED
-    /// - Agent → Agent: ALLOWED
-    /// - Agent → Bot: ALLOWED
-    /// - Bot → Bot: ALLOWED
+    /// All profile type combinations are now allowed (Bot→Agent unblocked for capability-based agents).
     static func isValid(sourceType: ProfileType, targetType: ProfileType) -> Bool {
-        if sourceType == .bot && targetType == .agent {
-            return false
-        }
-        return true
+        true
     }
 }
 

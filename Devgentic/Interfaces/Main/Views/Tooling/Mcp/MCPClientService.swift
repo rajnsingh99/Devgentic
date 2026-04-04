@@ -33,13 +33,13 @@ struct MCPSession {
     let process: ShellProcess?
 }
 
-@MainActor
-class MCPClientService: ObservableObject {
+@Observable @MainActor
+final class MCPClientService {
 
     static let shared = MCPClientService()
 
-    @Published private(set) var activeSessions: [UUID: MCPSession] = [:]
-    @Published var connectionStates: [UUID: MCPConnectionState] = [:]
+    private(set) var activeSessions: [UUID: MCPSession] = [:]
+    var connectionStates: [UUID: MCPConnectionState] = [:]
 
     /// Tracks health monitor tasks so they can be cancelled on disconnect.
     private var healthMonitorTasks: [UUID: Task<Void, Never>] = [:]

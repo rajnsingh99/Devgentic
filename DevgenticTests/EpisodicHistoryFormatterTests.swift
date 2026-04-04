@@ -29,14 +29,14 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
             content: .plainText(text)
         )
         msg.timelineEvents = toolEvents.map { event in
-            .toolExecution(
+            .toolExecution(ToolExecutionData(
                 id: UUID(),
                 name: event.name,
                 params: event.params,
                 output: event.output,
                 isSuccess: event.isSuccess,
                 isExecuting: false
-            )
+            ))
         }
         return msg
     }

@@ -86,6 +86,27 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
                 parseMode: nil
             )
             return "\(message.message_id)"
+
+        case .planReview(let subtaskDescriptions):
+            let planList = subtaskDescriptions.enumerated()
+                .map { "  \($0.offset + 1). \($0.element)" }
+                .joined(separator: "\n")
+            let messageText = """
+            📋 Plan Review Required
+
+            The agent has generated a plan with \(subtaskDescriptions.count) step(s):
+
+            \(planList)
+
+            Please approve or edit this plan from the Mac app.
+            """
+
+            let message = try await apiClient.sendMessage(
+                chatID: numericChatID,
+                text: messageText,
+                parseMode: nil
+            )
+            return "\(message.message_id)"
         }
     }
 

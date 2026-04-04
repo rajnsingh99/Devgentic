@@ -115,7 +115,26 @@ struct ToolExecutionMediator: ToolDispatching {
                     logToolExecution.debug("▶️ Dispatching Tool '\(toolName)' with payload:\n\(payloadStr)")
                 }
 
-                let toolResult = try await tool.run(paramData)
+                let toolResult: (output: String, artifacts: [MediaArtifact])
+
+                if let perToolTimeout = tool.timeout {
+                    // Per-tool timeout race
+                    toolResult = try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
+                        group.addTask {
+                            try await tool.run(paramData)
+                        }
+                        group.addTask {
+                            try await Task.sleep(for: .seconds(perToolTimeout))
+                            throw PerToolTimeoutError(toolName: toolName, duration: perToolTimeout)
+                        }
+                        let first = try await group.next()!
+                        group.cancelAll()
+                        return first
+                    }
+                } else {
+                    toolResult = try await tool.run(paramData)
+                }
+
                 let isSemanticFailure = Self.isSemanticFailure(toolResult.output)
 
                 if isSemanticFailure {
@@ -124,6 +143,15 @@ struct ToolExecutionMediator: ToolDispatching {
                 } else {
                     result = .success(output: toolResult.output, artifacts: toolResult.artifacts)
                 }
+
+            } catch let timeoutError as PerToolTimeoutError {
+                logToolExecution.warning("⏱️ Tool '\(toolName)' timed out after \(Int(timeoutError.duration))s (per-tool limit)")
+                if let customMessage = tool.timeoutMessage, !customMessage.isEmpty {
+                    result = .success(output: customMessage)
+                } else {
+                    result = .timedOut(toolName: toolName, duration: timeoutError.duration)
+                }
+                errorDescriptionForMetrics = "Per-tool timeout after \(Int(timeoutError.duration))s"
 
             } catch {
                 logToolExecution.error("❌ Tool '\(toolName)' threw system error:\n\(error.localizedDescription)")
@@ -227,4 +255,11 @@ struct ToolExecutionMediator: ToolDispatching {
         }
         return "{}"
     }
+}
+
+// MARK: - Per-Tool Timeout Error
+
+private struct PerToolTimeoutError: Error {
+    let toolName: String
+    let duration: TimeInterval
 }

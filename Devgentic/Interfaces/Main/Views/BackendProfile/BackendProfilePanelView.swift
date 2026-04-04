@@ -14,7 +14,7 @@ import SwiftUI
 struct BackendProfilePanelView: View {
     
     // MARK: - State Management
-    @StateObject private var profileService = BackendProfileService()
+    @State private var profileService = BackendProfileService()
     @State private var selectedProfileID: UUID?
     @State private var isAddingProfile = false
     @State private var searchText: String = ""
@@ -51,7 +51,7 @@ struct BackendProfilePanelView: View {
         } detail: {
             detailView
         }
-        .environmentObject(profileService)
+        .environment(profileService)
         .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "dracula" ? .dark : nil))
         .withToastOverlay()
         .configureWindow(collectionBehavior: [.canJoinAllSpaces, .fullScreenAuxiliary])
@@ -274,7 +274,7 @@ struct BackendProfilePanelView: View {
 struct BackendProfileDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
-    @EnvironmentObject var profileService: BackendProfileService
+    @Environment(BackendProfileService.self) var profileService
     @Environment(\.appTheme) private var theme
 
     var body: some View {

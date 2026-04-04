@@ -74,11 +74,11 @@ final class BackendProfileStoreTests: XCTestCase {
             displayName: "Test Agent",
             details: .agent(AgentConfig(
                 llmConfig: ProviderConfig(apiProvider: .anthropic, modelName: "claude-3", apiKey: "sk-test"),
-                architecture: .planAndExecute,
                 tools: tools,
                 description: "A test agent",
                 instructions: "Follow the plan.",
-                knowledgeSources: nil
+                knowledgeSources: nil,
+                capabilities: AgentCapabilities(planning: PlanningCapabilityConfig())
             ))
         )
         context.insert(profile)
@@ -89,7 +89,7 @@ final class BackendProfileStoreTests: XCTestCase {
         XCTAssertEqual(fetched.first?.profileType, .agent)
 
         if case .agent(let config) = fetched.first?.details {
-            XCTAssertEqual(config.architecture, .planAndExecute)
+            XCTAssertNotNil(config.capabilities.planning)
             XCTAssertEqual(config.tools.count, 1)
             XCTAssertEqual(config.tools.first?.name, "bash")
             XCTAssertEqual(config.description, "A test agent")
@@ -286,10 +286,10 @@ final class BackendProfileStoreTests: XCTestCase {
             lastSelected: Date(),
             details: .agent(AgentConfig(
                 llmConfig: ProviderConfig(apiProvider: .google, modelName: "gemini-pro", apiKey: "AIza-test"),
-                architecture: .reflexion,
                 tools: [makeTool(name: "web_search", confirm: false)],
                 description: "Research agent",
-                instructions: "Search thoroughly."
+                instructions: "Search thoroughly.",
+                capabilities: AgentCapabilities(selfReflection: SelfReflectionConfig())
             ))
         )
         context.insert(profile)
@@ -303,7 +303,7 @@ final class BackendProfileStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.profileType, .agent)
 
         if case .agent(let config) = snapshot.details {
-            XCTAssertEqual(config.architecture, .reflexion)
+            XCTAssertNotNil(config.capabilities.selfReflection)
             XCTAssertEqual(config.tools.first?.name, "web_search")
             XCTAssertEqual(config.description, "Research agent")
         } else {
@@ -321,8 +321,8 @@ final class BackendProfileStoreTests: XCTestCase {
             ))),
             ("agent", .agent(AgentConfig(
                 llmConfig: ProviderConfig(apiProvider: .anthropic, modelName: "claude-3"),
-                architecture: .supervisor,
-                tools: [makeTool(name: "bash")]
+                tools: [makeTool(name: "bash")],
+                capabilities: AgentCapabilities(agentDelegation: AgentDelegationConfig())
             ))),
             ("workflow", .workflow(WorkflowConfig(agentProfileIDs: [UUID(), UUID()]))),
             ("imageGen", .imageGen(ImageGenConfig(
@@ -375,8 +375,8 @@ final class BackendProfileStoreTests: XCTestCase {
         let migrated = ProfileMigrator.migrateIfNeeded(legacyData)
         let migratedJSON = try JSONSerialization.jsonObject(with: migrated) as? [String: Any]
 
-        XCTAssertEqual(migratedJSON?["schemaVersion"] as? Int, 1,
-                        "Migrator should stamp schemaVersion=1 on legacy data")
+        XCTAssertEqual(migratedJSON?["schemaVersion"] as? Int, ProfileSchemaVersion.current.rawValue,
+                        "Migrator should stamp current schemaVersion on legacy data")
     }
 
     func testMigratorPreservesCurrentVersionData() throws {

@@ -14,11 +14,17 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// Parses errors thrown by the `CognitiveGenerator` (HTTP 429s, Timeouts, JSON Parse Failures)
 /// and dictates the retry backoff sequence to the orchestrator.
 struct LLMRetryStrategy: LLMRetryHandling {
-    
-    private static let maxConsecutiveParseFailures = 3
-    
+
+    private let maxConsecutiveParseFailures: Int
+    private let backoffStrategy: BackoffStrategy
+
     private(set) var consecutiveRetries = 0
     private(set) var consecutiveParseFailures = 0
+
+    init(maxConsecutiveParseFailures: Int = 3, backoffStrategy: BackoffStrategy = .exponential) {
+        self.maxConsecutiveParseFailures = maxConsecutiveParseFailures
+        self.backoffStrategy = backoffStrategy
+    }
     
     // MARK: - Error Handling
     
@@ -29,7 +35,11 @@ struct LLMRetryStrategy: LLMRetryHandling {
         if let cloudError = error as? CloudProviderError {
             if cloudError.statusCode == 429 {
                 consecutiveRetries += 1
-                let retryAfter = cloudError.retryAfterSeconds ?? pow(2.0, Double(min(consecutiveRetries, 6)))
+                let defaultBackoff: TimeInterval = switch backoffStrategy {
+                case .exponential: pow(2.0, Double(min(consecutiveRetries, 6)))
+                case .fixed: 2.0
+                }
+                let retryAfter = cloudError.retryAfterSeconds ?? defaultBackoff
                 let retrySecs = Int(retryAfter)
                 logger.warning("Cloud 429 (\(String(describing: cloudError.provider))). request-id: \(cloudError.requestId ?? "n/a"). Throttling for \(retrySecs)s.")
                 return .throttle(seconds: retryAfter, message: "🛑 API Quota Hit. Pausing for \(retrySecs)s...")
@@ -74,7 +84,7 @@ struct LLMRetryStrategy: LLMRetryHandling {
         
         // Local captures to prevent escaping mutating 'self' in OSLog autoclosure
         let currentFailures = consecutiveParseFailures
-        let maxFailures = Self.maxConsecutiveParseFailures
+        let maxFailures = maxConsecutiveParseFailures
         
         logger.error("Cognitive Generation Failed (\(currentFailures)/\(maxFailures)): \(errorDesc)")
         
@@ -100,7 +110,10 @@ struct LLMRetryStrategy: LLMRetryHandling {
     // MARK: - Private Header Parsing
     
     private func extractRetryAfter(from error: Error, consecutiveRetries: Int) -> TimeInterval {
-        let fallback = pow(2.0, Double(min(consecutiveRetries, 6)))
+        let fallback: TimeInterval = switch backoffStrategy {
+        case .exponential: pow(2.0, Double(min(consecutiveRetries, 6)))
+        case .fixed: 2.0
+        }
         let nsError = error as NSError
         let possibleKeys = ["headers", "HTTPHeaders", "com.alamofire.serialization.response.error.response.headers"]
         

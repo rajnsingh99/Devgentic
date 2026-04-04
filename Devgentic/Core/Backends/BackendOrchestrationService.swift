@@ -18,25 +18,23 @@ class BackendOrchestrationService: ObservableObject {
     
     // MARK: - Dependencies
     private let ollamaService: OllamaService
-    private let persistenceService: CoreDataServiceProtocol
     private let fileProcessorService: FileProcessorService
     private let agentConnect: AgentConnect
-    
+
     // RAG Services
     private let embeddingService = EmbeddingService.shared
     private let vectorStoreService = VectorStoreService.shared
-    
+
     private var cancellables = Set<AnyCancellable>()
-    
+
     // MARK: - Initialization
     init(
         fileProcessorService: FileProcessorService
     ) {
         self.fileProcessorService = fileProcessorService
         self.ollamaService = OllamaService.shared
-        self.persistenceService = CoreDataPersistenceService.shared
         self.agentConnect = AgentConnect()
-        
+
         logger.info("BackendOrchestrationService initialized with AgentConnect.")
     }
     
@@ -267,6 +265,15 @@ class BackendOrchestrationService: ObservableObject {
 
                             // Multimodal events
                             case .mediaProgress, .artifactProduced:
+                                continuation.yield(event)
+
+                            // Capability events (Planning, Self-Reflection, Delegation)
+                            case .requestPlanReview:
+                                logger.debug("[PLAN_REVIEW] Plan review requested")
+                                continuation.yield(event)
+                            case .planGenerated, .subtaskStarted, .subtaskCompleted,
+                                 .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
+                                 .delegationStarted, .delegationCompleted:
                                 continuation.yield(event)
                             }
                         }

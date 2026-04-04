@@ -86,7 +86,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @State private var selectedCategory: SettingsCategory? = .general
     
-    @EnvironmentObject var mainApplicationViewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var mainApplicationViewModel
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -115,7 +115,7 @@ struct SettingsView: View {
                 
                 if let category = selectedCategory {
                     category.destination
-                        .environmentObject(mainApplicationViewModel)
+                        .environment(mainApplicationViewModel)
                 } else {
                     Text("Select a category")
                         .font(.title2)

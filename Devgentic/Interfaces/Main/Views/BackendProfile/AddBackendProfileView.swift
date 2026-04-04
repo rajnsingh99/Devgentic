@@ -158,7 +158,6 @@ struct AddBackendProfileView: View {
         case .agent:
             details = .agent(AgentConfig(
                 llmConfig: defaultLLMConfig,
-                architecture: .reAct,
                 tools: []
             ))
         case .workflow:

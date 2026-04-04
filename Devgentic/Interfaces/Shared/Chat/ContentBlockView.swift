@@ -35,7 +35,7 @@ struct ContentBlockView: View, Equatable {
     var searchQuery: String = ""
     var activeHighlightIndex: Int? = nil
 
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.appTheme) private var theme
 

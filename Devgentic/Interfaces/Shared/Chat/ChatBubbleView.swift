@@ -14,8 +14,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 private let STREAMING_BUBBLE_MIN_HEIGHT: CGFloat = 550
 
 struct ChatBubbleView: View {
-    @ObservedObject var message: ChatMessage
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    var message: ChatMessage
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(\.appTheme) private var theme
 
     // MARK: - State
@@ -208,7 +208,7 @@ struct ToolChipView: View {
 // MARK: - Permission Request (Read-only history record)
 struct PermissionRequestView: View {
     let confirmation: PendingToolConfirmation
-    @ObservedObject var message: ChatMessage
+    var message: ChatMessage
     @Environment(\.appTheme) private var theme
 
     private var isResolved: Bool { message.pendingToolConfirmation == nil }
@@ -260,7 +260,7 @@ struct PermissionRequestView: View {
 // MARK: - Clarification Request (Read-only history record)
 struct ClarificationRequestView: View {
     let clarification: PendingClarification
-    @ObservedObject var message: ChatMessage
+    var message: ChatMessage
     @Environment(\.appTheme) private var theme
 
     private var isResolved: Bool { message.pendingClarification == nil }
@@ -303,6 +303,69 @@ struct ClarificationRequestView: View {
     }
 }
 
+// MARK: - Plan Review Request (Read-only history record)
+struct PlanReviewRequestView: View {
+    let planReview: PendingPlanReview
+    var message: ChatMessage
+    @Environment(\.appTheme) private var theme
+
+    private var isResolved: Bool { message.pendingPlanReview == nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Header row
+            HStack(spacing: 8) {
+                Image(systemName: isResolved ? "checkmark.circle.fill" : "checklist.checked")
+                    .font(.system(size: 11))
+                    .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.streamingIndicator.opacity(0.7))
+
+                Text("Plan: \(planReview.subtasks.count) subtask\(planReview.subtasks.count == 1 ? "" : "s")")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(theme.secondaryText)
+
+                Spacer()
+
+                Text(isResolved ? "Approved" : "Awaiting...")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.streamingIndicator.opacity(0.6))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule()
+                            .fill(isResolved ? theme.successColor.opacity(0.08) : theme.streamingIndicator.opacity(0.08))
+                    )
+            }
+
+            // Compact subtask list
+            ForEach(Array(planReview.subtasks.enumerated()), id: \.element.id) { index, subtask in
+                HStack(spacing: 6) {
+                    Text("\(index + 1).")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.tertiaryText)
+                        .frame(width: 18, alignment: .trailing)
+
+                    Text(subtask.description)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 7)
+                .fill(theme.surfaceOverlay.opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(isResolved ? theme.successColor.opacity(0.15) : theme.streamingIndicator.opacity(0.15), lineWidth: 1)
+        )
+        .frame(maxWidth: 500, alignment: .leading)
+    }
+}
+
 // MARK: - Helpers
 struct ChatActionButton<LabelContent: View>: View {
     let action: () -> Void
@@ -320,10 +383,10 @@ struct ChatActionButton<LabelContent: View>: View {
 }
 
 struct AgentMessageActionsView: View {
-    @ObservedObject var message: ChatMessage
-    @ObservedObject private var speechService = SpeechService.shared
+    var message: ChatMessage
+    var speechService = SpeechService.shared
     var mainAppViewModel: MainApplicationViewModel
-    @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
     @Environment(\.appTheme) private var theme
     @State private var didCopy: Bool = false
     @State private var showVariantsPopover: Bool = false
@@ -439,7 +502,7 @@ struct AgentMessageActionsView: View {
 }
 
 struct VariantsSelectionView: View {
-    @ObservedObject var message: ChatMessage
+    var message: ChatMessage
     @Binding var isPresented: Bool
     @Environment(\.appTheme) private var theme
 

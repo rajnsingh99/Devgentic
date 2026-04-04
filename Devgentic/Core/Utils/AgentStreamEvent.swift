@@ -72,6 +72,35 @@ enum AgentStreamEvent: Sendable {
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
 
+    // MARK: - Capability Events (Planning, Self-Reflection, Delegation)
+
+    /// Planning capability: a plan has been generated with N subtasks.
+    case planGenerated(subtaskCount: Int)
+
+    /// Planning capability: a subtask has started execution.
+    case subtaskStarted(index: Int, total: Int, description: String)
+
+    /// Planning capability: a subtask has completed.
+    case subtaskCompleted(index: Int, total: Int, summary: String)
+
+    /// Self-Reflection capability: a new trial has started.
+    case reflectionTrialStarted(trial: Int, maxTrials: Int)
+
+    /// Self-Reflection capability: evaluating the current trial's output.
+    case reflectionEvaluating(trial: Int)
+
+    /// Self-Reflection capability: trial rejected, retrying with critique.
+    case reflectionRetrying(trial: Int, critique: String)
+
+    /// Self-Reflection capability: trial accepted, execution complete.
+    case reflectionAccepted(trial: Int)
+
+    /// Agent Delegation: a sub-agent has started working on a delegated task.
+    case delegationStarted(subAgentName: String, task: String)
+
+    /// Agent Delegation: a sub-agent has completed its task.
+    case delegationCompleted(subAgentName: String, summary: String)
+
     // MARK: - Multimodal Events
 
     /// Long-running media generation progress (e.g., image generation at 45%).
@@ -79,6 +108,14 @@ enum AgentStreamEvent: Sendable {
 
     /// A completed media artifact ready for UI rendering.
     case artifactProduced(MediaArtifact)
+
+    // MARK: - Plan Review HITL
+
+    /// Planning capability: the generated plan is ready for user review/edit before execution.
+    /// Execution is suspended until the user approves, edits, or rejects the plan.
+    /// - subtasks: The generated subtask plan (user may edit before approving)
+    /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
+    case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID())
 }
 
 /// Structured output from a tool execution.
@@ -118,5 +155,45 @@ struct PendingClarification: Sendable, Identifiable, Codable, Equatable {
     init(id: UUID = UUID(), question: String) {
         self.id = id
         self.question = question
+    }
+}
+
+/// Data Model for Plan Review HITL — the user can edit subtasks before approving.
+struct PendingPlanReview: Sendable, Identifiable, Codable, Equatable {
+    let id: UUID                // operationID for suspension correlation
+    var subtasks: [SubTask]     // mutable — user can edit before approving
+
+    init(id: UUID = UUID(), subtasks: [SubTask]) {
+        self.id = id
+        self.subtasks = subtasks
+    }
+}
+
+// MARK: - Unified HITL Interaction Enum
+
+/// A single enum representing all possible Human-in-the-Loop interaction types.
+/// Only one interaction can be pending at a time per message.
+/// Adding a new HITL type only requires adding a case here — Swift exhaustive
+/// switch enforces handling in all consumers at compile time.
+enum PendingInteraction: Sendable, Codable, Equatable, Identifiable {
+    case toolConfirmation(PendingToolConfirmation)
+    case clarification(PendingClarification)
+    case planReview(PendingPlanReview)
+
+    var id: UUID {
+        switch self {
+        case .toolConfirmation(let c): return c.id
+        case .clarification(let c): return c.id
+        case .planReview(let p): return p.id
+        }
+    }
+
+    /// The operation ID used by ExecutionSuspensionService for resume correlation.
+    var operationID: UUID { id }
+
+    /// The tool name, if this interaction is a tool confirmation.
+    var toolName: String? {
+        if case .toolConfirmation(let c) = self { return c.toolName }
+        return nil
     }
 }

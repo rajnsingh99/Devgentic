@@ -18,8 +18,8 @@ struct PromptLibrarySidebarView: View {
     @State private var showingAddPromptPopover: Bool = false
     @FocusState private var isSearchFieldFocused: Bool
     @Environment(\.appTheme) private var theme
-    @EnvironmentObject var appViewModel: MainApplicationViewModel
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) var appViewModel
+    @Environment(MainViewRouter.self) private var router
 
     // A list of categories for the UI.
     private let categories = ["All", "General", "Development", "Productivity", "Creativity", "Writing", "Education", "Research", "Marketing"]

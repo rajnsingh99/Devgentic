@@ -62,8 +62,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        Self.logger.info("Application will terminate. Saving core data.")
-        CoreDataPersistenceService.shared.saveContext()
+        Self.logger.info("Application will terminate.")
         
         // 1. Terminate any active shell processes to prevent zombies
         ShellSessionManager.shared.cleanup()

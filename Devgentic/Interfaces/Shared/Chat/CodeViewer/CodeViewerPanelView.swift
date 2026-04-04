@@ -185,7 +185,7 @@ class CodeDocument: ObservableObject, Equatable {
 
 // MARK: - CodeViewerPanelView (Main SwiftUI View)
 struct CodeViewerPanelView: View {
-    @EnvironmentObject var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
     @EnvironmentObject var themeManager: ThemeManager
 
     @State private var isHoveringOnDivider = false
@@ -224,7 +224,8 @@ struct CodeViewerPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .transition(.move(edge: .trailing))
         .shadow(color: .black.opacity(0.25), radius: 12, x: -4, y: 0)
-        .onReceive(chatHistoryViewModel.$codeViewerContent) { newContent in
+        .onChange(of: chatHistoryViewModel.codeViewerContent?.currentIndex) {
+            let newContent = chatHistoryViewModel.codeViewerContent
             if let content = newContent {
                 let snippet = content.snippets[content.currentIndex]
                 if currentSnippet?.id != snippet.id {

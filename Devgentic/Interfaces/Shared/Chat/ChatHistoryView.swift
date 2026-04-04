@@ -15,8 +15,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct ChatHistoryView: View {
     @Environment(\.appTheme) private var theme
 
-    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
+    @Environment(MainApplicationViewModel.self) private var mainAppViewModel
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
 
     // Track the ID of the newest message to handle auto-scrolling for new content.
     @State private var lastNewestMessageID: UUID?
@@ -29,7 +29,7 @@ struct ChatHistoryView: View {
     @State private var showScrollToBottom: Bool = false
 
     // MARK: - Speech Service
-    @ObservedObject private var speechService = SpeechService.shared
+    private var speechService = SpeechService.shared
 
     // MARK: - Search State
     @StateObject private var searchViewModel = ChatSearchViewModel()
@@ -300,7 +300,7 @@ struct ScrollToBottomFAB: View {
 /// Provides contextual guidance so the user knows the conversation is ready for input.
 private struct EmptyConversationPlaceholder: View {
     @Environment(\.appTheme) private var theme
-    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) private var mainAppViewModel
 
     /// Whether this conversation was created from a remote source (Telegram, Discord).
     private var isRemoteConversation: Bool {

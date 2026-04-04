@@ -20,8 +20,6 @@ import AppKit
 protocol ChatInputMainDelegate: AnyObject {
     var attachedFiles: [FileSystemItem] { get }
     var streamingMessageID: UUID? { get }
-    var attachedFilesPublisher: AnyPublisher<[FileSystemItem], Never> { get }
-    var streamingMessageIDPublisher: AnyPublisher<UUID?, Never> { get }
 
     func addAttachedFile(fileItem: FileSystemItem)
     func addAttachedFiles(fileItems: [FileSystemItem])
@@ -105,42 +103,42 @@ enum ValidationState {
 // Separated from ChatInputViewModel so high-frequency updates (power levels every ~100ms,
 // recording time every 1s) don't fire ChatInputViewModel.objectWillChange and cause
 // ChatInputAreaView to re-evaluate its entire body.
-@MainActor
-class RecordingDisplayStore: ObservableObject {
-    @Published var powerLevels: [Float] = []
-    @Published var recordingTime: TimeInterval = 0.0
-    @Published var liveTranscriptionText: String = ""
+@Observable @MainActor
+final class RecordingDisplayStore {
+    var powerLevels: [Float] = []
+    var recordingTime: TimeInterval = 0.0
+    var liveTranscriptionText: String = ""
 }
 
-@MainActor
-class ChatInputViewModel: ObservableObject {
+@Observable @MainActor
+final class ChatInputViewModel {
 
-    // MARK: - Published Properties
-    @Published var userInput: String = ""
-    @Published var voiceInputState: VoiceInputState = .idle
-    @Published var showModelSelectorPopover: Bool = false
-    @Published var showAPIKeyInputPopup: Bool = false
-    @Published var apiKeyInput: String = ""
-    @Published var validationState: ValidationState = .idle
+    // MARK: - Properties
+    var userInput: String = ""
+    var voiceInputState: VoiceInputState = .idle
+    var showModelSelectorPopover: Bool = false
+    var showAPIKeyInputPopup: Bool = false
+    var apiKeyInput: String = ""
+    var validationState: ValidationState = .idle
 
-    // MARK: - Recording Display (isolated from ViewModel's objectWillChange)
+    // MARK: - Recording Display
     let recordingDisplay = RecordingDisplayStore()
 
-    // MARK: - Published Properties (Suggestions)
-    @Published var promptSuggestionState = PromptSuggestionState()
-    @Published var fileSuggestionState = FileSuggestionState()
-    @Published var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
+    // MARK: - Suggestions
+    var promptSuggestionState = PromptSuggestionState()
+    var fileSuggestionState = FileSuggestionState()
+    var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
 
     // MARK: - Delegates
-    weak var mainDelegate: (any ChatInputMainDelegate)?
-    var onFileSearchRequest: ((String) -> (candidates: [FileSystemItem], attached: [FileSystemItem]))?
+    @ObservationIgnored weak var mainDelegate: (any ChatInputMainDelegate)?
+    @ObservationIgnored var onFileSearchRequest: ((String) -> (candidates: [FileSystemItem], attached: [FileSystemItem]))?
 
     // MARK: - Mediated Main ViewModel Access
-    // These mirror mainDelegate state as @Published so SwiftUI re-renders when they change.
+    // These mirror mainDelegate state so SwiftUI re-renders when they change.
     // Updated via setupMainDelegateObservers().
 
-    @Published private(set) var attachedFiles: [FileSystemItem] = []
-    @Published private(set) var isStreaming: Bool = false
+    private(set) var attachedFiles: [FileSystemItem] = []
+    private(set) var isStreaming: Bool = false
 
     func addAttachedFile(fileItem: FileSystemItem) { mainDelegate?.addAttachedFile(fileItem: fileItem) }
     func addAttachedFiles(fileItems: [FileSystemItem]) { mainDelegate?.addAttachedFiles(fileItems: fileItems) }
@@ -150,27 +148,27 @@ class ChatInputViewModel: ObservableObject {
     func resetQueryHistoryIndex() { mainDelegate?.resetQueryHistoryIndex() }
 
     // MARK: - Services
-    private var recognitionService: RecognitionServiceProtocol?
-    private let webSearchService: WebSearchServiceProtocol
-    private let promptService: PromptServiceProtocol
+    @ObservationIgnored private var recognitionService: RecognitionServiceProtocol?
+    @ObservationIgnored private let webSearchService: WebSearchServiceProtocol
+    @ObservationIgnored private let promptService: PromptServiceProtocol
 
     // MARK: - Private State
-    private var cancellables = Set<AnyCancellable>()
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatInputViewModel")
-    private var recordingTimer: Timer?
-    private let maxPowerLevelsToShow = 100
+    @ObservationIgnored private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatInputViewModel")
+    @ObservationIgnored private var recordingTimer: Timer?
+    @ObservationIgnored private let maxPowerLevelsToShow = 100
 
     // MARK: - Streaming Task Handle
-    private var streamingTask: Task<Void, Never>?
-    private var silenceUICounter: Int = 0
-    private let silenceUIThreshold: Int = 10 // Only show "finalizing" after ~1s of sustained silence
+    @ObservationIgnored private var streamingTask: Task<Void, Never>?
+    @ObservationIgnored private var silenceUICounter: Int = 0
+    @ObservationIgnored private let silenceUIThreshold: Int = 10
 
     // MARK: - Keyboard Shortcut Observer
-    private var notificationObserver: Any?
+    @ObservationIgnored private var notificationObserver: Any?
 
     // MARK: - Async Task Handles
-    private var searchTask: Task<Void, Never>?
-    private var fileSearchTask: Task<Void, Never>?
+    @ObservationIgnored private var searchTask: Task<Void, Never>?
+    @ObservationIgnored private var fileSearchTask: Task<Void, Never>?
 
     // MARK: - Initialization
     init(
@@ -212,35 +210,46 @@ class ChatInputViewModel: ObservableObject {
         }
     }
 
-    /// Call once after setting `mainDelegate` to mirror its published state and
-    /// refresh file suggestions on changes. Replaces the .onReceive calls that were in the view.
+    /// Call once after setting `mainDelegate` to mirror its observed state and
+    /// refresh file suggestions on changes.
     func setupMainDelegateObservers() {
         guard let delegate = mainDelegate else {
             logger.warning("setupMainDelegateObservers called but mainDelegate is nil — attached files and streaming state will not update.")
             return
         }
 
-        // Mirror attached files
-        delegate.attachedFilesPublisher
-            .receive(on: RunLoop.main)
-            .sink { [weak self] files in
-                guard let self = self else { return }
-                self.attachedFiles = files
-                if self.fileSuggestionState.isShowing {
-                    self.performFileSearch(query: self.fileSuggestionState.query)
+        // Mirror attached files via withObservationTracking
+        func observeFiles() {
+            withObservationTracking {
+                _ = delegate.attachedFiles
+            } onChange: {
+                Task { @MainActor [weak self] in
+                    guard let self, let delegate = self.mainDelegate else { return }
+                    self.attachedFiles = delegate.attachedFiles
+                    if self.fileSuggestionState.isShowing {
+                        self.performFileSearch(query: self.fileSuggestionState.query)
+                    }
+                    observeFiles()
                 }
             }
-            .store(in: &cancellables)
+        }
+        observeFiles()
+        self.attachedFiles = delegate.attachedFiles
 
         // Mirror streaming state
-        delegate.streamingMessageIDPublisher
-            .receive(on: RunLoop.main)
-            .map { $0 != nil }
-            .removeDuplicates()
-            .sink { [weak self] streaming in
-                self?.isStreaming = streaming
+        func observeStreaming() {
+            withObservationTracking {
+                _ = delegate.streamingMessageID
+            } onChange: {
+                Task { @MainActor [weak self] in
+                    guard let self, let delegate = self.mainDelegate else { return }
+                    self.isStreaming = delegate.streamingMessageID != nil
+                    observeStreaming()
+                }
             }
-            .store(in: &cancellables)
+        }
+        observeStreaming()
+        self.isStreaming = delegate.streamingMessageID != nil
     }
 
     deinit {
@@ -273,24 +282,55 @@ class ChatInputViewModel: ObservableObject {
 
     // MARK: - Suggestion Pipelines (Debounced)
 
-    private func setupSuggestionPipelines() {
-        $promptSuggestionState
-            .map(\.query)
-            .removeDuplicates()
-            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
-            .sink { [weak self] newQuery in
-                self?.performAsyncPromptFilter(query: newQuery)
-            }
-            .store(in: &cancellables)
+    @ObservationIgnored private var promptDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var fileDebounceTask: Task<Void, Never>?
+    @ObservationIgnored private var lastPromptQuery: String = ""
+    @ObservationIgnored private var lastFileQuery: String = ""
 
-        $fileSuggestionState
-            .map(\.query)
-            .removeDuplicates()
-            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
-            .sink { [weak self] newQuery in
-                self?.performFileSearch(query: newQuery)
+    private func setupSuggestionPipelines() {
+        func observePromptQuery() {
+            withObservationTracking {
+                _ = self.promptSuggestionState.query
+            } onChange: {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let newQuery = self.promptSuggestionState.query
+                    if newQuery != self.lastPromptQuery {
+                        self.lastPromptQuery = newQuery
+                        self.promptDebounceTask?.cancel()
+                        self.promptDebounceTask = Task {
+                            try? await Task.sleep(nanoseconds: 150_000_000)
+                            guard !Task.isCancelled else { return }
+                            self.performAsyncPromptFilter(query: newQuery)
+                        }
+                    }
+                    observePromptQuery()
+                }
             }
-            .store(in: &cancellables)
+        }
+        observePromptQuery()
+
+        func observeFileQuery() {
+            withObservationTracking {
+                _ = self.fileSuggestionState.query
+            } onChange: {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let newQuery = self.fileSuggestionState.query
+                    if newQuery != self.lastFileQuery {
+                        self.lastFileQuery = newQuery
+                        self.fileDebounceTask?.cancel()
+                        self.fileDebounceTask = Task {
+                            try? await Task.sleep(nanoseconds: 150_000_000)
+                            guard !Task.isCancelled else { return }
+                            self.performFileSearch(query: newQuery)
+                        }
+                    }
+                    observeFileQuery()
+                }
+            }
+        }
+        observeFileQuery()
     }
 
     private func performAsyncPromptFilter(query: String) {

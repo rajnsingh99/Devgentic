@@ -1,7 +1,7 @@
 // ViewModels/QuickAccessViewModel.swift
 import SwiftUI
 import Combine
-import CoreData
+import SwiftData
 import os
 // import Markdown // REMOVED: This was removed to fix a build conflict. See AgentResponseParser.swift for details.
 
@@ -12,7 +12,7 @@ class QuickAccessViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var isSending: Bool = false
     
-    private let persistenceService = CoreDataPersistenceService.shared
+    private let persistenceService = ChatPersistenceStore.shared
     private let aiConnect = OllamaConnect()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "QuickAccessViewModel")
     
@@ -22,47 +22,38 @@ class QuickAccessViewModel: ObservableObject {
 
     // MARK: - Initialization
     init() {
-        logger.info("QuickAccessViewModel initializing with Core Data integration.")
+        logger.info("QuickAccessViewModel initializing with SwiftData integration.")
         setupQuickAccessConversation()
-        
+
         // We'll use NotificationCenter to reload data when significant changes happen elsewhere.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleDataDidChange),
-            name: .NSManagedObjectContextObjectsDidChange,
-            object: persistenceService.viewContext
+            name: ModelContext.didSave,
+            object: nil
         )
     }
 
     // MARK: - Private Setup and Observation
     
-    /// Fetches or creates the dedicated Quick Access conversation from Core Data.
+    /// Fetches or creates the dedicated Quick Access conversation from SwiftData.
     private func setupQuickAccessConversation() {
-        let conversation = getOrCreateQuickAccessConversation()
-        self.targetConversationId = conversation.id
-        self.messages = conversation.toConversationStruct().messages.sorted { $0.timestamp < $1.timestamp }
+        let conversationSD = getOrCreateQuickAccessConversation()
+        self.targetConversationId = conversationSD.id
+        self.messages = conversationSD.toStruct().messages.sorted { $0.timestamp < $1.timestamp }
         logger.info("Quick Access ViewModel setup with conversation ID: \(self.targetConversationId?.uuidString ?? "nil")")
     }
 
-    /// Reloads the conversation data from Core Data when a change is detected.
+    /// Reloads the conversation data from SwiftData when a change is detected.
     @objc private func handleDataDidChange(notification: Notification) {
-        // Check if the change is relevant to our current conversation
-        guard let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject>,
-              let currentId = targetConversationId else { return }
+        guard let currentId = targetConversationId else { return }
 
-        let isRelevantUpdate = updatedObjects.contains { obj in
-            if let conv = obj as? ConversationEntity, conv.id == currentId { return true }
-            if let msg = obj as? ChatMessageEntity, msg.conversation?.id == currentId { return true }
-            return false
-        }
-        
-        if isRelevantUpdate {
-            logger.trace("Relevant data change detected for conversation \(currentId.uuidString). Reloading.")
-            if let conversation = persistenceService.getConversation(withId: currentId) {
-                let newMessages = conversation.toConversationStruct().messages.sorted { $0.timestamp < $1.timestamp }
-                if self.messages != newMessages {
-                    self.messages = newMessages
-                }
+        // Reload conversation data on any SwiftData save
+        logger.trace("Data change detected — reloading conversation \(currentId.uuidString).")
+        if let conversationSD = persistenceService.getConversation(withId: currentId) {
+            let newMessages = conversationSD.toStruct().messages.sorted { $0.timestamp < $1.timestamp }
+            if self.messages != newMessages {
+                self.messages = newMessages
             }
         }
     }
@@ -80,8 +71,8 @@ class QuickAccessViewModel: ObservableObject {
 
         let userMessage = ChatMessage(conversationId: originalConversationId, sender: .user, content: .plainText(query.trimmingCharacters(in: .whitespacesAndNewlines)))
         
-        guard let conversationEntity = persistenceService.getConversation(withId: originalConversationId) else {
-            logger.error("Cannot send message, conversation entity \(originalConversationId.uuidString) not found.")
+        guard let conversationSD = persistenceService.getConversation(withId: originalConversationId) else {
+            logger.error("Cannot send message, conversation \(originalConversationId.uuidString) not found.")
             return
         }
 
@@ -121,8 +112,8 @@ class QuickAccessViewModel: ObservableObject {
         logger.info("Starting new Quick Access chat session request.")
         
         let currentQAConversation = getOrCreateQuickAccessConversation()
-        
-        if !(currentQAConversation.messages?.allObjects.isEmpty ?? true) {
+
+        if !currentQAConversation.messages.isEmpty {
             let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat")
             persistenceService.addConversation(from: newConversation)
             UserDefaults.standard.set(newConversation.id.uuidString, forKey: GlobalConstants.quickAccessOverlayConversationId)
@@ -137,10 +128,10 @@ class QuickAccessViewModel: ObservableObject {
         logger.info("Quick Access ViewModel reset for session ID: \(self.targetConversationId?.uuidString ?? "nil")")
     }
 
-    // MARK: - Private Core Data Helpers
+    // MARK: - Private SwiftData Helpers
 
-    /// Gets the dedicated Quick Access conversation entity from Core Data, creating it if it doesn't exist.
-    private func getOrCreateQuickAccessConversation() -> ConversationEntity {
+    /// Gets the dedicated Quick Access conversation from SwiftData, creating it if it doesn't exist.
+    private func getOrCreateQuickAccessConversation() -> ConversationSD {
         let defaults = UserDefaults.standard
         let quickAccessKey = GlobalConstants.quickAccessOverlayConversationId
 
@@ -153,11 +144,11 @@ class QuickAccessViewModel: ObservableObject {
 
         logger.info("No valid Quick Access conversation found. Creating a new one.")
         let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat")
-        
+
         persistenceService.addConversation(from: newConversation)
-        
+
         defaults.set(newConversation.id.uuidString, forKey: quickAccessKey)
-        
+
         return persistenceService.getConversation(withId: newConversation.id)!
     }
     

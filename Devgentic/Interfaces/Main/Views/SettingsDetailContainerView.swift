@@ -14,7 +14,7 @@ struct SettingsDetailContainerView: View {
 
     let category: SettingsCategory
 
-    @EnvironmentObject private var mainViewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) private var mainViewModel
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -23,7 +23,7 @@ struct SettingsDetailContainerView: View {
 
             ScrollView {
                 category.destination
-                    .environmentObject(mainViewModel)
+                    .environment(mainViewModel)
                     .padding()
                     .frame(maxWidth: 1000)
                     .frame(maxWidth: .infinity)

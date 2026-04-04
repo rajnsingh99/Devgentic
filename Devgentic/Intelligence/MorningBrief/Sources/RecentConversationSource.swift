@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import CoreData
+import SwiftData
 import os
 
 /// Gathers raw message content from the most recent conversations.
@@ -55,58 +55,63 @@ final class RecentConversationSource: MorningBriefSource, Sendable {
     // MARK: - Context Extraction
 
     /// Fetches the most recent conversations and extracts condensed message content.
+    @MainActor
     private func fetchConversationContexts() async -> [ConversationContext] {
-        let context = CoreDataPersistenceService.shared.persistentContainer.viewContext
-
-        return await context.perform {
-            // Fetch recent conversations
-            let convRequest: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-            convRequest.sortDescriptors = [NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)]
-            convRequest.fetchLimit = self.maxConversations
-
-            guard let conversations = try? context.fetch(convRequest), !conversations.isEmpty else {
-                return []
-            }
-
-            var results: [ConversationContext] = []
-
-            for convEntity in conversations {
-                let conv = convEntity.toConversationStruct()
-                guard !conv.messages.isEmpty else { continue }
-
-                // Get the most recent messages (newest first from CoreData, take last N)
-                let msgRequest: NSFetchRequest<ChatMessageEntity> = ChatMessageEntity.fetchRequest()
-                msgRequest.predicate = NSPredicate(format: "conversationId == %@", conv.id as CVarArg)
-                msgRequest.sortDescriptors = [NSSortDescriptor(keyPath: \ChatMessageEntity.timestamp, ascending: false)]
-                msgRequest.fetchLimit = self.maxMessagesPerConversation
-
-                let messageEntities = (try? context.fetch(msgRequest)) ?? []
-                let messages = messageEntities.reversed().map { $0.toChatMessageStruct() }
-
-                // Build condensed content: role + first 200 chars of each message
-                let condensed = messages.compactMap { msg -> String? in
-                    guard let text = msg.content.textContent,
-                          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        return nil
-                    }
-                    let role = msg.sender == .user ? "User" : "Assistant"
-                    let snippet = String(text.prefix(200))
-                    return "\(role): \(snippet)"
-                }.joined(separator: "\n")
-
-                guard !condensed.isEmpty else { continue }
-
-                results.append(ConversationContext(
-                    conversationID: conv.id,
-                    title: conv.displayTitle,
-                    timeAgo: conv.timestamp.timeAgoDisplay(),
-                    messageCount: conv.messages.count,
-                    condensedContent: condensed
-                ))
-            }
-
-            self.logger.debug("[RecentConversationSource] Extracted context from \(results.count) conversations.")
-            return results
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else {
+            logger.error("[RecentConversationSource] ChatPersistenceStore container not configured.")
+            return []
         }
+
+        // Fetch recent conversations
+        var convDescriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        convDescriptor.fetchLimit = self.maxConversations
+
+        guard let conversations = try? context.fetch(convDescriptor), !conversations.isEmpty else {
+            return []
+        }
+
+        var results: [ConversationContext] = []
+
+        for conversationSD in conversations {
+            let conv = conversationSD.toStruct()
+            guard !conv.messages.isEmpty else { continue }
+
+            // Get the most recent messages (newest first, take last N)
+            let convID = conversationSD.id
+            var msgDescriptor = FetchDescriptor<ChatMessageSD>(
+                predicate: #Predicate { $0.conversationId == convID },
+                sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+            )
+            msgDescriptor.fetchLimit = self.maxMessagesPerConversation
+
+            let messageModels = (try? context.fetch(msgDescriptor)) ?? []
+            let messages = messageModels.reversed().map { $0.toChatMessage() }
+
+            // Build condensed content: role + first 200 chars of each message
+            let condensed = messages.compactMap { msg -> String? in
+                guard let text = msg.content.textContent,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                let role = msg.sender == .user ? "User" : "Assistant"
+                let snippet = String(text.prefix(200))
+                return "\(role): \(snippet)"
+            }.joined(separator: "\n")
+
+            guard !condensed.isEmpty else { continue }
+
+            results.append(ConversationContext(
+                conversationID: conv.id,
+                title: conv.displayTitle,
+                timeAgo: conv.timestamp.timeAgoDisplay(),
+                messageCount: conv.messages.count,
+                condensedContent: condensed
+            ))
+        }
+
+        self.logger.debug("[RecentConversationSource] Extracted context from \(results.count) conversations.")
+        return results
     }
 }

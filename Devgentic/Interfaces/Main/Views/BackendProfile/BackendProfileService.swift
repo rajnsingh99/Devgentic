@@ -10,7 +10,6 @@
 
 import Foundation
 import SwiftUI
-import Combine
 import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendProfileService")
@@ -21,16 +20,16 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// **Change tracking** is NOT handled here — it lives in `ProfileEditBuffer`.
 /// The service is a thin persistence + list layer. Detail views own an edit buffer
 /// and only call `saveProfile(_:)` when the user explicitly saves.
-@MainActor
-final class BackendProfileService: ObservableObject {
+@Observable @MainActor
+final class BackendProfileService {
 
-    /// The published array of profiles that the sidebar observes.
+    /// The array of profiles that the sidebar observes.
     /// This always reflects the **last-persisted** state.
-    @Published var profiles: [BackendProfileModel] = []
+    var profiles: [BackendProfileModel] = []
 
     /// The active edit buffer for the currently selected profile.
     /// Owned by the service so the panel view's navigation guard can check `editBuffer?.isDirty`.
-    @Published var editBuffer: ProfileEditBuffer?
+    var editBuffer: ProfileEditBuffer?
 
     private let profileStore: BackendProfileStoreProtocol
 
@@ -219,7 +218,7 @@ final class BackendProfileService: ObservableObject {
 
         case .agent(let config):
             logOutput += "[AGENT CONFIGURATION]\n"
-            logOutput += "Architecture: \(config.architecture.rawValue)\n"
+            logOutput += "Capabilities: \(config.capabilities.derivedArchitecture.rawValue)\n"
             logOutput += "Description: \(config.description ?? "None")\n"
             logOutput += "Instructions (Length): \(config.instructions?.count ?? 0) characters\n\n"
 

@@ -9,7 +9,7 @@
 import SwiftUI
 
 struct SpeechControlIsland: View {
-    @ObservedObject private var speechService = SpeechService.shared
+    private var speechService = SpeechService.shared
     @Environment(\.appTheme) private var theme
     @State private var showVoicePicker: Bool = false
     @State private var isHovering: Bool = false

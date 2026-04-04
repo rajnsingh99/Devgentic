@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Combine
 import os
 
 /// Mirrors agent stream events to remote ChatOps transports.
@@ -18,7 +17,7 @@ import os
 /// **Architecture**: The main app is the source of truth. This service is
 /// a lightweight observer — it never drives execution, only mirrors output.
 @MainActor
-final class RemoteMirrorService: ObservableObject {
+final class RemoteMirrorService: ActiveStreamMirrorDelegate {
 
     private let logger = Logger(subsystem: "com.devgentic", category: "RemoteMirrorService")
 
@@ -33,30 +32,41 @@ final class RemoteMirrorService: ObservableObject {
     /// Maps operationID → transport message_id (for editing HITL messages after resolution).
     private var hitlMessageIDs: [UUID: String] = [:]
 
-    /// Combine subscriptions for observing ChatMessage changes.
-    private var streamSubscriptions: [UUID: AnyCancellable] = [:]
+    /// Messages currently being observed via withObservationTracking.
+    private var observedMessageIDs: Set<UUID> = []
 
-    /// Reference to ActiveStreamManager for observing new streams.
+    /// Reference to ActiveStreamManager (set as delegate).
     private weak var activeStreamManager: ActiveStreamManager?
-
-    /// Combine subscription for observing activeStreams changes.
-    private var activeStreamsSubscription: AnyCancellable?
 
     /// Observers for HITL resolution notifications.
     private var permissionResolvedObserver: NSObjectProtocol?
     private var clarificationResolvedObserver: NSObjectProtocol?
+    private var planReviewResolvedObserver: NSObjectProtocol?
 
     // MARK: - Init
 
     init(activeStreamManager: ActiveStreamManager) {
         self.activeStreamManager = activeStreamManager
-        setupActiveStreamsObserver()
+        activeStreamManager.mirrorDelegate = self
         setupHITLResolvedObservers()
     }
 
     deinit {
         if let obs = permissionResolvedObserver { NotificationCenter.default.removeObserver(obs) }
         if let obs = clarificationResolvedObserver { NotificationCenter.default.removeObserver(obs) }
+        if let obs = planReviewResolvedObserver { NotificationCenter.default.removeObserver(obs) }
+    }
+
+    // MARK: - ActiveStreamMirrorDelegate
+
+    func activeStreamManager(_ manager: ActiveStreamManager, didStartStream message: ChatMessage, for conversationID: UUID) {
+        guard remoteSessions[conversationID] != nil else { return }
+        guard !observedMessageIDs.contains(message.id) else { return }
+        observeMessage(message)
+    }
+
+    func activeStreamManager(_ manager: ActiveStreamManager, didEndStream message: ChatMessage) {
+        observedMessageIDs.remove(message.id)
     }
 
     // MARK: - Session Registration
@@ -70,7 +80,6 @@ final class RemoteMirrorService: ObservableObject {
     /// Unregister a remote session. Called on disconnect or explicit cleanup.
     func unregisterSession(conversationID: UUID) {
         remoteSessions.removeValue(forKey: conversationID)
-        streamSubscriptions.removeValue(forKey: conversationID)
         logger.info("[Mirror] Unregistered remote session for conversation \(conversationID).")
     }
 
@@ -87,42 +96,39 @@ final class RemoteMirrorService: ObservableObject {
         await ExecutionSuspensionService.shared.resumeClarification(for: operationID, userInput: response)
     }
 
-    // MARK: - Active Stream Observation
-
-    /// Watches for new streams in conversations with active remote sessions.
-    private func setupActiveStreamsObserver() {
-        guard let asm = activeStreamManager else { return }
-
-        activeStreamsSubscription = asm.$activeStreams
-            .receive(on: RunLoop.main)
-            .sink { [weak self] streams in
-                guard let self else { return }
-                for (messageID, message) in streams {
-                    guard self.remoteSessions[message.conversationId] != nil else { continue }
-                    guard self.streamSubscriptions[messageID] == nil else { continue }
-
-                    // New stream for a remote conversation — start observing
-                    self.observeMessage(message)
-                }
-            }
+    /// Called when a remote transport receives a plan review response.
+    /// Plan review editing is only available on the Mac UI — remote transports
+    /// can only approve the plan as-is or reject it.
+    func handlePlanReview(operationID: UUID, approved: Bool, subtasks: [SubTask]?) async {
+        let editedPlan = approved ? subtasks : nil
+        await ExecutionSuspensionService.shared.resumePlanReview(for: operationID, editedPlan: editedPlan)
     }
 
-    /// Subscribe to a ChatMessage's changes and mirror relevant events to the transport.
+    // MARK: - Message Observation
+
+    /// Observe a ChatMessage using withObservationTracking and mirror relevant events.
     private func observeMessage(_ message: ChatMessage) {
         let messageID = message.id
         let conversationID = message.conversationId
+        observedMessageIDs.insert(messageID)
 
-        streamSubscriptions[messageID] = message.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self, weak message] _ in
-                guard let self, let message else { return }
-                // Defer to next runloop tick so @Published values are updated
-                DispatchQueue.main.async {
-                    Task { @MainActor in
-                        await self.evaluateMessageState(message, conversationID: conversationID)
-                    }
+        func observe() {
+            withObservationTracking {
+                // Touch observable properties to register tracking
+                _ = message.pendingInteraction
+                _ = message.isStreaming
+                _ = message.agentState
+                _ = message.content
+            } onChange: {
+                Task { @MainActor [weak self, weak message] in
+                    guard let self, let message else { return }
+                    guard self.observedMessageIDs.contains(messageID) else { return }
+                    await self.evaluateMessageState(message, conversationID: conversationID)
+                    observe()
                 }
             }
+        }
+        observe()
 
         logger.info("[Mirror] Started observing message \(messageID) for conversation \(conversationID).")
     }
@@ -131,37 +137,31 @@ final class RemoteMirrorService: ObservableObject {
     private func evaluateMessageState(_ message: ChatMessage, conversationID: UUID) async {
         guard let session = remoteSessions[conversationID] else { return }
 
-        // Mirror HITL tool confirmation
-        if let confirmation = message.pendingToolConfirmation,
-           !mirroredOperations.contains(confirmation.id) {
-            mirroredOperations.insert(confirmation.id)
-            do {
-                let msgID = try await session.transport.sendHITLPrompt(
-                    chatID: session.chatID,
-                    operationID: confirmation.id,
-                    type: .toolConfirmation(toolName: confirmation.toolName, params: confirmation.params)
-                )
-                hitlMessageIDs[confirmation.id] = msgID
-                logger.info("[Mirror] Sent tool confirmation to \(session.source.rawValue) for operation \(confirmation.id).")
-            } catch {
-                logger.error("[Mirror] Failed to send tool confirmation: \(error.localizedDescription)")
-            }
-        }
+        // Mirror HITL interaction (unified)
+        if let interaction = message.pendingInteraction,
+           !mirroredOperations.contains(interaction.id) {
+            mirroredOperations.insert(interaction.id)
 
-        // Mirror HITL clarification
-        if let clarification = message.pendingClarification,
-           !mirroredOperations.contains(clarification.id) {
-            mirroredOperations.insert(clarification.id)
+            let hitlType: HITLType
+            switch interaction {
+            case .toolConfirmation(let c):
+                hitlType = .toolConfirmation(toolName: c.toolName, params: c.params)
+            case .clarification(let c):
+                hitlType = .clarification(question: c.question)
+            case .planReview(let p):
+                hitlType = .planReview(subtaskDescriptions: p.subtasks.map(\.description))
+            }
+
             do {
                 let msgID = try await session.transport.sendHITLPrompt(
                     chatID: session.chatID,
-                    operationID: clarification.id,
-                    type: .clarification(question: clarification.question)
+                    operationID: interaction.id,
+                    type: hitlType
                 )
-                hitlMessageIDs[clarification.id] = msgID
-                logger.info("[Mirror] Sent clarification to \(session.source.rawValue) for operation \(clarification.id).")
+                hitlMessageIDs[interaction.id] = msgID
+                logger.info("[Mirror] Sent HITL prompt to \(session.source.rawValue) for operation \(interaction.id).")
             } catch {
-                logger.error("[Mirror] Failed to send clarification: \(error.localizedDescription)")
+                logger.error("[Mirror] Failed to send HITL prompt: \(error.localizedDescription)")
             }
         }
 
@@ -242,6 +242,30 @@ final class RemoteMirrorService: ObservableObject {
                     chatID: session.chatID,
                     messageID: messageID,
                     newText: "✅ Clarification handled (from Mac)."
+                )
+                self.hitlMessageIDs.removeValue(forKey: operationID)
+            }
+        }
+
+        planReviewResolvedObserver = NotificationCenter.default.addObserver(
+            forName: .hitlPlanReviewResolved,
+            object: nil,
+            queue: .main
+        ) { notification in
+            let operationID = notification.userInfo?[HITLResolvedKey.operationID] as? UUID
+            let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
+
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let operationID,
+                      let messageID = self.hitlMessageIDs[operationID],
+                      let convID = conversationID,
+                      let session = self.remoteSessions[convID] else { return }
+
+                try? await session.transport.editMessage(
+                    chatID: session.chatID,
+                    messageID: messageID,
+                    newText: "✅ Plan reviewed (from Mac)."
                 )
                 self.hitlMessageIDs.removeValue(forKey: operationID)
             }

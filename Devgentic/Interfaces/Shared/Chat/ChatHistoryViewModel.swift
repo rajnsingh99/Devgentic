@@ -6,41 +6,40 @@
 //
 
 import SwiftUI
-import Combine
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatHistoryViewModel")
 
-@MainActor
-class ChatHistoryViewModel: ObservableObject {
+@Observable @MainActor
+final class ChatHistoryViewModel {
 
     // MARK: - Dependencies
-    private let persistenceService: CoreDataServiceProtocol
-    private let activeStreamManager: ActiveStreamManager
+    @ObservationIgnored private let persistenceService: ChatPersistenceProtocol
+    @ObservationIgnored private let activeStreamManager: ActiveStreamManager
 
-    // MARK: - Published State Properties for Code Viewer
-    @Published var codeViewerContent: (snippets: [CodeSnippet], currentIndex: Int)? = nil
-    @Published var isShowingDiff: Bool = false
-    @Published var originalCodeForDiff: String? = nil
+    // MARK: - State Properties for Code Viewer
+    var codeViewerContent: (snippets: [CodeSnippet], currentIndex: Int)? = nil
+    var isShowingDiff: Bool = false
+    var originalCodeForDiff: String? = nil
 
-    // MARK: - Published State Properties for Chat History
+    // MARK: - State Properties for Chat History
     // OPTIMIZATION: Stores messages in Descending order (Newest -> Oldest).
     // This allows O(1) appending of history pages instead of O(n) insertion at index 0.
-    @Published var currentChatMessages: [ChatMessage] = []
-    
-    @Published var isInitiallyLoadingConversation = false
+    var currentChatMessages: [ChatMessage] = []
 
-    @Published var isLoadingPage = false
-    @Published var canLoadMorePages = true
-    private let initialPageSize = 20
-    private let subsequentPageSize = 10
+    var isInitiallyLoadingConversation = false
 
-    @Published var isSending: Bool = false
-    @Published var isUserMessagesOnlyFilterActive: Bool = false
+    var isLoadingPage = false
+    var canLoadMorePages = true
+    @ObservationIgnored private let initialPageSize = 20
+    @ObservationIgnored private let subsequentPageSize = 10
+
+    var isSending: Bool = false
+    var isUserMessagesOnlyFilterActive: Bool = false
 
     // MARK: - Initialization
     init(
-        persistenceService: CoreDataServiceProtocol = CoreDataPersistenceService.shared,
+        persistenceService: ChatPersistenceProtocol = ChatPersistenceStore.shared,
         activeStreamManager: ActiveStreamManager
     ) {
         self.persistenceService = persistenceService
@@ -283,7 +282,7 @@ class ChatHistoryViewModel: ObservableObject {
 
 
     func loadMoreMessages() async {
-        guard !isLoadingPage, canLoadMorePages, let selectedID = persistenceService.getConversation(withId: currentChatMessages.first?.conversationId ?? UUID())?.id else {
+        guard !isLoadingPage, canLoadMorePages, let selectedID = currentChatMessages.first?.conversationId else {
             return
         }
         

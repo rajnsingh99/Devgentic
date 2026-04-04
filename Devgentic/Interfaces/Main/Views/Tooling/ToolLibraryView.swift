@@ -15,6 +15,7 @@ import SwiftUI
 
 enum SidebarSelection: Hashable {
     case all
+    case favorites
     case localCategory(String)
     case mcp(UUID)
 }
@@ -56,9 +57,11 @@ struct ToolLibraryView: View {
     let instructions: String
     @Binding var searchText: String
     @Binding var selectedSidebar: SidebarSelection?
+    @Binding var isSelectionMode: Bool
+    @Binding var selectedToolIDs: Set<String>
 
-    @EnvironmentObject private var router: MainViewRouter
-    @StateObject private var toolStore = UnifiedToolStore.shared
+    @Environment(MainViewRouter.self) private var router
+    @State private var toolStore = UnifiedToolStore.shared
     @Environment(\.appTheme) private var theme
 
     // Sheet state
@@ -125,6 +128,23 @@ struct ToolLibraryView: View {
                         .foregroundColor(theme.secondaryText)
                         .textCase(.uppercase)
                         .tracking(0.5)
+                }
+
+                if favoriteCount > 0 {
+                    Section {
+                        sidebarRow(
+                            label: "Favorites",
+                            icon: "star.fill",
+                            count: favoriteCount,
+                            tag: .favorites
+                        )
+                    } header: {
+                        Text("Pinned")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(theme.secondaryText)
+                            .textCase(.uppercase)
+                            .tracking(0.5)
+                    }
                 }
 
                 Section {
@@ -235,106 +255,204 @@ struct ToolLibraryView: View {
         if displayedRows.isEmpty {
             emptyStateView
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    // Column header
-                    HStack(spacing: 0) {
-                        Text("Tool")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Description")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("State")
-                            .frame(width: 80, alignment: .center)
-                    }
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(theme.secondaryText)
-                    .textCase(.uppercase)
-                    .tracking(0.5)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(theme.surfaceOverlay.opacity(0.3))
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        // Column header
+                        HStack(spacing: 0) {
+                            Text("Tool")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text("Description")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text("State")
+                                .frame(width: 80, alignment: .center)
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(theme.secondaryText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(theme.surfaceOverlay.opacity(0.3))
 
-                    ForEach(displayedRows) { row in
-                        toolRow(row)
+                        ForEach(displayedRows) { row in
+                            toolRow(row)
 
-                        if row.id != displayedRows.last?.id {
-                            Divider()
-                                .padding(.leading, 56)
+                            if row.id != displayedRows.last?.id {
+                                Divider()
+                                    .padding(.leading, 56)
+                            }
                         }
                     }
+                    .padding(.bottom, isSelectionMode && !selectedToolIDs.isEmpty ? 64 : 20)
                 }
-                .padding(.bottom, 20)
+
+                // Bulk action bar
+                if isSelectionMode && !selectedToolIDs.isEmpty {
+                    bulkActionBar
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .animation(.easeInOut(duration: 0.2), value: selectedToolIDs.isEmpty)
         }
     }
 
-    private func toolRow(_ row: ToolTableRow) -> some View {
+    // MARK: - Bulk Actions
+
+    private var bulkActionBar: some View {
         HStack(spacing: 12) {
-            // Icon
-            MCPIconView(
-                icons: row.definition.icons,
-                fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
-                size: 24
-            )
-            .foregroundColor(theme.accentColor)
-            .frame(width: 28)
+            Text("\(selectedToolIDs.count) selected")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(theme.primaryText)
 
-            // Name + source
-            VStack(alignment: .leading, spacing: 2) {
-                if let title = row.definition.title {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                    Text(row.definition.name)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(theme.secondaryText)
-                } else {
-                    Text(row.definition.name)
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundColor(theme.primaryText)
-                }
+            Spacer()
 
-                ToolAnnotationBadges(annotations: row.definition.annotations)
-
-                if selectedSidebar == .all {
-                    Text(row.source.serverName)
-                        .font(.system(size: 10))
-                        .foregroundColor(theme.secondaryText.opacity(0.7))
-                }
+            Button { bulkSetState(.ask) } label: {
+                Label("Ask", systemImage: "lock.shield.fill")
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.bordered)
+            .tint(.orange)
+            .controlSize(.small)
 
-            // Description + info
-            HStack(alignment: .center, spacing: 8) {
-                Text(row.definition.description)
-                    .font(.system(size: 12))
-                    .foregroundColor(theme.secondaryText)
-                    .lineLimit(2)
-
-                Spacer(minLength: 4)
-
-                ToolDetailsButton(definition: row.definition)
+            Button { bulkSetState(.auto) } label: {
+                Label("Auto", systemImage: "bolt.fill")
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .buttonStyle(.bordered)
+            .tint(.green)
+            .controlSize(.small)
 
-            // State control
-            ToolStateControl(
-                configuredTools: $configuredTools,
-                source: row.source,
-                definition: row.definition,
-                instructions: instructions
-            )
-            .frame(width: 80, alignment: .center)
+            Button { bulkSetState(.disabled) } label: {
+                Label("Disable", systemImage: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Divider().frame(height: 20)
+
+            Button { bulkToggleFavorite() } label: {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.bordered)
+            .tint(.yellow)
+            .controlSize(.small)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(theme.secondaryBackground)
+                .shadow(color: .black.opacity(0.2), radius: 8, y: -2)
+        )
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    private enum BulkToolState {
+        case ask, auto, disabled
+    }
+
+    private func bulkSetState(_ state: BulkToolState) {
+        var tools = configuredTools
+
+        for rowID in selectedToolIDs {
+            guard let row = displayedRows.first(where: { $0.id == rowID }) else { continue }
+            let name = row.definition.name
+            let sourceId = row.source.id
+
+            switch state {
+            case .ask:
+                if let idx = tools.firstIndex(where: { $0.name == name && $0.sourceId == sourceId }) {
+                    tools[idx].requiresConfirmation = true
+                } else {
+                    tools.append(Tool(
+                        name: name,
+                        description: row.definition.description,
+                        isEnabled: true,
+                        requiresConfirmation: true,
+                        sourceId: sourceId,
+                        parameters: row.definition.parameters
+                    ))
+                }
+            case .auto:
+                if let idx = tools.firstIndex(where: { $0.name == name && $0.sourceId == sourceId }) {
+                    tools[idx].requiresConfirmation = false
+                } else {
+                    tools.append(Tool(
+                        name: name,
+                        description: row.definition.description,
+                        isEnabled: true,
+                        requiresConfirmation: false,
+                        sourceId: sourceId,
+                        parameters: row.definition.parameters
+                    ))
+                }
+            case .disabled:
+                if instructions.contains("`\(name)`") { continue }
+                tools.removeAll { $0.name == name && $0.sourceId == sourceId }
+            }
+        }
+
+        configuredTools = tools
+        selectedToolIDs.removeAll()
+    }
+
+    private func bulkToggleFavorite() {
+        var tools = configuredTools
+        let allFavorited = selectedToolIDs.allSatisfy { rowID in
+            guard let row = displayedRows.first(where: { $0.id == rowID }) else { return false }
+            return tools.first(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })?.isFavorite == true
+        }
+
+        for rowID in selectedToolIDs {
+            guard let row = displayedRows.first(where: { $0.id == rowID }) else { continue }
+            if let idx = tools.firstIndex(where: { $0.name == row.definition.name && $0.sourceId == row.source.id }) {
+                tools[idx].isFavorite = !allFavorited
+            }
+        }
+
+        configuredTools = tools
+        selectedToolIDs.removeAll()
+    }
+
+    private var isToolFavorited: (ToolTableRow) -> Bool {
+        { row in configuredTools.first(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })?.isFavorite == true }
+    }
+
+    private func toolRow(_ row: ToolTableRow) -> some View {
+        let isEnabled = configuredTools.contains(where: { $0.name == row.definition.name && $0.sourceId == row.source.id })
+
+        return ToolRowContent(
+            row: row,
+            isEnabled: isEnabled,
+            isFavorited: isToolFavorited(row),
+            isSelectionMode: isSelectionMode,
+            isSelected: selectedToolIDs.contains(row.id),
+            showSourceName: selectedSidebar == .all || selectedSidebar == .favorites,
+            configuredTools: $configuredTools,
+            instructions: instructions,
+            theme: theme,
+            onToggleSelection: {
+                if selectedToolIDs.contains(row.id) {
+                    selectedToolIDs.remove(row.id)
+                } else {
+                    selectedToolIDs.insert(row.id)
+                }
+            }
+        )
     }
 
     // MARK: - Computed Properties
 
     var totalToolCount: Int {
         toolStore.sources.reduce(0) { $0 + $1.tools.count }
+    }
+
+    var favoriteCount: Int {
+        configuredTools.filter(\.isFavorite).count
     }
 
     /// Groups built-in tools by sidebar category with counts.
@@ -364,6 +482,16 @@ struct ToolLibraryView: View {
                     }
                 }
             }
+        case .favorites:
+            let favoriteNames = Set(configuredTools.filter(\.isFavorite).map { "\($0.sourceId)-\($0.name)" })
+            for source in toolStore.sources {
+                for tool in source.tools {
+                    let compositeKey = "\(source.id)-\(tool.name)"
+                    if favoriteNames.contains(compositeKey) && matchesSearch(tool) {
+                        rows.append(ToolTableRow(source: source, definition: tool))
+                    }
+                }
+            }
         case .localCategory(let groupName):
             guard let group = BuiltInToolCategory.allGroups.first(where: { $0.name == groupName }) else { break }
             for source in toolStore.sources where source.type == .local {
@@ -385,7 +513,13 @@ struct ToolLibraryView: View {
             break
         }
 
-        return rows.sorted { $0.definition.name < $1.definition.name }
+        // Sort: favorites first, then alphabetical
+        return rows.sorted { lhs, rhs in
+            let lhsFav = configuredTools.first(where: { $0.name == lhs.definition.name && $0.sourceId == lhs.source.id })?.isFavorite == true
+            let rhsFav = configuredTools.first(where: { $0.name == rhs.definition.name && $0.sourceId == rhs.source.id })?.isFavorite == true
+            if lhsFav != rhsFav { return lhsFav }
+            return lhs.definition.name < rhs.definition.name
+        }
     }
 
     private func matchesSearch(_ tool: ToolDefinition) -> Bool {
@@ -414,6 +548,127 @@ struct ToolLibraryView: View {
 }
 
 // MARK: - Row Action Components
+
+// MARK: - Tool Row with Hover Effect
+
+private struct ToolRowContent: View {
+    let row: ToolTableRow
+    let isEnabled: Bool
+    let isFavorited: Bool
+    let isSelectionMode: Bool
+    let isSelected: Bool
+    let showSourceName: Bool
+    @Binding var configuredTools: [Tool]
+    let instructions: String
+    let theme: any Theme
+    let onToggleSelection: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Selection checkbox (bulk mode)
+            if isSelectionMode {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+                    .frame(width: 20)
+                    .onTapGesture { onToggleSelection() }
+            }
+
+            // Icon
+            MCPIconView(
+                icons: row.definition.icons,
+                fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
+                size: 24
+            )
+            .foregroundColor(theme.accentColor)
+            .frame(width: 28)
+
+            // Name + source + favorite star
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    if let title = row.definition.title {
+                        Text(title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(theme.primaryText)
+                    } else {
+                        Text(row.definition.name)
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .foregroundColor(theme.primaryText)
+                    }
+
+                    if isFavorited {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.yellow)
+                    }
+                }
+
+                if row.definition.title != nil {
+                    Text(row.definition.name)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                }
+
+                ToolAnnotationBadges(annotations: row.definition.annotations)
+
+                if showSourceName {
+                    Text(row.source.serverName)
+                        .font(.system(size: 10))
+                        .foregroundColor(theme.secondaryText.opacity(0.7))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Description + info (info button only on hover)
+            HStack(alignment: .center, spacing: 8) {
+                Text(row.definition.description)
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(2)
+
+                Spacer(minLength: 4)
+
+                if isHovered {
+                    ToolDetailsButton(definition: row.definition)
+                        .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // State control
+            ToolStateControl(
+                configuredTools: $configuredTools,
+                source: row.source,
+                definition: row.definition,
+                instructions: instructions
+            )
+            .frame(width: 80, alignment: .center)
+
+            // Settings gear AFTER state button (only when enabled)
+            if isEnabled {
+                ToolSettingsPopover(
+                    configuredTools: $configuredTools,
+                    source: row.source,
+                    definition: row.definition
+                )
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isHovered ? theme.accentColor.opacity(0.06) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
 
 /// A small button that triggers a popover showing the full description and parameter schema.
 private struct ToolDetailsButton: View {
@@ -661,6 +916,123 @@ fileprivate struct ToolStateControl: View {
     }
 }
 
+// MARK: - Per-Tool Settings Popover
+
+private struct ToolSettingsPopover: View {
+    @Binding var configuredTools: [Tool]
+    let source: ToolSource
+    let definition: ToolDefinition
+
+    @State private var isShowingPopover = false
+    @Environment(\.appTheme) private var theme
+
+    private var toolIndex: Int? {
+        configuredTools.firstIndex(where: { $0.name == definition.name && $0.sourceId == source.id })
+    }
+
+    var body: some View {
+        Button {
+            isShowingPopover.toggle()
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 11))
+                .foregroundColor(theme.secondaryText)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Tool settings")
+        .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
+            popoverContent
+                .frame(width: 280)
+                .padding()
+        }
+    }
+
+    @ViewBuilder
+    private var popoverContent: some View {
+        if let idx = toolIndex {
+            VStack(alignment: .leading, spacing: 14) {
+                // Header
+                HStack(spacing: 6) {
+                    Image(systemName: "gearshape.fill")
+                        .foregroundColor(theme.accentColor)
+                    Text("Tool Settings")
+                        .font(.headline)
+                }
+
+                Divider()
+
+                // Favorite
+                Toggle(isOn: Binding(
+                    get: { configuredTools[idx].isFavorite },
+                    set: { configuredTools[idx].isFavorite = $0 }
+                )) {
+                    Label("Favorite", systemImage: "star.fill")
+                        .font(.system(size: 13))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                Divider()
+
+                // Timeout
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle(isOn: Binding(
+                        get: { configuredTools[idx].timeout != nil },
+                        set: { enabled in
+                            configuredTools[idx].timeout = enabled ? 30 : nil
+                            if !enabled { configuredTools[idx].timeoutMessage = nil }
+                        }
+                    )) {
+                        Label("Timeout", systemImage: "clock")
+                            .font(.system(size: 13))
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+
+                    if configuredTools[idx].timeout != nil {
+                        HStack {
+                            Stepper(
+                                "\(Int(configuredTools[idx].timeout ?? 30))s",
+                                value: Binding(
+                                    get: { configuredTools[idx].timeout ?? 30 },
+                                    set: { configuredTools[idx].timeout = $0 }
+                                ),
+                                in: 5...300,
+                                step: 5
+                            )
+                            .font(.system(size: 12))
+                            .fixedSize()
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("On Timeout, Send:")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(theme.secondaryText)
+
+                            TextField(
+                                "Custom message to LLM on timeout...",
+                                text: Binding(
+                                    get: { configuredTools[idx].timeoutMessage ?? "" },
+                                    set: { configuredTools[idx].timeoutMessage = $0.isEmpty ? nil : $0 }
+                                ),
+                                axis: .vertical
+                            )
+                            .lineLimit(2...4)
+                            .font(.system(size: 12))
+                            .textFieldStyle(.roundedBorder)
+                        }
+
+                        Text("Leave empty for default timeout error")
+                            .font(.system(size: 10))
+                            .foregroundColor(theme.secondaryText)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // MARK: - MCP v0.11.0 UI Components
 
 /// Displays annotation badges for a tool's behavioral hints.
@@ -711,10 +1083,9 @@ private struct AnnotationBadge: View {
 /// Displays a colored circle indicating the MCP server's connection state.
 private struct ConnectionStateIndicator: View {
     let sourceId: UUID
-    @ObservedObject private var clientService = MCPClientService.shared
 
     private var state: MCPConnectionState {
-        clientService.connectionStates[sourceId] ?? .disconnected
+        MCPClientService.shared.connectionStates[sourceId] ?? .disconnected
     }
 
     var body: some View {

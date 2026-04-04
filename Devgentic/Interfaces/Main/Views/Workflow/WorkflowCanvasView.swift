@@ -20,7 +20,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 struct WorkflowCanvasView: View {
     @Binding var profile: BackendProfileModel
     var onDelete: ((UUID) -> Void)? = nil
-    @EnvironmentObject var profileService: BackendProfileService
+    @Environment(BackendProfileService.self) var profileService
     @Environment(\.appTheme) private var theme
 
     @StateObject private var canvasState: WorkflowCanvasState
@@ -123,7 +123,7 @@ struct WorkflowCanvasView: View {
         )) { node in
             if let targetProfile = profileService.profiles.first(where: { $0.id == node.profileID }) {
                 WorkflowProfileEditorView(profile: targetProfile)
-                    .environmentObject(profileService)
+                    .environment(profileService)
             }
         }
     }

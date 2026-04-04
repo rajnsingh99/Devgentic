@@ -17,7 +17,7 @@ enum SuggestionNavigationDirection { case up, down }
 
 struct ChatInputAreaView: View {
 
-    @StateObject private var inputViewModel = ChatInputViewModel()
+    @State private var inputViewModel = ChatInputViewModel()
 
     @Binding var showContextArea: Bool
     @Binding var activeContextFilePath: String?
@@ -31,8 +31,8 @@ struct ChatInputAreaView: View {
     let onToggleContext: () -> Void
 
     @EnvironmentObject private var explorerViewModel: ExplorerViewModel
-    @EnvironmentObject private var mainViewModel: MainApplicationViewModel // retained only for delegate wiring & APIKeyInputPopup sheet
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring & APIKeyInputPopup sheet
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     // MARK: - UI State
@@ -178,8 +178,8 @@ struct ChatInputAreaView: View {
             inputViewModel.resetAPIKeyPopupState()
         }) {
             APIKeyInputPopup()
-                .environmentObject(mainViewModel)
-                .environmentObject(inputViewModel)
+                .environment(mainViewModel)
+                .environment(inputViewModel)
         }
         .animation(.spring(), value: inputViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)

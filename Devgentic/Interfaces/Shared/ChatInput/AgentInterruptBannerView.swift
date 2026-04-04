@@ -12,24 +12,27 @@ import SwiftUI
 // MARK: - Main Banner View
 
 struct AgentInterruptBannerView: View {
-    @ObservedObject var message: ChatMessage
-    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    var message: ChatMessage
+    @Environment(MainApplicationViewModel.self) var mainAppViewModel
     @Environment(\.appTheme) private var theme
 
     var body: some View {
         Group {
-            if let clarification = message.pendingClarification {
-                ClarificationBanner(clarification: clarification, message: message)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .move(edge: .bottom).combined(with: .opacity)
-                    ))
-            } else if let confirmation = message.pendingToolConfirmation {
-                PermissionBanner(confirmation: confirmation, message: message)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .move(edge: .bottom).combined(with: .opacity)
-                    ))
+            if let interaction = message.pendingInteraction {
+                Group {
+                    switch interaction {
+                    case .planReview(let planReview):
+                        PlanReviewBanner(planReview: planReview, message: message)
+                    case .clarification(let clarification):
+                        ClarificationBanner(clarification: clarification, message: message)
+                    case .toolConfirmation(let confirmation):
+                        PermissionBanner(confirmation: confirmation, message: message)
+                    }
+                }
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .move(edge: .bottom).combined(with: .opacity)
+                ))
             }
         }
         // Match the chat input's width constraints exactly
@@ -37,8 +40,7 @@ struct AgentInterruptBannerView: View {
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal)
         .padding(.bottom, 6)
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingClarification != nil)
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingToolConfirmation != nil)
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingInteraction != nil)
     }
 }
 
@@ -46,8 +48,8 @@ struct AgentInterruptBannerView: View {
 
 private struct ClarificationBanner: View {
     let clarification: PendingClarification
-    @ObservedObject var message: ChatMessage
-    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    var message: ChatMessage
+    @Environment(MainApplicationViewModel.self) var mainAppViewModel
     @Environment(\.appTheme) private var theme
 
     @State private var userInput: String = ""
@@ -144,7 +146,7 @@ private struct ClarificationBanner: View {
         let trimmed = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         withAnimation { isSubmitting = true }
-        mainAppViewModel.submitClarificationResponse(operationID: message.pendingClarification!.id, response: trimmed)
+        mainAppViewModel.submitClarificationResponse(operationID: clarification.id, response: trimmed)
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             withAnimation { message.pendingClarification = nil }
@@ -153,7 +155,7 @@ private struct ClarificationBanner: View {
 
     private func skip() {
         withAnimation { isSubmitting = true }
-        mainAppViewModel.submitClarificationResponse(operationID: message.pendingClarification!.id, response: nil)
+        mainAppViewModel.submitClarificationResponse(operationID: clarification.id, response: nil)
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             withAnimation { message.pendingClarification = nil }
@@ -165,8 +167,8 @@ private struct ClarificationBanner: View {
 
 private struct PermissionBanner: View {
     let confirmation: PendingToolConfirmation
-    @ObservedObject var message: ChatMessage
-    @EnvironmentObject var mainAppViewModel: MainApplicationViewModel
+    var message: ChatMessage
+    @Environment(MainApplicationViewModel.self) var mainAppViewModel
     @Environment(\.appTheme) private var theme
 
     @State private var isProcessing: Bool = false
@@ -264,6 +266,205 @@ private struct PermissionBanner: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(300))
             withAnimation { message.pendingToolConfirmation = nil }
+        }
+    }
+}
+
+// MARK: - Plan Review Subtask Row
+
+private struct PlanReviewSubtaskRow: View {
+    @Binding var subtask: SubTask
+    let index: Int
+    let onDelete: () -> Void
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("\(index + 1)")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(theme.streamingIndicator.opacity(0.7))
+                .frame(width: 18, alignment: .center)
+
+            TextField("Subtask description", text: $subtask.description)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundColor(theme.primaryText)
+
+            if let hint = subtask.toolHint, !hint.isEmpty {
+                Text(hint)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.tertiaryText)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(theme.surfaceOverlay.opacity(0.6)))
+            }
+
+            Button(action: onDelete) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.tertiaryText.opacity(0.5))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(theme.surfaceOverlay.opacity(0.4))
+        )
+    }
+}
+
+// MARK: - Plan Review Banner
+
+private struct PlanReviewBanner: View {
+    let planReview: PendingPlanReview
+    var message: ChatMessage
+    @Environment(MainApplicationViewModel.self) var mainAppViewModel
+    @Environment(\.appTheme) private var theme
+
+    @State private var editableSubtasks: [SubTask] = []
+    @State private var isProcessing: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Header row
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(theme.streamingIndicator)
+                    .frame(width: 6, height: 6)
+                    .shadow(color: theme.streamingIndicator.opacity(0.5), radius: 3)
+
+                Text("Plan Review")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(theme.streamingIndicator)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+
+                Spacer()
+
+                Text("\(editableSubtasks.count) step\(editableSubtasks.count == 1 ? "" : "s")")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.tertiaryText.opacity(0.6))
+            }
+
+            // Scrollable subtask list
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 6) {
+                    ForEach($editableSubtasks) { $subtask in
+                        let displayIndex = editableSubtasks.firstIndex(where: { $0.id == subtask.id })
+                        PlanReviewSubtaskRow(
+                            subtask: $subtask,
+                            index: displayIndex ?? 0,
+                            onDelete: {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    editableSubtasks.removeAll { $0.id == subtask.id }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+            .frame(maxHeight: 200)
+
+            // Add step + Reset row
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        let newID = "step_\(editableSubtasks.count + 1)"
+                        editableSubtasks.append(SubTask(id: newID, description: ""))
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus.circle")
+                            .font(.system(size: 10))
+                        Text("Add Step")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(theme.streamingIndicator.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                // Reset to original plan
+                if editableSubtasks != planReview.subtasks {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            editableSubtasks = planReview.subtasks
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 10))
+                            Text("Reset")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(theme.tertiaryText)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            // Button row
+            HStack(spacing: 8) {
+                Spacer()
+
+                if isProcessing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.8)
+                        .frame(height: 28)
+                } else {
+                    BannerActionButton(
+                        label: "Reject",
+                        icon: "xmark",
+                        style: .ghost,
+                        isDisabled: false,
+                        action: { reject() }
+                    )
+
+                    BannerActionButton(
+                        label: "Approve & Run",
+                        icon: "play.fill",
+                        style: .primary(color: theme.successColor),
+                        isDisabled: editableSubtasks.isEmpty || editableSubtasks.contains(where: { $0.description.trimmingCharacters(in: .whitespaces).isEmpty }),
+                        action: { approve() }
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(theme.streamingIndicator.opacity(0.15), lineWidth: 1)
+        )
+        .onAppear {
+            editableSubtasks = planReview.subtasks
+        }
+    }
+
+    private func approve() {
+        withAnimation { isProcessing = true }
+        mainAppViewModel.submitPlanReview(operationID: planReview.id, editedPlan: editableSubtasks)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            withAnimation { message.pendingPlanReview = nil }
+        }
+    }
+
+    private func reject() {
+        withAnimation { isProcessing = true }
+        mainAppViewModel.submitPlanReview(operationID: planReview.id, editedPlan: nil)
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            withAnimation { message.pendingPlanReview = nil }
         }
     }
 }

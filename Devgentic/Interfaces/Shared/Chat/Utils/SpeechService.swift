@@ -8,7 +8,6 @@
 //
 
 import AppKit
-import Combine
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SpeechService")
@@ -48,10 +47,11 @@ struct VoiceInfo: Identifiable, Hashable {
 /// A singleton ObservableObject wrapper around NSSpeechSynthesizer that speaks agent responses
 /// segment by segment. When a code block is encountered, it announces it, opens the Code Viewer,
 /// and continues (or pauses if `pauseOnCode` is enabled).
-final class SpeechService: NSObject, ObservableObject, NSSpeechSynthesizerDelegate {
+@Observable
+final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     static let shared = SpeechService()
 
-    private lazy var synthesizer: NSSpeechSynthesizer = {
+    @ObservationIgnored private lazy var synthesizer: NSSpeechSynthesizer = {
         let synth = NSSpeechSynthesizer()
         synth.delegate = self
         synth.rate = baseRate * currentRate
@@ -64,39 +64,39 @@ final class SpeechService: NSObject, ObservableObject, NSSpeechSynthesizerDelega
     /// Whether the synthesizer has been lazily initialized.
     private var synthesizerInitialized: Bool = false
 
-    // MARK: - Published State
+    // MARK: - State
 
     /// Whether a speech session is currently active (speaking or paused).
-    @Published private(set) var isActive: Bool = false
+    private(set) var isActive: Bool = false
 
     /// Whether speech is currently paused (via user action or pause-on-code).
-    @Published private(set) var isPaused: Bool = false
+    private(set) var isPaused: Bool = false
 
     /// The index of the segment currently being spoken (1-based for display).
-    @Published private(set) var currentSegmentIndex: Int = 0
+    private(set) var currentSegmentIndex: Int = 0
 
     /// Total number of segments in the current playback session.
-    @Published private(set) var totalSegmentCount: Int = 0
+    private(set) var totalSegmentCount: Int = 0
 
     /// The current speech rate multiplier (0.5, 1.0, 1.5, 2.0).
-    @Published private(set) var currentRate: Float = 1.0
+    private(set) var currentRate: Float = 1.0
 
     /// The currently selected voice identifier.
-    @Published private(set) var selectedVoice: String?
+    private(set) var selectedVoice: String?
 
     /// Whether to pause playback when a code block is encountered (instead of auto-resuming).
-    @Published private(set) var pauseOnCode: Bool = false
+    private(set) var pauseOnCode: Bool = false
 
     /// The message ID currently being spoken.
-    @Published private(set) var currentMessageID: UUID?
+    private(set) var currentMessageID: UUID?
 
     // MARK: - Internal State
 
     /// The full list of segments for the current session (preserved for skip-backward).
-    private var allSegments: [SpeechSegment] = []
+    @ObservationIgnored private var allSegments: [SpeechSegment] = []
 
     /// The index into `allSegments` of the segment currently being spoken.
-    private var playbackIndex: Int = 0
+    @ObservationIgnored private var playbackIndex: Int = 0
 
     /// Temporarily holds a code block waiting to be opened after the announcement finishes.
     private var pendingCodeBlock: (language: String?, code: String)?

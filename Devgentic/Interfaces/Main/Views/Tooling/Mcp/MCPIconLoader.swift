@@ -12,8 +12,8 @@ import os.log
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MCPIconLoader")
 
 /// Loads and caches MCP tool icons from URLs or base64 data URIs.
-@MainActor
-class MCPIconLoader: ObservableObject {
+@Observable @MainActor
+final class MCPIconLoader {
     static let shared = MCPIconLoader()
 
     private let cache = NSCache<NSString, NSImage>()

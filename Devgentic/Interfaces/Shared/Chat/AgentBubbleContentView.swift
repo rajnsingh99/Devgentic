@@ -10,12 +10,12 @@ import SwiftUI
 private let CODE_BLOCK_LINE_LIMIT = 50
 
 struct AgentBubbleContentView: View {
-    @ObservedObject var message: ChatMessage
+    var message: ChatMessage
     let isAgentic: Bool
     let contentToDisplay: MessageContent
 
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
-    @EnvironmentObject private var mainAppViewModel: MainApplicationViewModel
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
+    @Environment(MainApplicationViewModel.self) private var mainAppViewModel
     @EnvironmentObject private var searchViewModel: ChatSearchViewModel
     @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.appTheme) private var theme
@@ -37,7 +37,7 @@ struct AgentBubbleContentView: View {
                             currentHeadline: message.isStreaming ? message.thinkingHeadline : nil,
                             agentState: message.agentState,
                             isStreaming: message.isStreaming,
-                            isExpanded: $message.isThinkingExpanded
+                            isExpanded: Bindable(message).isThinkingExpanded
                         )
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
@@ -56,22 +56,24 @@ struct AgentBubbleContentView: View {
                     .accessibilityLabel("\(message.artifacts.count) tool results")
             }
 
-            // 3. HITL
-            if let confirmation = message.pendingToolConfirmation {
-                PermissionRequestView(confirmation: confirmation, message: message)
-                    .padding(.bottom, 8)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Permission request for \(confirmation.toolName)")
-            }
-
-            // 3b. CLARIFICATION
-            if let clarification = message.pendingClarification {
-                ClarificationRequestView(clarification: clarification, message: message)
-                    .padding(.bottom, 8)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Clarification: \(clarification.question)")
+            // 3. HITL Interaction (unified)
+            if let interaction = message.pendingInteraction {
+                Group {
+                    switch interaction {
+                    case .toolConfirmation(let confirmation):
+                        PermissionRequestView(confirmation: confirmation, message: message)
+                            .accessibilityLabel("Permission request for \(confirmation.toolName)")
+                    case .clarification(let clarification):
+                        ClarificationRequestView(clarification: clarification, message: message)
+                            .accessibilityLabel("Clarification: \(clarification.question)")
+                    case .planReview(let planReview):
+                        PlanReviewRequestView(planReview: planReview, message: message)
+                            .accessibilityLabel("Plan review with \(planReview.subtasks.count) subtasks")
+                    }
+                }
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .accessibilityElement(children: .combine)
             }
 
             // 4. CONTENT
@@ -80,7 +82,7 @@ struct AgentBubbleContentView: View {
             // 5. ACTIONS
             if !message.isStreaming && contentToDisplay.textContent != nil {
                 AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
-                    .environmentObject(chatHistoryViewModel)
+                    .environment(chatHistoryViewModel)
                     .opacity(0.6)
             }
         }

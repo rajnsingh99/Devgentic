@@ -22,8 +22,8 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ActivityBar")
 
 struct HomeButton: View {
-    @EnvironmentObject var viewModel: MainApplicationViewModel
-    @EnvironmentObject var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) var viewModel
+    @Environment(MainViewRouter.self) var router
     @Binding var isSidebarVisible: Bool
     @Binding var selectedTab: SidebarTab?
 
@@ -74,7 +74,7 @@ struct ActivityBarButton: View {
     @Binding var selectedTab: SidebarTab?
     @Binding var isSidebarVisible: Bool
 
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var viewModel
     @ObservedObject private var downloadManager = DownloadManager.shared
     @Environment(\.appTheme) private var theme
 

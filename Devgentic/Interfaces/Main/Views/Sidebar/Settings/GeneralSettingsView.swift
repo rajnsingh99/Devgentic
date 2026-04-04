@@ -11,7 +11,7 @@ import SwiftUI
 /// A view for managing general application settings.
 struct GeneralSettingsView: View {
     // Access the main view model from the environment to bind the setting.
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
 
     // Speech settings stored via @AppStorage for direct UserDefaults binding
@@ -75,7 +75,7 @@ struct GeneralSettingsView: View {
                         description: "When enabled, the LLM response will appear word-by-word. Disable this if you prefer to receive the full response at once after it has been generated.",
                         theme: theme
                     ) {
-                        Toggle("", isOn: $viewModel.useStreamingResponse)
+                        Toggle("", isOn: Bindable(viewModel).useStreamingResponse)
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)

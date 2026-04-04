@@ -12,8 +12,8 @@ import SwiftUI
 /// toggle individual features, and customize behavior with a prompt.
 struct CoreIntelligenceSettingsView: View {
 
-    @EnvironmentObject var viewModel: MainApplicationViewModel
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) var viewModel
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     // Model selection stored in UserDefaults
@@ -47,7 +47,7 @@ struct CoreIntelligenceSettingsView: View {
                         description: "A dedicated on-device MLX model that runs background intelligence tasks to improve your experience. Runs locally — no data leaves your machine.",
                         theme: theme
                     ) {
-                        Toggle("", isOn: $viewModel.isIntelligenceCoreEnabled)
+                        Toggle("", isOn: Bindable(viewModel).isIntelligenceCoreEnabled)
                             .toggleStyle(.switch)
                             .labelsHidden()
                             .tint(theme.accentColor)
@@ -147,9 +147,35 @@ struct CoreIntelligenceSettingsView: View {
                             description: "Builds a personal profile over time to tailor responses to your workflow, preferences, and communication style. You can view and edit the profile at any time.",
                             icon: "person.text.rectangle.fill",
                             isOn: $userPersonalEnabled,
-                            theme: theme,
-                            comingSoon: true
+                            theme: theme
                         )
+
+                        // View Profile button (shown when User Personal is enabled)
+                        if userPersonalEnabled {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    router.navigateToUserPersonalProfile()
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "person.text.rectangle")
+                                        Text("View Profile")
+                                    }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                if let lastUpdated = UserPersonalService.shared.lastUpdated {
+                                    Text("Updated \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(theme.tertiaryText)
+                                }
+
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
+                        }
                     }
 
                     // 3. Debug: Test Morning Brief
@@ -162,6 +188,24 @@ struct CoreIntelligenceSettingsView: View {
                                 .lineSpacing(2)
 
                             HStack(spacing: 12) {
+                                Button {
+                                    runUserPersonalTest()
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if isTestRunning {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                        } else {
+                                            Image(systemName: "person.text.rectangle.fill")
+                                        }
+                                        Text(isTestRunning ? "Running..." : "Run User Personal")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.purple)
+                                .controlSize(.small)
+                                .disabled(isTestRunning || selectedModel.isEmpty)
+
                                 Button {
                                     runMorningBriefTest()
                                 } label: {
@@ -305,6 +349,57 @@ struct CoreIntelligenceSettingsView: View {
     // MARK: - Debug Test Actions
 
     #if DEBUG
+    private func runUserPersonalTest() {
+        guard !isTestRunning else { return }
+        isTestRunning = true
+        testLog.removeAll()
+        appendLog("Starting User Personal analysis...")
+
+        Task {
+            let overallStart = CFAbsoluteTimeGetCurrent()
+
+            // Temporarily enable for the test
+            let wasEnabled = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey)
+            UserDefaults.standard.set(true, forKey: AppSettings.ciFeatureUserPersonalKey)
+
+            // Clear cooldown for test
+            let savedDate = UserDefaults.standard.object(forKey: AppSettings.lastUserPersonalAnalysisDateKey)
+            UserDefaults.standard.removeObject(forKey: AppSettings.lastUserPersonalAnalysisDateKey)
+
+            let service = UserPersonalService.shared
+
+            appendLog("Gate check: \(service.shouldAnalyze() ? "PASSED" : "FAILED")")
+            appendLog("Analyzing recent conversations...")
+
+            await service.analyzeRecentConversations()
+
+            let profileLength = service.profileMarkdown.count
+            appendLog("Profile now \(profileLength) chars")
+
+            if let lastUpdated = service.lastUpdated {
+                appendLog("Last updated: \(lastUpdated.formatted(date: .abbreviated, time: .standard))")
+            }
+
+            // Show first few lines of profile
+            let previewLines = service.profileMarkdown.split(separator: "\n").prefix(10)
+            for line in previewLines {
+                appendLog("  \(line)")
+            }
+
+            // Restore state
+            if let saved = savedDate {
+                UserDefaults.standard.set(saved, forKey: AppSettings.lastUserPersonalAnalysisDateKey)
+            }
+            if !wasEnabled {
+                UserDefaults.standard.set(false, forKey: AppSettings.ciFeatureUserPersonalKey)
+            }
+
+            let totalTime = CFAbsoluteTimeGetCurrent() - overallStart
+            appendLog("DONE — Total: \(String(format: "%.2f", totalTime))s")
+            isTestRunning = false
+        }
+    }
+
     private func appendLog(_ text: String) {
         let timestamp = Date().formatted(date: .omitted, time: .standard)
         testLog.append("[\(timestamp)] \(text)")

@@ -195,7 +195,6 @@ final class ProfileValidatorTests: XCTestCase {
     func testValidAgentProfilePasses() {
         let config = AgentConfig(
             llmConfig: ProviderConfig(apiProvider: .ollama, modelName: "llama3", baseURL: "http://localhost:11434"),
-            architecture: .reAct,
             tools: []
         )
         let profile = BackendProfileSnapshot(displayName: "Agent", details: .agent(config))

@@ -15,7 +15,7 @@ struct PromptDetailContainerView: View {
     let promptID: UUID
 
     @StateObject private var viewModel = PromptLibraryViewModel()
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     @State private var isDeleteHovered = false

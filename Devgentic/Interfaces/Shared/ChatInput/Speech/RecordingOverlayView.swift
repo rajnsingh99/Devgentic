@@ -144,9 +144,10 @@ private struct WaveformBarView: View {
         }
         .frame(height: maxBarHeight, alignment: .center)
         // Only update this specific view when powerLevels changes
-        .onReceive(store.$powerLevels) { newLevels in
+        .onChange(of: store.powerLevels) { _, newLevels in
             self.powerLevels = newLevels
         }
+        .onAppear { self.powerLevels = store.powerLevels }
     }
 }
 
@@ -174,9 +175,10 @@ private struct TimerTextView: View {
                 .foregroundColor(theme.secondaryText)
         }
         // Only update this specific view when recordingTime changes
-        .onReceive(store.$recordingTime) { newTime in
+        .onChange(of: store.recordingTime) { _, newTime in
             self.recordingTime = newTime
         }
+        .onAppear { self.recordingTime = store.recordingTime }
     }
 
     private func formatTime(_ interval: TimeInterval) -> String {
@@ -227,13 +229,8 @@ private struct LiveTranscriptionTextView: View {
         // WhisperKit's sliding window frequently drops unconfirmed text during pauses,
         // causing the text to "shrink" or "vanish" completely. We add a smart delay
         // to text reductions to hold the last known good string on screen.
-        .onReceive(
-            store.$liveTranscriptionText
-                .removeDuplicates()
-                .throttle(for: .milliseconds(250), scheduler: RunLoop.main, latest: true)
-        ) { newText in
+        .onChange(of: store.liveTranscriptionText) { _, newText in
             if newText.isEmpty && !self.liveTranscriptionText.isEmpty {
-                // Total buffer reset (e.g., long silence). Wait 2.5s before clearing.
                 clearTask?.cancel()
                 clearTask = Task {
                     try? await Task.sleep(for: .seconds(2.5))
@@ -242,8 +239,6 @@ private struct LiveTranscriptionTextView: View {
                     }
                 }
             } else if newText.count < self.liveTranscriptionText.count - 5 {
-                // Partial drop: The text shrank significantly. Hold the longer text
-                // for 1.5s to see if Whisper catches back up before shrinking the UI.
                 clearTask?.cancel()
                 clearTask = Task {
                     try? await Task.sleep(for: .seconds(1.5))
@@ -252,7 +247,6 @@ private struct LiveTranscriptionTextView: View {
                     }
                 }
             } else {
-                // Valid update: text grew or had a minor length correction.
                 clearTask?.cancel()
                 self.liveTranscriptionText = newText
             }

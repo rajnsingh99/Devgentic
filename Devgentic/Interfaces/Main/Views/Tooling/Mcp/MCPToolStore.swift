@@ -9,21 +9,20 @@
 
 import Foundation
 import SwiftData
-import Combine
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MCPToolStore")
 
 /// Manages all SwiftData operations for MCP tools (MCPToolItem and MCPToolDefinitionModel).
 /// This class acts as a single source of truth for tool data and publishes changes to the UI.
-@MainActor
-class MCPToolStore: ObservableObject {
+@Observable @MainActor
+final class MCPToolStore {
 
     // MARK: - Singleton Instance
     static let shared = MCPToolStore()
 
-    /// Published array of tool sources that the UI can observe for changes.
-    @Published var sources: [ToolSource] = []
+    /// Array of tool sources that the UI can observe for changes.
+    var sources: [ToolSource] = []
 
     /// The shared model container, configured once at app startup.
     private(set) var modelContainer: ModelContainer?

@@ -13,7 +13,7 @@ import SwiftUI
 struct DownloadSidebarView: View {
 
     @ObservedObject private var manager = DownloadManager.shared
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     var body: some View {

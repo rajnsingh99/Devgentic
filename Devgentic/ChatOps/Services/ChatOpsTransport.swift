@@ -13,6 +13,7 @@ import Foundation
 enum HITLType: Sendable {
     case toolConfirmation(toolName: String, params: String)
     case clarification(question: String)
+    case planReview(subtaskDescriptions: [String])
 }
 
 // MARK: - Transport Protocol

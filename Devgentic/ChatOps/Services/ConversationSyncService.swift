@@ -6,8 +6,6 @@
 //
 
 import Foundation
-import CoreData
-import Combine
 import os
 
 /// Ensures the Mac UI updates in real-time when remote messages arrive.
@@ -27,9 +25,6 @@ final class ConversationSyncService {
     private weak var chatHistoryViewModel: ChatHistoryViewModel?
     private weak var activeStreamManager: ActiveStreamManager?
 
-    private var activeStreamsSubscription: AnyCancellable?
-    private var coreDataObserver: NSObjectProtocol?
-
     /// Tracks message IDs already in the view (to avoid duplicate insertions).
     private var syncedMessageIDs: Set<UUID> = []
 
@@ -38,14 +33,11 @@ final class ConversationSyncService {
         self.activeStreamManager = activeStreamManager
 
         setupActiveStreamsObserver()
-        setupCoreDataObserver()
 
         logger.info("ConversationSyncService initialized.")
     }
 
-    deinit {
-        if let obs = coreDataObserver { NotificationCenter.default.removeObserver(obs) }
-    }
+    deinit { }
 
     // MARK: - Active Conversation ID
 
@@ -61,75 +53,40 @@ final class ConversationSyncService {
     private func setupActiveStreamsObserver() {
         guard let asm = activeStreamManager else { return }
 
-        activeStreamsSubscription = asm.$activeStreams
-            .receive(on: RunLoop.main)
-            .sink { [weak self] streams in
-                guard let self, let chvm = self.chatHistoryViewModel else { return }
-                guard let displayedID = self.displayedConversationID else { return }
+        func observe() {
+            withObservationTracking {
+                _ = asm.activeStreams
+            } onChange: {
+                Task { @MainActor [weak self] in
+                    guard let self, let chvm = self.chatHistoryViewModel, let asm = self.activeStreamManager else { return }
+                    guard let displayedID = self.displayedConversationID else {
+                        observe()
+                        return
+                    }
 
-                for (_, message) in streams {
-                    guard message.conversationId == displayedID else { continue }
-                    guard !self.syncedMessageIDs.contains(message.id) else { continue }
+                    for (_, message) in asm.activeStreams {
+                        guard message.conversationId == displayedID else { continue }
+                        guard !self.syncedMessageIDs.contains(message.id) else { continue }
 
-                    // Check it's not already in the view
-                    let alreadyInView = chvm.currentChatMessages.contains { $0.id == message.id }
-                    guard !alreadyInView else {
+                        let alreadyInView = chvm.currentChatMessages.contains { $0.id == message.id }
+                        guard !alreadyInView else {
+                            self.syncedMessageIDs.insert(message.id)
+                            continue
+                        }
+
+                        chvm.currentChatMessages.insert(message, at: 0)
                         self.syncedMessageIDs.insert(message.id)
-                        continue
+                        self.logger.info("[Sync] Injected streaming message \(message.id) into displayed conversation.")
                     }
 
-                    // Insert at index 0 (newest first, matching ChatHistoryViewModel convention)
-                    chvm.currentChatMessages.insert(message, at: 0)
-                    self.syncedMessageIDs.insert(message.id)
-                    self.logger.info("[Sync] Injected streaming message \(message.id) into displayed conversation.")
-                }
-            }
-    }
-
-    // MARK: - CoreData Observation
-
-    /// When CoreData saves a new message for the currently displayed conversation,
-    /// convert it and insert it into the view.
-    private func setupCoreDataObserver() {
-        coreDataObserver = NotificationCenter.default.addObserver(
-            forName: .NSManagedObjectContextDidSave,
-            object: nil,
-            queue: .main
-        ) { notification in
-            let insertedObjects = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject>
-
-            Task { @MainActor [weak self] in
-                guard let self,
-                      let insertedObjects,
-                      let displayedID = self.displayedConversationID else { return }
-
-                for object in insertedObjects {
-                    // Check if this is a message entity for the displayed conversation
-                    guard object.entity.name == "ChatMessageEntity",
-                          let conversationRelation = object.value(forKey: "conversation") as? NSManagedObject,
-                          let convID = conversationRelation.value(forKey: "id") as? UUID,
-                          convID == displayedID,
-                          let msgID = object.value(forKey: "id") as? UUID else { continue }
-
-                    // Skip if already synced (from submitRemoteMessage's direct insert or stream observer)
-                    guard !self.syncedMessageIDs.contains(msgID) else { continue }
-
-                    // Check it's not already in the view
-                    guard let chvm = self.chatHistoryViewModel else { continue }
-                    let alreadyInView = chvm.currentChatMessages.contains { $0.id == msgID }
-                    guard !alreadyInView else {
-                        self.syncedMessageIDs.insert(msgID)
-                        continue
-                    }
-
-                    // Convert entity to ChatMessage (the entity should have the conversion method)
-                    // For now, trigger a lightweight reload of the most recent message
-                    self.syncedMessageIDs.insert(msgID)
-                    self.logger.info("[Sync] Detected new persisted message \(msgID) for displayed conversation. View should update on next load.")
+                    observe()
                 }
             }
         }
+        observe()
     }
+
+    // CoreData observation removed — SwiftData handles persistence updates via @Observable.
 
     /// Called when the displayed conversation changes (to reset tracking state).
     func resetForConversation(_ conversationID: UUID?) {

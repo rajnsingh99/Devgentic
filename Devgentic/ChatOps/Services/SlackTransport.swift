@@ -76,6 +76,18 @@ final class SlackTransport: ChatOpsTransport, @unchecked Sendable {
                 text: messageText
             )
             return result.ts
+
+        case .planReview(let subtaskDescriptions):
+            let planList = subtaskDescriptions.enumerated()
+                .map { "  \($0.offset + 1). \($0.element)" }
+                .joined(separator: "\n")
+            let messageText = "📋 *Plan Review Required*\n\nThe agent has generated a plan with \(subtaskDescriptions.count) step(s):\n\n\(planList)\n\nPlease approve or edit this plan from the Mac app."
+
+            let result = try await apiClient.postMessage(
+                channel: chatID,
+                text: messageText
+            )
+            return result.ts
         }
     }
 

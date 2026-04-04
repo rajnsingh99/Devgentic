@@ -23,7 +23,7 @@ struct VSCodifiedSidebarContainerView: View {
     private let fixedSidebarWidth: CGFloat = 320
     private let activityBarWidth: CGFloat = 50
 
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
 
     init(isSidebarVisible: Binding<Bool>, sidebarWidth: Binding<CGFloat>) {

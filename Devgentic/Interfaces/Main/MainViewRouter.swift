@@ -22,16 +22,17 @@ enum MainViewDestination: Equatable, Hashable {
     case ollamaModelStore(profileID: UUID)
     case mlxModelStore(profileID: UUID, filterForTools: Bool)
     case downloadManager
+    case userPersonalProfile
 }
 
 /// Manages push/pop stack navigation for the main content area.
 ///
 /// The chat view is kept alive via opacity toggling (never torn down),
 /// while non-chat destinations are lazily created on demand.
-@MainActor
-final class MainViewRouter: ObservableObject {
-    @Published var activeDestination: MainViewDestination = .chat
-    @Published private(set) var navigationStack: [MainViewDestination] = []
+@Observable @MainActor
+final class MainViewRouter {
+    var activeDestination: MainViewDestination = .chat
+    private(set) var navigationStack: [MainViewDestination] = []
 
     var canGoBack: Bool { !navigationStack.isEmpty }
 
@@ -104,5 +105,12 @@ final class MainViewRouter: ObservableObject {
         navigationStack.removeAll()
         navigationStack.append(.chat)
         activeDestination = .downloadManager
+    }
+
+    /// Navigate to the User Personal profile view.
+    /// Uses `navigate(to:)` to push onto the existing stack, so Back returns
+    /// to wherever the user came from (settings, welcome, etc.).
+    func navigateToUserPersonalProfile() {
+        navigate(to: .userPersonalProfile)
     }
 }

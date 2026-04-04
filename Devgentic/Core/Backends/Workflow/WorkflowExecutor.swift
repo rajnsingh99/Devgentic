@@ -253,6 +253,16 @@ actor WorkflowExecutor: Executor {
 
                                 case .mediaProgress, .artifactProduced:
                                     continuation.yield(event)
+
+                                case .requestPlanReview:
+                                    // Bubble up plan review HITL requests (preserve operationID)
+                                    continuation.yield(event)
+
+                                case .planGenerated, .subtaskStarted, .subtaskCompleted,
+                                     .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
+                                     .delegationStarted, .delegationCompleted:
+                                    // Forward capability events from inner node execution
+                                    continuation.yield(event)
                                 }
                             }
                         } catch is CancellationError {

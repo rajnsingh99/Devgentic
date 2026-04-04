@@ -13,9 +13,9 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.exam
 
 // MARK: - Main View
 struct MainApplicationView: View {
-    @EnvironmentObject private var viewModel: MainApplicationViewModel
-    @EnvironmentObject private var chatHistoryViewModel: ChatHistoryViewModel
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainApplicationViewModel.self) private var viewModel
+    @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     @FocusState private var isInputFocused: Bool
@@ -63,7 +63,7 @@ struct MainApplicationView: View {
 
             if chatHistoryViewModel.codeViewerContent != nil {
                 CodeViewerPanelView()
-                    .environmentObject(chatHistoryViewModel)
+                    .environment(chatHistoryViewModel)
                     .zIndex(2)
             }
 
@@ -137,6 +137,8 @@ struct MainApplicationView: View {
             MLXModelStoreContainerView(filterForTools: filterForTools)
         case .downloadManager:
             DownloadManagerContainerView()
+        case .userPersonalProfile:
+            UserPersonalContainerView()
         }
     }
 
@@ -144,7 +146,7 @@ struct MainApplicationView: View {
     private var chatArea: some View {
         ZStack(alignment: .bottom) {
             ChatHistoryView()
-                .environmentObject(chatHistoryViewModel)
+                .environment(chatHistoryViewModel)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.bottom, 115)
                 .overlay {
@@ -158,12 +160,12 @@ struct MainApplicationView: View {
                 // to pendingClarification/pendingToolConfirmation changes.
                 if let streamingMsg = viewModel.streamingMessage {
                     StreamingMessageBannerWrapper(message: streamingMsg)
-                        .environmentObject(viewModel)
+                        .environment(viewModel)
                 }
 
                 ChatInputAreaView(
-                    showContextArea: $viewModel.showContextArea,
-                    activeContextFilePath: $viewModel.activeContextFilePath,
+                    showContextArea: Bindable(viewModel).showContextArea,
+                    activeContextFilePath: Bindable(viewModel).activeContextFilePath,
                     isSending: chatHistoryViewModel.isSending,
                     isInputFocused: $isInputFocused,
                     backendConfiguration: viewModel.backendConfiguration,
@@ -182,26 +184,23 @@ struct MainApplicationView: View {
 }
 
 // MARK: - Streaming Message Banner Wrapper
-/// Holds an @ObservedObject on the ChatMessage so SwiftUI re-evaluates
-/// pending state when `pendingClarification` / `pendingToolConfirmation` change.
-/// Without this, MainApplicationView only reacts to the VM reference changing,
-/// not to @Published properties on the nested ChatMessage.
+/// Wrapper that observes the unified `pendingInteraction` property on ChatMessage
+/// to show the sticky HITL banner above the chat input.
 private struct StreamingMessageBannerWrapper: View {
-    @ObservedObject var message: ChatMessage
-    @EnvironmentObject var viewModel: MainApplicationViewModel
+    var message: ChatMessage
+    @Environment(MainApplicationViewModel.self) var viewModel
 
     var body: some View {
         Group {
-            if message.pendingClarification != nil || message.pendingToolConfirmation != nil {
+            if message.pendingInteraction != nil {
                 AgentInterruptBannerView(message: message)
-                    .environmentObject(viewModel)
+                    .environment(viewModel)
                     .transition(.asymmetric(
                         insertion: .move(edge: .bottom).combined(with: .opacity),
                         removal: .move(edge: .bottom).combined(with: .opacity)
                     ))
             }
         }
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingClarification != nil)
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingToolConfirmation != nil)
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingInteraction != nil)
     }
 }

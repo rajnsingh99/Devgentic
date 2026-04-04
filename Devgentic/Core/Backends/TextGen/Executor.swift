@@ -32,46 +32,46 @@ enum ExecutorFactory {
     /// Creates the appropriate AgentExecutor for the given profile.
     /// - Parameter profile: The backend profile model containing configuration details.
     /// - Returns: A type-erased `AgentExecutor` (either `ChatExecutor` or `ReActAgentExecutor`).
+    /// Creates the appropriate executor for the given profile.
+    /// Agent profiles always start with ReAct, then stack capability decorators.
+    /// Delegation is NOT a wrapper — it's a tool (handled in AgentConnect.resolveExecutableTools).
     static func create(for profile: BackendProfileModel) -> any Executor {
         switch profile.profileType {
 
         case .bot:
-            // Bots use the simple pass-through executor.
-            // They don't plan, reason, or use tools in a loop.
             return ChatExecutor()
 
         case .agent:
-            // Route to the correct architecture based on the profile's configuration.
-            let architecture: AgentArchitecture
-            if case .agent(let config) = profile.details {
-                architecture = config.architecture
-            } else {
-                architecture = .reAct
-            }
-            switch architecture {
-            case .reAct:
-                return ReActAgentExecutor()
-            case .planAndExecute:
-                return PlanExecuteExecutor()
-            case .reflexion:
-                return ReflexionExecutor()
-            case .supervisor:
-                return SupervisorExecutor()
-            case .workflow:
-                // Agent profiles should never have .workflow architecture.
-                // Fallback to ReAct if misconfigured.
+            guard case .agent(let config) = profile.details else {
                 return ReActAgentExecutor()
             }
+
+            // Core executor — always ReAct
+            var executor: any Executor = ReActAgentExecutor(
+                maxIterations: config.maxIterations ?? 15
+            )
+
+            // Stack capabilities as decorators
+            if let planning = config.capabilities.planning {
+                executor = PlanningCapability(config: planning).wrap(executor)
+            }
+
+            if let reflection = config.capabilities.selfReflection {
+                executor = SelfReflectionCapability(config: reflection).wrap(executor)
+            }
+
+            // Agent Delegation is NOT an executor wrapper — it's a tool
+            // (handled in AgentConnect.resolveExecutableTools)
+
+            return executor
 
         case .workflow:
             return WorkflowExecutor()
 
         case .imageGen:
-            // ImageGen profiles use a simple pass-through executor.
             return ChatExecutor()
 
         @unknown default:
-            // Safety fallback for future enum cases
             return ReActAgentExecutor()
         }
     }

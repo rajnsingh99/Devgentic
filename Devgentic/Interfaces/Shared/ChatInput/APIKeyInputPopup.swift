@@ -10,8 +10,8 @@ import SwiftUI
 struct APIKeyInputPopup: View {
     
     // MARK: - Environment & View Models
-    @EnvironmentObject var mainViewModel: MainApplicationViewModel
-    @EnvironmentObject var inputViewModel: ChatInputViewModel
+    @Environment(MainApplicationViewModel.self) var mainViewModel
+    @Environment(ChatInputViewModel.self) var inputViewModel
     @Environment(\.dismiss) private var dismiss
     
     // MARK: - Constants
@@ -71,7 +71,7 @@ struct APIKeyInputPopup: View {
     }
 
     private var apiKeyInputField: some View {
-        SecureField("Enter Google API Key", text: $inputViewModel.apiKeyInput)
+        SecureField("Enter Google API Key", text: Bindable(inputViewModel).apiKeyInput)
             .textFieldStyle(.roundedBorder)
             .controlSize(.large)
             // Reset validation state when user starts typing

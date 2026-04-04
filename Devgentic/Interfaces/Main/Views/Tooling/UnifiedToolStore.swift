@@ -9,37 +9,45 @@
 //
 
 import Foundation
-import Combine
 
 /// A singleton class that acts as the single source of truth for all tool sources,
 /// combining the static, built-in tools with the user's persisted MCP servers.
-@MainActor
-class UnifiedToolStore: ObservableObject {
-    
+@Observable @MainActor
+final class UnifiedToolStore {
+
     // MARK: - Singleton Instance
     static let shared = UnifiedToolStore()
-    
-    /// The unified, published list of all available tool sources.
-    @Published var sources: [ToolSource] = []
-    
-    private var mcpStore = MCPToolStore.shared
-    private var localManager = LocalToolManager.shared
-    private var cancellables = Set<AnyCancellable>()
-    
+
+    /// The unified list of all available tool sources.
+    var sources: [ToolSource] = []
+
+    private let mcpStore = MCPToolStore.shared
+    private let localManager = LocalToolManager.shared
+
+    /// Observation task that watches MCPToolStore for changes.
+    private var observationTask: Task<Void, Never>?
+
     /// Private initializer to set up data observation.
     private init() {
-        // Listen for any changes in the persisted MCP tools.
-        // When MCPToolStore updates (e.g., a tool is added/deleted),
-        // this sink will trigger a refresh of our combined list.
-        mcpStore.$sources
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.refreshSources()
-            }
-            .store(in: &cancellables)
-        
         // Perform the initial data load.
         refreshSources()
+
+        // Observe MCPToolStore changes via @Observable tracking.
+        // When mcpStore.sources changes, re-read triggers refreshSources().
+        observationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let _ = withObservationTracking {
+                    self.mcpStore.sources
+                } onChange: {
+                    Task { @MainActor [weak self] in
+                        self?.refreshSources()
+                    }
+                }
+                // Yield to allow the onChange callback to fire before looping.
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
     }
     
     /// Rebuilds the `sources` array by combining local and MCP tools.
@@ -104,13 +112,15 @@ class UnifiedToolStore: ObservableObject {
     /// A pass-through method to add a new MCP tool.
     func addTool(serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
         mcpStore.addTool(serverName: serverName, serverDefinition: serverDefinition, newTools: newTools)
+        refreshSources()
     }
-    
+
     /// A pass-through method to update an existing MCP tool.
     func updateTool(id: UUID, serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
         mcpStore.updateTool(id: id, serverName: serverName, serverDefinition: serverDefinition, newTools: newTools)
+        refreshSources()
     }
-    
+
     /// A pass-through method to delete an MCP tool source.
     /// This ensures that the built-in tools cannot be deleted.
     func deleteTool(toolSource: ToolSource) {
@@ -119,5 +129,6 @@ class UnifiedToolStore: ObservableObject {
             return
         }
         mcpStore.deleteTool(toolSource: toolSource)
+        refreshSources()
     }
 }

@@ -7,8 +7,7 @@
 
 import AppKit
 import SwiftUI
-import CoreData
-import os // Import for logging
+import os
 
 // UserDefaults Keys for saving the frame (Keep existing ones)
 private enum UserDefaultsKeys {
@@ -84,15 +83,14 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         let defaults = UserDefaults.standard
         let wasExpandedOnClose = defaults.bool(forKey: GlobalConstants.quickAccessWasExpandedOnClose)
         
-        // Helper function to check if the QA conversation has messages.
+        // TODO: Re-enable with SwiftData ChatPersistenceStore when QuickAccess is enhanced
         func qaConversationHasMessages() -> Bool {
-            let persistence = CoreDataPersistenceService.shared
             if let qaIdString = defaults.string(forKey: GlobalConstants.quickAccessOverlayConversationId),
                let qaId = UUID(uuidString: qaIdString),
-               let conversation = persistence.getConversation(withId: qaId) {
-                return (conversation.messages?.count ?? 0) > 0
+               let conversation = ChatPersistenceStore.shared.getConversation(withId: qaId) {
+                return !conversation.messages.isEmpty
             }
-            return false // If no conversation exists, it has no messages.
+            return false
         }
 
         if forceExpandVisual {
@@ -107,27 +105,22 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
         }
     }
 
-    // This private helper can be used by other methods *after* initialization is complete.
-    private func getOrCreateQuickAccessConversation() -> ConversationEntity? {
+    // TODO: Re-enable with SwiftData ChatPersistenceStore when QuickAccess is enhanced
+    private func getOrCreateQuickAccessConversation() -> ConversationSD? {
         let defaults = UserDefaults.standard
-        let persistenceService = CoreDataPersistenceService.shared
+        let persistenceService = ChatPersistenceStore.shared
         let quickAccessKey = GlobalConstants.quickAccessOverlayConversationId
 
-        // Try to find an existing conversation by its stored ID.
         if let qaIdString = defaults.string(forKey: quickAccessKey),
            let qaId = UUID(uuidString: qaIdString),
-           let foundConversation = persistenceService.getConversation(withId: qaId) {
-            return foundConversation
+           let found = persistenceService.getConversation(withId: qaId) {
+            return found
         }
 
-        // If not found, create a new one.
-        logger.info("No valid Quick Access conversation found for panel check. Creating a new one.")
-        let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat")
-        
+        logger.info("No valid Quick Access conversation found. Creating a new one.")
+        let newConversation = Conversation(id: UUID(), messages: [], timestamp: Date(), userDefinedTitle: "Quick Access Chat", isPinned: false)
         persistenceService.addConversation(from: newConversation)
         defaults.set(newConversation.id.uuidString, forKey: quickAccessKey)
-        
-        // Fetch the newly created entity to return it.
         return persistenceService.getConversation(withId: newConversation.id)
     }
 

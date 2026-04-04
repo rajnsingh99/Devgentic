@@ -35,6 +35,10 @@ struct AppSettings {
     static let lastMorningBriefDateKey = "lastMorningBriefDate"
     static let morningBriefIncludeAISummaryKey = "morningBriefIncludeAISummary"
 
+    // User Personal
+    static let lastUserPersonalAnalysisDateKey = "lastUserPersonalAnalysisDate"
+    static let userPersonalAnalyzedConversationIDsKey = "userPersonalAnalyzedConversationIDs"
+
     // Notifications
     static let notificationsEnabledKey = "notificationsEnabled"
     static let notificationChannelsKey = "notificationChannels"

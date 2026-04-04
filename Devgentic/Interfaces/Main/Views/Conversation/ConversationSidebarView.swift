@@ -7,16 +7,16 @@
 
 import Foundation
 import SwiftUI
-import CoreData
+import SwiftData
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ConversationSidebarView")
 
 
-// MARK: - ConversationEntity Extension
-/// Extensions to `ConversationEntity` to provide stable, computed properties for the UI.
-extension ConversationEntity {
-    
+// MARK: - ConversationSD Extension
+/// Extensions to `ConversationSD` to provide stable, computed properties for the UI.
+extension ConversationSD {
+
     /// Computes a user-friendly display title for the conversation.
     /// It prioritizes a user-defined title or defaults to "New Conversation".
     var displayTitle: String {
@@ -38,7 +38,7 @@ struct SidebarGroupHeaderView: View {
     let title: String
     let count: Int
     @Binding var isExpanded: Bool
-    
+
     @State private var isHovering = false
     @Environment(\.appTheme) private var theme
 
@@ -92,10 +92,10 @@ struct SidebarGroupHeaderView: View {
 /// Wrapper around `ConversationRowView` that specifically handles sidebar behaviors
 /// such as context menus (pinning, renaming, deleting) and inline state preparation.
 struct ConversationSidebarRow: View {
-    let conversation: ConversationEntity
+    let conversation: ConversationSD
 
-    @ObservedObject var viewModel: MainApplicationViewModel
-    @EnvironmentObject private var router: MainViewRouter
+    var viewModel: MainApplicationViewModel
+    @Environment(MainViewRouter.self) private var router
 
     // Inline Renaming State
     @Binding var renamingConversationID: UUID?
@@ -103,7 +103,7 @@ struct ConversationSidebarRow: View {
     var isRenameFieldFocused: FocusState<Bool>.Binding
 
     // Deletion State
-    @Binding var conversationToDelete: ConversationEntity?
+    @Binding var conversationToDelete: ConversationSD?
     @Binding var showingDeleteAlert: Bool
 
     // Batch Selection
@@ -113,7 +113,7 @@ struct ConversationSidebarRow: View {
     var body: some View {
         ConversationRowView(
             // Assuming toConversationStruct() maps the entity to a UI model
-            conversation: conversation.toConversationStruct(),
+            conversation: conversation.toStruct(),
             isSelected: viewModel.selectedConversationID == conversation.id,
             isRenaming: renamingConversationID == conversation.id,
             editableName: $editableConversationName,
@@ -128,14 +128,13 @@ struct ConversationSidebarRow: View {
                 renamingConversationID = nil
             },
             onPin: {
-                guard let id = conversation.id else { return }
-                viewModel.togglePinStatus(for: id)
+                viewModel.togglePinStatus(for: conversation.id)
             },
             onDelete: {
                 triggerDelete()
             },
             isSelectionMode: isSelectionMode,
-            isBatchSelected: conversation.id.map { selectedIDs.contains($0) } ?? false
+            isBatchSelected: selectedIDs.contains(conversation.id)
         )
         .contextMenu {
             contextMenuContent
@@ -158,18 +157,18 @@ struct ConversationSidebarRow: View {
     }
 
     private func toggleBatchSelection() {
-        guard let id = conversation.id else { return }
+        let id = conversation.id
         if selectedIDs.contains(id) {
             selectedIDs.remove(id)
         } else {
             selectedIDs.insert(id)
         }
-        
+
         // Auto-exit if nothing selected? No, let user cancel.
     }
 
     private func enterSelectionMode() {
-        guard let id = conversation.id else { return }
+        let id = conversation.id
         isSelectionMode = true
         selectedIDs.insert(id)
     }
@@ -178,7 +177,7 @@ struct ConversationSidebarRow: View {
     @ViewBuilder
     private var contextMenuContent: some View {
         if isSelectionMode {
-            let isSelected = conversation.id.map { selectedIDs.contains($0) } ?? false
+            let isSelected = selectedIDs.contains(conversation.id)
             Button {
                 toggleBatchSelection()
             } label: {
@@ -198,8 +197,7 @@ struct ConversationSidebarRow: View {
         Divider()
 
         Button {
-            guard let id = conversation.id else { return }
-            viewModel.togglePinStatus(for: id)
+            viewModel.togglePinStatus(for: conversation.id)
         } label: {
             if conversation.isPinned {
                 Label("Unpin", systemImage: "pin.slash")
@@ -216,9 +214,7 @@ struct ConversationSidebarRow: View {
         }
 
         Button {
-            if let id = conversation.id {
-                viewModel.exportConversation(conversationID: id)
-            }
+            viewModel.exportConversation(conversationID: conversation.id)
         } label: {
             Label("Export to Markdown", systemImage: "square.and.arrow.up")
         }
@@ -243,7 +239,7 @@ struct ConversationSidebarRow: View {
             self.isRenameFieldFocused.wrappedValue = true
         }
     }
-    
+
     private func triggerDelete() {
         self.conversationToDelete = conversation
         self.showingDeleteAlert = true
@@ -254,18 +250,11 @@ struct ConversationSidebarRow: View {
 /// Manages fetching conversations, sorting them into time-based groups, and coordinating state.
 
 struct ConversationSidebarView: View {
-    @EnvironmentObject var viewModel: MainApplicationViewModel
-    @Environment(\.managedObjectContext) private var viewContext
+    @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
 
     // MARK: - Data Fetching
-    @FetchRequest(
-        sortDescriptors: [
-            NSSortDescriptor(keyPath: \ConversationEntity.isPinned, ascending: false),
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ],
-        animation: .default)
-    private var conversations: FetchedResults<ConversationEntity>
+    @Query(sort: \ConversationSD.timestamp, order: .reverse) private var conversations: [ConversationSD]
 
     // MARK: - Filter
     private enum ConversationFilter: String, CaseIterable {
@@ -277,7 +266,7 @@ struct ConversationSidebarView: View {
     // MARK: - View State
     @State private var searchText = ""
     @State private var showingDeleteAlert = false
-    @State private var conversationToDelete: ConversationEntity? = nil
+    @State private var conversationToDelete: ConversationSD? = nil
 
     // Renaming State
     @State private var renamingConversationID: UUID?
@@ -294,7 +283,7 @@ struct ConversationSidebarView: View {
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
-            
+
             SidebarHeaderView(
                 title: "Chats",
                 buttonTitle: "New Chat",
@@ -347,9 +336,7 @@ struct ConversationSidebarView: View {
         .background(Color.clear)
         .alert("Delete Conversation?", isPresented: $showingDeleteAlert, presenting: conversationToDelete) { conv in
             Button("Delete", role: .destructive) {
-                if let id = conv.id {
-                    viewModel.deleteConversation(conversationID: id)
-                }
+                viewModel.deleteConversation(conversationID: conv.id)
             }
             Button("Cancel", role: .cancel) {}
         }
@@ -364,7 +351,7 @@ struct ConversationSidebarView: View {
             isPinnedExpanded = UserDefaults.standard.object(forKey: "sidebarPinnedExpanded_v2") as? Bool ?? true
         }
     }
-    
+
     // MARK: - List Component
     private var conversationList: some View {
         let data = partitioned
@@ -421,7 +408,7 @@ struct ConversationSidebarView: View {
     }
 
     @ViewBuilder
-    private func row(for conversation: ConversationEntity) -> some View {
+    private func row(for conversation: ConversationSD) -> some View {
         ConversationSidebarRow(
             conversation: conversation,
             viewModel: viewModel,
@@ -442,16 +429,16 @@ struct ConversationSidebarView: View {
     // MARK: - Filtering Logic (single-pass partition)
 
     private struct PartitionedConversations {
-        let pinned: [ConversationEntity]
+        let pinned: [ConversationSD]
         let dateSections: [DateSection]
     }
 
     private struct DateSection: Equatable {
         let title: String
-        let conversations: [ConversationEntity]
+        let conversations: [ConversationSD]
 
         static func == (lhs: DateSection, rhs: DateSection) -> Bool {
-            lhs.title == rhs.title && lhs.conversations.map(\.objectID) == rhs.conversations.map(\.objectID)
+            lhs.title == rhs.title && lhs.conversations.map(\.id) == rhs.conversations.map(\.id)
         }
     }
 
@@ -462,12 +449,12 @@ struct ConversationSidebarView: View {
         let weekAgo = calendar.date(byAdding: .day, value: -7, to: now)
         let monthAgo = calendar.date(byAdding: .month, value: -1, to: now)
 
-        var pinned: [ConversationEntity] = []
-        var today: [ConversationEntity] = []
-        var yesterday: [ConversationEntity] = []
-        var thisWeek: [ConversationEntity] = []
-        var thisMonth: [ConversationEntity] = []
-        var earlier: [ConversationEntity] = []
+        var pinned: [ConversationSD] = []
+        var today: [ConversationSD] = []
+        var yesterday: [ConversationSD] = []
+        var thisWeek: [ConversationSD] = []
+        var thisMonth: [ConversationSD] = []
+        var earlier: [ConversationSD] = []
 
         for conversation in conversations {
             if !searchText.isEmpty,
@@ -480,10 +467,7 @@ struct ConversationSidebarView: View {
                 continue
             }
 
-            guard let date = conversation.timestamp else {
-                earlier.append(conversation)
-                continue
-            }
+            let date = conversation.timestamp
 
             if calendar.isDateInToday(date) {
                 today.append(conversation)
@@ -507,7 +491,7 @@ struct ConversationSidebarView: View {
         return PartitionedConversations(pinned: pinned, dateSections: sections)
     }
 
-    private var pinnedConversations: [ConversationEntity] { partitioned.pinned }
+    private var pinnedConversations: [ConversationSD] { partitioned.pinned }
     private var dateGroupedSections: [DateSection] { partitioned.dateSections }
 
     // MARK: - Batch Selection Components

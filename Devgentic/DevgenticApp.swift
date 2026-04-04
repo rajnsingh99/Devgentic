@@ -11,7 +11,6 @@
 
 import SwiftUI
 import SwiftData
-import CoreData
 import UserNotifications
 
 @main
@@ -19,11 +18,8 @@ struct DevgenticApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @AppStorage(GlobalConstants.isOnboardingComplete) private var isOnboardingComplete: Bool = false
     @Environment(\.openWindow) var openWindow  // Retained for File Viewer window
-    
-    private let coreDataService = CoreDataPersistenceService.shared
 
-    /// Unified SwiftData container for all migrated subsystems.
-    /// Core Data continues to serve Chat entities only.
+    /// Unified SwiftData container for all subsystems (profiles, chat, scheduling, etc.).
     private let swiftDataContainer: ModelContainer = {
         do {
             let schema = Schema([
@@ -31,10 +27,13 @@ struct DevgenticApp: App {
                 MCPToolItem.self,
                 MCPToolDefinitionModel.self,
                 PromptModel.self,
-                ScheduledTaskModel.self
+                ScheduledTaskModel.self,
+                // Chat persistence (migrated from CoreData)
+                ConversationSD.self,
+                ChatMessageSD.self,
+                AttachedTextFileSD.self,
+                AttachedImageFileSD.self,
             ])
-            // Store alongside Core Data's DevgenticDB.sqlite in Application Support,
-            // but with a distinct filename to avoid any collision.
             let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let storeURL = appSupportURL.appendingPathComponent("DevgenticSD.store")
             let config = ModelConfiguration("DevgenticSD", schema: schema, url: storeURL)
@@ -43,6 +42,7 @@ struct DevgenticApp: App {
             BackendProfileStore.shared.configureContainer(container)
             MCPToolStore.shared.configureContainer(container)
             PromptStore.shared.configureContainer(container)
+            ChatPersistenceStore.shared.configureContainer(container)
             return container
         } catch {
             fatalError("Failed to create SwiftData ModelContainer: \(error)")
@@ -51,14 +51,14 @@ struct DevgenticApp: App {
 
     @StateObject private var themeManager = ThemeManager()
 
-    @StateObject private var mainApplicationViewModel: MainApplicationViewModel
-    @StateObject private var chatHistoryViewModel: ChatHistoryViewModel
-    @StateObject private var mainViewRouter = MainViewRouter()
-    @StateObject private var backendProfileService = BackendProfileService()
+    @State private var mainApplicationViewModel: MainApplicationViewModel
+    @State private var chatHistoryViewModel: ChatHistoryViewModel
+    @State private var mainViewRouter = MainViewRouter()
+    @State private var backendProfileService = BackendProfileService()
     @StateObject private var toastManager = ToastManager()
 
     init() {
-        let persistence = CoreDataPersistenceService.shared
+        let persistence = ChatPersistenceStore.shared
         let fileProcessor = FileProcessorService()
 
         let streamManager = ActiveStreamManager(
@@ -78,8 +78,8 @@ struct DevgenticApp: App {
             chatHistoryViewModel: chatHistoryVM
         )
 
-        self._chatHistoryViewModel = StateObject(wrappedValue: chatHistoryVM)
-        self._mainApplicationViewModel = StateObject(wrappedValue: mainVM)
+        self._chatHistoryViewModel = State(wrappedValue: chatHistoryVM)
+        self._mainApplicationViewModel = State(wrappedValue: mainVM)
 
         // MARK: - Notification system bootstrap
         // Register the local delivery channel with the dispatcher so tasks can
@@ -107,13 +107,12 @@ struct DevgenticApp: App {
             MainApplicationView()
                 .environmentObject(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
-                .environmentObject(mainApplicationViewModel)
+                .environment(mainApplicationViewModel)
                 .environmentObject(mainApplicationViewModel.explorerViewModel)
-                .environmentObject(chatHistoryViewModel)
-                .environmentObject(mainViewRouter)
-                .environmentObject(backendProfileService)
+                .environment(chatHistoryViewModel)
+                .environment(mainViewRouter)
+                .environment(backendProfileService)
                 .environmentObject(toastManager)
-                .environment(\.managedObjectContext, coreDataService.persistentContainer.viewContext)
                 .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -161,6 +160,16 @@ struct DevgenticApp: App {
                     .environment(\.appTheme, themeManager.currentTheme)
                     .tint(themeManager.currentTheme.accentColor)
             }
+        }
+    }
+
+    /// Removes legacy CoreData SQLite files (DevgenticDB) from Application Support.
+    /// Safe to call multiple times — no-ops if files are already gone.
+    private static func cleanupLegacyCoreDataStore() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        for suffix in ["", "-wal", "-shm"] {
+            let file = appSupport.appendingPathComponent("DevgenticDB.sqlite\(suffix)")
+            try? FileManager.default.removeItem(at: file)
         }
     }
 }

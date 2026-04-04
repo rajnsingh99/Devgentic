@@ -15,7 +15,7 @@ import SwiftUI
 
 struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 
-    @EnvironmentObject private var router: MainViewRouter
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     let center: CenterContent

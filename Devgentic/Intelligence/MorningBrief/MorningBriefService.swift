@@ -43,7 +43,8 @@ final class MorningBriefService: ObservableObject {
     private init() {
         sourceRegistry = [
             RecentConversationSource(),
-            SystemHealthSource()
+            SystemHealthSource(),
+            UserPersonalBriefSource()
         ]
         logger.info("[Morning Brief] Service initialized with \(self.sourceRegistry.count) built-in sources.")
     }

@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import CoreData
+import SwiftData
 import os
 
 /// The core orchestrator for Discord ChatOps.
@@ -308,9 +308,9 @@ final class DiscordChatOpsBridge: ObservableObject {
         var rows: [DiscordComponent] = []
         var currentButtons: [DiscordComponent] = []
 
-        for entity in conversations {
-            let title = entity.displayTitle
-            let convID = entity.id ?? UUID()
+        for conversationSD in conversations {
+            let title = conversationSD.toStruct().displayTitle
+            let convID = conversationSD.id
             let isActive = convID == config.discordActiveConversationID ? "⭐ " : ""
             let label = String("\(isActive)\(title)".prefix(80))
 
@@ -358,7 +358,7 @@ final class DiscordChatOpsBridge: ObservableObject {
 
         // Reuse an existing empty conversation
         if let emptyConv = findReusableEmptyConversation() {
-            let reusedID = emptyConv.id!
+            let reusedID = emptyConv.id
             config.discordActiveConversationID = reusedID
             vm.selectedConversationID = reusedID
 
@@ -407,7 +407,7 @@ final class DiscordChatOpsBridge: ObservableObject {
     private func handleSwitchConversation(to uuid: UUID, channelID: String) async {
         guard let vm = viewModel else { return }
 
-        guard let entity = vm.persistenceService.getConversation(withId: uuid) else {
+        guard let conversationSD = vm.persistenceService.getConversation(withId: uuid) else {
             _ = try? await apiClient?.sendMessage(channelID: channelID, content: "⚠️ Conversation not found.")
             return
         }
@@ -417,7 +417,7 @@ final class DiscordChatOpsBridge: ObservableObject {
         vm.selectedConversationID = uuid
         logger.info("[Discord] Mac UI navigated to conversation \(uuid.uuidString).")
 
-        let title = entity.displayTitle
+        let title = conversationSD.toStruct().displayTitle
         _ = try? await apiClient?.sendMessage(
             channelID: channelID,
             content: "✅ Switched to: **\(title)**\n\nJust type your message to continue."
@@ -478,9 +478,9 @@ final class DiscordChatOpsBridge: ObservableObject {
         }
 
         var lines = ["📋 **Your Conversations:**\n"]
-        for (index, entity) in conversations.enumerated() {
-            let title = entity.displayTitle
-            let isActive = entity.id == config.discordActiveConversationID ? " ⭐" : ""
+        for (index, conversationSD) in conversations.enumerated() {
+            let title = conversationSD.toStruct().displayTitle
+            let isActive = conversationSD.id == config.discordActiveConversationID ? " ⭐" : ""
             lines.append("\(index + 1). \(title)\(isActive)")
         }
         return lines.joined(separator: "\n")
@@ -492,8 +492,8 @@ final class DiscordChatOpsBridge: ObservableObject {
         let isStreaming = vm.streamingMessageID != nil
         let activeConvTitle: String
         if let activeID = config.discordActiveConversationID,
-           let entity = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = entity.displayTitle
+           let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
+            activeConvTitle = conversationSD.toStruct().displayTitle
         } else {
             activeConvTitle = "None"
         }
@@ -535,8 +535,8 @@ final class DiscordChatOpsBridge: ObservableObject {
 
     private func resolveProfileForConversation(_ conversationID: UUID) -> BackendProfileModel? {
         guard let vm = viewModel else { return nil }
-        let entity = vm.persistenceService.getConversation(withId: conversationID)
-        guard let profileID = entity?.backendEntityId else { return nil }
+        let conversationSD = vm.persistenceService.getConversation(withId: conversationID)
+        guard let profileID = conversationSD?.backendEntityId else { return nil }
         return ((try? BackendProfileStore.shared.fetchProfiles()) ?? []).first { $0.id == profileID }
     }
 
@@ -550,43 +550,44 @@ final class DiscordChatOpsBridge: ObservableObject {
         return profiles.first { $0.profileType == .agent } ?? profiles.first
     }
 
-    // MARK: - Core Data Helpers
+    // MARK: - SwiftData Helpers
 
-    private func findReusableEmptyConversation() -> ConversationEntity? {
+    private func findReusableEmptyConversation() -> ConversationSD? {
         if let activeID = config.discordActiveConversationID,
            let activeEntity = viewModel?.persistenceService.getConversation(withId: activeID),
-           activeEntity.messages?.count == 0 {
+           activeEntity.messages.count == 0 {
             logger.info("[Discord] Active conversation \(activeID.uuidString) is empty — reusing.")
             return activeEntity
         }
 
-        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ]
-        request.fetchLimit = 10
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
+
+        var descriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        descriptor.fetchLimit = 10
 
         do {
-            let context = CoreDataPersistenceService.shared.viewContext
-            let results = try context.fetch(request)
-            return results.first { $0.messages?.count == 0 }
+            let results = try context.fetch(descriptor)
+            return results.first { $0.messages.count == 0 }
         } catch {
             logger.error("[Discord] Failed to query for empty conversations: \(error.localizedDescription)")
             return nil
         }
     }
 
-    private func fetchRecentConversations(limit: Int) -> [ConversationEntity] {
-        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \ConversationEntity.isPinned, ascending: false),
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ]
-        request.fetchLimit = limit
+    private func fetchRecentConversations(limit: Int) -> [ConversationSD] {
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return [] }
+
+        var descriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [
+                SortDescriptor(\.timestamp, order: .reverse)
+            ]
+        )
+        descriptor.fetchLimit = limit
 
         do {
-            let context = CoreDataPersistenceService.shared.viewContext
-            return try context.fetch(request)
+            return try context.fetch(descriptor)
         } catch {
             logger.error("Failed to fetch conversations for Discord ChatOps: \(error.localizedDescription)")
             return []

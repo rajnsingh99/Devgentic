@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import CoreData
+import SwiftData
 import os
 
 /// The core orchestrator for Telegram ChatOps.
@@ -178,9 +178,9 @@ final class ChatOpsBridge: ObservableObject {
             return
         }
 
-        let buttons: [[InlineKeyboardButton]] = conversations.map { entity in
-            let title = entity.displayTitle
-            let convID = entity.id ?? UUID()
+        let buttons: [[InlineKeyboardButton]] = conversations.map { conversationSD in
+            let title = conversationSD.toStruct().displayTitle
+            let convID = conversationSD.id
             let isActive = convID == config.activeConversationID ? "⭐ " : ""
             let label = "\(isActive)\(title)"
             return [InlineKeyboardButton(text: String(label.prefix(60)), callbackData: "switch:\(convID.uuidString)")]
@@ -210,7 +210,7 @@ final class ChatOpsBridge: ObservableObject {
         // Reuse an existing empty conversation instead of creating duplicates.
         // Check the most recent conversations for one with zero messages.
         if let emptyConv = findReusableEmptyConversation() {
-            let reusedID = emptyConv.id!
+            let reusedID = emptyConv.id
             config.activeConversationID = reusedID
             vm.selectedConversationID = reusedID
 
@@ -242,8 +242,8 @@ final class ChatOpsBridge: ObservableObject {
         let isStreaming = vm.streamingMessageID != nil
         let activeConvTitle: String
         if let activeID = config.activeConversationID,
-           let entity = vm.persistenceService.getConversation(withId: activeID) {
-            activeConvTitle = entity.displayTitle
+           let conversationSD = vm.persistenceService.getConversation(withId: activeID) {
+            activeConvTitle = conversationSD.toStruct().displayTitle
         } else {
             activeConvTitle = "None"
         }
@@ -304,7 +304,7 @@ final class ChatOpsBridge: ObservableObject {
     private func handleSwitchConversation(to uuid: UUID, chatID: Int64) async {
         guard let vm = viewModel else { return }
 
-        guard let entity = vm.persistenceService.getConversation(withId: uuid) else {
+        guard let conversationSD = vm.persistenceService.getConversation(withId: uuid) else {
             _ = try? await apiClient?.sendMessage(chatID: chatID, text: "⚠️ Conversation not found.")
             return
         }
@@ -316,7 +316,7 @@ final class ChatOpsBridge: ObservableObject {
         vm.selectedConversationID = uuid
         logger.info("[ChatOps] Mac UI navigated to conversation \(uuid.uuidString).")
 
-        let title = entity.displayTitle
+        let title = conversationSD.toStruct().displayTitle
         _ = try? await apiClient?.sendMessage(
             chatID: chatID,
             text: "✅ Switched to: *\(title)*\n\nJust type your message to continue."
@@ -378,8 +378,8 @@ final class ChatOpsBridge: ObservableObject {
     private func resolveProfileForConversation(_ conversationID: UUID) -> BackendProfileModel? {
         guard let vm = viewModel else { return nil }
 
-        let entity = vm.persistenceService.getConversation(withId: conversationID)
-        guard let profileID = entity?.backendEntityId else { return nil }
+        let conversationSD = vm.persistenceService.getConversation(withId: conversationID)
+        guard let profileID = conversationSD?.backendEntityId else { return nil }
 
         return ((try? BackendProfileStore.shared.fetchProfiles()) ?? []).first { $0.id == profileID }
     }
@@ -399,55 +399,37 @@ final class ChatOpsBridge: ObservableObject {
         return profiles.first { $0.profileType == .agent } ?? profiles.first
     }
 
-    // MARK: - Core Data Helpers
+    // MARK: - Persistence Helpers
 
     /// Finds the most recent empty conversation that can be reused instead of creating a new one.
-    /// Checks two paths:
-    /// 1. If the currently active ChatOps conversation is already empty, reuse it directly.
-    /// 2. Otherwise, query CoreData for recent empty conversations (sorted by time, ignoring pin status).
-    private func findReusableEmptyConversation() -> ConversationEntity? {
+    private func findReusableEmptyConversation() -> ConversationSD? {
         // Fast path: check if the current active conversation is already empty
         if let activeID = config.activeConversationID,
-           let activeEntity = viewModel?.persistenceService.getConversation(withId: activeID),
-           activeEntity.messages?.count == 0 {
+           let activeSD = viewModel?.persistenceService.getConversation(withId: activeID),
+           activeSD.messages.isEmpty {
             logger.info("[ChatOps] Active conversation \(activeID.uuidString) is empty — reusing.")
-            return activeEntity
+            return activeSD
         }
 
-        // Slow path: dedicated query sorted by timestamp only (not pinned status),
-        // so pinned conversations don't push empty ones out of the result window.
-        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ]
-        request.fetchLimit = 10
-
-        do {
-            let context = CoreDataPersistenceService.shared.viewContext
-            let results = try context.fetch(request)
-            return results.first { $0.messages?.count == 0 }
-        } catch {
-            logger.error("[ChatOps] Failed to query for empty conversations: \(error.localizedDescription)")
-            return nil
-        }
+        // Slow path: query for recent empty conversations
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
+        var descriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+        )
+        descriptor.fetchLimit = 10
+        guard let results = try? context.fetch(descriptor) else { return nil }
+        return results.first { $0.messages.isEmpty }
     }
 
-    /// Fetches recent conversations directly from Core Data.
-    /// The sidebar uses `@FetchRequest` which is view-scoped — the bridge fetches independently.
-    private func fetchRecentConversations(limit: Int) -> [ConversationEntity] {
-        let request: NSFetchRequest<ConversationEntity> = ConversationEntity.fetchRequest()
-        request.sortDescriptors = [
-            NSSortDescriptor(keyPath: \ConversationEntity.isPinned, ascending: false),
-            NSSortDescriptor(keyPath: \ConversationEntity.timestamp, ascending: false)
-        ]
-        request.fetchLimit = limit
-
-        do {
-            let context = CoreDataPersistenceService.shared.viewContext
-            return try context.fetch(request)
-        } catch {
-            logger.error("Failed to fetch conversations for ChatOps: \(error.localizedDescription)")
-            return []
-        }
+    /// Fetches recent conversations from SwiftData.
+    private func fetchRecentConversations(limit: Int) -> [ConversationSD] {
+        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return [] }
+        var descriptor = FetchDescriptor<ConversationSD>(
+            sortBy: [
+                SortDescriptor(\.timestamp, order: .reverse)
+            ]
+        )
+        descriptor.fetchLimit = limit
+        return (try? context.fetch(descriptor)) ?? []
     }
 }

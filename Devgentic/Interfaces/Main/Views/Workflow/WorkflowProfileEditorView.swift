@@ -13,7 +13,7 @@ import SwiftUI
 struct WorkflowProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
-    @EnvironmentObject var profileService: BackendProfileService
+    @Environment(BackendProfileService.self) var profileService
 
     @State private var localBuffer: ProfileEditBuffer
 
@@ -52,17 +52,17 @@ struct WorkflowProfileEditorView: View {
             switch localBuffer.draft.details {
             case .agent:
                 AgentConfigDetailView(editBuffer: localBuffer)
-                    .environmentObject(profileService)
+                    .environment(profileService)
             case .bot:
                 BotConfigDetailView(editBuffer: localBuffer)
-                    .environmentObject(profileService)
+                    .environment(profileService)
             case .workflow:
                 Text("Workflow configuration not supported here.")
                     .foregroundColor(theme.secondaryText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .imageGen:
                 ImageGenConfigDetailView(editBuffer: localBuffer)
-                    .environmentObject(profileService)
+                    .environment(profileService)
             }
         }
         .frame(width: 800, height: 750)

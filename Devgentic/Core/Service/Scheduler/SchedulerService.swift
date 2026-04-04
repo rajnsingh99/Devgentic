@@ -245,7 +245,7 @@ final class SchedulerService: ObservableObject {
         var conversationID: UUID
 
         if task.mode == .conversationBound, let linkedID = task.linkedConversationID {
-            if CoreDataPersistenceService.shared.getConversation(withId: linkedID) != nil {
+            if ChatPersistenceStore.shared.getConversation(withId: linkedID) != nil {
                 conversationID = linkedID
             } else {
                 logger.warning("Linked conversation orphaned for task '\(task.displayName)' — creating new.")
@@ -255,7 +255,7 @@ final class SchedulerService: ObservableObject {
                 )
             }
         } else if task.mode == .autonomous, let linkedID = task.linkedConversationID {
-            if task.contextWindowMode == .stateless || CoreDataPersistenceService.shared.getConversation(withId: linkedID) == nil {
+            if task.contextWindowMode == .stateless || ChatPersistenceStore.shared.getConversation(withId: linkedID) == nil {
                 conversationID = vm.createConversationForScheduledTask(
                     profileID: profile,
                     title: "[\(task.displayName)]"
