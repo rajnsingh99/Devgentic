@@ -48,6 +48,8 @@ struct ToolLibraryContainerView: View {
                     isSelectionMode: $isSelectionMode,
                     selectedToolIDs: $selectedToolIDs
                 )
+                .frame(maxWidth: 1000)
+                .frame(maxWidth: .infinity)
             }
             .id(profileID)
             .sheet(isPresented: $isPresentingAddView) {
@@ -64,7 +66,7 @@ struct ToolLibraryContainerView: View {
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 36))
+                    .font(.system(size: 36)) // Fixed size: intentional (icon)
                     .foregroundColor(theme.secondaryText)
                 Text("Profile not found")
                     .font(.title3)
@@ -79,12 +81,12 @@ struct ToolLibraryContainerView: View {
     private var searchBar: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundColor(theme.secondaryText)
 
             TextField("Search tools...", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.primaryText)
         }
         .padding(.horizontal, 12)
@@ -152,7 +154,7 @@ struct ToolLibraryContainerView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(.caption, weight: .bold))
                 .foregroundColor(isHovered.wrappedValue ? theme.accentColor : color)
                 .frame(width: 28, height: 28)
                 .background(

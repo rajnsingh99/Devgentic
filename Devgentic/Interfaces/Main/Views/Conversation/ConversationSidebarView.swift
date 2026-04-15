@@ -45,19 +45,19 @@ struct SidebarGroupHeaderView: View {
     var body: some View {
         HStack(spacing: 0) {
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold)) // Fixed size: intentional (small disclosure chevron)
                 .foregroundColor(theme.secondaryText.opacity(0.5))
                 .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isExpanded)
                 .frame(width: 16)
 
             Text(title)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(.caption, weight: .semibold))
                 .foregroundColor(theme.secondaryText)
                 .padding(.leading, 2)
 
             Text("\(count)")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(.caption2, weight: .medium))
                 .foregroundColor(theme.tertiaryText)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
@@ -280,22 +280,54 @@ struct ConversationSidebarView: View {
     @State private var isSelectionMode: Bool = false
     @State private var showingBatchDeleteAlert: Bool = false
 
+    // MARK: - Mode-Aware Properties
+
+    private var sidebarTitle: LocalizedStringKey {
+        viewModel.interfaceMode == .workflow ? "Workflows" : "Chats"
+    }
+
+    private var newButtonTitle: LocalizedStringKey {
+        viewModel.interfaceMode == .workflow ? "New Workflow" : "New Chat"
+    }
+
+    private var searchPlaceholder: String {
+        viewModel.interfaceMode == .workflow ? "Search workflows..." : "Search conversations..."
+    }
+
+    private var emptyStateTitle: LocalizedStringKey {
+        viewModel.interfaceMode == .workflow ? "No Workflow Runs Yet" : "No Conversations Yet"
+    }
+
+    private var emptyStateSubtitle: LocalizedStringKey {
+        viewModel.interfaceMode == .workflow ? "Select a workflow profile and run it" : "Start a new chat to begin exploring"
+    }
+
+    private var emptyStateIcon: String {
+        viewModel.interfaceMode == .workflow ? "point.3.connected.trianglepath.dotted" : "bubble.left.and.text.bubble.right"
+    }
+
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
 
             SidebarHeaderView(
-                title: "Chats",
-                buttonTitle: "New Chat",
+                title: sidebarTitle,
+                buttonTitle: newButtonTitle,
                 systemImage: "plus",
                 shortcut: "⌘N",
-                onAction: { viewModel.startNewConversation() }
+                onAction: {
+                    if viewModel.interfaceMode == .workflow {
+                        viewModel.deselectConversationAndShowWelcome()
+                    } else {
+                        viewModel.startNewConversation()
+                    }
+                }
             )
             .padding(.horizontal, 12)
             .padding(.top, 12)
             .padding(.bottom, 8)
 
-            SidebarSearchBarView("Search conversations...", text: $searchText)
+            SidebarSearchBarView(searchPlaceholder, text: $searchText)
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
 
@@ -321,13 +353,19 @@ struct ConversationSidebarView: View {
                     .padding(.bottom, 10)
             }
 
-            if conversations.isEmpty && searchText.isEmpty {
+            if filteredConversationCount == 0 && searchText.isEmpty {
                 SidebarEmptyStateView(
-                    title: "No Conversations Yet",
-                    subtitle: "Start a new chat to begin exploring",
-                    buttonTitle: "Start a Conversation",
-                    systemImage: "bubble.left.and.text.bubble.right",
-                    onAction: { viewModel.startNewConversation() }
+                    title: emptyStateTitle,
+                    subtitle: emptyStateSubtitle,
+                    buttonTitle: viewModel.interfaceMode == .workflow ? "Select a Workflow" : "Start a Conversation",
+                    systemImage: emptyStateIcon,
+                    onAction: {
+                        if viewModel.interfaceMode == .workflow {
+                            viewModel.deselectConversationAndShowWelcome()
+                        } else {
+                            viewModel.startNewConversation()
+                        }
+                    }
                 )
             } else {
                 conversationList
@@ -362,11 +400,17 @@ struct ConversationSidebarView: View {
                     // Pinned-only flat list
                     if data.pinned.isEmpty {
                         SidebarEmptyStateView(
-                            title: "No Pinned Chats",
+                            title: viewModel.interfaceMode == .workflow ? "No Pinned Workflows" : "No Pinned Chats",
                             subtitle: "Right-click a conversation to pin it",
-                            buttonTitle: "New Chat",
+                            buttonTitle: newButtonTitle,
                             systemImage: "pin",
-                            onAction: { viewModel.startNewConversation() }
+                            onAction: {
+                                if viewModel.interfaceMode == .workflow {
+                                    viewModel.deselectConversationAndShowWelcome()
+                                } else {
+                                    viewModel.startNewConversation()
+                                }
+                            }
                         )
                     } else {
                         VStack(spacing: 2) {
@@ -388,7 +432,7 @@ struct ConversationSidebarView: View {
                             }
 
                             Text(section.title)
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(.caption, weight: .semibold))
                                 .foregroundColor(theme.secondaryText)
                                 .padding(.horizontal, 8)
                                 .padding(.top, 10)
@@ -442,8 +486,21 @@ struct ConversationSidebarView: View {
         }
     }
 
-    /// Single-pass partition: filters, splits pinned/unpinned, and date-groups in one traversal.
+    /// Quick count of conversations visible in the current mode (for empty state detection).
+    private var filteredConversationCount: Int {
+        let p = partitioned
+        let pinnedCount = p.pinned.count
+        let dateCount = p.dateSections.reduce(0) { $0 + $1.conversations.count }
+        return pinnedCount + dateCount
+    }
+
+    /// Single-pass partition: filters by mode, splits pinned/unpinned, and date-groups in one traversal.
     private var partitioned: PartitionedConversations {
+        // Build profile type lookup for mode-based filtering.
+        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        let typeMap = Dictionary(profiles.map { ($0.id, $0.profileType) }, uniquingKeysWith: { first, _ in first })
+        let allowedTypes = viewModel.interfaceMode.allowedProfileTypes
+
         let calendar = Calendar.current
         let now = Date()
         let weekAgo = calendar.date(byAdding: .day, value: -7, to: now)
@@ -457,6 +514,17 @@ struct ConversationSidebarView: View {
         var earlier: [ConversationSD] = []
 
         for conversation in conversations {
+            // Mode filter: match conversation's linked profile type to current mode.
+            if let profileID = conversation.backendEntityId,
+               let profileType = typeMap[profileID] {
+                // Conversation has a known profile — check if it belongs to the current mode.
+                if !allowedTypes.contains(profileType) { continue }
+            } else {
+                // No profile or deleted profile — show only in chat mode (these are new/empty conversations).
+                if viewModel.interfaceMode != .chat { continue }
+            }
+
+            // Search text filter.
             if !searchText.isEmpty,
                !conversation.displayTitle.localizedCaseInsensitiveContains(searchText) {
                 continue
@@ -503,9 +571,9 @@ struct ConversationSidebarView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "trash")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                     Text("Delete (\(selectedConversationIDs.count))")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(.caption, weight: .bold))
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
@@ -522,7 +590,7 @@ struct ConversationSidebarView: View {
                 cancelSelectionMode()
             } label: {
                 Text("Cancel")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)

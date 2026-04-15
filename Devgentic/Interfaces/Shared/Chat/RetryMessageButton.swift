@@ -16,9 +16,9 @@ struct RetryMessageButton: View {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                 Text("Retry")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
             }
             .foregroundColor(theme.accentColor)
             .padding(.horizontal, 10)

@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct OllamaModelStoreView: View {
-    @StateObject private var viewModel = OllamaModelStoreViewModel()
+    @State private var viewModel = OllamaModelStoreViewModel()
     @Environment(\.dismiss) var dismiss
     @Environment(\.appTheme) private var theme
 
@@ -21,7 +21,7 @@ struct OllamaModelStoreView: View {
             // MARK: - Bottom Action Bar (sheet-only)
             HStack {
                 Text("\(viewModel.displayedModels.count) Models Available")
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
 
                 Spacer()
@@ -44,7 +44,7 @@ struct OllamaModelStoreView: View {
 // MARK: - Reusable Content (shared between sheet and inline container)
 
 struct OllamaModelStoreContent: View {
-    @ObservedObject var viewModel: OllamaModelStoreViewModel
+    @Bindable var viewModel: OllamaModelStoreViewModel
     /// When false, the search bar is hidden (it's in the DynamicIslandBar instead).
     var showSearchBar: Bool = true
     /// When true, content is centered with maxWidth: 1000 to match DynamicIslandBar width.
@@ -124,9 +124,9 @@ struct OllamaModelStoreContent: View {
                         }
                         .padding(10)
                         .background(theme.secondaryBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle(cornerRadius: theme.cornerRadiusMedium, style: .continuous)
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
 
@@ -193,7 +193,7 @@ struct OllamaModelStoreContent: View {
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "externaldrive.badge.xmark")
-                .font(.system(size: 48))
+                .font(.system(size: 48)) // Fixed size: intentional (icon)
                 .foregroundColor(theme.secondaryText.opacity(0.5))
             
             Text(viewModel.searchText.isEmpty ? "No local models found" : "No matching models")
@@ -250,11 +250,11 @@ struct OllamaModelStoreContent: View {
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: theme.cornerRadiusLarge, style: .continuous)
                 .fill(theme.secondaryBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: theme.cornerRadiusLarge, style: .continuous)
                 .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
         )
         .shadow(color: theme.primaryText.opacity(0.08), radius: 10, y: 4)
@@ -265,7 +265,7 @@ struct OllamaModelStoreContent: View {
 
 struct OllamaModelCardView: View {
     let model: LocalModel
-    @ObservedObject var viewModel: OllamaModelStoreViewModel
+    var viewModel: OllamaModelStoreViewModel
     @State private var showingDeleteAlert = false
     @State private var isHovered = false
     @Environment(\.appTheme) private var theme
@@ -302,7 +302,7 @@ struct OllamaModelCardView: View {
 
                     if let family = model.details?.family {
                         Text(family)
-                            .font(.caption)
+                            .font(theme.fontCaption)
                             .foregroundColor(theme.secondaryText)
                     }
                 }
@@ -317,7 +317,7 @@ struct OllamaModelCardView: View {
                             Label(quant, systemImage: "square.3.layers.3d.down.right")
                         }
                     }
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
                 }
 
@@ -331,7 +331,7 @@ struct OllamaModelCardView: View {
                                 }
                                 Text(tag.text)
                             }
-                            .font(.caption2)
+                            .font(theme.fontCaption2)
                             .fontWeight(.medium)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 3)
@@ -349,7 +349,7 @@ struct OllamaModelCardView: View {
                             Image(systemName: capabilityIcon(for: model.cognitiveCapability))
                             Text(model.cognitiveCapability.rawValue)
                         }
-                        .font(.caption2)
+                        .font(theme.fontCaption2)
                         .fontWeight(.medium)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
@@ -378,7 +378,7 @@ struct OllamaModelCardView: View {
                     .foregroundColor(isHovered ? theme.errorColor : theme.secondaryText)
                     .padding(8)
                     .background(isHovered ? theme.errorColor.opacity(0.1) : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium, style: .continuous))
             }
             .buttonStyle(.plain)
             .help("Delete Model")
@@ -393,9 +393,9 @@ struct OllamaModelCardView: View {
         }
         .padding(14)
         .background(isHovered ? theme.controlBackground : theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusLarge, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: theme.cornerRadiusLarge, style: .continuous)
                 .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 1)
         )
         .shadow(color: theme.primaryText.opacity(isHovered ? 0.05 : 0.03), radius: isHovered ? 12 : 6, y: isHovered ? 6 : 3)

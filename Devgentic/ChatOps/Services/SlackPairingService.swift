@@ -18,8 +18,8 @@ import os
 /// 5. User types `PAIR <pin>` in their chosen Slack channel
 /// 6. On match: stores channel_id, transitions to `.connected`
 /// 7. On timeout (5 min): transitions to `.disconnected`
-@MainActor
-final class SlackPairingService: ObservableObject {
+@Observable @MainActor
+final class SlackPairingService {
 
     private let logger = Logger(subsystem: "com.devgentic", category: "SlackPairing")
     private let config = ChatOpsConfigManager.shared

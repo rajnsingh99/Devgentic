@@ -140,10 +140,9 @@ struct SessionGraph: Sendable, Codable {
 
 /// In-memory cache for active SessionGraph instances, keyed by conversation ID.
 /// Replaces the legacy ContextMemoryManager.
-class SessionGraphStore {
+actor SessionGraphStore {
     static let shared = SessionGraphStore()
     private var graphs: [UUID: SessionGraph] = [:]
-    private init() {}
 
     func getActiveState(for conversationID: UUID) -> SessionGraph {
         return graphs[conversationID] ?? SessionGraph(sessionID: conversationID.uuidString)

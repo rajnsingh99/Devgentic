@@ -76,12 +76,17 @@ struct LLMProviderConfig: Sendable {
     let timeout: TimeInterval
     let options: [String: JSONValue]?
 
-    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0, options: [String: JSONValue]? = nil) {
+    /// Profile-scoped rate limit bucket key, derived from (provider + apiKey/baseURL).
+    /// Profiles sharing the same API key share the same bucket.
+    let rateLimitKey: String
+
+    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0, options: [String: JSONValue]? = nil, rateLimitKey: String = "default") {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.modelName = modelName
         self.timeout = timeout
         self.options = options
+        self.rateLimitKey = rateLimitKey
     }
 }
 

@@ -51,7 +51,7 @@ struct SideBarPaneView: View {
     @Binding var selectedTab: SidebarTab?
     @Binding var sidebarWidth: CGFloat
 
-    @EnvironmentObject var themeManager: ThemeManager
+    @Environment(ThemeManager.self) var themeManager
     @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.openWindow) var openWindow
     @Environment(\.appTheme) private var theme

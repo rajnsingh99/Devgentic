@@ -263,12 +263,13 @@ actor ExecutionSuspensionService {
         name: Notification.Name,
         operationID: UUID,
         conversationID: UUID?,
-        extraInfo: [String: Any] = [:]
+        extraInfo: sending [String: Any] = [:]
     ) {
+        let wrappedExtra = UnsafeSendable(extraInfo)
         Task { @MainActor in
             var userInfo: [String: Any] = [HITLResolvedKey.operationID: operationID]
             if let conversationID { userInfo[HITLResolvedKey.conversationID] = conversationID }
-            for (key, value) in extraInfo { userInfo[key] = value }
+            for (key, value) in wrappedExtra.value { userInfo[key] = value }
             NotificationCenter.default.post(name: name, object: nil, userInfo: userInfo)
         }
     }

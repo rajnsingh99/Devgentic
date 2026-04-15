@@ -24,7 +24,7 @@ struct SettingsDetailContainerView: View {
             ScrollView {
                 category.destination
                     .environment(mainViewModel)
-                    .padding()
+                    .padding(24)
                     .frame(maxWidth: 1000)
                     .frame(maxWidth: .infinity)
             }

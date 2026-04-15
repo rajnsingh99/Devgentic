@@ -47,10 +47,10 @@ struct UserFeedbackView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "doc.text.magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundStyle(theme.secondaryText)
                 Text("EXECUTION SUMMARY")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
                     .tracking(0.5)
             }
@@ -60,12 +60,12 @@ struct UserFeedbackView: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(viewModel.activeTraceRecord?.profileName ?? "Unknown Profile")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(theme.fontBody.weight(.medium))
                             .foregroundStyle(theme.primaryText)
 
                         if let model = viewModel.activeTraceRecord?.modelName {
                             Text(model)
-                                .font(.system(size: 12))
+                                .font(.system(.caption))
                                 .foregroundStyle(theme.secondaryText)
                         }
                     }
@@ -130,7 +130,7 @@ struct UserFeedbackView: View {
                 .fill(color)
                 .frame(width: 6, height: 6)
             Text(text)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(.caption, weight: .medium))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 8)
@@ -143,14 +143,14 @@ struct UserFeedbackView: View {
         VStack(spacing: 4) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 10))
+                    .font(.system(.caption2))
                 Text(value)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced)) // Fixed size: monospaced design
             }
             .foregroundStyle(color ?? theme.primaryText)
 
             Text(label)
-                .font(.system(size: 10))
+                .font(.system(.caption2))
                 .foregroundStyle(theme.tertiaryText)
         }
         .frame(maxWidth: .infinity)
@@ -168,10 +168,10 @@ struct UserFeedbackView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "hand.thumbsup.fill")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundStyle(theme.secondaryText)
                 Text("HOW DID IT GO?")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
                     .tracking(0.5)
             }
@@ -204,9 +204,9 @@ struct UserFeedbackView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 14))
+                    .font(theme.fontBody)
                 Text(label)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(theme.fontSubheadline.weight(.medium))
             }
             .foregroundStyle(isSelected ? activeColor : theme.secondaryText)
             .frame(maxWidth: .infinity)
@@ -229,16 +229,16 @@ struct UserFeedbackView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "text.bubble.fill")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundStyle(theme.secondaryText)
                 Text("DETAILS")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
                     .tracking(0.5)
             }
 
             TextEditor(text: $viewModel.userFeedback.messageText)
-                .font(.system(size: 13))
+                .font(theme.fontSubheadline)
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .frame(minHeight: 80, maxHeight: 140)
@@ -254,7 +254,7 @@ struct UserFeedbackView: View {
                 .focused($isFeedbackFocused)
 
             Text("Describe what went wrong or what could be improved. This is bundled with the execution trace for debugging.")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundStyle(theme.tertiaryText)
                 .lineSpacing(2)
         }
@@ -269,27 +269,27 @@ struct UserFeedbackView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: didExport ? "checkmark.circle.fill" : "square.and.arrow.up")
-                        .font(.system(size: 14))
+                        .font(theme.fontBody)
                     Text(didExport ? "Exported" : "Export Feedback Report")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(theme.fontSubheadline.weight(.medium))
                 }
                 .foregroundStyle(didExport ? .green : theme.accentColor)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(didExport ? Color.green.opacity(0.1) : theme.accentColor.opacity(0.1))
+                        .fill(didExport ? theme.successColor.opacity(0.1) : theme.accentColor.opacity(0.1))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(didExport ? Color.green.opacity(0.3) : theme.accentColor.opacity(0.3), lineWidth: 1)
+                        .stroke(didExport ? theme.successColor.opacity(0.3) : theme.accentColor.opacity(0.3), lineWidth: 1)
                 )
             }
             .buttonStyle(.plain)
             .disabled(viewModel.activeTraceRecord == nil)
 
             Text("Exports a JSON file containing the execution trace and your feedback. No personal data is included.")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundStyle(theme.tertiaryText)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)

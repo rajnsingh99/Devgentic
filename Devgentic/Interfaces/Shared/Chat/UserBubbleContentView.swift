@@ -11,7 +11,7 @@ struct UserBubbleContentView: View {
     var message: ChatMessage
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
-    @EnvironmentObject private var searchViewModel: ChatSearchViewModel
+    @Environment(ChatSearchViewModel.self) private var searchViewModel
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -53,7 +53,7 @@ struct UserBubbleContentView: View {
             .frame(maxWidth: 600, alignment: .trailing)
 
             Image(systemName: "person.circle.fill")
-                .font(.system(size: 24))
+                .font(.system(size: 24)) // Fixed size: intentional (icon)
                 .foregroundColor(theme.secondaryText.opacity(0.4))
                 .padding(.top, 4)
                 .accessibilityHidden(true)

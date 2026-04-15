@@ -2,12 +2,12 @@
 //  SpeechService.swift
 //  Devgentic
 //
-//  Provides text-to-speech using macOS NSSpeechSynthesizer.
+//  Provides text-to-speech using AVSpeechSynthesizer.
 //  Supports segment-based playback: speaks text, then opens code blocks
 //  in the Code Viewer panel before continuing.
 //
 
-import AppKit
+import AVFoundation
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SpeechService")
@@ -35,34 +35,27 @@ enum SpeechSegment: Equatable {
 
 // MARK: - Voice Info
 
-/// A user-friendly representation of an available macOS voice.
+/// A user-friendly representation of an available system voice.
 struct VoiceInfo: Identifiable, Hashable {
-    let id: String // NSSpeechSynthesizer.VoiceName raw value
+    let id: String // AVSpeechSynthesisVoice.identifier
     let name: String
     let locale: String
 }
 
 // MARK: - SpeechService
 
-/// A singleton ObservableObject wrapper around NSSpeechSynthesizer that speaks agent responses
+/// A singleton wrapper around AVSpeechSynthesizer that speaks agent responses
 /// segment by segment. When a code block is encountered, it announces it, opens the Code Viewer,
 /// and continues (or pauses if `pauseOnCode` is enabled).
-@Observable
-final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
+@MainActor @Observable
+final class SpeechService: NSObject, AVSpeechSynthesizerDelegate {
     static let shared = SpeechService()
 
-    @ObservationIgnored private lazy var synthesizer: NSSpeechSynthesizer = {
-        let synth = NSSpeechSynthesizer()
+    @ObservationIgnored private lazy var synthesizer: AVSpeechSynthesizer = {
+        let synth = AVSpeechSynthesizer()
         synth.delegate = self
-        synth.rate = baseRate * currentRate
-        if let voice = selectedVoice {
-            synth.setVoice(NSSpeechSynthesizer.VoiceName(rawValue: voice))
-        }
         return synth
     }()
-
-    /// Whether the synthesizer has been lazily initialized.
-    private var synthesizerInitialized: Bool = false
 
     // MARK: - State
 
@@ -95,33 +88,38 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     /// The full list of segments for the current session (preserved for skip-backward).
     @ObservationIgnored private var allSegments: [SpeechSegment] = []
 
+    /// Tracks the in-flight delayed Task (e.g., code-block pause) so it can be cancelled on stop().
+    @ObservationIgnored private var pendingDelayTask: Task<Void, Never>?
+
     /// The index into `allSegments` of the segment currently being spoken.
     @ObservationIgnored private var playbackIndex: Int = 0
 
     /// Temporarily holds a code block waiting to be opened after the announcement finishes.
     private var pendingCodeBlock: (language: String?, code: String)?
 
-    /// The base rate from NSSpeechSynthesizer (words per minute) for 1× speed.
-    private var baseRate: Float = 175
-
     /// Available speed presets.
     static let speedPresets: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
+    // MARK: - Rate Mapping
+
+    /// Maps the user-facing multiplier (0.5–2.0) to AVSpeechUtteranceRate range.
+    /// AVSpeechUtteranceDefaultSpeechRate is ~0.5, min is 0.0, max is 1.0.
+    private func avRate(for multiplier: Float) -> Float {
+        AVSpeechUtteranceDefaultSpeechRate * multiplier
+    }
 
     // MARK: - Init
 
     private override init() {
-        // Load persisted preferences before calling super — do NOT touch synthesizer here
         let savedRate = UserDefaults.standard.float(forKey: AppSettings.speechPlaybackRateKey)
         let savedVoice = UserDefaults.standard.string(forKey: AppSettings.speechPlaybackVoiceKey)
         let savedPauseOnCode = UserDefaults.standard.bool(forKey: AppSettings.speechPauseOnCodeKey)
 
         super.init()
 
-        // Store preferences (synthesizer is lazy — these are applied when it's first accessed)
         if savedRate > 0 {
             currentRate = savedRate
         }
-        baseRate = 175
         selectedVoice = savedVoice
         pauseOnCode = savedPauseOnCode
     }
@@ -143,9 +141,6 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         isActive = true
         isPaused = false
 
-        // Apply current rate
-        synthesizer.rate = baseRate * currentRate
-
         logger.info("Started reading aloud message \(messageID.uuidString) (\(segments.count) segments)")
         speakCurrentSegment()
     }
@@ -153,8 +148,12 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     /// Stops all speech and resets state.
     func stop() {
         if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking()
+            synthesizer.stopSpeaking(at: .immediate)
         }
+
+        // Cancel any in-flight delayed task (e.g., code-block auto-resume sleep)
+        pendingDelayTask?.cancel()
+        pendingDelayTask = nil
 
         let previousID = currentMessageID
 
@@ -169,16 +168,14 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
 
         if let id = previousID {
             logger.info("Stopped reading aloud message \(id.uuidString)")
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .speechDidFinish, object: id)
-            }
+            NotificationCenter.default.post(name: .speechDidFinish, object: id)
         }
     }
 
-    /// Pauses speech at the next sentence boundary.
+    /// Pauses speech at the next word boundary.
     func pauseSpeaking() {
         guard isActive, !isPaused else { return }
-        synthesizer.pauseSpeaking(at: .sentenceBoundary)
+        synthesizer.pauseSpeaking(at: .word)
         isPaused = true
         logger.info("Paused speech")
     }
@@ -188,11 +185,9 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         guard isActive, isPaused else { return }
         isPaused = false
 
-        if synthesizer.isSpeaking {
-            // Paused mid-sentence — continue from where we left off
+        if synthesizer.isPaused {
             synthesizer.continueSpeaking()
         } else {
-            // Paused between segments (e.g., pause-on-code) — speak next segment
             speakCurrentSegment()
         }
         logger.info("Resumed speech")
@@ -211,20 +206,17 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     func skipForward() {
         guard isActive else { return }
 
-        // Stop current speech
         if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking()
+            synthesizer.stopSpeaking(at: .immediate)
         }
         pendingCodeBlock = nil
         isPaused = false
 
-        // Advance to next segment
         playbackIndex += 1
         if playbackIndex < allSegments.count {
             currentSegmentIndex = playbackIndex + 1
             speakCurrentSegment()
         } else {
-            // No more segments
             finishPlayback()
         }
     }
@@ -233,14 +225,12 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     func skipBackward() {
         guard isActive else { return }
 
-        // Stop current speech
         if synthesizer.isSpeaking {
-            synthesizer.stopSpeaking()
+            synthesizer.stopSpeaking(at: .immediate)
         }
         pendingCodeBlock = nil
         isPaused = false
 
-        // Go back one segment (minimum index 0)
         if playbackIndex > 0 {
             playbackIndex -= 1
         }
@@ -251,7 +241,6 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     /// Sets the speech rate multiplier and persists it.
     func setRate(_ rate: Float) {
         currentRate = rate
-        synthesizer.rate = baseRate * rate
         UserDefaults.standard.set(rate, forKey: AppSettings.speechPlaybackRateKey)
         logger.info("Speech rate set to \(rate)×")
     }
@@ -259,7 +248,6 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
     /// Sets the voice and persists it.
     func setVoice(_ voiceID: String) {
         selectedVoice = voiceID
-        synthesizer.setVoice(NSSpeechSynthesizer.VoiceName(rawValue: voiceID))
         UserDefaults.standard.set(voiceID, forKey: AppSettings.speechPlaybackVoiceKey)
         logger.info("Speech voice set to \(voiceID)")
     }
@@ -271,14 +259,14 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         logger.info("Pause on code: \(self.pauseOnCode)")
     }
 
-    /// Returns the list of available macOS voices with user-friendly names.
-    /// Cached voice list — queried from the system only once to avoid repeated AFLocalization warnings.
+    /// Returns the list of available system voices with user-friendly names.
     private static let _cachedVoices: [VoiceInfo] = {
-        NSSpeechSynthesizer.availableVoices.compactMap { voiceName in
-            let attrs = NSSpeechSynthesizer.attributes(forVoice: voiceName)
-            guard let name = attrs[.name] as? String else { return nil }
-            let locale = (attrs[.localeIdentifier] as? String) ?? "unknown"
-            return VoiceInfo(id: voiceName.rawValue, name: name, locale: locale)
+        AVSpeechSynthesisVoice.speechVoices().map { voice in
+            VoiceInfo(
+                id: voice.identifier,
+                name: voice.name,
+                locale: voice.language
+            )
         }
     }()
 
@@ -302,20 +290,33 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         switch segment {
         case .text(let text):
             if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // Skip empty text segments
                 playbackIndex += 1
                 currentSegmentIndex = playbackIndex + 1
                 speakCurrentSegment()
             } else {
-                synthesizer.startSpeaking(text)
+                let utterance = makeUtterance(text)
+                synthesizer.speak(utterance)
             }
 
         case .codeBlock(let language, let code):
-            // Announce the code block, then open it in the viewer
             let announcement = "Here is the code in the panel view."
             pendingCodeBlock = (language: language, code: code)
-            synthesizer.startSpeaking(announcement)
+            let utterance = makeUtterance(announcement)
+            synthesizer.speak(utterance)
         }
+    }
+
+    /// Creates an AVSpeechUtterance with current rate and voice settings.
+    private func makeUtterance(_ text: String) -> AVSpeechUtterance {
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.rate = avRate(for: currentRate)
+
+        if let voiceID = selectedVoice,
+           let voice = AVSpeechSynthesisVoice(identifier: voiceID) {
+            utterance.voice = voice
+        }
+
+        return utterance
     }
 
     private func finishPlayback() {
@@ -331,46 +332,46 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         currentMessageID = nil
 
         if let id = messageID {
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(name: .speechDidFinish, object: id)
-            }
+            NotificationCenter.default.post(name: .speechDidFinish, object: id)
         }
     }
 
-    // MARK: - NSSpeechSynthesizerDelegate
+    // MARK: - AVSpeechSynthesizerDelegate
 
-    func speechSynthesizer(_ sender: NSSpeechSynthesizer, didFinishSpeaking finishedSpeaking: Bool) {
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor [weak self] in
+            self?.handleUtteranceFinished()
+        }
+    }
+
+    /// Handles utterance completion on the main actor where all state lives.
+    private func handleUtteranceFinished() {
         guard isActive else { return }
 
         // If there's a pending code block, open it now
         if let codeBlock = pendingCodeBlock {
             pendingCodeBlock = nil
-            DispatchQueue.main.async {
-                NotificationCenter.default.post(
-                    name: .speechOpenCodeViewer,
-                    object: self.currentMessageID,
-                    userInfo: [
-                        "language": codeBlock.language as Any,
-                        "code": codeBlock.code
-                    ]
-                )
-            }
+            NotificationCenter.default.post(
+                name: .speechOpenCodeViewer,
+                object: self.currentMessageID,
+                userInfo: [
+                    "language": codeBlock.language as Any,
+                    "code": codeBlock.code
+                ]
+            )
 
             if pauseOnCode {
-                // Pause and let the user resume manually
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.isPaused = true
-                    // Advance index so resume goes to next segment
-                    self.playbackIndex += 1
-                    if self.playbackIndex < self.allSegments.count {
-                        self.currentSegmentIndex = self.playbackIndex + 1
-                    }
+                isPaused = true
+                playbackIndex += 1
+                if playbackIndex < allSegments.count {
+                    currentSegmentIndex = playbackIndex + 1
                 }
             } else {
-                // Brief pause before continuing (let the panel animate open)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                pendingDelayTask = Task { [weak self] in
                     guard let self, self.isActive else { return }
+                    try? await Task.sleep(for: .seconds(1.0))
+                    guard !Task.isCancelled, self.isActive else { return }
+                    self.pendingDelayTask = nil
                     self.playbackIndex += 1
                     if self.playbackIndex < self.allSegments.count {
                         self.currentSegmentIndex = self.playbackIndex + 1
@@ -382,15 +383,12 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         }
 
         // Normal text segment finished — advance to next
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isActive else { return }
-            self.playbackIndex += 1
-            if self.playbackIndex < self.allSegments.count {
-                self.currentSegmentIndex = self.playbackIndex + 1
-                self.speakCurrentSegment()
-            } else {
-                self.finishPlayback()
-            }
+        playbackIndex += 1
+        if playbackIndex < allSegments.count {
+            currentSegmentIndex = playbackIndex + 1
+            speakCurrentSegment()
+        } else {
+            finishPlayback()
         }
     }
 
@@ -412,10 +410,8 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
 
             if trimmed.hasPrefix("```") {
                 if insideCodeBlock {
-                    // Closing fence — flush the code block
                     let code = currentCodeLines.joined(separator: "\n")
                     if !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // Flush any preceding text first
                         let cleaned = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
                         if !cleaned.isEmpty {
                             segments.append(.text(cleaned))
@@ -427,7 +423,6 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
                     codeLanguage = nil
                     insideCodeBlock = false
                 } else {
-                    // Opening fence — extract language hint
                     let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
                     codeLanguage = lang.isEmpty ? nil : lang
                     insideCodeBlock = true
@@ -442,7 +437,6 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
             }
         }
 
-        // Flush any remaining text
         let remaining = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
         if !remaining.isEmpty {
             segments.append(.text(remaining))
@@ -456,19 +450,13 @@ final class SpeechService: NSObject, NSSpeechSynthesizerDelegate {
         var cleaned = line
         let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-        // Strip heading markers
         if trimmed.hasPrefix("#") {
             cleaned = trimmed.replacingOccurrences(of: "^#{1,6}\\s*", with: "", options: .regularExpression)
         }
 
-        // Strip bold/italic markers
         cleaned = cleaned.replacingOccurrences(of: "\\*{1,3}([^*]+)\\*{1,3}", with: "$1", options: .regularExpression)
         cleaned = cleaned.replacingOccurrences(of: "_{1,3}([^_]+)_{1,3}", with: "$1", options: .regularExpression)
-
-        // Strip inline code backticks
         cleaned = cleaned.replacingOccurrences(of: "`([^`]+)`", with: "$1", options: .regularExpression)
-
-        // Strip link syntax [text](url) -> text
         cleaned = cleaned.replacingOccurrences(of: "\\[([^\\]]+)\\]\\([^)]+\\)", with: "$1", options: .regularExpression)
 
         return cleaned

@@ -358,8 +358,31 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             return nil
         }
 
-        guard let content = extractStringOrNull(forKey: "content", in: json), content != "null" else {
+        // Extract content leniently — don't gate tool_calls on content success.
+        // A malformed content field (e.g., HTML tags, unquoted value) must NOT
+        // prevent recovery of a valid tool_calls array sitting right next to it.
+        let rawContent = extractStringOrNull(forKey: "content", in: json)
+        let contentReasoning = (rawContent != nil && rawContent != "null") ? rawContent! : ""
+        let hasToolCallsKey = json.range(of: "\"tool_calls\"") != nil
+        let hasToolNameKey = json.range(of: "\"tool_name\"") != nil
+
+        // If we found neither a content field nor any tool-related keys, this isn't
+        // recoverable JSON — return nil so the caller can try other recovery paths.
+        if contentReasoning.isEmpty && !hasToolCallsKey && !hasToolNameKey {
             return nil
+        }
+
+        // If content extraction failed but tool_calls key exists, try to salvage
+        // readable text before "tool_calls"
+        let reasoning: String
+        if contentReasoning.isEmpty, let toolCallsMarker = json.range(of: "\"tool_calls\"") {
+            let beforeTools = String(json[json.startIndex..<toolCallsMarker.lowerBound])
+            reasoning = beforeTools
+                .replacingOccurrences(of: "\"content\"", with: "")
+                .replacingOccurrences(of: #"[{}\[\]":,]"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            reasoning = contentReasoning
         }
 
         // --- Strategy A: Extract individual tool objects from "tool_calls" array ---
@@ -398,8 +421,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
                     arguments = [:]
                 }
 
-                if arguments?.isEmpty == true, !content.isEmpty {
-                    if let rescued = rescueArgumentsFromContent(toolName: toolName, content: content) {
+                if arguments?.isEmpty == true, !reasoning.isEmpty {
+                    if let rescued = rescueArgumentsFromContent(toolName: toolName, content: reasoning) {
                         logger.info("🔧 [JSONParser] Rescued arguments from content for tool '\(toolName)'.")
                         arguments = rescued
                     }
@@ -409,7 +432,7 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             }
         }
 
-        return ModernCognitiveStep(reasoning: content, toolCalls: pending)
+        return ModernCognitiveStep(reasoning: reasoning.isEmpty ? "Executing..." : reasoning, toolCalls: pending)
     }
 
     // MARK: - Array Tool Call Extraction

@@ -19,7 +19,7 @@ private struct CardStyleModifier: ViewModifier {
         content
             .padding(padding ?? theme.spacingLarge)
             .background(backgroundColor ?? theme.controlBackground)
-            .cornerRadius(cornerRadius ?? theme.cornerRadiusLarge)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius ?? theme.cornerRadiusLarge))
             .shadow(color: theme.primaryText.opacity(0.1), radius: 5, y: 3)
     }
 }
@@ -35,7 +35,7 @@ private struct ChatBubbleStyleModifier: ViewModifier {
             .padding(theme.spacingMedium)
             .background(isCurrentUser ? theme.accentColor : theme.controlBackground)
             .foregroundColor(isCurrentUser ? .white : theme.primaryText)
-            .cornerRadius(theme.cornerRadiusLarge)
+            .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusLarge))
             .shadow(color: theme.primaryText.opacity(0.15), radius: 2, y: 1)
     }
 }

@@ -15,7 +15,8 @@ private let logToolExecution = Logger(subsystem: Bundle.main.bundleIdentifier ??
 /// A unified agent connection service that serves as the central controller for
 /// all LLM interactions (Bots, Agents, Workflows).
 /// It acts as the Hub, initializing models, resolving tools, and routing to the correct Executor.
-class AgentConnect: ObservableObject {
+@Observable
+class AgentConnect: @unchecked Sendable {
     
     // MARK: - Initialization
     
@@ -34,7 +35,7 @@ class AgentConnect: ObservableObject {
         conversationID: UUID,
         ragContext: String? = nil,
         traceContext: TraceContext,
-        onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
+        onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         
         logger.info("Request reached TextGen Unified Pipeline for profile: \(profile.displayName)")
@@ -47,6 +48,8 @@ class AgentConnect: ObservableObject {
                     var instructions: String?
                     let rawTools: [Tool]
                     let isBotFlow: Bool
+                    var skillManifests: [SkillManifest]?
+                    var skillFolderPath: String?
                     
                     switch profile.details {
                     case .bot(let config):
@@ -54,19 +57,22 @@ class AgentConnect: ObservableObject {
                         instructions = config.instructions
                         rawTools = []
                         isBotFlow = true
+                        skillManifests = nil
+                        skillFolderPath = nil
 
                     case .agent(let config):
                         llmConfig = config.llmConfig
                         instructions = config.instructions
                         rawTools = config.tools
                         isBotFlow = false
+                        skillManifests = config.skillConfig?.manifests.filter(\.isEnabled)
+                        skillFolderPath = config.skillConfig?.folderURL.path
 
-                    case .workflow(let config):
+                    case .workflow:
                         // Workflow: each node resolves its own model, tools, and generator.
-                        // Bypass the single-model pipeline entirely.
+                        // Bypass the single-model pipeline entirely. Layout is the source of truth.
                         let workflowExecutor = WorkflowExecutor(workflowProfileID: profile.id)
                         let wfStream = workflowExecutor.executeWorkflow(
-                            agentProfileIDs: config.agentProfileIDs,
                             userInput: userInput,
                             chatHistory: chatHistory,
                             conversationID: conversationID,
@@ -90,13 +96,12 @@ class AgentConnect: ObservableObject {
                     }
 
                     // 2. Select Cognitive Strategy & Rate Limit Boundary
-                    let rateLimitCategory: RateLimitCategory
-                    switch llmConfig.apiProvider {
-                    case .anthropic: rateLimitCategory = .anthropic
-                    case .google: rateLimitCategory = .geminiFlash
-                    case .openAI: rateLimitCategory = .openAI
-                    case .ollama, .mlx: rateLimitCategory = .local
-                    }
+                    let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider)
+                    let rateLimitKey = RateLimitCategory.deriveBucketKey(
+                        provider: llmConfig.apiProvider,
+                        apiKey: llmConfig.apiKey,
+                        baseURL: llmConfig.baseURL
+                    )
                     
                     // Resolve Cognitive Strategy via our 2D routing matrix
                     let generatorStrategy = try self.resolveCognitiveGenerator(
@@ -104,11 +109,11 @@ class AgentConnect: ObservableObject {
                         isBotFlow: isBotFlow
                     )
                     
-                    // --- UI Progress: Preparing tools ---
-                    continuation.yield(.thought("Preparing agent tools…"))
-
-                    // 3. Resolve Tools
+                    // 3. Memory & Model Initialization
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
+                    let contextWindow = max(2048, llmConfig.modelMetadata?.contextWindow
+                        ?? KnownModelContextWindows.lookup(llmConfig.modelName)
+                        ?? 128_000)
                     let fallbackRag = ragContext ?? "No static context provided."
                     
                     // Instantiate the correct Long-Term Memory Strategy
@@ -124,33 +129,6 @@ class AgentConnect: ObservableObject {
                         )
                     }
 
-                    // Extract capabilities for tool injection (delegation)
-                    let agentCapabilities: AgentCapabilities?
-                    if case .agent(let agentConfig) = profile.details {
-                        agentCapabilities = agentConfig.capabilities
-                    } else {
-                        agentCapabilities = nil
-                    }
-
-                    let activeTools = await self.resolveExecutableTools(
-                        profileTools: rawTools,
-                        conversationID: conversationID,
-                        longTermMemory: longTermMemory,
-                        agentCapabilities: agentCapabilities
-                    )
-                    
-                    // 4. Initialize Evaluation Session (Metrics)
-                    let evalSessionID = UUID()
-                    if !activeTools.isEmpty {
-                        EvaluationLogger.shared.startSession(id: evalSessionID, availableTools: activeTools)
-                    }
-                    
-                    defer {
-                        if !activeTools.isEmpty {
-                            _ = EvaluationLogger.shared.endSession(id: evalSessionID)
-                        }
-                    }
-                    
                     // --- UI Progress: Model initialization ---
                     switch llmConfig.apiProvider {
                     case .mlx:
@@ -161,12 +139,49 @@ class AgentConnect: ObservableObject {
                         break
                     }
 
-                    // 5. Initialize the Language Model (Passing isBotFlow to determine endpoint routing)
+                    // 4. Initialize the Language Model (before tool resolution — delegation needs the model)
                     let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
-                    
+
                     // --- UI Progress: Model ready ---
                     if llmConfig.apiProvider == .mlx || llmConfig.apiProvider == .ollama {
                         continuation.yield(.thought("Model loaded. Starting execution…"))
+                    }
+
+                    // --- UI Progress: Preparing tools ---
+                    continuation.yield(.thought("Preparing agent tools…"))
+
+                    // Extract capabilities for tool injection (delegation)
+                    let agentCapabilities: AgentCapabilities?
+                    if case .agent(let agentConfig) = profile.details {
+                        agentCapabilities = agentConfig.capabilities
+                    } else {
+                        agentCapabilities = nil
+                    }
+
+                    // 5. Resolve Tools (model passed for delegation tool to reuse)
+                    var activeTools = await self.resolveExecutableTools(
+                        profileTools: rawTools,
+                        conversationID: conversationID,
+                        longTermMemory: longTermMemory,
+                        agentCapabilities: agentCapabilities,
+                        parentModel: model,
+                        generatorStrategy: generatorStrategy,
+                        rateLimitKey: rateLimitKey,
+                        rateLimitCategory: rateLimitCategory,
+                        parentProvider: llmConfig.apiProvider,
+                        skillManifests: skillManifests
+                    )
+
+                    // 6. Initialize Evaluation Session (Metrics)
+                    let evalSessionID = UUID()
+                    if !activeTools.isEmpty {
+                        EvaluationLogger.shared.startSession(id: evalSessionID, availableTools: activeTools)
+                    }
+
+                    defer {
+                        if !activeTools.isEmpty {
+                            _ = EvaluationLogger.shared.endSession(id: evalSessionID)
+                        }
                     }
 
                     // NEW: Log Full Configuration Visibility
@@ -181,26 +196,140 @@ class AgentConnect: ObservableObject {
                     // 6. Instantiate the Executor
                     let executor = ExecutorFactory.create(for: profile)
                     
-                    logger.info("Starting execution using executor strategy: \(executor.architecture.rawValue)")
+                    logger.info("Starting execution using executor strategy: \(executor.executorLabel)")
                     
                     // 7. Prepare Input (State Injection)
                     var activeState: SessionGraph? = nil
                     var recentHistory: String? = nil
                     
-                    // NEW: Determine Model Tier and Provision Memory Strategy
-                    let workingMemory: any WorkingMemoryStrategy = (modelTier == .tiny || modelTier == .small)
-                        ? SummarizedLinearMemory()
-                        : HighContextLinearMemory()
+                    // Provision budget-aware Working Memory Strategy
+                    let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
+                    let workingMemory: any WorkingMemoryStrategy = WindowedLinearMemory(config: memoryConfig)
                     
-                    if !activeTools.isEmpty {
-                        // Build the ephemeral SessionGraph from the UI history
-                        activeState = EpisodicHistoryFormatter.buildGraph(
-                            from: chatHistory,
-                            sessionID: conversationID.uuidString
-                        )
-                        
-                        // Generate the "Recent History" text block directly from the chat history
-                        recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(from: chatHistory)
+                    // Resolve history strategy from profile (default: .recentHistory)
+                    let historyStrategy: HistoryStrategy
+                    if case .agent(let agentConfig) = profile.details {
+                        historyStrategy = agentConfig.historyStrategy ?? .recentHistory
+                    } else {
+                        historyStrategy = .recentHistory
+                    }
+
+                    // Determine if this is a native provider (supports turn-by-turn history)
+                    let isNativeProvider: Bool = {
+                        switch llmConfig.apiProvider {
+                        case .anthropic, .openAI, .google: return true
+                        case .ollama: return llmConfig.cognitiveCapability != .none
+                        case .mlx: return false
+                        }
+                    }()
+
+                    var nativeHistoryTurns: [[String: String]]? = nil
+
+                    // History building is independent of tool availability.
+                    // Even tool-less agents benefit from conversation context.
+                    var effectiveHistory = chatHistory // Mutable copy — compaction may insert a checkpoint
+                    if !effectiveHistory.isEmpty {
+                        let charBudget = max(4000, Int(Double(contextWindow) * 0.6) * 4) // 60% of context, ~4 chars/token, floor 4K
+
+                        // --- IC-Powered History Compaction (Synchronous) ---
+                        // Runs before history building so the current request benefits from compacted context.
+                        let compactionEnabled = UserDefaults.standard.object(forKey: AppSettings.ciFeatureHistoryCompactionKey) as? Bool ?? true
+                        if compactionEnabled,
+                           await IntelligenceCoreService.shared.hasModelSelected {
+                            do {
+                                if let result = try await HistoryCompactionService.shared.compactIfNeeded(
+                                    chatHistory: effectiveHistory,
+                                    conversationID: conversationID,
+                                    charBudget: charBudget
+                                ) {
+                                    continuation.yield(.compactionStarted(
+                                        turnsToCompact: result.turnsCompacted,
+                                        checkpointNumber: result.checkpointNumber
+                                    ))
+
+                                    // Insert checkpoint into effective history for this request.
+                                    effectiveHistory.append(result.checkpointMessage)
+                                    effectiveHistory.sort(by: { $0.timestamp < $1.timestamp })
+
+                                    continuation.yield(.compactionCompleted(
+                                        turnsCompacted: result.turnsCompacted,
+                                        summaryPreview: result.summaryPreview
+                                    ))
+                                }
+                            } catch {
+                                logger.warning("History compaction failed: \(error.localizedDescription). Continuing without compaction.")
+                            }
+                        }
+
+                        // SessionGraph tracks tool failures (Ghost Protocol) — only relevant when tools exist.
+                        // Built AFTER compaction so it operates on checkpoint-aware history.
+                        if !activeTools.isEmpty {
+                            activeState = EpisodicHistoryFormatter.buildGraph(
+                                from: effectiveHistory,
+                                sessionID: conversationID.uuidString
+                            )
+                        }
+
+                        switch historyStrategy {
+                        case .recentHistory:
+                            if isNativeProvider {
+                                nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
+                                    from: effectiveHistory, limit: 10, charBudget: charBudget
+                                )
+                            } else {
+                                recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
+                                    from: effectiveHistory, limit: 10
+                                )
+                            }
+                        case .fullHistory:
+                            if isNativeProvider {
+                                nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
+                                    from: effectiveHistory, limit: nil, charBudget: charBudget
+                                )
+                            } else {
+                                recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
+                                    from: effectiveHistory, limit: effectiveHistory.count
+                                )
+                            }
+
+                        case .pointer:
+                            if isNativeProvider {
+                                nativeHistoryTurns = NativeHistoryConverter.buildPointerTurns(
+                                    from: effectiveHistory
+                                )
+                            } else {
+                                recentHistory = EpisodicHistoryFormatter.buildPointerHistoryString(
+                                    from: effectiveHistory
+                                )
+                            }
+
+                        case .hybrid:
+                            if isNativeProvider {
+                                nativeHistoryTurns = NativeHistoryConverter.buildHybridTurns(
+                                    from: effectiveHistory, inlineCount: 3, charBudget: charBudget
+                                )
+                            } else {
+                                recentHistory = EpisodicHistoryFormatter.buildHybridHistoryString(
+                                    from: effectiveHistory, inlineCount: 3
+                                )
+                            }
+                        }
+
+                        // Only inject get_conversation_history tool if pointer references
+                        // were actually emitted in the built history. This avoids a dead tool
+                        // when history is too short for pointers (e.g. hybrid with <= 3 turns).
+                        let hasPointers: Bool = {
+                            if let turns = nativeHistoryTurns {
+                                return turns.contains { $0["content"]?.contains("get_conversation_history(") == true }
+                            }
+                            return recentHistory?.contains("get_conversation_history(") == true
+                        }()
+
+                        if hasPointers {
+                            activeTools.append(
+                                wrapTool(ConversationHistoryTool(chatHistory: effectiveHistory), requiresConfirmation: false)
+                            )
+                        }
                     }
                     
                     // Extract resilience config from agent profile
@@ -214,6 +343,13 @@ class AgentConnect: ObservableObject {
                         errorRecovery = ErrorRecovery()
                     }
 
+                    // Resolve IC-powered response synthesis.
+                    // Global toggle from Core Intelligence settings, gated on IC availability.
+                    let icAvailable = await IntelligenceCoreService.shared.hasModelSelected
+                    let icEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
+                    let synthToggle = UserDefaults.standard.bool(forKey: AppSettings.ciFeatureResponseSynthesisKey)
+                    let responseSynthesisEnabled = icAvailable && icEnabled && synthToggle
+
                     let input = AgentInput(
                         userInput: userInput,
                         chatHistory: chatHistory,
@@ -224,10 +360,15 @@ class AgentConnect: ObservableObject {
                         recentHistory: recentHistory,
                         generatorStrategy: generatorStrategy,
                         workingMemory: workingMemory,
+                        rateLimitKey: rateLimitKey,
                         rateLimitCategory: rateLimitCategory,
                         instructions: instructions,
+                        skillManifests: skillManifests,
+                        skillFolderPath: skillFolderPath,
                         retryPolicy: retryPolicy,
                         errorRecovery: errorRecovery,
+                        responseSynthesisEnabled: responseSynthesisEnabled,
+                        nativeHistoryTurns: nativeHistoryTurns,
                         traceContext: traceContext
                     )
                     
@@ -316,6 +457,188 @@ class AgentConnect: ObservableObject {
         }
     }
     
+    // MARK: - Workflow Node Streaming
+
+    /// Workflow-aware streaming that bypasses RAG, history, compaction, and episode management.
+    /// Wraps the resolved generator in `WorkflowCognitiveGenerator` for clean task+input prompts.
+    func streamWorkflowNodeResponse(
+        for profile: BackendProfileModel,
+        workflowContext: WorkflowExecutionContext,
+        conversationID: UUID,
+        traceContext: TraceContext,
+        onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)? = nil
+    ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
+
+        logger.info("[Workflow] Node stream: profile='\(profile.displayName)' type=\(profile.profileType.rawValue) node='\(workflowContext.nodeName)'")
+
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    // 1. Extract profile config (same switch as streamAgentResponse lines 54-96)
+                    let llmConfig: ProviderConfig
+                    var instructions: String?
+                    let rawTools: [Tool]
+                    let isBotFlow: Bool
+                    var skillManifests: [SkillManifest]?
+                    var skillFolderPath: String?
+
+                    switch profile.details {
+                    case .bot(let config):
+                        llmConfig = config.llmConfig
+                        instructions = config.instructions
+                        rawTools = []
+                        isBotFlow = true
+                        skillManifests = nil
+                        skillFolderPath = nil
+
+                    case .agent(let config):
+                        llmConfig = config.llmConfig
+                        instructions = config.instructions
+                        rawTools = config.tools
+                        isBotFlow = false
+                        skillManifests = config.skillConfig?.manifests.filter(\.isEnabled)
+                        skillFolderPath = config.skillConfig?.folderURL.path
+
+                    case .workflow, .imageGen:
+                        continuation.yield(.error("Unsupported profile type for workflow node: \(profile.profileType.rawValue)"))
+                        continuation.finish()
+                        return
+                    }
+
+                    logger.info("[Workflow] Pipeline: skipping RAG, history, compaction, episode management")
+
+                    // 2. Resolve inner generator strategy (dialect-specific)
+                    let innerGenerator = try self.resolveCognitiveGenerator(
+                        llmConfig: llmConfig,
+                        isBotFlow: isBotFlow
+                    )
+
+                    // 3. Determine native flow and resolve dialect rules for the wrapper
+                    let isNativeFlow: Bool = {
+                        switch llmConfig.apiProvider {
+                        case .anthropic, .openAI, .google: return true
+                        case .ollama: return llmConfig.cognitiveCapability != .none && llmConfig.cognitiveProfile.capability == .parallelActions
+                        case .mlx: return false
+                        }
+                    }()
+
+                    // 4. Wrap in WorkflowCognitiveGenerator
+                    // Dialect rules are read directly from inner.dialectRules (protocol property).
+                    let workflowGenerator = WorkflowCognitiveGenerator(
+                        inner: innerGenerator,
+                        workflowContext: workflowContext,
+                        isNativeFlow: isNativeFlow
+                    )
+
+                    // 5. Initialize model
+                    let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
+
+                    // 6. Resolve tools (still needed for agent nodes)
+                    let longTermMemory: any LongTermMemoryStrategy = StaticGroundingMemory(ragContext: "")
+                    let agentCapabilities: AgentCapabilities? = {
+                        if case .agent(let config) = profile.details { return config.capabilities }
+                        return nil
+                    }()
+
+                    let rateLimitCategory = RateLimitCategory.from(provider: llmConfig.apiProvider)
+                    let rateLimitKey = RateLimitCategory.deriveBucketKey(
+                        provider: llmConfig.apiProvider,
+                        apiKey: llmConfig.apiKey,
+                        baseURL: llmConfig.baseURL
+                    )
+
+                    let activeTools = await self.resolveExecutableTools(
+                        profileTools: rawTools,
+                        conversationID: conversationID,
+                        longTermMemory: longTermMemory,
+                        agentCapabilities: agentCapabilities,
+                        parentModel: model,
+                        generatorStrategy: workflowGenerator,
+                        rateLimitKey: rateLimitKey,
+                        rateLimitCategory: rateLimitCategory,
+                        parentProvider: llmConfig.apiProvider,
+                        skillManifests: skillManifests
+                    )
+
+                    // 7. Build AgentInput — workflow-aware, no history/RAG/compaction
+                    // taskDescription contains the merged user query for first nodes.
+                    // For downstream nodes, upstreamInput is the primary data.
+                    let userInputForNode = workflowContext.isFirstNode
+                        ? workflowContext.taskDescription
+                        : workflowContext.upstreamInput
+
+                    let contextWindow = max(2048, llmConfig.modelMetadata?.contextWindow
+                        ?? KnownModelContextWindows.lookup(llmConfig.modelName)
+                        ?? 128_000)
+                    let modelTier = llmConfig.modelMetadata?.tier ?? .medium
+                    let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
+
+                    // Resilience config
+                    let retryPolicy: RetryPolicy
+                    let errorRecovery: ErrorRecovery
+                    if case .agent(let agentConfig) = profile.details {
+                        retryPolicy = agentConfig.retryPolicy ?? RetryPolicy()
+                        errorRecovery = agentConfig.errorRecovery ?? ErrorRecovery()
+                    } else {
+                        retryPolicy = RetryPolicy()
+                        errorRecovery = ErrorRecovery()
+                    }
+
+                    let input = AgentInput(
+                        userInput: userInputForNode,
+                        chatHistory: [],
+                        conversationID: conversationID,
+                        tools: activeTools,
+                        longTermMemory: longTermMemory,
+                        recentHistory: nil,
+                        generatorStrategy: workflowGenerator,
+                        workingMemory: WindowedLinearMemory(config: memoryConfig),
+                        rateLimitKey: rateLimitKey,
+                        rateLimitCategory: rateLimitCategory,
+                        instructions: instructions,
+                        skillManifests: skillManifests,
+                        skillFolderPath: skillFolderPath,
+                        retryPolicy: retryPolicy,
+                        errorRecovery: errorRecovery,
+                        responseSynthesisEnabled: false,
+                        nativeHistoryTurns: nil,
+                        suppressEpisodeManagement: true,
+                        workflowContext: workflowContext,
+                        traceContext: traceContext
+                    )
+
+                    logger.info("[Workflow] AgentInput: tools=\(activeTools.count), generator=WorkflowCognitiveGenerator(\(type(of: innerGenerator))), node='\(workflowContext.nodeName)'")
+
+                    // 8. Execute
+                    let executor = ExecutorFactory.create(for: profile)
+                    logger.info("[Workflow] Executor: \(executor.executorLabel) for '\(workflowContext.nodeName)'")
+
+                    let traceHandler: @Sendable (AgentTraceLog) -> Void = { log in
+                        onTraceUpdate?(log)
+                    }
+
+                    try Task.checkCancellation()
+
+                    let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
+
+                    for try await event in stream {
+                        continuation.yield(event)
+                    }
+
+                    continuation.finish()
+
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    logger.error("[Workflow] Node '\(workflowContext.nodeName)' stream error: \(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
+
     // MARK: - Cognitive Strategy Resolution
     
     /// Evaluates the model configuration and isolates the routing logic for the generator.
@@ -351,26 +674,32 @@ class AgentConnect: ObservableObject {
                 return JsonStructuredGenerator()
                 
             case .singleAction:
-                // Secondary Dimension: Dialect matching for single-action text constraints
+                // Secondary Dimension: Dialect matching for single-action text constraints.
+                // Default is ReAct Markdown — the most universal format for weak/unknown models
+                // that have basic tool awareness but no proven structured-output training.
                 switch cognitiveProfile.dialect {
                 case .mistralXML:
                     return XMLStructuredGenerator()
-                case .reactMarkdown:
-                    return MarkdownStructuredGenerator()
                 default:
-                    return JsonStructuredGenerator()
+                    return MarkdownStructuredGenerator()
                 }
                 
             case .parallelActions:
-                // Models capable of parallel tool calling are well-trained to output structured JSON natively.
-                // Dialect routing is unnecessary here — it's only needed for singleAction models
-                // which may be legacy or older architectures requiring format-specific prompting.
-                let strategyName = (llmConfig.apiProvider == .mlx) ? "MLXNativeStructuredGenerator" : "NativeStructuredGenerator"
-                logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
-
-                if llmConfig.apiProvider == .mlx {
+                // Ollama: API layer abstracts the model's native format — always use NativeStructuredGenerator.
+                // MLX: No intermediary API — must match the model's trained output dialect.
+                //   Mistral-family models output XML (<tool_call> blocks), all others output JSON arrays.
+                let strategyName: String
+                if llmConfig.apiProvider == .mlx && cognitiveProfile.dialect == .mistralXML {
+                    strategyName = "XMLNativeStructuredGenerator"
+                    logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
+                    return XMLNativeStructuredGenerator()
+                } else if llmConfig.apiProvider == .mlx {
+                    strategyName = "MLXNativeStructuredGenerator"
+                    logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
                     return MLXNativeStructuredGenerator()
                 } else {
+                    strategyName = "NativeStructuredGenerator"
+                    logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
                     return NativeStructuredGenerator()
                 }
             }
@@ -380,6 +709,12 @@ class AgentConnect: ObservableObject {
     // MARK: - Model Initialization
     
     func initializeModel(config llmConfig: ProviderConfig, isBotFlow: Bool) async throws -> any LLMProvider {
+        let rlKey = RateLimitCategory.deriveBucketKey(
+            provider: llmConfig.apiProvider,
+            apiKey: llmConfig.apiKey,
+            baseURL: llmConfig.baseURL
+        )
+
         switch llmConfig.apiProvider {
         case .anthropic:
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
@@ -390,7 +725,7 @@ class AgentConnect: ObservableObject {
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
             }
-            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
             return ClaudeLLMProvider(config: config)
             
         case .ollama:
@@ -405,7 +740,7 @@ class AgentConnect: ObservableObject {
                 options = advConfig
             }
             
-            let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
+            let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
             return OllamaLLMProvider(config: config)
             
         case .openAI:
@@ -417,7 +752,7 @@ class AgentConnect: ObservableObject {
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
             }
-            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
             return OpenAILLMProvider(config: config)
             
         case .google:
@@ -431,7 +766,7 @@ class AgentConnect: ObservableObject {
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
             }
-            let config = LLMProviderConfig(apiKey: apiKey, baseURL: googleBaseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options)
+            let config = LLMProviderConfig(apiKey: apiKey, baseURL: googleBaseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
             return GeminiLLMProvider(config: config)
             
         case .mlx:
@@ -481,7 +816,13 @@ class AgentConnect: ObservableObject {
         profileTools: [Tool],
         conversationID: UUID,
         longTermMemory: any LongTermMemoryStrategy,
-        agentCapabilities: AgentCapabilities? = nil
+        agentCapabilities: AgentCapabilities? = nil,
+        parentModel: (any LLMProvider)? = nil,
+        generatorStrategy: (any CognitiveGenerator)? = nil,
+        rateLimitKey: String? = nil,
+        rateLimitCategory: RateLimitCategory? = nil,
+        parentProvider: ApiProvider? = nil,
+        skillManifests: [SkillManifest]? = nil
     ) async -> [AgentTool] {
 
         var activeTools: [AgentTool] = []
@@ -489,15 +830,26 @@ class AgentConnect: ObservableObject {
         // -----------------------------------------------------------------
         // 1. Core System Tools (Inherently Safe & Required for ALL models)
         // -----------------------------------------------------------------
-        activeTools.append(wrapTool(VectorSearchTool(conversationID: conversationID), requiresConfirmation: false))
+        // Note: VectorSearchTool (recall_conversation_history) was removed here.
+        // It was redundant — the same HNSW vector store is already queried by the
+        // RAG pipeline pre-request (contextualRAG / directInjection), and recent
+        // turns are auto-injected via EpisodicHistoryFormatter XML. Keeping the
+        // tool wasted a tool slot and caused small models to call it reflexively.
         activeTools.append(wrapTool(AskUserTool(), requiresConfirmation: false))
 
         // -----------------------------------------------------------------
         // 2. Deep Episodic Memory (Delegated to Strategy)
         // -----------------------------------------------------------------
-        // If it's an edge model, this array is empty.
-        // If it's a frontier model, this contains ReadActionLogTool, etc.
         activeTools.append(contentsOf: longTermMemory.memoryCapabilities)
+
+        // -----------------------------------------------------------------
+        // 2.5. Skill Loading Tool (conditional — only when skills are configured)
+        // -----------------------------------------------------------------
+        if let manifests = skillManifests, !manifests.isEmpty {
+            let loadSkillTool = LoadSkillTool(manifests: manifests)
+            activeTools.append(wrapTool(loadSkillTool, requiresConfirmation: false))
+            logger.info("Registered load_skill tool with \(manifests.count) available skill(s)")
+        }
 
         // -----------------------------------------------------------------
         // 3. User-Configured / External Tools (Standard resolution)
@@ -519,14 +871,24 @@ class AgentConnect: ObservableObject {
         // -----------------------------------------------------------------
         // 4. Agent Delegation Tool (when capability is ON)
         // -----------------------------------------------------------------
-        if let delegation = agentCapabilities?.agentDelegation, !delegation.subAgents.isEmpty {
+        if let delegation = agentCapabilities?.agentDelegation,
+           let model = parentModel,
+           let generator = generatorStrategy,
+           let rlKey = rateLimitKey,
+           let rateLimit = rateLimitCategory,
+           let provider = parentProvider {
             let callAgentTool = CallAgentTool.create(
                 config: delegation,
-                agentConnect: self,
+                parentModel: model,
+                parentTools: activeTools,
+                parentGeneratorStrategy: generator,
+                parentRateLimitKey: rlKey,
+                parentRateLimitCategory: rateLimit,
+                parentProvider: provider,
                 conversationID: conversationID
             )
             activeTools.append(callAgentTool)
-            logger.debug("Enabled call_agent delegation tool (\(delegation.subAgents.count) sub-agents)")
+            logger.debug("Enabled call_agent delegation tool (max \(delegation.maxConcurrentAgents) concurrent)")
         }
 
         return activeTools
@@ -721,7 +1083,7 @@ class AgentConnect: ObservableObject {
         Provider: \(config.apiProvider.rawValue)
         Model: \(config.modelName)
         Base URL: \(config.baseURL ?? "Default")
-        Capabilities: \(config.cognitiveCapability.rawValue) (Dialect: \(config.modelDialect.rawValue))
+        Capabilities: \(config.cognitiveCapability.rawValue) (Dialect: \(effectiveDialect(config)))
         Metadata: \(metadata)
         Advanced Options: \(advConfig)
         Tools Enabled: [\(toolNames)]
@@ -731,37 +1093,24 @@ class AgentConnect: ObservableObject {
         logger.notice("\(logMsg)")
     }
 
-    // MARK: - Sub-Agent Helpers (used by CallAgentTool)
-
-    /// Resolves tools for an inline sub-agent. Only user-configured tools — no system tools,
-    /// no memory tools, and no call_agent (sub-agents are leaf nodes).
-    func resolveSubAgentTools(profileTools: [Tool], conversationID: UUID) async -> [AgentTool] {
-        var tools: [AgentTool] = []
-        let allToolSources = await UnifiedToolStore.shared.sources
-
-        for toolConfig in profileTools where toolConfig.isEnabled {
-            if let agentTool = self.resolveNativeTool(toolName: toolConfig.name, conversationID: conversationID, requiresConfirmation: toolConfig.requiresConfirmation, timeout: toolConfig.timeout, timeoutMessage: toolConfig.timeoutMessage) {
-                tools.append(agentTool)
-            } else if let agentTool = self.resolveMCPTool(toolConfig: toolConfig, availableSources: allToolSources) {
-                tools.append(agentTool)
+    /// Returns the dialect that is actually used by the generator strategy,
+    /// not the raw value stored in ProviderConfig. For `parallelActions` local
+    /// models the stored dialect is ignored (they always use native JSON),
+    /// so logging it verbatim is misleading during debugging.
+    private func effectiveDialect(_ config: ProviderConfig) -> String {
+        switch config.apiProvider {
+        case .anthropic, .google, .openAI:
+            return "Native JSON (Cloud)"
+        case .mlx, .ollama:
+            switch config.cognitiveCapability {
+            case .parallelActions:
+                return "Native JSON (Parallel)"
+            case .singleAction:
+                return config.modelDialect.rawValue
+            case .none:
+                return "Heuristic JSON (Prompted)"
             }
         }
-
-        return tools
     }
 
-    /// Resolves a cognitive generator for a sub-agent based on its provider config.
-    func resolveCognitiveGeneratorForSubAgent(llmConfig: ProviderConfig, tools: [AgentTool]) -> any CognitiveGenerator {
-        (try? resolveCognitiveGenerator(llmConfig: llmConfig, isBotFlow: false)) ?? NativeStructuredGenerator()
-    }
-
-    /// Maps an API provider to its rate-limit category.
-    func rateLimitCategory(for provider: ApiProvider) -> RateLimitCategory {
-        switch provider {
-        case .anthropic: return .anthropic
-        case .google: return .geminiFlash
-        case .openAI: return .openAI
-        case .ollama, .mlx: return .local
-        }
-    }
 }

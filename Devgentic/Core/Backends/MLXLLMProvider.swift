@@ -98,6 +98,17 @@ struct MLXLLMProvider: LLMProvider {
             expectedDialect: dialect,
             modelId: modelName
         )
-        return pipeline.parse(raw: fullText)
+        var step = pipeline.parse(raw: fullText)
+
+        // MLX doesn't expose token counts — use heuristic estimation
+        let inputChars = messages.reduce(0) { $0 + ($1["content"]?.count ?? 0) }
+        step = ModernCognitiveStep(
+            reasoning: step.reasoning,
+            thought: step.thought,
+            toolCalls: step.toolCalls,
+            tokenUsage: .estimated(inputChars: inputChars, outputChars: fullText.count)
+        )
+
+        return step
     }
 }

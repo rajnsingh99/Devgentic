@@ -7,54 +7,62 @@
 
 import Foundation
 import SwiftUI
-import Combine
 
-@MainActor
-class MLXModelStoreViewModel: ObservableObject {
-    
+@Observable @MainActor
+class MLXModelStoreViewModel {
+
     let filterForTools: Bool
-    
+
     // MARK: - Inputs (View Actions)
-    @Published var searchText: String = ""
-    @Published var selectedCategory: StoreCategory = .all {
+    var searchText: String = "" {
+        didSet {
+            searchDebounceTask?.cancel()
+            searchDebounceTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled, let self, self.isRemoteSearchEnabled else { return }
+                self.refreshCategoryData()
+            }
+        }
+    }
+    var selectedCategory: StoreCategory = .all {
         didSet {
             if selectedCategory != oldValue {
                 refreshCategoryData()
             }
         }
     }
-    
+
     /// Toggle to switch between filtering local results or fetching new results from the server
-    @Published var isRemoteSearchEnabled: Bool = true {
+    var isRemoteSearchEnabled: Bool = true {
         didSet {
             refreshCategoryData()
         }
     }
-    
+
     /// Sorting preference
-    @Published var sortOption: SortOption = .popularity {
+    var sortOption: SortOption = .popularity {
         didSet {
             // Re-apply filters and sort when option changes
             applyFilterAndSort()
         }
     }
-    
+
     // MARK: - Outputs (View State)
-    @Published var displayedModels: [MLXDisplayModel] = []
-    @Published var isLoading: Bool = false
-    
+    var displayedModels: [MLXDisplayModel] = []
+    var isLoading: Bool = false
+
     // Pagination State
-    private var currentPage = 0
-    private let pageSize = 30
-    
+    @ObservationIgnored private var currentPage = 0
+    @ObservationIgnored private let pageSize = 30
+
     // Download State
-    @Published var isDownloading: Bool = false
-    @Published var downloadProgress: Double = 0.0
-    @Published var currentDownloadName: String = ""
-    
+    var isDownloading: Bool = false
+    var downloadProgress: Double = 0.0
+    var currentDownloadName: String = ""
+
     // MARK: - Dependencies
-    private let service = MLXModelService.shared
-    private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private let service = MLXModelService.shared
+    @ObservationIgnored private var searchDebounceTask: Task<Void, Never>?
     
     // MARK: - Definitions
     
@@ -117,46 +125,44 @@ class MLXModelStoreViewModel: ObservableObject {
     }
     
     // MARK: - Initialization
-    
+
+    @ObservationIgnored private var isObserving = true
+
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
         self.selectedCategory = filterForTools ? .installed : .all
-        setupBindings()
+        observeServiceChanges()
         refreshCategoryData()
     }
-    
-    private func setupBindings() {
-        // 1. Debounced Remote Search Trigger
-        $searchText
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                if self.isRemoteSearchEnabled {
-                    self.refreshCategoryData()
-                }
+
+    deinit {
+        isObserving = false
+    }
+
+    /// Bridges MLXModelService (@Observable) changes into this @Observable view model.
+    private func observeServiceChanges() {
+        guard isObserving else { return }
+        withObservationTracking {
+            // Touch all service properties we depend on -- this registers them for tracking
+            _ = service.availableModels
+            _ = service.installedModels
+            _ = service.isLoadingRemoteModels
+            _ = service.isDownloading
+            _ = service.downloadProgress
+            _ = service.currentDownloadName
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self, self.isObserving else { return }
+                // Mirror state from service
+                self.isLoading = self.service.isLoadingRemoteModels
+                self.isDownloading = self.service.isDownloading
+                self.downloadProgress = self.service.downloadProgress
+                self.currentDownloadName = self.service.currentDownloadName
+                self.applyFilterAndSort()
+                // Re-register observation for next change
+                self.observeServiceChanges()
             }
-            .store(in: &cancellables)
-        
-        // 2. Filter & Sort Logic (Local)
-        Publishers.CombineLatest3(
-            service.$availableModels,
-            service.$installedModels,
-            $searchText
-        )
-        .receive(on: RunLoop.main)
-        .sink { [weak self] _ in
-            self?.applyFilterAndSort()
         }
-        .store(in: &cancellables)
-        
-        // 3. Loading State
-        service.$isLoadingRemoteModels.assign(to: &$isLoading)
-        
-        // 4. Download State Mirroring
-        service.$isDownloading.assign(to: &$isDownloading)
-        service.$downloadProgress.assign(to: &$downloadProgress)
-        service.$currentDownloadName.assign(to: &$currentDownloadName)
     }
     
     // MARK: - Logic
@@ -226,8 +232,8 @@ class MLXModelStoreViewModel: ObservableObject {
         if category == .installed {
             sourceModels = local.map { item in
                 
-                // Fetch authentic capability from MLX Analyzer instead of hardcoding "Chat"
-                let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: item.localPath, modelName: item.displayName)
+                // Use cached profile from MLXModelService instead of re-parsing files
+                let profile = service.cachedCognitiveProfile(for: item)
                 var caps: Set<MLXModelCapability> = []
                 
                 if profile.capability != .none {

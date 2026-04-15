@@ -6,14 +6,15 @@
 //
 
 import SwiftUI
-import Combine
 import os
 import UniformTypeIdentifiers
 
-@MainActor
-final class ExplorerViewModel: ObservableObject {
-    @Published var rootItems: [FileSystemItem] = []
-    @Published var selectedRootURL: URL? = nil {
+@Observable @MainActor
+final class ExplorerViewModel {
+    var rootItems: [FileSystemItem] = [] {
+        didSet { recomputeFilteredRootItems() }
+    }
+    var selectedRootURL: URL? = nil {
         willSet {
             if let currentURL = self.selectedRootURL {
                 if currentURL != newValue || newValue == nil {
@@ -62,66 +63,64 @@ final class ExplorerViewModel: ObservableObject {
         }
     }
     
-    @Published var searchText: String = ""
-    @Published private(set) var filteredRootItems: [FileSystemItem] = []
-    @Published var isLoading: Bool = false
-    @Published var errorMessage: String? = nil
-    
-    @Published var itemBeingRenamedID: URL? = nil
-    @Published var currentEditName: String = ""
-    @Published var renameErrorMessage: String? = nil
+    var searchText: String = "" {
+        didSet { recomputeFilteredRootItems() }
+    }
+    private(set) var filteredRootItems: [FileSystemItem] = []
+    var isLoading: Bool = false
+    var errorMessage: String? = nil
 
-    @Published var expandedItemIDs: Set<URL> = []
-    @Published private var loadingIDs: Set<URL> = []
+    var itemBeingRenamedID: URL? = nil
+    var currentEditName: String = ""
+    var renameErrorMessage: String? = nil
+
+    var expandedItemIDs: Set<URL> = []
+    @ObservationIgnored private var loadingIDs: Set<URL> = []
 
     // The in-memory cache for all files in the directory.
-    @Published var allSuggestableFiles: [FileSystemItem] = []
+    var allSuggestableFiles: [FileSystemItem] = []
 
     // A flag to provide UI feedback during the initial scan.
-    @Published var isIndexing: Bool = false
+    var isIndexing: Bool = false
 
     // A property to hold our real-time file system monitor.
-    private var fileSystemMonitor: FileSystemMonitor?
-    private var fileSystemEventSubject = PassthroughSubject<URL, Never>()
-    private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private var fileSystemMonitor: FileSystemMonitor?
+    @ObservationIgnored private var fileSystemDebounceTask: Task<Void, Never>?
 
-
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.explorer", category: "ExplorerViewModel")
-    private static let lastOpenedFolderBookmarkKey = "explorerLastOpenedFolderBookmark"
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.explorer", category: "ExplorerViewModel")
+    @ObservationIgnored private static let lastOpenedFolderBookmarkKey = "explorerLastOpenedFolderBookmark"
 
     init() {
         logger.info("ExplorerViewModel initializing.")
-        setupDebouncer()
-        setupFilteredItemsCache()
         loadLastOpenedFolder()
     }
 
-    private func setupFilteredItemsCache() {
-        // Recompute filteredRootItems whenever rootItems or searchText changes
-        Publishers.CombineLatest($rootItems, $searchText)
-            .map { items, searchText -> [FileSystemItem] in
-                guard !searchText.isEmpty else { return items }
-                let query = searchText.lowercased()
-                func filterItems(_ items: [FileSystemItem]) -> [FileSystemItem] {
-                    var result: [FileSystemItem] = []
-                    for item in items {
-                        if item.name.lowercased().contains(query) {
-                            result.append(item)
-                        } else if let children = item.children {
-                            let filteredChildren = filterItems(children)
-                            if !filteredChildren.isEmpty {
-                                var copy = item
-                                copy.children = filteredChildren
-                                result.append(copy)
-                            }
-                        }
+    /// Recomputes filteredRootItems from rootItems and searchText.
+    /// Called via didSet on both rootItems and searchText.
+    private func recomputeFilteredRootItems() {
+        let items = rootItems
+        guard !searchText.isEmpty else {
+            filteredRootItems = items
+            return
+        }
+        let query = searchText.lowercased()
+        func filterItems(_ items: [FileSystemItem]) -> [FileSystemItem] {
+            var result: [FileSystemItem] = []
+            for item in items {
+                if item.name.lowercased().contains(query) {
+                    result.append(item)
+                } else if let children = item.children {
+                    let filteredChildren = filterItems(children)
+                    if !filteredChildren.isEmpty {
+                        var copy = item
+                        copy.children = filteredChildren
+                        result.append(copy)
                     }
-                    return result
                 }
-                return filterItems(items)
             }
-            .receive(on: DispatchQueue.main)
-            .assign(to: &$filteredRootItems)
+            return result
+        }
+        filteredRootItems = filterItems(items)
     }
 
     deinit {
@@ -129,28 +128,23 @@ final class ExplorerViewModel: ObservableObject {
         // The call to stopMonitoring() is removed. The FileSystemMonitor's own deinit will handle the cleanup automatically
         // when the ExplorerViewModel is deallocated, which is the correct and safe pattern.
     }
-    
-    private func setupDebouncer() {
-        fileSystemEventSubject
-            .debounce(for: .milliseconds(500), scheduler: DispatchQueue.main)
-            .sink { [weak self] url in
-                guard let self = self else { return }
-                self.logger.info("Debounced file system event triggered for \(url.path). Refreshing contents.")
-                
-                // PERFORMANCE FIX: Root or Incremental?
-                // If the URL is the root, do a full reload of the visual tree.
-                // Otherwise, perform an incremental update for that specific sub-folder.
-                Task {
-                    if url == self.selectedRootURL {
-                        await self.indexAllFiles(from: url)
-                        self.loadDirectoryContents(for: url)
-                    } else {
-                        // Incremental refresh for a sub-folder
-                        await self.refreshSubfolder(at: url)
-                    }
-                }
+
+    /// Task-based debounce for file system events. Cancels previous pending task on each new event.
+    private func handleFileSystemEvent(_ url: URL) {
+        fileSystemDebounceTask?.cancel()
+        fileSystemDebounceTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self else { return }
+            self.logger.info("Debounced file system event triggered for \(url.path). Refreshing contents.")
+
+            // PERFORMANCE FIX: Root or Incremental?
+            if url == self.selectedRootURL {
+                await self.indexAllFiles(from: url)
+                self.loadDirectoryContents(for: url)
+            } else {
+                await self.refreshSubfolder(at: url)
             }
-            .store(in: &cancellables)
+        }
     }
         
     // MARK: - File Operations (New & Existing)
@@ -399,7 +393,8 @@ final class ExplorerViewModel: ObservableObject {
             return false
         }
         if findAndUpdate(items: &rootItems) {
-            objectWillChange.send()
+            // @Observable tracks rootItems mutation automatically
+            recomputeFilteredRootItems()
         }
     }
 
@@ -571,12 +566,12 @@ final class ExplorerViewModel: ObservableObject {
             "\(path)/.DS_Store"
         ]
         
-        // Capture the subject to avoid referencing @MainActor-isolated self from @Sendable callback.
         // The callback is dispatched on main by FileSystemMonitor.handleEvents.
-        let subject = fileSystemEventSubject
-        fileSystemMonitor = FileSystemMonitor { urls in
+        fileSystemMonitor = FileSystemMonitor { [weak self] urls in
             if let firstURL = urls.first {
-                subject.send(firstURL)
+                Task { @MainActor [weak self] in
+                    self?.handleFileSystemEvent(firstURL)
+                }
             }
         }
         fileSystemMonitor?.start(path: path, excludedPaths: excludedPaths)

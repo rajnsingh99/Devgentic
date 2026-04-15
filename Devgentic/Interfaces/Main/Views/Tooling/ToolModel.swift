@@ -100,7 +100,7 @@ struct ToolSource: Identifiable, Hashable {
 
 /// A universal protocol for any tool that the Swift client application can run directly.
 /// This ensures a consistent structure for defining, displaying, and executing tools.
-protocol ExecutableTool {
+protocol ExecutableTool: Sendable {
     /// A unique, programmatic name for the tool (e.g., "execute_shell").
     var name: String { get }
     

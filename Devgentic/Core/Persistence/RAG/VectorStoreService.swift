@@ -16,7 +16,7 @@ import os
 /// Search complexity is reduced from O(N) brute-force cosine similarity to O(log N) via ObjectBox's
 /// probabilistic Hierarchical Navigable Small World graph, configured for the 384-dimensional
 /// All-MiniLM-L6-v2 embedding space.  See `ChildChunkEntity` for index hyperparameter rationale.
-class VectorStoreService {
+final class VectorStoreService: @unchecked Sendable {
 
     // MARK: - Singleton Instance
     static let shared = VectorStoreService()

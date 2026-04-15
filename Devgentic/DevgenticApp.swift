@@ -49,13 +49,13 @@ struct DevgenticApp: App {
         }
     }()
 
-    @StateObject private var themeManager = ThemeManager()
+    @State private var themeManager = ThemeManager()
 
     @State private var mainApplicationViewModel: MainApplicationViewModel
     @State private var chatHistoryViewModel: ChatHistoryViewModel
     @State private var mainViewRouter = MainViewRouter()
     @State private var backendProfileService = BackendProfileService()
-    @StateObject private var toastManager = ToastManager()
+    @State private var toastManager = ToastManager()
 
     init() {
         let persistence = ChatPersistenceStore.shared
@@ -105,14 +105,14 @@ struct DevgenticApp: App {
         // MARK: - Main Application Window
         WindowGroup {
             MainApplicationView()
-                .environmentObject(themeManager)
+                .environment(themeManager)
                 .environment(\.appTheme, themeManager.currentTheme)
                 .environment(mainApplicationViewModel)
-                .environmentObject(mainApplicationViewModel.explorerViewModel)
+                .environment(mainApplicationViewModel.explorerViewModel)
                 .environment(chatHistoryViewModel)
                 .environment(mainViewRouter)
                 .environment(backendProfileService)
-                .environmentObject(toastManager)
+                .environment(toastManager)
                 .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -156,7 +156,7 @@ struct DevgenticApp: App {
         WindowGroup("File Viewer", id: "file-viewer-window", for: URL.self) { $fileURL in
             if let url = fileURL {
                 FileWindowViewer(fileURL: url)
-                    .environmentObject(themeManager)
+                    .environment(themeManager)
                     .environment(\.appTheme, themeManager.currentTheme)
                     .tint(themeManager.currentTheme.accentColor)
             }

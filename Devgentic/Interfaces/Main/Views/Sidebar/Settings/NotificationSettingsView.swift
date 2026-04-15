@@ -10,7 +10,7 @@ import UserNotifications
 
 struct NotificationSettingsView: View {
 
-    @ObservedObject private var config = NotificationConfiguration.shared
+    @Bindable private var config = NotificationConfiguration.shared
     @Environment(\.appTheme) private var theme
 
     @State private var testSent = false
@@ -26,12 +26,13 @@ struct NotificationSettingsView: View {
                     HStack(spacing: 12) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.orange)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Notifications Disabled in System Settings")
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(theme.fontSubheadline.weight(.semibold))
                                 .foregroundColor(theme.primaryText)
                             Text("Devgentic doesn't have permission to send notifications. Enable them to use this feature.")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                         }
                         Spacer()
@@ -42,28 +43,29 @@ struct NotificationSettingsView: View {
                         .controlSize(.small)
                     }
                     .padding(12)
-                    .background(Color.orange.opacity(0.12))
+                    .background(theme.warningColor.opacity(0.12))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                            .stroke(theme.warningColor.opacity(0.3), lineWidth: 1)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
 
                 // Master Toggle
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("NOTIFICATIONS")
-                        .font(.system(size: 11, weight: .bold))
+                    Text("Notifications")
+                        .font(.system(.caption, weight: .bold))
                         .foregroundColor(theme.secondaryText)
                         .tracking(0.5)
+                        .textCase(.uppercase)
 
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Enable Notifications")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(theme.fontBody.weight(.medium))
                                 .foregroundColor(theme.primaryText)
                             Text("Receive alerts when queries complete while the app is in the background.")
-                                .font(.system(size: 12))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                         }
                         Spacer()
@@ -78,10 +80,11 @@ struct NotificationSettingsView: View {
 
                 // Channels
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("CHANNELS")
-                        .font(.system(size: 11, weight: .bold))
+                    Text("Channels")
+                        .font(.system(.caption, weight: .bold))
                         .foregroundColor(theme.secondaryText)
                         .tracking(0.5)
+                        .textCase(.uppercase)
 
                     VStack(spacing: 0) {
                         channelRow(
@@ -129,10 +132,11 @@ struct NotificationSettingsView: View {
 
                 // Test Notification
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("TEST")
-                        .font(.system(size: 11, weight: .bold))
+                    Text("Test")
+                        .font(.system(.caption, weight: .bold))
                         .foregroundColor(theme.secondaryText)
                         .tracking(0.5)
+                        .textCase(.uppercase)
 
                     Button {
                         sendTestNotification()
@@ -141,7 +145,7 @@ struct NotificationSettingsView: View {
                             Image(systemName: testSent ? "checkmark.circle.fill" : "bell.and.waves.left.and.right")
                                 .foregroundColor(testSent ? .green : theme.accentColor)
                             Text(testSent ? "Test Sent!" : "Send Test Notification")
-                                .font(.system(size: 13, weight: .medium))
+                                .font(theme.fontSubheadline.weight(.medium))
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -156,9 +160,10 @@ struct NotificationSettingsView: View {
                         HStack(spacing: 6) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.red)
-                                .font(.system(size: 12))
+                                .font(.system(.caption))
+                                .accessibilityHidden(true)
                             Text(errorMsg)
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(.red)
                         }
                     }
@@ -176,19 +181,20 @@ struct NotificationSettingsView: View {
     }
 
     @ViewBuilder
-    private func channelRow(name: String, description: String, icon: String, isEnabled: Bool, isComingSoon: Bool = false) -> some View {
+    private func channelRow(name: LocalizedStringKey, description: LocalizedStringKey, icon: String, isEnabled: Bool, isComingSoon: Bool = false) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(.system(.body)) // scales with Dynamic Type; ~16pt
                 .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.4) : (isEnabled ? theme.accentColor : .orange))
                 .frame(width: 28)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(name)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(theme.fontSubheadline.weight(.medium))
                     .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.5) : theme.primaryText)
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText.opacity(0.6))
             }
 
@@ -196,7 +202,7 @@ struct NotificationSettingsView: View {
 
             if isComingSoon {
                 Text("Soon")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 10, weight: .medium)) // Fixed size: intentional (badge/chip text)
                     .foregroundColor(theme.secondaryText.opacity(0.4))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -205,7 +211,8 @@ struct NotificationSettingsView: View {
             } else if !isEnabled && !isComingSoon {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundColor(.orange.opacity(0.7))
-                    .font(.system(size: 14))
+                    .font(.system(.body)) // scales with Dynamic Type; ~14pt
+                    .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, 12)

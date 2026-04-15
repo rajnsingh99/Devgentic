@@ -72,20 +72,20 @@ struct AttachedFilePillView: View {
                     .frame(width: 28, height: 28)
 
                 Image(systemName: displayIconName)
-                    .font(.system(size: 11, weight: displayIconFontWeight))
+                    .font(.system(.caption, weight: displayIconFontWeight))
                     .foregroundColor(theme.accentColor)
             }
 
             // File Name and Type
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
                 Text(fileItem.fileTypeDescription.uppercased())
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold)) // Fixed size: intentional (badge/chip text)
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
             }
@@ -96,7 +96,7 @@ struct AttachedFilePillView: View {
             // Hidden by default, becomes prominent on pill hover, red on button hover
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (small remove icon)
                     .foregroundColor(isRemoveButtonHovering ? .white : theme.secondaryText)
                     .frame(width: 20, height: 20)
                     .background(

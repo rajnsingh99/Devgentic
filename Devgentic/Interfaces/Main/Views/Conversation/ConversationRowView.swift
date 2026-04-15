@@ -28,7 +28,7 @@ struct ConversationRowView: View {
         HStack(spacing: 0) {
             if isSelectionMode {
                 Image(systemName: isBatchSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 14))
+                    .font(.system(.body))
                     .foregroundColor(isBatchSelected ? theme.accentColor : theme.secondaryText.opacity(0.4))
                     .padding(.leading, 8)
                     .transition(.move(edge: .leading).combined(with: .opacity))
@@ -38,13 +38,13 @@ struct ConversationRowView: View {
                 // Modern renaming field that blends in
                 TextField("", text: $editableName, prompt: Text("Name this chat").foregroundColor(.secondary.opacity(0.7)))
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(theme.fontSubheadline.weight(.medium))
                     .focused(isRenameFieldFocused)
                     .onSubmit(onCommitRename)
                     .padding(.vertical, 8)
                     .padding(.horizontal, 10)
                     .background(theme.surfaceOverlayStrong)
-                    .cornerRadius(6)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
             } else {
                 standardContentView
             }
@@ -111,7 +111,7 @@ struct ConversationRowView: View {
                     }
 
                     Text(conversation.displayTitle)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(theme.fontSubheadline.weight(.medium))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
@@ -122,14 +122,14 @@ struct ConversationRowView: View {
                         StreamingPulseIndicator()
                     } else {
                         Text(conversation.relativeTimestamp)
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                             .foregroundColor(theme.tertiaryText)
                     }
                 }
 
                 // Last message preview
                 Text(conversation.lastMessageSnippet)
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
                     .padding(.leading, (conversation.backendType != nil && conversation.backendType != .none) ? 11 : 0)

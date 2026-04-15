@@ -62,19 +62,32 @@ final class RecentConversationSource: MorningBriefSource, Sendable {
             return []
         }
 
-        // Fetch recent conversations
+        // Fetch recent conversations (over-fetch to account for workflow filtering)
         var convDescriptor = FetchDescriptor<ConversationSD>(
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
-        convDescriptor.fetchLimit = self.maxConversations
+        convDescriptor.fetchLimit = self.maxConversations * 3
 
         guard let conversations = try? context.fetch(convDescriptor), !conversations.isEmpty else {
             return []
         }
 
+        // Filter to agent/bot profiles only — exclude workflow conversations
+        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        let typeMap = Dictionary(profiles.map { ($0.id, $0.profileType) }, uniquingKeysWith: { first, _ in first })
+        let allowedTypes: Set<ProfileType> = [.bot, .agent]
+
+        let filtered = conversations.filter { conv in
+            guard let profileID = conv.backendEntityId,
+                  let profileType = typeMap[profileID] else {
+                return true // No linked profile — include (legacy/orphan chats)
+            }
+            return allowedTypes.contains(profileType)
+        }.prefix(self.maxConversations)
+
         var results: [ConversationContext] = []
 
-        for conversationSD in conversations {
+        for conversationSD in filtered {
             let conv = conversationSD.toStruct()
             guard !conv.messages.isEmpty else { continue }
 

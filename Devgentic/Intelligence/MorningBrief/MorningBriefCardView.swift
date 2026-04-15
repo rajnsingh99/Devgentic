@@ -35,10 +35,10 @@ struct MorningBriefCardView: View {
                             .spring(response: 0.45, dampingFraction: 0.8).delay(Double(index) * 0.12),
                             value: appearedInsights.contains(insight.id)
                         )
-                        .onAppear {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.12) {
-                                appearedInsights.insert(insight.id)
-                            }
+                        .task {
+                            let delay = Double(index) * 0.12
+                            try? await Task.sleep(for: .seconds(delay))
+                            appearedInsights.insert(insight.id)
                         }
                 }
             }
@@ -50,23 +50,24 @@ struct MorningBriefCardView: View {
                 systemFooter(status)
                     .opacity(showSystem ? 1 : 0)
                     .animation(.easeOut(duration: 0.3), value: showSystem)
-                    .onAppear {
+                    .task {
                         let delay = Double(brief.insights.count) * 0.12 + 0.25
-                        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                            showSystem = true
-                        }
+                        try? await Task.sleep(for: .seconds(delay))
+                        showSystem = true
                     }
             }
 
             Spacer().frame(height: 16)
         }
-        .background(theme.controlBackground)
+        // MARK: Liquid Glass — card with glass treatment
+        .background(.clear)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
-        )
-        .shadow(color: theme.primaryText.opacity(0.05), radius: 24, x: 0, y: 12)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        // --- To revert to pre-Liquid-Glass, comment out the 3 lines above and uncomment below ---
+        // .background(theme.controlBackground)
+        // .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        // .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(theme.surfaceOverlayStrong, lineWidth: 1))
+        // .shadow(color: theme.primaryText.opacity(0.05), radius: 24, x: 0, y: 12)
         .frame(maxWidth: 500)
     }
 
@@ -88,7 +89,7 @@ struct MorningBriefCardView: View {
                         .frame(width: 32, height: 32)
 
                     Image(systemName: "sunrise.fill")
-                        .font(.system(size: 14))
+                        .font(.system(.body))
                         .foregroundStyle(
                             LinearGradient(
                                 colors: [.orange, .yellow],
@@ -97,14 +98,15 @@ struct MorningBriefCardView: View {
                             )
                         )
                 }
+                .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Morning Brief")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .font(.system(size: 14, weight: .semibold, design: .rounded)) // Fixed size: intentional (rounded design heading)
                         .foregroundColor(theme.primaryText)
 
                     Text(brief.generatedAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.tertiaryText)
                 }
             }
@@ -114,9 +116,10 @@ struct MorningBriefCardView: View {
             // AI badge
             HStack(spacing: 4) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 9))
+                    .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
+                    .accessibilityHidden(true)
                 Text("AI Generated")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold)) // Fixed size: intentional (badge/chip text)
             }
             .foregroundColor(theme.accentColor)
             .padding(.horizontal, 7)
@@ -126,7 +129,7 @@ struct MorningBriefCardView: View {
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(.caption2, weight: .bold))
                     .foregroundColor(theme.tertiaryText)
                     .frame(width: 22, height: 22)
                     .background(theme.secondaryBackground)
@@ -134,6 +137,7 @@ struct MorningBriefCardView: View {
             }
             .buttonStyle(.plain)
             .help("Dismiss brief")
+            .accessibilityLabel("Dismiss brief")
             .padding(.leading, 6)
         }
         .padding(.horizontal, 16)
@@ -152,31 +156,32 @@ struct MorningBriefCardView: View {
                 HStack(alignment: .center, spacing: 8) {
                     // Numbered indicator
                     Text("\(index + 1)")
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .font(.system(size: 10, weight: .bold, design: .rounded)) // Fixed size: intentional (rounded design badge)
                         .foregroundColor(theme.accentColor)
                         .frame(width: 20, height: 20)
                         .background(theme.accentColor.opacity(0.12))
                         .clipShape(Circle())
 
                     Text(insight.title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
                     Spacer()
 
                     Text(insight.timeAgo)
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.tertiaryText)
 
                     Image(systemName: "arrow.right")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge/chip text)
                         .foregroundColor(theme.tertiaryText)
+                        .accessibilityHidden(true)
                 }
 
                 // AI Summary
                 Text(insight.summary)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -186,12 +191,13 @@ struct MorningBriefCardView: View {
                 if let suggestion = insight.suggestion {
                     HStack(alignment: .top, spacing: 6) {
                         Image(systemName: "lightbulb.fill")
-                            .font(.system(size: 9))
-                            .foregroundColor(.orange)
+                            .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
+                            .foregroundColor(theme.accentColor)
                             .padding(.top, 2)
+                            .accessibilityHidden(true)
 
                         Text(suggestion)
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                             .foregroundColor(theme.primaryText.opacity(0.85))
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
@@ -201,10 +207,10 @@ struct MorningBriefCardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.orange.opacity(0.06))
+                            .fill(theme.accentColor.opacity(0.06))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.orange.opacity(0.12), lineWidth: 0.5)
+                                    .stroke(theme.accentColor.opacity(0.12), lineWidth: 0.5)
                             )
                     )
                     .padding(.leading, 28)
@@ -229,10 +235,11 @@ struct MorningBriefCardView: View {
     private func systemFooter(_ status: String) -> some View {
         HStack(spacing: 5) {
             Image(systemName: "desktopcomputer")
-                .font(.system(size: 9))
+                .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
+                .accessibilityHidden(true)
 
             Text(status)
-                .font(.system(size: 10))
+                .font(.system(.caption2))
                 .lineLimit(1)
         }
         .foregroundColor(theme.tertiaryText)
@@ -252,7 +259,7 @@ struct MorningBriefLoadingView: View {
         HStack(spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(Color.orange.opacity(pulseOpacity))
+                    .fill(theme.warningColor.opacity(pulseOpacity))
                     .frame(width: 36, height: 36)
                     .animation(
                         .easeInOut(duration: 1.2).repeatForever(autoreverses: true),
@@ -260,7 +267,7 @@ struct MorningBriefLoadingView: View {
                     )
 
                 Image(systemName: "sunrise.fill")
-                    .font(.system(size: 14))
+                    .font(.system(.body))
                     .foregroundStyle(
                         LinearGradient(
                             colors: [.orange, .yellow],
@@ -269,14 +276,15 @@ struct MorningBriefLoadingView: View {
                         )
                     )
             }
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Preparing your brief")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .font(.system(size: 13, weight: .medium, design: .rounded)) // Fixed size: intentional (rounded design heading)
                     .foregroundColor(theme.primaryText)
 
                 Text("Analysing recent conversations...")
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.tertiaryText)
             }
 

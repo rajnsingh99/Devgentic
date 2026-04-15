@@ -82,13 +82,13 @@ struct FileSuggestionView: View {
             }
         }
         .frame(maxHeight: maxListHeight)
-        .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadiusValue)
-                .stroke(theme.dividerColor, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+        // MARK: Liquid Glass
+        .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
+        // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
+        // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
+        // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
         .transition(.opacity.combined(with: .move(edge: .bottom)))
         .onAppear {
             logger.debug("FileSuggestionView appeared with \(files.count) files for query '\(suggestionQuery)'.")
@@ -104,13 +104,13 @@ struct FileSuggestionView: View {
             .foregroundColor(theme.secondaryText)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadiusValue)
-                    .stroke(theme.dividerColor, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+            // MARK: Liquid Glass
+            .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
+            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+            // .background(VisualEffectBlur(material: .sidebar).opacity(0.9))
+            // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
+            // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
+            // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
             .transition(.opacity)
     }
 
@@ -133,10 +133,11 @@ struct FileSuggestionView: View {
                 .frame(width: iconSize, height: iconSize)
                 .foregroundColor(theme.secondaryText)
                 .frame(width: 20, alignment: .center)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(highlightedText(for: fileItem.name, query: suggestionQuery))
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
@@ -160,7 +161,7 @@ struct FileSuggestionView: View {
                 }
             }
         )
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .animation(.easeInOut(duration: 0.1), value: isSelected)
         .animation(.easeInOut(duration: 0.1), value: isFocused)
     }
@@ -179,7 +180,7 @@ struct FileSuggestionView: View {
         var attributedString = AttributedString(fileName)
         attributedString.foregroundColor = theme.primaryText
         if !query.isEmpty, let range = attributedString.range(of: query, options: .caseInsensitive) {
-            attributedString[range].font = .system(size: 13, weight: .bold)
+            attributedString[range].font = .system(.subheadline, weight: .bold)
         }
         return attributedString
     }

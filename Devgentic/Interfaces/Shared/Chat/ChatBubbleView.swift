@@ -20,12 +20,13 @@ struct ChatBubbleView: View {
 
     // MARK: - State
     @State private var applyMinHeight: Bool = false
-    @State private var resolvedIsAgentProfile: Bool = false
     @State private var didCopyFeedback: Bool = false
 
-    // MARK: - Identity Logic (P0 Fix: cached profile lookup)
+    // MARK: - Identity Logic
+    /// Uses the persisted profileType (tagged at creation) instead of runtime profile store lookups.
+    /// Falls back to checking thoughts for legacy messages without profileType.
     private var isAgentic: Bool {
-        !message.thoughts.isEmpty || resolvedIsAgentProfile
+        message.profileType == .agent || (!message.thoughts.isEmpty && message.profileType == nil)
     }
 
     private var contentToDisplay: MessageContent {
@@ -63,9 +64,6 @@ struct ChatBubbleView: View {
             }
         }
         .onAppear {
-            // P0 Fix: Resolve profile type once on appear, not every render
-            resolvedIsAgentProfile = resolveIsAgentProfile()
-
             if message.isStreaming && !applyMinHeight {
                 withAnimation(.easeInOut(duration: 0.3)) {
                     applyMinHeight = true
@@ -87,23 +85,12 @@ struct ChatBubbleView: View {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         didCopyFeedback = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
             didCopyFeedback = false
         }
     }
 
-    // MARK: - Profile Resolution (runs once on appear)
-    private func resolveIsAgentProfile() -> Bool {
-        guard let response = message.agentResponse,
-              let variant = response.variants.indices.contains(response.selectedVariantIndex)
-                ? response.variants[response.selectedVariantIndex] : nil,
-              let entityId = variant.backendEntityId else {
-            return false
-        }
-
-        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
-        return profiles.first(where: { $0.id == entityId })?.profileType == .agent
-    }
 }
 
 // MARK: - Bot: Sparkle Loading View
@@ -116,11 +103,11 @@ struct SparkleLoadingView: View {
         HStack(spacing: 8) {
             Image(systemName: "sparkles")
                 .symbolEffect(.bounce.up.byLayer, options: .repeating, value: isAnimating)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(.body, weight: .semibold))
                 .foregroundColor(theme.accentColor)
 
             Text(headline ?? "Generating...")
-                .font(.system(size: 14, weight: .medium))
+                .font(theme.fontBody.weight(.medium))
                 .foregroundColor(theme.secondaryText)
         }
         .padding(.vertical, 4)
@@ -156,17 +143,17 @@ struct ToolChipView: View {
         Button(action: { showPopover.toggle() }) {
             HStack(spacing: 6) {
                 Image(systemName: iconForTool(artifact.toolName))
-                    .font(.system(size: 10))
+                    .font(.system(.caption2))
                     .foregroundColor(artifact.isSuccess ? theme.secondaryText : theme.warningColor)
-                Text(artifact.toolName).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(theme.primaryText)
+                Text(artifact.toolName).font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundColor(theme.primaryText) // Fixed size: monospaced
                 if !artifact.isSuccess {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)).foregroundColor(theme.warningColor)
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)).foregroundColor(theme.warningColor) // Fixed size: intentional (badge/chip text)
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(theme.surfaceOverlay)
-            .cornerRadius(6)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(artifact.isSuccess ? theme.successColor.opacity(0.2) : theme.warningColor.opacity(0.3), lineWidth: 1))
         }
         .buttonStyle(.plain)
@@ -183,7 +170,7 @@ struct ToolChipView: View {
                 .background(theme.controlBackground)
                 Divider()
                 ScrollView {
-                    Text(artifact.output).font(.system(size: 11, design: .monospaced)).padding().frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    Text(artifact.output).font(.system(size: 11, design: .monospaced)).padding().frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) // Fixed size: monospaced
                 }
             }
             .frame(width: 400, height: 300)
@@ -216,16 +203,16 @@ struct PermissionRequestView: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: isResolved ? "checkmark.shield.fill" : "lock.shield.fill")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.warningColor.opacity(0.7))
 
             Text(confirmation.toolName)
-                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .font(.system(size: 12, weight: .semibold, design: .monospaced)) // Fixed size: monospaced
                 .foregroundColor(theme.secondaryText)
 
             if !confirmation.params.isEmpty && confirmation.params != "{}" {
                 Text(confirmation.params)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(theme.tertiaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -234,7 +221,7 @@ struct PermissionRequestView: View {
             Spacer()
 
             Text(isResolved ? "Resolved" : "Awaiting...")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(.caption2, weight: .medium))
                 .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.warningColor.opacity(0.6))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
@@ -268,11 +255,11 @@ struct ClarificationRequestView: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: isResolved ? "bubble.left.fill" : "questionmark.bubble.fill")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundColor(isResolved ? theme.streamingIndicator.opacity(0.7) : theme.streamingIndicator.opacity(0.7))
 
             Text(clarification.question)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.secondaryText)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -280,7 +267,7 @@ struct ClarificationRequestView: View {
             Spacer()
 
             Text(isResolved ? "Answered" : "Awaiting...")
-                .font(.system(size: 10, weight: .medium))
+                .font(.system(.caption2, weight: .medium))
                 .foregroundColor(isResolved ? theme.streamingIndicator.opacity(0.7) : theme.streamingIndicator.opacity(0.6))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
@@ -316,17 +303,17 @@ struct PlanReviewRequestView: View {
             // Header row
             HStack(spacing: 8) {
                 Image(systemName: isResolved ? "checkmark.circle.fill" : "checklist.checked")
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.streamingIndicator.opacity(0.7))
 
                 Text("Plan: \(planReview.subtasks.count) subtask\(planReview.subtasks.count == 1 ? "" : "s")")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundColor(theme.secondaryText)
 
                 Spacer()
 
                 Text(isResolved ? "Approved" : "Awaiting...")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(.caption2, weight: .medium))
                     .foregroundColor(isResolved ? theme.successColor.opacity(0.7) : theme.streamingIndicator.opacity(0.6))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
@@ -340,12 +327,12 @@ struct PlanReviewRequestView: View {
             ForEach(Array(planReview.subtasks.enumerated()), id: \.element.id) { index, subtask in
                 HStack(spacing: 6) {
                     Text("\(index + 1).")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                         .foregroundColor(theme.tertiaryText)
                         .frame(width: 18, alignment: .trailing)
 
                     Text(subtask.description)
-                        .font(.system(size: 11))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -415,7 +402,7 @@ struct AgentMessageActionsView: View {
                     ChatActionButton(action: {
                         chatHistoryViewModel.copyMessageContentToClipboard(message: message)
                         withAnimation(.easeInOut) { didCopy = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { withAnimation(.easeInOut) { didCopy = false } }
+                        Task { @MainActor in try? await Task.sleep(for: .seconds(2)); withAnimation(.easeInOut) { didCopy = false } }
                     }) {
                         Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                     }
@@ -468,7 +455,7 @@ struct AgentMessageActionsView: View {
                 .foregroundColor(isSpeaking ? theme.accentColor : theme.secondaryText)
                 .accessibilityLabel(isSpeaking ? "Stop reading aloud" : "Read response aloud")
             }
-            .font(.system(size: 12))
+            .font(.system(.caption))
             .padding(.top, theme.spacingSmall)
         }
         .sheet(isPresented: $showReportInspector) {

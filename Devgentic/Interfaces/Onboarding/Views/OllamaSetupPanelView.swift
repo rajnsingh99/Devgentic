@@ -8,7 +8,7 @@
 //import SwiftUI
 //
 //struct OllamaSetupPanelView: View {
-//    @ObservedObject var viewModel: AgentOnboardingViewModel
+//    @Bindable var viewModel: AgentOnboardingViewModel
 //
 //    var body: some View {
 //        VStack(alignment: .leading, spacing: 20) {

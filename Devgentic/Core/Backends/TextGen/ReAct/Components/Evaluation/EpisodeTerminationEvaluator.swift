@@ -23,7 +23,16 @@ struct EpisodeTerminationEvaluator: TerminationEvaluating {
             return .maxIterationsReached
         }
         
-        // Condition 2: Agent signaled task completion by returning a null/empty tool
+        // Condition 2: Parse pipeline exhausted all stages without extracting tool calls.
+        // The model likely intended to call tools but produced unparseable output.
+        // Route to .suspectedFormatFailure so the executor injects a corrective alert
+        // and retries, rather than silently terminating with a confident response.
+        if step.toolCalls.isEmpty && step.parseExhausted {
+            logger.warning("🔄 Parse pipeline exhausted — not treating as genuine completion.")
+            return .suspectedFormatFailure(reasoning: step.reasoning)
+        }
+
+        // Condition 3: Agent signaled task completion by returning a null/empty tool
         if step.toolCalls.isEmpty {
             logger.info("🛑 Null-Termination Triggered. Agent signaled task completion.")
             return .completed(finalThought: step.reasoning)

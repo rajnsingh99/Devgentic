@@ -165,6 +165,7 @@ private func executeSingleTool(
         // Resolve the timeline chip: send = success, skip/timeout = failure
         continuation.yield(.toolOutput(ToolOutput(
             toolName: toolName,
+            params: paramsString,
             output: didAnswer ? "User answered: \(answerText)" : "Skipped by user.",
             isSuccess: didAnswer
         )))
@@ -176,7 +177,7 @@ private func executeSingleTool(
             result: "User Response: \(answerText)",
             summary: "User Response: \(answerText)",
             isSuccess: didAnswer,
-            params: "n/a",
+            params: question,
             output: "User Response: \(answerText)",
             artifacts: []
         )
@@ -197,7 +198,7 @@ private func executeSingleTool(
         let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID)
         if !approved {
             let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
-            continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: denialResult.llmObservation, isSuccess: false)))
+            continuation.yield(.toolOutput(ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)))
             return ToolObservation(
                 stepId: currentIteration,
                 toolCallId: toolCallId,
@@ -222,7 +223,7 @@ private func executeSingleTool(
     )
 
     // Emit UI Output
-    continuation.yield(.toolOutput(ToolOutput(toolName: toolName, output: result.llmObservation, isSuccess: result.isSuccess)))
+    continuation.yield(.toolOutput(ToolOutput(toolName: toolName, params: paramsString, output: result.llmObservation, isSuccess: result.isSuccess)))
 
     // Emit media artifacts if produced
     for artifact in result.artifacts {
@@ -261,21 +262,92 @@ private func executeSingleTool(
 // MARK: - Testable Helpers
 
 func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
-    var unique: [PendingToolCall] = []
+    // Phase 1: Exact dedup — remove calls with identical name + serialized params.
+    var exactUnique: [PendingToolCall] = []
     var seen = Set<String>()
     for tool in toolCalls {
         let signature = "\(tool.name)|\(serializeToolParams(tool.arguments))"
         if !seen.contains(signature) {
             seen.insert(signature)
-            unique.append(tool)
+            exactUnique.append(tool)
         }
     }
-    return unique
+
+    // Phase 2: Semantic dedup — for destructive/write operations targeting the same
+    // file path, keep only the LAST call (most recent intent). This prevents the
+    // model from flooding the HITL queue with near-identical write_file calls that
+    // differ only in whitespace (e.g., "\nHello" vs "\nHello\n" vs "Hello\n").
+    let destructiveTools: Set<String> = ["write_file", "delete_file", "move_file", "copy_file"]
+    var pathLastIndex: [String: Int] = [:]  // "tool|path" → last index in exactUnique
+
+    for (index, tool) in exactUnique.enumerated() {
+        guard destructiveTools.contains(tool.name) else { continue }
+        let normalized = normalizePathArguments(tool.arguments)
+        guard let pathValue = normalized["path"] ?? normalized["source"] ?? normalized["destination"],
+              case .string(let path) = pathValue else { continue }
+        let key = "\(tool.name)|\(path)"
+        pathLastIndex[key] = index
+    }
+
+    // If no destructive duplicates found, skip Phase 2
+    guard !pathLastIndex.isEmpty else { return exactUnique }
+
+    // Build set of indices to drop (earlier calls to same tool+path)
+    var indicesToKeep = Set(exactUnique.indices)
+    var seenPaths: [String: [Int]] = [:]
+
+    for (index, tool) in exactUnique.enumerated() {
+        guard destructiveTools.contains(tool.name) else { continue }
+        let normalized = normalizePathArguments(tool.arguments)
+        guard let pathValue = normalized["path"] ?? normalized["source"] ?? normalized["destination"],
+              case .string(let path) = pathValue else { continue }
+        let key = "\(tool.name)|\(path)"
+        seenPaths[key, default: []].append(index)
+    }
+
+    for (_, indices) in seenPaths where indices.count > 1 {
+        // Keep only the last one, drop earlier calls
+        for i in indices.dropLast() {
+            indicesToKeep.remove(i)
+        }
+    }
+
+    if indicesToKeep.count < exactUnique.count {
+        let dropped = exactUnique.count - indicesToKeep.count
+        logger.info("🔀 Semantic dedup: collapsed \(dropped) earlier write(s) to same path, keeping last intent.")
+    }
+
+    return exactUnique.enumerated().compactMap { indicesToKeep.contains($0.offset) ? $0.element : nil }
 }
 
 func serializeToolParams(_ params: [String: JSONValue]) -> String {
-    if let data = try? JSONEncoder().encode(params), let str = String(data: data, encoding: .utf8) { return str }
+    let normalized = normalizePathArguments(params)
+    if let data = try? JSONEncoder().encode(normalized), let str = String(data: data, encoding: .utf8) { return str }
     return "{}"
+}
+
+/// Normalizes filesystem path arguments to canonical form so that
+/// `/Users/alice/Acme/` and `/Users/alice/Acme` produce identical
+/// signatures for deduplication and circuit-breaker fingerprinting.
+///
+/// Handles: trailing slashes, tilde expansion, `.` / `..` segments, doubled slashes.
+func normalizePathArguments(_ params: [String: JSONValue]) -> [String: JSONValue] {
+    params.mapValues { value in
+        guard case .string(let str) = value,
+              str.hasPrefix("/") || str.hasPrefix("~") || str.hasPrefix("./") else {
+            return value
+        }
+        var normalized = str
+        // Strip trailing slash (unless root "/")
+        if normalized.count > 1 && normalized.hasSuffix("/") {
+            normalized = String(normalized.dropLast())
+        }
+        // Expand tilde
+        normalized = (normalized as NSString).expandingTildeInPath
+        // Resolve . and .. components, collapse double slashes
+        normalized = (normalized as NSString).standardizingPath
+        return .string(normalized)
+    }
 }
 
 struct AskUserInterceptor {

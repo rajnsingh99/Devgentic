@@ -6,50 +6,39 @@
 //
 
 import SwiftUI
-import Combine
 import os
 
-@MainActor
-class PromptLibraryViewModel: ObservableObject {
+@Observable @MainActor
+class PromptLibraryViewModel {
     // MARK: - Dependencies
     private let promptService = PromptService.shared
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptLibraryViewModel")
-    private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptLibraryViewModel")
 
-    // MARK: - Published State Properties for UI
-    @Published var searchText: String = ""
-    @Published var filteredPrompts: [DevPrompt] = []
-    @Published var selectedPrompt: DevPrompt? = nil
-    @Published var showingCreateOrEditPromptSheet: Bool = false
-    
-    @Published var selectedCategory: String = "All"
-    
+    // MARK: - State Properties for UI
+    var searchText: String = "" {
+        didSet { filterPrompts(searchText: searchText, category: selectedCategory) }
+    }
+    var filteredPrompts: [DevPrompt] = []
+    var selectedPrompt: DevPrompt? = nil
+    var showingCreateOrEditPromptSheet: Bool = false
+
+    var selectedCategory: String = "All" {
+        didSet { filterPrompts(searchText: searchText, category: selectedCategory) }
+    }
+
     // Properties for the create/edit sheet
-    @Published var promptToEdit: DevPrompt?
-    @Published var editablePromptTitle: String = ""
-    @Published var editablePromptText: String = ""
-    @Published var editablePromptCategory: String = "General"
-    @Published var editablePromptTagsString: String = ""
+    var promptToEdit: DevPrompt?
+    var editablePromptTitle: String = ""
+    var editablePromptText: String = ""
+    var editablePromptCategory: String = "General"
+    var editablePromptTagsString: String = ""
 
     // MARK: - Initialization
     init() {
         logger.info("PromptLibraryViewModel initialized.")
-        
-        // Subscribe to changes in searchText, selectedCategory, and the main prompt list
-        // Note: search debounce is handled at the SidebarSearchBarView level (300ms)
-        Publishers.CombineLatest3(
-            $searchText,
-            $selectedCategory,
-            promptService.$prompts
-        )
-        // FIX: Pass the values from the publisher directly into the filter function.
-        .sink { [weak self] (searchText, category, prompts) in
-            self?.logger.debug("Filtering triggered. Search text: '\(searchText)', Category: '\(category)', Total prompts: \(prompts.count)")
-            // Pass the received values directly to the filtering function
-            self?.filterPrompts(searchText: searchText, category: category)
-        }
-        .store(in: &cancellables)
-        // Note: CombineLatest3 handles the initial emission — no manual call needed.
+
+        // Initial filter
+        filterPrompts(searchText: searchText, category: selectedCategory)
     }
 
     // MARK: - Filtering Logic

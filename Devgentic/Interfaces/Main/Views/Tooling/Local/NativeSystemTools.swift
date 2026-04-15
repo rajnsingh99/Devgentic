@@ -6,7 +6,7 @@
 //  Updated for Robust JSON Parsing & Schema Injection.
 //
 
-import Foundation
+@preconcurrency import Foundation
 import AppKit
 
 // MARK: - Terminal Tool
@@ -282,8 +282,7 @@ struct GetSystemStatsTool: DevgenticTool {
         
         var memInfo = ""
         if result == KERN_SUCCESS {
-            let pageSize = vm_kernel_page_size
-            let free = Double(vmStats.free_count) * Double(pageSize) / 1024 / 1024 / 1024
+            let free = Double(vmStats.free_count) * Double(vm_page_size) / 1024 / 1024 / 1024
             memInfo = String(format: ", Free Memory: %.2f GB", free)
         }
         

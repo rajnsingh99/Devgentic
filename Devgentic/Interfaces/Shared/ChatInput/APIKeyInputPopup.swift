@@ -53,6 +53,7 @@ struct APIKeyInputPopup: View {
         .buttonStyle(.plain)
         .padding()
         .help("Close")
+        .accessibilityLabel("Close")
     }
 
     private var headerView: some View {

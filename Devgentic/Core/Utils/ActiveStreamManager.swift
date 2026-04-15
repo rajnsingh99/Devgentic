@@ -26,9 +26,9 @@ final class ActiveStreamManager {
 
     // MARK: - Dependencies
     @ObservationIgnored private var activeTasks: [UUID: Task<Void, Never>] = [:]
-    @ObservationIgnored private var permissionResolvedObserver: Any?
-    @ObservationIgnored private var clarificationResolvedObserver: Any?
-    @ObservationIgnored private var planReviewResolvedObserver: Any?
+    @ObservationIgnored nonisolated(unsafe) private var permissionResolvedObserver: Any?
+    @ObservationIgnored nonisolated(unsafe) private var clarificationResolvedObserver: Any?
+    @ObservationIgnored nonisolated(unsafe) private var planReviewResolvedObserver: Any?
 
     @ObservationIgnored private let persistenceService: ChatPersistenceProtocol
     @ObservationIgnored private let fileProcessorService: FileProcessorService
@@ -72,9 +72,9 @@ final class ActiveStreamManager {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
             MainActor.assumeIsolated {
-                guard let self,
-                      let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
+                guard let self, let conversationID else { return }
                 // Find the active stream for this conversation and clear its pending confirmation
                 for (_, message) in self.activeStreams where message.conversationId == conversationID {
                     if case .toolConfirmation = message.pendingInteraction {
@@ -92,9 +92,9 @@ final class ActiveStreamManager {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
             MainActor.assumeIsolated {
-                guard let self,
-                      let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
+                guard let self, let conversationID else { return }
                 // Find the active stream for this conversation and clear its pending clarification
                 for (_, message) in self.activeStreams where message.conversationId == conversationID {
                     if case .clarification = message.pendingInteraction {
@@ -112,9 +112,9 @@ final class ActiveStreamManager {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
             MainActor.assumeIsolated {
-                guard let self,
-                      let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID else { return }
+                guard let self, let conversationID else { return }
                 // Find the active stream for this conversation and clear its pending plan review
                 for (_, message) in self.activeStreams where message.conversationId == conversationID {
                     if case .planReview = message.pendingInteraction {
@@ -136,6 +136,7 @@ final class ActiveStreamManager {
         history: [ChatMessage],
         files: [FileSystemItem],
         updating existingMessage: ChatMessage? = nil,
+        workflowExecutionState: WorkflowExecutionState? = nil,
         onComplete: @escaping () -> Void
     ) -> ChatMessage {
         
@@ -153,6 +154,7 @@ final class ActiveStreamManager {
                 isStreaming: true,
                 backendEntityId: config.profile.id
             )
+            agentMessage.profileType = config.profile.profileType
             logger.notice("🚀 [STREAM_START] Created message \(agentMessage.id.uuidString) for conversation \(conversationID.uuidString).")
         }
         
@@ -204,40 +206,110 @@ final class ActiveStreamManager {
                     try Task.checkCancellation()
 
                     switch event {
-                    case .thought(let thoughtText, let id):
+                    case .thought(let thoughtText, let id, let sourceNodeID):
                         // 1. Handle Thoughts (Update Headline + Append to History using structured ID)
                         agentMessage.thinkingHeadline = thoughtText
                         agentMessage.agentState = .thinking(.reasoning)
-                        agentMessage.timelineEvents.append(.thought(id: id, text: thoughtText))
-                        
-                    case .toolCall(let name, let params):
+                        let thoughtEvent = TimelineEvent.thought(id: id, text: thoughtText)
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            wfState.appendNodeTimelineEvent(thoughtEvent, for: nodeID)
+                            logger.debug("[WF_ROUTE] Thought → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
+                        } else {
+                            agentMessage.appendTimelineEvent(thoughtEvent)
+                        }
+
+                    case .toolCall(let name, let params, let sourceNodeID):
                         agentMessage.thinkingHeadline = "Using tool: \(name)"
                         agentMessage.agentState = .acting(.tool(name: name))
-                        agentMessage.timelineEvents.append(.toolExecution(
+                        let toolEvent = TimelineEvent.toolExecution(
                             ToolExecutionData(id: UUID(), name: name, params: params, output: nil, isSuccess: nil, isExecuting: true)
-                        ))
+                        )
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            wfState.appendNodeTimelineEvent(toolEvent, for: nodeID)
+                            logger.debug("[WF_ROUTE] ToolCall '\(name)' → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
+                        } else {
+                            agentMessage.appendTimelineEvent(toolEvent)
+                        }
                         
                     // [HITL] Phase 3: Handle Permission Requests
-                    case .requestConfirmation(let toolName, let params, let operationID):
-                        agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
-                        agentMessage.agentState = .interaction(.permission(toolName: toolName))
-                        agentMessage.pendingInteraction = .toolConfirmation(
-                            PendingToolConfirmation(id: operationID, toolName: toolName, params: params)
-                        )
+                    case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            // Workflow mode — route to WorkflowInteractionPanel
+                            let runningNode = wfState.nodeResults.first(where: { $0.nodeID == nodeID })
+                            let recentTimeline = Array(wfState.nodeTimelines[nodeID]?.suffix(3) ?? [])
+                            let request = WorkflowInteractionRequest(
+                                id: operationID,
+                                nodeID: nodeID,
+                                nodeName: runningNode?.profileName ?? toolName,
+                                nodeKind: .gate(GateNodeConfig(prompt: toolName, options: [], timeout: nil)),
+                                requestType: .toolConfirmation(toolName: toolName, params: params),
+                                timestamp: Date(),
+                                recentTimeline: recentTimeline,
+                                upstreamNodeNames: []
+                            )
+                            wfState.addPendingInteraction(request)
+                            agentMessage.thinkingHeadline = "[\(runningNode?.profileName ?? "Node")] Waiting for approval..."
+                            agentMessage.agentState = .interaction(.permission(toolName: toolName))
+                        } else {
+                            // Normal agent mode
+                            agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
+                            agentMessage.agentState = .interaction(.permission(toolName: toolName))
+                            agentMessage.pendingInteraction = .toolConfirmation(
+                                PendingToolConfirmation(id: operationID, toolName: toolName, params: params)
+                            )
+                        }
 
                     // [ASK_USER] Handle Clarification Requests
-                    case .requestClarification(let question, let operationID):
-                        agentMessage.thinkingHeadline = "Asking you a question..."
-                        agentMessage.agentState = .interaction(.clarification)
-                        agentMessage.pendingInteraction = .clarification(
-                            PendingClarification(id: operationID, question: question)
-                        )
+                    case .requestClarification(let question, let operationID, let sourceNodeID):
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            // Workflow mode — route to WorkflowInteractionPanel
+                            let runningNode = wfState.nodeResults.first(where: { $0.nodeID == nodeID })
+                            let recentTimeline = Array(wfState.nodeTimelines[nodeID]?.suffix(3) ?? [])
+                            let request = WorkflowInteractionRequest(
+                                id: operationID,
+                                nodeID: nodeID,
+                                nodeName: runningNode?.profileName ?? "Agent",
+                                nodeKind: .profile(profileID: UUID(), profileType: .agent),
+                                requestType: .askUser(question: question),
+                                timestamp: Date(),
+                                recentTimeline: recentTimeline,
+                                upstreamNodeNames: []
+                            )
+                            wfState.addPendingInteraction(request)
+                            agentMessage.thinkingHeadline = "[\(runningNode?.profileName ?? "Node")] Asking you a question..."
+                            agentMessage.agentState = .interaction(.clarification)
+                        } else {
+                            // Normal agent mode
+                            agentMessage.thinkingHeadline = "Asking you a question..."
+                            agentMessage.agentState = .interaction(.clarification)
+                            agentMessage.pendingInteraction = .clarification(
+                                PendingClarification(id: operationID, question: question)
+                            )
+                        }
 
-                    case .toolOutput(let output):
+                    case .toolOutput(let output, let sourceNodeID):
                         // 2. Handle Artifacts (File lists, etc.)
                         agentMessage.agentState = .thinking(.reflecting)
                         agentMessage.thinkingHeadline = "Processed \(output.toolName)"
 
+                        // Route tool output completion to per-node timeline or message timeline
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            // Update the matching executing event in the node timeline
+                            if let idx = wfState.nodeTimelines[nodeID]?.lastIndex(where: {
+                                if case .toolExecution(let data) = $0 {
+                                    return data.name == output.toolName && data.isExecuting
+                                }
+                                return false
+                            }) {
+                                if case .toolExecution(var data) = wfState.nodeTimelines[nodeID]![idx] {
+                                    data.output = output.output
+                                    data.isSuccess = output.isSuccess
+                                    data.isExecuting = false
+                                    wfState.nodeTimelines[nodeID]![idx] = .toolExecution(data)
+                                    logger.debug("[WF_ROUTE] ToolOutput '\(output.toolName)' → node [\(nodeID)] success=\(output.isSuccess)")
+                                }
+                            }
+                        } else
                         // Update timeline event
                         if let index = agentMessage.timelineEvents.lastIndex(where: {
                             if case .toolExecution(let data) = $0 {
@@ -301,29 +373,44 @@ final class ActiveStreamManager {
                         logger.error("Stream Error Event: \(errorMsg)")
 
                     // MARK: Workflow Orchestration Events
-                    case .workflowNodeStarted(_, let profileName, let idx, let total):
+                    case .workflowNodeStarted(let nodeID, let profileName, let idx, let total):
                         agentMessage.thinkingHeadline = "Running \(profileName) (\(idx)/\(total))..."
                         agentMessage.agentState = .acting(.subtask(current: idx, total: total))
+                        logger.info("[WF_EVENT] NodeStarted: '\(profileName)' [\(nodeID)] (\(idx)/\(total))")
+                        workflowExecutionState?.handleNodeStarted(nodeID: nodeID, profileName: profileName, index: idx, total: total)
 
-                    case .workflowNodeCompleted(_, let profileName, let summary):
+                    case .workflowNodeCompleted(let nodeID, let profileName, let summary):
                         agentMessage.thinkingHeadline = "\(profileName) completed"
                         let completedId = UUID()
-                        agentMessage.timelineEvents.append(.thought(id: completedId, text: "✅ \(profileName): \(summary)"))
+                        agentMessage.appendTimelineEvent(.thought(id: completedId, text: "✅ \(profileName): \(summary)"))
+                        logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(String(summary.prefix(200)))")
+                        workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary)
 
-                    case .workflowNodeFailed(_, let profileName, let error):
+                    case .workflowNodeFailed(let nodeID, let profileName, let error):
                         agentMessage.thinkingHeadline = "\(profileName) failed"
                         let failedId = UUID()
-                        agentMessage.timelineEvents.append(.thought(id: failedId, text: "❌ \(profileName): \(error)"))
+                        agentMessage.appendTimelineEvent(.thought(id: failedId, text: "❌ \(profileName): \(error)"))
+                        logger.info("[WF_EVENT] NodeFailed: '\(profileName)' [\(nodeID)] error=\(error)")
+                        workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error)
 
                     case .workflowProgress(let completed, let total):
                         agentMessage.thinkingHeadline = "Workflow progress: \(completed)/\(total)"
+                        logger.info("[WF_EVENT] Progress: \(completed)/\(total)")
+                        workflowExecutionState?.handleProgress(completed: completed, total: total)
+
+                    case .workflowLoopIteration(let nodeID, let profileName, let iteration, let maxIterations):
+                        agentMessage.thinkingHeadline = "Loop \(profileName): iteration \(iteration)/\(maxIterations)"
+                        let iterationId = UUID()
+                        agentMessage.appendTimelineEvent(.thought(id: iterationId, text: "🔄 \(profileName): iteration \(iteration)/\(maxIterations)"))
+                        logger.info("[WF_EVENT] LoopIteration: '\(profileName)' [\(nodeID)] \(iteration)/\(maxIterations)")
+                        workflowExecutionState?.handleLoopIteration(nodeID: nodeID, profileName: profileName, iteration: iteration, maxIterations: maxIterations)
 
                     // MARK: Capability Events (Planning, Self-Reflection, Delegation)
 
                     case .planGenerated(let count):
                         agentMessage.thinkingHeadline = "Planned \(count) subtask\(count == 1 ? "" : "s")"
                         agentMessage.agentState = .thinking(.planning)
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .planGenerated, detail: "Planned \(count) subtask\(count == 1 ? "" : "s")"
                         ))
 
@@ -333,7 +420,7 @@ final class ActiveStreamManager {
                         agentMessage.pendingInteraction = .planReview(
                             PendingPlanReview(id: operationID, subtasks: subtasks)
                         )
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .planReviewRequested,
                             detail: "Plan with \(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s") awaiting approval"
                         ))
@@ -341,27 +428,27 @@ final class ActiveStreamManager {
                     case .subtaskStarted(let index, let total, let description):
                         agentMessage.thinkingHeadline = "Subtask \(index)/\(total): \(description)"
                         agentMessage.agentState = .acting(.subtask(current: index, total: total))
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .subtaskStarted, detail: "Subtask \(index)/\(total): \(description)"
                         ))
 
                     case .subtaskCompleted(let index, let total, let summary):
                         agentMessage.thinkingHeadline = "Subtask \(index)/\(total) complete"
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .subtaskCompleted, detail: "Subtask \(index)/\(total): \(summary)"
                         ))
 
                     case .reflectionTrialStarted(let trial, let maxTrials):
                         agentMessage.thinkingHeadline = "Attempt \(trial)/\(maxTrials)"
                         agentMessage.agentState = .thinking(.reasoning)
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .reflectionTrialStarted, detail: "Trial \(trial) of \(maxTrials)"
                         ))
 
                     case .reflectionEvaluating(let trial):
                         agentMessage.thinkingHeadline = "Evaluating attempt \(trial)..."
                         agentMessage.agentState = .thinking(.reflecting)
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .reflectionEvaluating, detail: "Evaluating trial \(trial)"
                         ))
 
@@ -369,29 +456,45 @@ final class ActiveStreamManager {
                         let shortCritique = String(critique.prefix(80))
                         agentMessage.thinkingHeadline = "Retrying with feedback (\(trial + 1))..."
                         agentMessage.agentState = .thinking(.reflecting)
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .reflectionRetrying, detail: "Retry: \(shortCritique)"
                         ))
 
                     case .reflectionAccepted(let trial):
                         agentMessage.thinkingHeadline = "Result accepted (attempt \(trial))"
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .reflectionAccepted, detail: "Accepted on trial \(trial)"
                         ))
 
-                    case .delegationStarted(let name, let task):
+                    case .delegationStarted(let task):
                         let shortTask = String(task.prefix(60))
-                        agentMessage.thinkingHeadline = "Delegating to \(name)..."
+                        agentMessage.thinkingHeadline = "Delegating: \(shortTask)…"
                         agentMessage.agentState = .acting(.tool(name: "call_agent"))
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
-                            id: UUID(), kind: .delegationStarted, detail: "\(name): \(shortTask)"
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
+                            id: UUID(), kind: .delegationStarted, detail: shortTask
                         ))
 
-                    case .delegationCompleted(let name, let summary):
+                    case .delegationCompleted(let summary):
                         let shortSummary = String(summary.prefix(80))
-                        agentMessage.thinkingHeadline = "\(name) completed"
-                        agentMessage.timelineEvents.append(.capabilityMilestone(
-                            id: UUID(), kind: .delegationCompleted, detail: "\(name): \(shortSummary)"
+                        agentMessage.thinkingHeadline = "Agent completed"
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
+                            id: UUID(), kind: .delegationCompleted, detail: shortSummary
+                        ))
+
+                    // MARK: History Compaction Events
+                    case .compactionStarted(let turns, let checkpoint):
+                        agentMessage.thinkingHeadline = "Compacting history (\(turns) turns)..."
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
+                            id: UUID(), kind: .compactionStarted,
+                            detail: "Compacting \(turns) turns into checkpoint #\(checkpoint)"
+                        ))
+
+                    case .compactionCompleted(let turns, let preview):
+                        let shortPreview = String(preview.prefix(100))
+                        agentMessage.thinkingHeadline = nil
+                        agentMessage.appendTimelineEvent(.capabilityMilestone(
+                            id: UUID(), kind: .compactionCompleted,
+                            detail: "History compacted \u{2014} \(turns) turns summarized: \(shortPreview)"
                         ))
 
                     // MARK: Multimodal Events
@@ -399,12 +502,16 @@ final class ActiveStreamManager {
                         agentMessage.thinkingHeadline = "\(toolName): \(status) (\(Int(percent * 100))%)"
 
                     case .artifactProduced(let artifact):
-                        agentMessage.timelineEvents.append(.mediaGeneration(
+                        agentMessage.appendTimelineEvent(.mediaGeneration(
                             id: UUID(),
                             toolName: artifact.label ?? artifact.kind.rawValue,
                             artifact: artifact,
                             isComplete: true
                         ))
+
+                    // MARK: Token Usage
+                    case .tokenUsage(let usage):
+                        agentMessage.tokenUsage = usage
                     }
                 }
                 
@@ -414,13 +521,24 @@ final class ActiveStreamManager {
                 }
                 
                 logger.info("🏁 [STREAM_LOOP_END] Finished processing stream for message \(agentMessage.id.uuidString).")
+
+                // Forward final output to workflow execution state
+                if let wfState = workflowExecutionState {
+                    let finalText = agentMessage.content.textContent ?? ""
+                    logger.info("[WF_EVENT] FinalOutput: \(finalText.count) chars, nodeTimelines=\(wfState.nodeTimelines.count) nodes tracked")
+                    logger.debug("[WF_EVENT] FinalOutput preview: \(String(finalText.prefix(300)))")
+                    wfState.handleFinalOutput(finalText)
+                }
+
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
-                
+
             } catch is CancellationError {
                 logger.info("🛑 [STREAM_CANCELLED] Stream for message \(agentMessage.id.uuidString) was cancelled.")
+                workflowExecutionState?.handleError("Cancelled")
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
             } catch {
                 logger.error("❌ [STREAM_ERROR] Streaming failed for message \(agentMessage.id.uuidString): \(error.localizedDescription)")
+                workflowExecutionState?.handleError(error.localizedDescription)
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
             }
             
@@ -453,6 +571,10 @@ final class ActiveStreamManager {
                 agentMessage.agentResponse?.variants[0].content = newContent
             }
         }
+        // Invalidate cached markdown blocks so the next body evaluation reparses
+        // with the updated content. This works with getOrCreateMarkdownBlocks() to
+        // provide O(1) no-ops when body re-evaluates without new content.
+        agentMessage.invalidateMarkdownCache()
     }
     
     public func cancelStream(for messageId: UUID) {
@@ -486,8 +608,25 @@ final class ActiveStreamManager {
                 message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = errorContent
             }
         } else {
-            if let currentAgentContent = message.currentAgentContent {
+            if let currentAgentContent = message.currentAgentContent,
+               let text = currentAgentContent.textContent,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Stream produced content before finishing/cancellation — keep it
                 message.content = currentAgentContent
+            } else {
+                // No meaningful content was streamed (cancelled before response,
+                // or response was empty whitespace). Show a placeholder so the
+                // user knows the operation was stopped rather than seeing an
+                // empty bubble with action buttons as if it completed normally.
+                let placeholderContent = MessageContent.markdownText("*Operation was stopped before a response could be generated.*")
+                message.content = placeholderContent
+                // Also update the agentResponse variant to stay in sync —
+                // without this, `currentAgentContent` could return a stale
+                // empty variant that the UI reads instead of message.content.
+                if let agentResponse = message.agentResponse,
+                   agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
+                    message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = placeholderContent
+                }
             }
         }
         

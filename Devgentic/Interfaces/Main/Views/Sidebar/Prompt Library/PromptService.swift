@@ -7,12 +7,12 @@
 
 // Stores/PromptService.swift
 import Foundation
-import Combine
 import os
 
 /// Manages the collection of prompts, handling persistence and providing access.
-@MainActor // Ensures changes to @Published properties are on the main thread
-class PromptService: ObservableObject {
+@MainActor
+@Observable
+class PromptService {
     static let shared = PromptService()
 
     // Use the new PromptStoreProtocol
@@ -20,7 +20,7 @@ class PromptService: ObservableObject {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptService")
 
     /// The collection of all prompts, published for UI updates.
-    @Published var prompts: [DevPrompt] = []
+    var prompts: [DevPrompt] = []
 
     // Update the initializer to accept a PromptStoreProtocol
     private init(promptStore: PromptStoreProtocol = PromptStore.shared) {

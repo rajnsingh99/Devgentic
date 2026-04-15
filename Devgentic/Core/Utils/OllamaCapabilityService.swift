@@ -10,8 +10,8 @@ import Foundation
 import os
 
 /// Service to determine which local Ollama models support Agentic capabilities (Tools).
-class OllamaCapabilityService {
-    
+final class OllamaCapabilityService: @unchecked Sendable {
+
     static let shared = OllamaCapabilityService()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaCapabilityService")
     

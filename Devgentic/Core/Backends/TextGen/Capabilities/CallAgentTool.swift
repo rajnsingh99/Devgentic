@@ -2,11 +2,9 @@
 //  CallAgentTool.swift
 //  Devgentic
 //
-//  Agent delegation tool: allows an LLM to delegate subtasks to inline sub-agents.
-//  Sub-agents are leaf nodes — they run plain ReAct with their own model/tools/instructions
-//  but have NO capabilities and NO call_agent tool, so they cannot delegate further.
-//
-//  Created during the Agent Capabilities Migration.
+//  Agent delegation tool: allows an LLM to spawn focused sub-agents for subtasks.
+//  Spawned agents inherit the parent's LLM and tools (minus call_agent) and run
+//  a plain ReAct loop. They are leaf nodes — they cannot delegate further.
 //
 
 import Foundation
@@ -14,107 +12,126 @@ import OSLog
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CallAgentTool")
 
+// MARK: - Concurrency Limiter
+
+/// Actor-based semaphore that enforces a maximum number of concurrent spawned agents.
+private actor ConcurrencyLimiter {
+    private let maxConcurrent: Int
+    private var active: Int = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(maxConcurrent: Int) {
+        self.maxConcurrent = maxConcurrent
+    }
+
+    func acquire() async {
+        if active < maxConcurrent {
+            active += 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if let waiter = waiters.first {
+            waiters.removeFirst()
+            waiter.resume()
+        } else {
+            active -= 1
+        }
+    }
+}
+
+// MARK: - CallAgentTool
+
 enum CallAgentTool {
 
     /// Creates the `call_agent` AgentTool for injection into the parent agent's tool set.
     ///
     /// - Parameters:
-    ///   - config: Delegation configuration containing inline sub-agent definitions.
-    ///   - agentConnect: The AgentConnect instance for model initialization and tool resolution.
+    ///   - config: Delegation configuration (concurrency + iteration limits).
+    ///   - parentModel: The parent agent's LLM provider (reused by spawned agents).
+    ///   - parentTools: The parent agent's resolved tools (already excludes call_agent).
+    ///   - parentGeneratorStrategy: The parent's cognitive generator strategy.
+    ///   - parentRateLimitCategory: The parent's rate limit category.
+    ///   - parentProvider: The parent's API provider (for trace context).
     ///   - conversationID: Current conversation for context propagation.
     static func create(
         config: AgentDelegationConfig,
-        agentConnect: AgentConnect,
+        parentModel: any LLMProvider,
+        parentTools: [AgentTool],
+        parentGeneratorStrategy: any CognitiveGenerator,
+        parentRateLimitKey: String,
+        parentRateLimitCategory: RateLimitCategory,
+        parentProvider: ApiProvider,
         conversationID: UUID
     ) -> AgentTool {
 
-        // Build dynamic description listing available sub-agents
-        let subAgentList = config.subAgents
-            .map { "- \"\($0.name)\": \($0.purpose)" }
-            .joined(separator: "\n")
+        let limiter = ConcurrencyLimiter(maxConcurrent: config.maxConcurrentAgents)
+        let maxIterations = config.maxIterationsPerAgent
 
         let parameters = ToolParameters(
             type: "object",
             properties: [
-                "agent_name": ToolParameterProperty(
-                    type: "string",
-                    description: "Name of the sub-agent to delegate to. Must be one of the available sub-agents listed in this tool's description.",
-                    items: nil
-                ),
                 "task": ToolParameterProperty(
                     type: "string",
-                    description: "Clear description of the subtask to delegate to the sub-agent.",
+                    description: "Clear, self-contained description of the subtask to delegate to a spawned agent. The agent will have access to the same tools as you.",
                     items: nil
                 )
             ],
-            required: ["agent_name", "task"]
+            required: ["task"]
         )
 
         return AgentTool(
             name: "call_agent",
             description: """
-                Delegate a subtask to a specialist sub-agent. Use when the task requires \
-                specialist expertise you don't have.
-                Available sub-agents:
-                \(subAgentList.isEmpty ? "(none configured)" : subAgentList)
+                Spawn a focused sub-agent to work on a subtask in parallel. The spawned agent \
+                uses the same model and tools as you but operates independently with its own \
+                reasoning loop. Use this to parallelize work or isolate complex subtasks. \
+                Each agent receives only the task description — provide all necessary context in it.
                 """,
             parameters: parameters,
             requiresConfirmation: false,
             run: { data in
                 // Parse arguments
                 guard let args = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let agentName = args["agent_name"] as? String,
                       let taskDescription = args["task"] as? String
                 else {
-                    return (output: "Error: call_agent requires 'agent_name' (string) and 'task' (string) parameters.", artifacts: [])
+                    return (output: "Error: call_agent requires a 'task' (string) parameter.", artifacts: [])
                 }
 
-                // Find the sub-agent by name (case-insensitive)
-                guard let subAgent = config.subAgents.first(where: {
-                    $0.name.lowercased() == agentName.lowercased()
-                }) else {
-                    let available = config.subAgents.map(\.name).joined(separator: ", ")
-                    return (
-                        output: "Sub-agent '\(agentName)' not found. Available sub-agents: \(available.isEmpty ? "(none configured)" : available)",
-                        artifacts: []
-                    )
-                }
+                logger.info("Spawning agent for task: \(taskDescription.prefix(100))")
 
-                logger.info("Delegating to sub-agent '\(subAgent.name)': \(taskDescription.prefix(100))")
+                // Enforce concurrency limit
+                await limiter.acquire()
+                defer { Task { await limiter.release() } }
 
                 do {
-                    // Initialize sub-agent's model
-                    let model = try await agentConnect.initializeModel(config: subAgent.llmConfig, isBotFlow: false)
-
-                    // Resolve sub-agent's tools (NO system tools, NO call_agent — leaf node)
-                    let resolvedTools = await agentConnect.resolveSubAgentTools(
-                        profileTools: subAgent.tools,
-                        conversationID: conversationID
+                    // Build minimal AgentInput — no history, no instructions.
+                    // Conservative memory budget: spawned agents are short-lived leaf nodes.
+                    let traceContext = TraceContext(subAgentName: "spawned-agent", provider: parentProvider)
+                    let spawnedMemory = WindowedLinearMemory(
+                        config: MemoryBudgetConfig.derive(contextWindow: 8192, tier: .small, maxIterations: maxIterations)
                     )
-
-                    // Resolve cognitive generator for the sub-agent's dialect
-                    let generator = agentConnect.resolveCognitiveGeneratorForSubAgent(
-                        llmConfig: subAgent.llmConfig,
-                        tools: resolvedTools
-                    )
-
-                    // Build AgentInput — minimal, no memory, no history
-                    let traceContext = TraceContext(subAgentName: subAgent.name, provider: subAgent.llmConfig.apiProvider)
                     let input = AgentInput(
                         userInput: taskDescription,
                         chatHistory: [],
                         conversationID: conversationID,
-                        tools: resolvedTools,
+                        tools: parentTools,
                         longTermMemory: StaticGroundingMemory(ragContext: ""),
-                        generatorStrategy: generator,
-                        rateLimitCategory: agentConnect.rateLimitCategory(for: subAgent.llmConfig.apiProvider),
-                        instructions: subAgent.instructions,
+                        generatorStrategy: parentGeneratorStrategy,
+                        workingMemory: spawnedMemory,
+                        rateLimitKey: parentRateLimitKey,
+                        rateLimitCategory: parentRateLimitCategory,
+                        instructions: nil,
                         traceContext: traceContext
                     )
 
                     // Run plain ReAct — NO capabilities, NO call_agent
-                    let executor = ReActAgentExecutor(maxIterations: subAgent.maxIterations)
-                    let stream = executor.execute(model: model, input: input) { _ in }
+                    let executor = ReActAgentExecutor(maxIterations: maxIterations)
+                    let stream = executor.execute(model: parentModel, input: input) { _ in }
 
                     var output = ""
                     var artifacts: [MediaArtifact] = []
@@ -130,15 +147,15 @@ enum CallAgentTool {
                         }
                     }
 
-                    logger.info("Sub-agent '\(subAgent.name)' completed. Output length: \(output.count)")
+                    logger.info("Spawned agent completed. Output length: \(output.count)")
 
                     return (
-                        output: output.isEmpty ? "Sub-agent completed the task but produced no output." : output,
+                        output: output.isEmpty ? "Agent completed the task but produced no output." : output,
                         artifacts: artifacts
                     )
                 } catch {
-                    logger.error("Sub-agent '\(subAgent.name)' failed: \(error.localizedDescription)")
-                    return (output: "Sub-agent '\(subAgent.name)' failed: \(error.localizedDescription)", artifacts: [])
+                    logger.error("Spawned agent failed: \(error.localizedDescription)")
+                    return (output: "Spawned agent failed: \(error.localizedDescription)", artifacts: [])
                 }
             }
         )

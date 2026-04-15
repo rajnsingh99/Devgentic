@@ -17,24 +17,24 @@ import os
 ///
 /// Architecture mirrors `MorningBriefService` with the same gate-check,
 /// gather, IC-merge, parse/save flow.
-@MainActor
-final class UserPersonalService: ObservableObject {
+@Observable @MainActor
+final class UserPersonalService {
 
     static let shared = UserPersonalService()
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "UserPersonalService")
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "UserPersonalService")
 
     /// Registry of all available profile sources. Add new sources here.
-    private(set) var sourceRegistry: [any UserPersonalSource] = []
+    @ObservationIgnored private(set) var sourceRegistry: [any UserPersonalSource] = []
 
     /// The current profile markdown content.
-    @Published var profileMarkdown: String = ""
+    var profileMarkdown: String = ""
 
     /// Whether an analysis is currently in progress.
-    @Published var isAnalyzing: Bool = false
+    var isAnalyzing: Bool = false
 
     /// When the profile was last updated by IC analysis.
-    @Published var lastUpdated: Date?
+    var lastUpdated: Date?
 
     /// Minimum time gap between analyses (2 hours).
     private let minimumAnalysisGap: TimeInterval = 2 * 60 * 60

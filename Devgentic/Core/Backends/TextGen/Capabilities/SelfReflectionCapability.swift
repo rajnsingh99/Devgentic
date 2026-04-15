@@ -66,11 +66,15 @@ struct SelfReflectionCapability: ExecutorCapability, Sendable {
 
 actor SelfReflectionExecutorWrapper: Executor {
 
-    nonisolated let architecture: AgentArchitecture = .reflexion
+    nonisolated let executorLabel: String = "Reflexion → ReAct"
     nonisolated private let innerExecutor: any Executor
     nonisolated private let config: SelfReflectionConfig
 
     init(innerExecutor: any Executor, config: SelfReflectionConfig) {
+        // SelfReflectionCapability seeds prior trial output into workingMemory.
+        // This only works with executors that consume AgentInput.workingMemory.
+        assert(innerExecutor is ReActAgentExecutor,
+               "SelfReflectionCapability requires an inner executor that consumes workingMemory (e.g., ReActAgentExecutor).")
         self.innerExecutor = innerExecutor
         self.config = config
     }
@@ -84,8 +88,12 @@ actor SelfReflectionExecutorWrapper: Executor {
         return AsyncThrowingStream(AgentStreamEvent.self) { continuation in
             let task = Task {
 
-                var sessionState: SessionGraph = input.activeState
-                    ?? SessionGraphStore.shared.getActiveState(for: input.conversationID)
+                var sessionState: SessionGraph
+                if let activeState = input.activeState {
+                    sessionState = activeState
+                } else {
+                    sessionState = await SessionGraphStore.shared.getActiveState(for: input.conversationID)
+                }
                 var accumulatedConstraints = Set(sessionState.negativeConstraints)
 
                 do {
@@ -99,7 +107,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                     // --- Start Episode ---
                     sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
                     sessionState.workingMemory.removeValue(forKey: "current_focus")
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     var bestOutput: String = ""
                     var bestTrial: Int = 0
@@ -136,6 +144,22 @@ actor SelfReflectionExecutorWrapper: Executor {
                             trialInstructions = input.instructions ?? ""
                         }
 
+                        // Seed working memory with the prior trial's output so the
+                        // next trial doesn't re-discover what was already found.
+                        // Combined with the critique in instructions, the model gets
+                        // both "what went wrong" and "what was already discovered".
+                        var seededMemory = input.workingMemory
+                        if trial > 1 && !bestOutput.isEmpty {
+                            seededMemory.recordObservation(
+                                stepId: 0,
+                                toolCallId: "trial_\(trial - 1)",
+                                toolName: "prior_trial",
+                                result: "[Trial \(trial - 1) output]: \(bestOutput)",
+                                artifacts: []
+                            )
+                            logger.info("Seeded trial \(trial) working memory with trial \(trial - 1) output (\(bestOutput.count) chars).")
+                        }
+
                         let trialInput = AgentInput(
                             userInput: input.userInput,
                             chatHistory: input.chatHistory,
@@ -150,11 +174,17 @@ actor SelfReflectionExecutorWrapper: Executor {
                             ),
                             recentHistory: input.recentHistory,
                             generatorStrategy: input.generatorStrategy,
-                            workingMemory: input.workingMemory,
+                            workingMemory: seededMemory,
+                            rateLimitKey: input.rateLimitKey,
                             rateLimitCategory: input.rateLimitCategory,
                             instructions: trialInstructions.isEmpty ? nil : trialInstructions,
+                            skillManifests: input.skillManifests,
+                            skillFolderPath: input.skillFolderPath,
                             retryPolicy: input.retryPolicy,
                             errorRecovery: input.errorRecovery,
+                            responseSynthesisEnabled: input.responseSynthesisEnabled,
+                            nativeHistoryTurns: input.nativeHistoryTurns,
+                            suppressEpisodeManagement: true,
                             traceContext: trialSpan
                         )
 
@@ -164,21 +194,54 @@ actor SelfReflectionExecutorWrapper: Executor {
                         var trialOutput = ""
                         var trialSummary = ExecutionSummary(originalGoal: input.userInput)
 
-                        for try await event in stream {
-                            switch event {
-                            case .content(let text):
-                                trialOutput += text
-                            case .thought(let thought):
-                                continuation.yield(.thought("[Trial \(trial)] \(thought)"))
-                            case .artifactProduced(let artifact):
-                                continuation.yield(.artifactProduced(artifact))
-                            default:
-                                break
+                        do {
+                            for try await event in stream {
+                                switch event {
+                                case .content(let text):
+                                    trialOutput += text
+                                case .thought(let thought, _, _):
+                                    continuation.yield(.thought("[Trial \(trial)] \(thought)"))
+                                case .toolCall(let name, let params, _):
+                                    // [G11] Forward tool invocation events so UI shows tool activity during trials.
+                                    continuation.yield(.toolCall(name: name, params: params))
+                                case .toolOutput(let output, _):
+                                    // [G1] Capture tool results so ReflectionEvaluator has full context.
+                                    trialSummary.record(
+                                        toolCallId: output.id.uuidString,
+                                        toolName: output.toolName,
+                                        params: output.params,
+                                        output: output.output,
+                                        isSuccess: output.isSuccess
+                                    )
+                                    continuation.yield(.toolOutput(output))
+                                case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
+                                    // [G8] Forward HITL permission requests — user must see these during trials.
+                                    continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
+                                case .requestClarification(let question, let operationID, let sourceNodeID):
+                                    // [G8] Forward HITL clarification requests.
+                                    continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID))
+                                case .error(let msg):
+                                    continuation.yield(.error(msg))
+                                case .artifactProduced(let artifact):
+                                    continuation.yield(.artifactProduced(artifact))
+                                case .tokenUsage(let usage):
+                                    continuation.yield(.tokenUsage(usage))
+                                default:
+                                    break
+                                }
                             }
+                            trialSummary.finalAgentThought = trialOutput
+                            trialSummary.markComplete()
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            // [G10] Trial-level error recovery: log failure, mark summary,
+                            // and continue to next trial instead of aborting the entire loop.
+                            logger.error("Trial \(trial) stream error: \(error.localizedDescription)")
+                            continuation.yield(.thought("[Trial \(trial)] Error: \(error.localizedDescription)"))
+                            trialSummary.finalAgentThought = trialOutput
+                            trialSummary.markComplete(failureReason: error.localizedDescription)
                         }
-
-                        trialSummary.finalAgentThought = trialOutput
-                        trialSummary.markComplete()
 
                         bestOutput = trialOutput
                         bestTrial = trial
@@ -192,7 +255,8 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                         continuation.yield(.thought("Reflecting on trial \(trial) outcome..."))
 
-                        await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
+                        await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+                        try Task.checkCancellation()  // [G7] Catch cancellation before reflection LLM call
 
                         let reflection = try await reflectionEvaluator.evaluate(
                             summary: trialSummary,
@@ -220,6 +284,9 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                         accumulatedConstraints.insert("Trial \(trial) failed: \(reflection.critique)")
 
+                        // [G6] Backpressure before starting the next trial to avoid 429s
+                        await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
+
                     } // End trial loop
 
                     // =====================================================================
@@ -228,7 +295,7 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                     let exitStatus = bestOutput.isEmpty ? "FAILED" : "COMPLETED"
                     sessionState.closeActiveEpisode(status: exitStatus, outcome: bestOutput)
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     onTraceUpdate(AgentTraceLog(
                         traceID: executionTrace.traceID,
@@ -246,7 +313,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                     logger.notice("Self-reflection cancelled.")
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
                     sessionState.cancelActiveEpisode()
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
                     continuation.finish()
                 } catch {

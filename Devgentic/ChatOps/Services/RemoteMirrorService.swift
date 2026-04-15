@@ -124,7 +124,7 @@ final class RemoteMirrorService: ActiveStreamMirrorDelegate {
                     guard let self, let message else { return }
                     guard self.observedMessageIDs.contains(messageID) else { return }
                     await self.evaluateMessageState(message, conversationID: conversationID)
-                    observe()
+                    self.observeMessage(message)
                 }
             }
         }

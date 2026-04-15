@@ -8,15 +8,68 @@
 
 import Foundation
 
+// MARK: - Prompt Structural Wrapping
+
+/// Controls how structural sections are wrapped in the prompt.
+/// XML for native/Mistral models (they handle XML naturally).
+/// Markdown for local models using Markdown or JSON response formats (avoids format conflict).
+enum PromptWrapping: Sendable {
+    case xml       // <tag>\ncontent\n</tag>
+    case markdown  // ## Tag\ncontent
+
+    /// Wraps content in a named structural section.
+    func section(_ tag: String, content: String) -> String {
+        switch self {
+        case .xml:
+            return "<\(tag)>\n\(content)\n</\(tag)>"
+        case .markdown:
+            let heading = tag.split(separator: "_").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+            return "## \(heading)\n\(content)"
+        }
+    }
+
+    /// Wraps a labeled field within a section (e.g. clarification sub-tags).
+    func field(_ label: String, value: String) -> String {
+        switch self {
+        case .xml:
+            return "<\(label)>\(value)</\(label)>"
+        case .markdown:
+            let heading = label.prefix(1).uppercased() + label.dropFirst()
+            return "**\(heading):** \(value)"
+        }
+    }
+}
+
+// MARK: - Prompt Layer Configuration
+
+/// Controls which optional layers are included in the unified prompt builder.
+/// Agent mode includes all layers; Workflow mode strips RAG, episodic memory, and user profile.
+struct PromptLayerConfig: Sendable {
+    let includeRAG: Bool
+    let includeEpisodicMemory: Bool
+    let includeUserProfile: Bool
+
+    static let agent = PromptLayerConfig(includeRAG: true, includeEpisodicMemory: true, includeUserProfile: true)
+    static let workflow = PromptLayerConfig(includeRAG: false, includeEpisodicMemory: false, includeUserProfile: false)
+    static let bot = PromptLayerConfig(includeRAG: true, includeEpisodicMemory: true, includeUserProfile: false)
+}
+
+// MARK: - Cognitive Generator Protocol
+
 /// Defines a strategy for generating structured cognitive steps from an LLM.
 /// Strategies operate on the SemanticContext payload and compile provider-specific message arrays.
 protocol CognitiveGenerator: Sendable {
     /// The adapter responsible for formatting tools for this specific generator.
     var toolAdapter: ToolSchemaAdapter { get }
-    
+
+    /// Dialect-specific formatting rules for the execution contract.
+    /// Non-native generators return their rules (XML, Markdown, JSON schemas).
+    /// Native generators return nil (tools are sent via API, not embedded in prompt).
+    var dialectRules: String? { get }
+
     /// Compiles the raw execution state into a provider-specific message array.
     func compileMessages(from context: SemanticContext) -> [[String: String]]
-    
+
     /// Executes the cognitive step and returns a structured response.
     func generateCognitiveStep(
         model: any LLMProvider,
@@ -26,104 +79,197 @@ protocol CognitiveGenerator: Sendable {
 
     /// Multimodal message compilation. Default wraps legacy compileMessages().
     func compileProviderMessages(from context: SemanticContext) -> [ProviderMessage]
+
+    /// Returns the dialect-appropriate prompt trigger for the given iteration.
+    /// Default returns the universal base. Override to append dialect-specific suffixes.
+    func promptTrigger(for iteration: Int) -> String
+
+    /// Structural wrapping style for prompt sections.
+    /// XML for native/Mistral models; Markdown for local JSON/Markdown dialects.
+    var promptWrapping: PromptWrapping { get }
 }
 
 extension CognitiveGenerator {
+    /// Default: no dialect rules (native generators).
+    var dialectRules: String? { nil }
+
+    /// Default wrapping: XML tags (suitable for frontier models and XML dialect).
+    var promptWrapping: PromptWrapping { .xml }
+
     func compileProviderMessages(from context: SemanticContext) -> [ProviderMessage] {
         compileMessages(from: context).map { ProviderMessage(legacy: $0) }
     }
+
+    /// Default trigger: clean universal base used by XML & Markdown generators.
+    /// Generators needing dialect-specific suffixes (Native, JSON, MLX) override this.
+    func promptTrigger(for iteration: Int) -> String {
+        iteration == 1
+            ? "Analyze the task and working memory, then decide your next action."
+            : "New observations have been recorded in working memory. Decide your next action."
+    }
 }
 
-// MARK: - Default Builder Extension
+// MARK: - Unified Prompt Builder
 
-extension CognitiveGenerator {
-    
-    /// Constructs the standard "Sandwich" prompt with injected data from the SemanticContext.
-    func buildStandardMessages(
+/// Standalone prompt builder shared by all execution modes (Agent, Workflow, Bot).
+/// Extracted from the CognitiveGenerator protocol extension so that ChatExecutor
+/// (which is an Executor, not a CognitiveGenerator) can also call it.
+enum PromptBuilder {
+
+    /// Constructs the unified prompt with attention-optimized layer ordering.
+    ///
+    /// Layer order (system message): WHAT → HOW → WHO → CONTEXT → CAPABILITIES → GUARDRAILS
+    /// Optimized for small-model primacy/recency attention patterns. Critical layers (task, format rules)
+    /// sit at peak primacy; working memory sits at peak recency in the user message.
+    ///
+    /// - Parameters:
+    ///   - context: The semantic context with all execution state.
+    ///   - dialectRules: Format contract for non-native generators (nil for native API flows).
+    ///   - isNativeFlow: True when tools are sent via API (Claude, GPT, Gemini).
+    ///   - layerConfig: Controls which optional layers are included (`.agent`, `.workflow`, `.bot`).
+    ///   - userMessagePrefix: Optional prefix for the user message (workflow `<input>` block, bot query, etc.).
+    static func buildStandardMessages(
         context: SemanticContext,
         dialectRules: String? = nil,
-        isNativeFlow: Bool = false
+        isNativeFlow: Bool = false,
+        layerConfig: PromptLayerConfig = .agent,
+        userMessagePrefix: String? = nil,
+        wrapping: PromptWrapping = .xml
     ) -> [[String: String]] {
-        
-        // Tier 1: System Rules & Static RAG
-        var systemContent = """
-        <system_instructions>
-        \(context.instructions ?? "You are a helpful AI assistant.")
-        </system_instructions>
-        
-        <semantic_context>
-        \(context.longTermMemory.getStaticGrounding())
+
+        // =====================================================================
+        // SYSTEM MESSAGE — Attention-Optimized Layer Order
+        // =====================================================================
+
+        var systemContent = ""
+
+        // Layer 1: WHAT — Task (peak primacy)
+        let task = context.taskDescription ?? context.originalQuery
+        systemContent += wrapping.section("task", content: task)
+
+        // Layer 2: WHAT — Clarification (task refinement from ask_user)
+        if let clarification = context.latestClarification {
+            let body = wrapping.field("query", value: clarification.query) + "\n" + wrapping.field("response", value: clarification.response)
+            systemContent += "\n\n" + wrapping.section("clarification", content: body)
+        }
+
+        // Layer 3: HOW — Execution contract + tool definitions (non-native only)
+        if !isNativeFlow, let rules = dialectRules {
+            let toolsMarkdown = context.availableTools.map { $0.toMarkdownDefinition() }.joined(separator: "\n\n")
+            systemContent += "\n\n" + wrapping.section("execution_contract", content: rules)
+            systemContent += "\n\n" + wrapping.section("available_tools", content: toolsMarkdown)
+        }
+
+        // Layer 4: WHO — System instructions (user persona)
+        systemContent += "\n\n" + wrapping.section("system_instructions", content: context.instructions ?? "You are a helpful AI assistant.")
+
+        // Layer 5: CONTEXT — Environment facts (always full)
+        let envContent = """
         - OS: \(context.environmentFacts.osVersion)
         - Shell: \(context.environmentFacts.shellType)
         - User: \(context.environmentFacts.userName)
         - Date: \(context.environmentFacts.currentDate)
-        </semantic_context>
         """
+        systemContent += "\n\n" + wrapping.section("environment", content: envContent)
 
-        // Inject User Personal profile if available
-        if let profile = context.userProfile, !profile.isEmpty {
-            systemContent += """
-            \n
-            <user_profile>
-            \(profile)
-            </user_profile>
-            """
+        // Layer 6: CONTEXT — RAG grounding (configurable)
+        if layerConfig.includeRAG {
+            let grounding = context.longTermMemory.getStaticGrounding()
+            if !grounding.isEmpty {
+                systemContent += "\n\n" + wrapping.section("semantic_context", content: grounding)
+            }
         }
 
-        // Inject the specific Dialect Rules (Execution Contract) if not native
-        if !isNativeFlow, let rules = dialectRules {
-            let toolsMarkdown = context.availableTools.map { $0.toMarkdownDefinition() }.joined(separator: "\n\n")
-            systemContent += """
-            \n
-            <execution_contract>
-            \(rules)
-            </execution_contract>
-            
-            <available_tools>
-            \(toolsMarkdown)
-            </available_tools>
-            """
-        } else if isNativeFlow {
-            // Native models still need a strict capability fence
-            systemContent += "\n<capability_fence>\nYou have \(context.availableTools.count) native tools. Do not hallucinate capabilities outside this list.</capability_fence>"
+        // Layer 7: CONTEXT — Episodic memory (configurable, 3-path injection)
+        if layerConfig.includeEpisodicMemory {
+            if let history = context.recentHistory, !history.isEmpty,
+               context.nativeHistoryTurns == nil, !isNativeFlow {
+                // Non-native: embed in system prompt (episodic XML has its own tags)
+                systemContent += "\n\n\(history)"
+            }
         }
-        
-        // Append Dynamic Guardrails
+
+        // Layer 8: CONTEXT — User personal profile (configurable)
+        if layerConfig.includeUserProfile {
+            if let profile = context.userProfile, !profile.isEmpty {
+                systemContent += "\n\n" + wrapping.section("user_profile", content: profile)
+            }
+        }
+
+        // Layer 9: CAPABILITIES — Skill discovery
+        if let skills = context.skillManifests, !skills.isEmpty {
+            let skillBody = "You have access to specialized skills. When a task matches a skill's description,\nuse the `load_skill` tool to load its full instructions before proceeding.\n" + skills.map { "- \($0.name): \($0.description)" }.joined(separator: "\n")
+            systemContent += "\n\n" + wrapping.section("available_skills", content: skillBody)
+        }
+
+        // Layer 10-11: GUARDRAILS — Negative constraints + hallucinated tools
         if !context.negativeConstraints.isEmpty {
-            systemContent += "\n<negative_constraints>\nFAILED PATHS:\n" + context.negativeConstraints.map { "- \($0)" }.joined(separator: "\n") + "\n</negative_constraints>"
+            let body = "FAILED PATHS:\n" + context.negativeConstraints.map { "- \($0)" }.joined(separator: "\n")
+            systemContent += "\n\n" + wrapping.section("negative_constraints", content: body)
         }
         if !context.hallucinatedTools.isEmpty {
-            systemContent += "\n<hallucinated_tools>\nDO NOT USE:\n" + context.hallucinatedTools.map { "- \($0)" }.joined(separator: "\n") + "\n</hallucinated_tools>"
+            let body = "DO NOT USE:\n" + context.hallucinatedTools.map { "- \($0)" }.joined(separator: "\n")
+            systemContent += "\n\n" + wrapping.section("hallucinated_tools", content: body)
         }
-        
+
+        // =====================================================================
+        // MESSAGE ARRAY
+        // =====================================================================
+
         var messages: [[String: String]] = [["role": "system", "content": systemContent]]
-        
-        // Tier 2: Episodic Memory (XML with executable tool recipes)
-        if let history = context.recentHistory, !history.isEmpty {
-            messages.append(["role": "user", "content": history])
+
+        // History messages (native flows, when episodic memory is enabled)
+        if layerConfig.includeEpisodicMemory {
+            if let turns = context.nativeHistoryTurns, !turns.isEmpty {
+                // Native: real turn-by-turn history as user/assistant message pairs
+                messages.append(contentsOf: turns)
+            } else if let history = context.recentHistory, !history.isEmpty, isNativeFlow {
+                // Native episodic fallback: XML as user message
+                messages.append(["role": "user", "content": history])
+            }
         }
-        
-        // Tier 3: Active Scratchpad & Objective
-        var activeContext = """
-        <current_objective>
-        ### User
-        \(context.originalQuery)
-        """
-        
-        if let clarification = context.latestClarification {
-            activeContext += "\n### Clarification\n\(clarification)"
+
+        // User message: optional prefix (workflow <input>, bot query) + working memory
+        var userContent = ""
+        if let prefix = userMessagePrefix {
+            userContent += prefix
         }
-        
-        activeContext += """
-        
-        </current_objective>
-        
-        <working_memory>
-        \(context.compiledScratchpad)
-        </working_memory>
-        """
-        
-        messages.append(["role": "user", "content": activeContext])
+
+        let scratchpad = context.compiledScratchpad
+        if !scratchpad.isEmpty && scratchpad != "No actions taken yet." {
+            if !userContent.isEmpty { userContent += "\n\n" }
+            userContent += wrapping.section("working_memory", content: scratchpad)
+        }
+
+        if !userContent.isEmpty {
+            messages.append(["role": "user", "content": userContent])
+        }
+
         return messages
+    }
+}
+
+// MARK: - CognitiveGenerator Convenience Wrapper
+
+extension CognitiveGenerator {
+
+    /// Convenience wrapper — delegates to `PromptBuilder.buildStandardMessages()`.
+    /// Allows generators to call `self.buildStandardMessages(...)` as before.
+    func buildStandardMessages(
+        context: SemanticContext,
+        dialectRules: String? = nil,
+        isNativeFlow: Bool = false,
+        layerConfig: PromptLayerConfig = .agent,
+        userMessagePrefix: String? = nil,
+        wrapping: PromptWrapping = .xml
+    ) -> [[String: String]] {
+        PromptBuilder.buildStandardMessages(
+            context: context,
+            dialectRules: dialectRules,
+            isNativeFlow: isNativeFlow,
+            layerConfig: layerConfig,
+            userMessagePrefix: userMessagePrefix,
+            wrapping: wrapping
+        )
     }
 }

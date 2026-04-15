@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Combine
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendOrchestrationService")
@@ -14,7 +13,8 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// The primary entry point for backend operations.
 /// Orchestrates the flow between the UI, file processing, RAG retrieval, and the Agent/Bot pipelines.
 @MainActor
-class BackendOrchestrationService: ObservableObject {
+@Observable
+class BackendOrchestrationService {
     
     // MARK: - Dependencies
     private let ollamaService: OllamaService
@@ -24,8 +24,6 @@ class BackendOrchestrationService: ObservableObject {
     // RAG Services
     private let embeddingService = EmbeddingService.shared
     private let vectorStoreService = VectorStoreService.shared
-
-    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Initialization
     init(
@@ -49,11 +47,11 @@ class BackendOrchestrationService: ObservableObject {
         history: [ChatMessage],
         files: [FileSystemItem],
         context: TraceContext,
-        onTraceUpdate: ((AgentTraceLog) -> Void)? = nil
+        onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
-        
+
         // Forward trace updates to the caller (TraceLogAggregator is superseded by TraceRecorder)
-        let aggregatedTraceUpdate: (AgentTraceLog) -> Void = { log in
+        let aggregatedTraceUpdate: @Sendable (AgentTraceLog) -> Void = { log in
             onTraceUpdate?(log)
         }
         
@@ -218,7 +216,7 @@ class BackendOrchestrationService: ObservableObject {
                         // Signals a "New User Request" to the downstream AgentConnect logic.
                         logger.notice("[ORCHESTRATOR] ⚠️ Starting Generalist Agent Execution (Direct Handoff).")
                         
-                        let traceHandler: (AgentTraceLog) -> Void = { log in
+                        let traceHandler: @Sendable (AgentTraceLog) -> Void = { log in
                             logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.headline)): \(log.content) (span: \(log.spanID))")
                             aggregatedTraceUpdate(log)
                         }
@@ -240,19 +238,19 @@ class BackendOrchestrationService: ObservableObject {
                             case .content:
                                 tokensReceived += 1
                                 continuation.yield(event)
-                            case .thought(_, let message):
+                            case .thought(_, let message, _):
                                 logger.debug("[THOUGHT] \(message)")
                                 continuation.yield(event)
-                            case .toolOutput(let output):
+                            case .toolOutput(let output, _):
                                 logger.debug("[ARTIFACT] \(output.toolName) - \(output.output.prefix(50))...")
                                 continuation.yield(event)
-                            case .toolCall(let name, let params):
+                            case .toolCall(let name, let params, _):
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
-                            case .requestConfirmation(let toolName, _, _):
+                            case .requestConfirmation(let toolName, _, _, _):
                                 logger.debug("[HITL] Permission requested for \(toolName)")
                                 continuation.yield(event)
-                            case .requestClarification(let question, _):
+                            case .requestClarification(let question, _, _):
                                 logger.debug("[ASK_USER] Clarification requested: \(question)")
                                 continuation.yield(event)
                             case .error(let err):
@@ -260,7 +258,7 @@ class BackendOrchestrationService: ObservableObject {
                                 continuation.yield(event)
 
                             // Workflow orchestration events (not emitted by agent profiles, but needed for exhaustive switch)
-                            case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress:
+                            case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress, .workflowLoopIteration:
                                 continuation.yield(event)
 
                             // Multimodal events
@@ -273,7 +271,9 @@ class BackendOrchestrationService: ObservableObject {
                                 continuation.yield(event)
                             case .planGenerated, .subtaskStarted, .subtaskCompleted,
                                  .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
-                                 .delegationStarted, .delegationCompleted:
+                                 .delegationStarted, .delegationCompleted,
+                                 .compactionStarted, .compactionCompleted,
+                                 .tokenUsage:
                                 continuation.yield(event)
                             }
                         }

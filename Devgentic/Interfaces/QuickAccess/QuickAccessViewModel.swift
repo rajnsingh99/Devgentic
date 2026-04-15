@@ -5,20 +5,19 @@ import SwiftData
 import os
 // import Markdown // REMOVED: This was removed to fix a build conflict. See AgentResponseParser.swift for details.
 
-@MainActor
-class QuickAccessViewModel: ObservableObject {
+@Observable @MainActor
+class QuickAccessViewModel {
 
-    // MARK: - Published Properties
-    @Published var messages: [ChatMessage] = []
-    @Published var isSending: Bool = false
-    
-    private let persistenceService = ChatPersistenceStore.shared
-    private let aiConnect = OllamaConnect()
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "QuickAccessViewModel")
-    
+    // MARK: - Observable State
+    var messages: [ChatMessage] = []
+    var isSending: Bool = false
+
+    @ObservationIgnored private let persistenceService = ChatPersistenceStore.shared
+    @ObservationIgnored private let aiConnect = OllamaConnect()
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "QuickAccessViewModel")
+
     // MARK: - Properties
-    private var targetConversationId: UUID? // The ID of the current Quick Access conversation.
-    private var cancellables = Set<AnyCancellable>()
+    @ObservationIgnored private var targetConversationId: UUID?
 
     // MARK: - Initialization
     init() {
@@ -161,8 +160,6 @@ class QuickAccessViewModel: ObservableObject {
     }
     
     deinit {
-        logger.info("QuickAccessViewModel deinitialized.")
-        cancellables.forEach { $0.cancel() }
         NotificationCenter.default.removeObserver(self)
     }
 }

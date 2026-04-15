@@ -67,12 +67,12 @@ struct CreateScheduledTaskView: View {
             // Header
             HStack {
                 Text(existingTask != nil ? "Edit Scheduled Task" : "New Scheduled Task")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(.title3, weight: .semibold))
                     .foregroundColor(theme.primaryText)
                 Spacer()
                 Button { dismiss() } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18))
+                        .font(.system(.title3)) // scales with Dynamic Type; ~18pt
                         .foregroundColor(theme.secondaryText.opacity(0.5))
                 }
                 .buttonStyle(.plain)
@@ -89,7 +89,7 @@ struct CreateScheduledTaskView: View {
                     formSection("Name") {
                         TextField("e.g., Daily Standup", text: $displayName)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 14))
+                            .font(theme.fontBody)
                             .padding(10)
                             .background(theme.surfaceOverlay)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -120,7 +120,7 @@ struct CreateScheduledTaskView: View {
                     formSection("Prompt Template") {
                         VStack(alignment: .leading, spacing: 6) {
                             TextEditor(text: $promptTemplate)
-                                .font(.system(size: 13, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced input
                                 .frame(minHeight: 80, maxHeight: 150)
                                 .padding(8)
                                 .background(theme.surfaceOverlay)
@@ -134,7 +134,7 @@ struct CreateScheduledTaskView: View {
                                         promptTemplate += " \(variable)"
                                     } label: {
                                         Text(variable)
-                                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                            .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced (template chip)
                                             .foregroundColor(theme.accentColor)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 3)
@@ -166,14 +166,14 @@ struct CreateScheduledTaskView: View {
                                         HStack(spacing: 8) {
                                             Image(systemName: cronPreset == preset ? "checkmark.circle.fill" : "circle")
                                                 .foregroundColor(cronPreset == preset ? theme.accentColor : theme.secondaryText.opacity(0.4))
-                                                .font(.system(size: 14))
+                                                .font(theme.fontBody)
                                             Text(preset.rawValue)
-                                                .font(.system(size: 13))
+                                                .font(theme.fontSubheadline)
                                                 .foregroundColor(theme.primaryText)
                                             Spacer()
                                             if let expr = preset.expression {
                                                 Text(expr)
-                                                    .font(.system(size: 10, design: .monospaced))
+                                                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced (cron expression)
                                                     .foregroundColor(theme.secondaryText.opacity(0.5))
                                             }
                                         }
@@ -184,7 +184,7 @@ struct CreateScheduledTaskView: View {
                                     if cronPreset == .custom {
                                         TextField("e.g., 30 8 * * 1", text: $customCronExpression)
                                             .textFieldStyle(.plain)
-                                            .font(.system(size: 13, design: .monospaced))
+                                            .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced input
                                             .padding(8)
                                             .background(theme.surfaceOverlay)
                                             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -207,7 +207,7 @@ struct CreateScheduledTaskView: View {
                             Text(contextWindowMode == .continuous
                                  ? "Appends to the same conversation thread. Full history is visible to the LLM."
                                  : "Creates a new conversation each run. No accumulated context.")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText.opacity(0.6))
                         }
                     }
@@ -215,7 +215,7 @@ struct CreateScheduledTaskView: View {
                     // Validation error
                     if let error = validationError {
                         Text(error)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundColor(.red)
                     }
                 }
@@ -261,10 +261,10 @@ struct CreateScheduledTaskView: View {
     // MARK: - Helpers
 
     @ViewBuilder
-    private func formSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+    private func formSection(_ title: LocalizedStringKey, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.system(size: 11, weight: .bold))
+                .font(.system(.caption, weight: .bold))
                 .foregroundColor(theme.secondaryText)
                 .textCase(.uppercase)
                 .tracking(0.5)
@@ -297,15 +297,15 @@ struct CreateScheduledTaskView: View {
     private func createOrSave() {
         // Validate
         guard !displayName.trimmingCharacters(in: .whitespaces).isEmpty else {
-            validationError = "Name is required."
+            validationError = String(localized: "Name is required.")
             return
         }
         guard selectedProfileID != nil else {
-            validationError = "Please select a backend profile."
+            validationError = String(localized: "Please select a backend profile.")
             return
         }
         guard !promptTemplate.trimmingCharacters(in: .whitespaces).isEmpty else {
-            validationError = "Prompt template is required."
+            validationError = String(localized: "Prompt template is required.")
             return
         }
 
@@ -315,7 +315,7 @@ struct CreateScheduledTaskView: View {
         if scheduleType == .recurring {
             if cronPreset == .custom {
                 guard !customCronExpression.isEmpty else {
-                    validationError = "Cron expression is required for custom schedule."
+                    validationError = String(localized: "Cron expression is required for custom schedule.")
                     return
                 }
                 // Validate cron

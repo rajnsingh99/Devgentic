@@ -8,7 +8,7 @@
 import Foundation
 import MLX
 import MLXLLM
-import MLXLMCommon
+@preconcurrency import MLXLMCommon
 import os
 
 /// A thread-safe actor that manages the lifecycle and inference of local MLX models.
@@ -203,14 +203,18 @@ actor MLXService {
 
                 do {
                     // Use container.perform to safely access the ModelContext (which contains model, processor, tokenizer).
+                    let wrappedMessages = UnsafeSendable(messages)
+                    let wrappedTools = UnsafeSendable(tools)
+
                     let stream = try await container.perform { context -> AsyncStream<Generation> in
                         // A. Apply Chat Template & Tokenize
-                        let mlxTools: [[String: any Sendable]]? = tools?.compactMap { $0 as? [String: any Sendable] }
+                        let sendableMessages = wrappedMessages.value.map { $0 as [String: any Sendable] }
+                        let mlxTools: [[String: any Sendable]]? = wrappedTools.value?.compactMap { $0 as? [String: any Sendable] }
 
                         let promptTokens: [Int]
                         if context.tokenizer.hasChatTemplate {
                             promptTokens = try context.tokenizer.applyChatTemplate(
-                                messages: messages.map { $0 as [String: Any] },
+                                messages: sendableMessages,
                                 tools: mlxTools
                             )
                         } else {
@@ -220,7 +224,7 @@ actor MLXService {
                             //   Layer 2 (.familyFallback): Hardcoded template matched to the model's token family.
                             let fallback = Self.resolveFallbackTemplate(from: chatTemplateSource)
                             promptTokens = try context.tokenizer.applyChatTemplate(
-                                messages: messages.map { $0 as [String: Any] },
+                                messages: sendableMessages,
                                 chatTemplate: .literal(fallback),
                                 addGenerationPrompt: true,
                                 truncation: false,
@@ -535,7 +539,7 @@ actor MLXService {
         
         idleCleanupTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: idleTimeoutNanoseconds)
+                try await Task.sleep(nanoseconds: self?.idleTimeoutNanoseconds ?? 120_000_000_000)
                 
                 // If we reached here without cancellation, unload.
                 guard let self = self else { return }

@@ -25,7 +25,7 @@ struct ImageView: View {
                 Image(nsImage: nsImage)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .cornerRadius(theme.cornerRadiusMedium)
+                    .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                     .overlay(
                         // Add a subtle border to frame the image nicely.
                         RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
@@ -43,7 +43,7 @@ struct ImageView: View {
                 }
                 .frame(maxWidth: 500, minHeight: 150, alignment: .center)
                 .background(theme.controlBackground)
-                .cornerRadius(theme.cornerRadiusMedium)
+                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                 .onAppear {
                     logger.error("❌ Failed to create NSImage from the provided data.")
                 }
@@ -72,12 +72,13 @@ struct ImageView: View {
                     }
                     .foregroundColor(.white)
                     .help("Save Image")
+                    .accessibilityLabel("Save image")
                 }
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(.caption, weight: .medium))
                 .padding(.vertical, theme.spacingXSmall)
                 .padding(.horizontal, theme.spacingSmall)
                 .background(Color.black.opacity(0.6))
-                .cornerRadius(theme.cornerRadiusLarge)
+                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusLarge))
                 .padding(theme.spacingSmall)
                 .transition(.opacity.animation(.easeInOut))
             }
@@ -104,7 +105,8 @@ struct ImageView: View {
 
         // Provide visual feedback to the user.
         withAnimation(.easeInOut) { didCopy = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
             withAnimation(.easeInOut) { didCopy = false }
         }
     }

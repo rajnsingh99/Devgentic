@@ -7,12 +7,12 @@
 ////
 //
 //import SwiftUI
-//import Combine
 //import os
 //import Foundation // Required for NSRegularExpression
 //
 //@MainActor
-//class AgentOnboardingViewModel: ObservableObject, SetupFailedViewModelProtocol {
+//@Observable
+//class AgentOnboardingViewModel: SetupFailedViewModelProtocol {
 //    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AgentOnboardingViewModel")
 //
 //    // Overall onboarding steps
@@ -50,44 +50,44 @@
 //    }
 //
 //    // Published properties for overall flow
-//    @Published var currentFlowStep: OnboardingFlowStep = .welcome
-//    @Published var errorMessage: String? = nil
-//    @Published var scriptLog: [String] = [] // General logs if needed, or can be stage-specific
+//    var currentFlowStep: OnboardingFlowStep = .welcome
+//    var errorMessage: String? = nil
+//    var scriptLog: [String] = [] // General logs if needed, or can be stage-specific
 //
 //    // Published properties for Interactive Setup
-//    @Published var currentInteractiveStage: InteractiveSetupStage = .pythonVerification
-//    @Published var showPythonInstallSheet: Bool = false // For the Python install prompt
+//    var currentInteractiveStage: InteractiveSetupStage = .pythonVerification
+//    var showPythonInstallSheet: Bool = false // For the Python install prompt
 //
 //    // --- Python Verification Stage States ---
-//    @Published var pythonVerificationStatus: StageStatus = .pending
-//    @Published var pythonVerificationMessage: String = "Checking for Python 3.8+..."
-//    @Published var isPythonActionButtonEnabled: Bool = true
-//    @Published var pythonActionButtonTitle: String = "Begin Verification"
-//    @Published var isPythonNextButtonEnabled: Bool = false
-//    @Published var showEmbeddedPythonInstallPrompt: Bool = false // To show prompt in right panel
+//    var pythonVerificationStatus: StageStatus = .pending
+//    var pythonVerificationMessage: String = "Checking for Python 3.8+..."
+//    var isPythonActionButtonEnabled: Bool = true
+//    var pythonActionButtonTitle: String = "Begin Verification"
+//    var isPythonNextButtonEnabled: Bool = false
+//    var showEmbeddedPythonInstallPrompt: Bool = false // To show prompt in right panel
 //
 //    // --- Ollama Setup Stage States ---
-//    @Published var ollamaSetupStatus: StageStatus = .pending
-//    @Published var ollamaOverallProgressMessage: String = "Ready to configure Ollama."
+//    var ollamaSetupStatus: StageStatus = .pending
+//    var ollamaOverallProgressMessage: String = "Ready to configure Ollama."
 //    // Hardcoded list of Ollama models
 //    let hardcodedOllamaModels: [String] = [
 //        "gemma:2b", "llama3:8b", "mistral:latest", "phi3:mini",
 //        "qwen:4b", "llava:latest", "codellama:latest"
 //    ]
-//    @Published var selectedOllamaModel: String
-//    @Published var ollamaAppInstallProgressMessage: String = ""
-//    @Published var ollamaModelDownloadProgress: Double = 0.0 // 0.0 to 1.0
-//    @Published var isOllamaActionButtonEnabled: Bool = true
-//    @Published var ollamaActionButtonTitle: String = "Begin Ollama Setup"
-//    @Published var isOllamaNextButtonEnabled: Bool = false
+//    var selectedOllamaModel: String
+//    var ollamaAppInstallProgressMessage: String = ""
+//    var ollamaModelDownloadProgress: Double = 0.0 // 0.0 to 1.0
+//    var isOllamaActionButtonEnabled: Bool = true
+//    var ollamaActionButtonTitle: String = "Begin Ollama Setup"
+//    var isOllamaNextButtonEnabled: Bool = false
 //    private var ollamaInstallAttempted: Bool = false // Track if we tried installing Ollama app
 //
 //    // --- Agent Server Setup Stage States ---
-//    @Published var agentServerStatus: StageStatus = .pending
-//    @Published var agentServerProgressMessage: String = "Ready to set up the agent server."
-//    @Published var isAgentServerFinishButtonEnabled: Bool = false
-//    @Published var agentServerActionButtonTitle: String = "Start Server Setup" // If manual start needed
-//    @Published var isAgentServerActionButtonEnabled: Bool = true // If manual start needed
+//    var agentServerStatus: StageStatus = .pending
+//    var agentServerProgressMessage: String = "Ready to set up the agent server."
+//    var isAgentServerFinishButtonEnabled: Bool = false
+//    var agentServerActionButtonTitle: String = "Start Server Setup" // If manual start needed
+//    var isAgentServerActionButtonEnabled: Bool = true // If manual start needed
 //
 //
 //    // Callbacks

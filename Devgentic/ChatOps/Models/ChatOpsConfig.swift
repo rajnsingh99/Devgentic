@@ -58,146 +58,190 @@ enum ChatOpsConnectionState: Equatable {
 // MARK: - ChatOps Configuration
 
 /// Manages ChatOps state, persisted to UserDefaults (non-sensitive) and Keychain (tokens).
-@MainActor
-final class ChatOpsConfigManager: ObservableObject {
+@Observable @MainActor
+final class ChatOpsConfigManager {
 
     static let shared = ChatOpsConfigManager()
 
     private let keychain = SecureKeyStorage()
     private static let keychainService = Bundle.main.bundleIdentifier ?? "com.devgentic.app"
 
-    @Published var connectionState: ChatOpsConnectionState = .disconnected
+    var connectionState: ChatOpsConnectionState = .disconnected
 
     var botToken: String? {
-        get { keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey) }
+        get {
+            access(keyPath: \.botToken)
+            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
+        }
         set {
-            if let value = newValue {
-                _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
-            } else {
-                _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
+            withMutation(keyPath: \.botToken) {
+                if let value = newValue {
+                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
+                } else {
+                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsBotTokenKey)
+                }
             }
-            objectWillChange.send()
         }
     }
 
     var authorizedChatID: Int64? {
         get {
+            access(keyPath: \.authorizedChatID)
             let val = UserDefaults.standard.integer(forKey: AppSettings.chatOpsAuthorizedChatIDKey)
             return val == 0 ? nil : Int64(val)
         }
         set {
-            if let id = newValue {
-                UserDefaults.standard.set(Int(id), forKey: AppSettings.chatOpsAuthorizedChatIDKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: AppSettings.chatOpsAuthorizedChatIDKey)
+            withMutation(keyPath: \.authorizedChatID) {
+                if let id = newValue {
+                    UserDefaults.standard.set(Int(id), forKey: AppSettings.chatOpsAuthorizedChatIDKey)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: AppSettings.chatOpsAuthorizedChatIDKey)
+                }
             }
-            objectWillChange.send()
         }
     }
 
     var securityTier: ChatOpsSecurityTier {
         get {
+            access(keyPath: \.securityTier)
             guard let raw = UserDefaults.standard.string(forKey: AppSettings.chatOpsSecurityTierKey),
                   let tier = ChatOpsSecurityTier(rawValue: raw) else { return .readOnly }
             return tier
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: AppSettings.chatOpsSecurityTierKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.securityTier) {
+                UserDefaults.standard.set(newValue.rawValue, forKey: AppSettings.chatOpsSecurityTierKey)
+            }
         }
     }
 
     var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: AppSettings.chatOpsEnabledKey) }
+        get {
+            access(keyPath: \.isEnabled)
+            return UserDefaults.standard.bool(forKey: AppSettings.chatOpsEnabledKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsEnabledKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.isEnabled) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsEnabledKey)
+            }
         }
     }
 
     var botUsername: String? {
-        get { UserDefaults.standard.string(forKey: "chatOpsBotUsername") }
+        get {
+            access(keyPath: \.botUsername)
+            return UserDefaults.standard.string(forKey: "chatOpsBotUsername")
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: "chatOpsBotUsername")
-            objectWillChange.send()
+            withMutation(keyPath: \.botUsername) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsBotUsername")
+            }
         }
     }
 
     var activeConversationID: UUID? {
         get {
+            access(keyPath: \.activeConversationID)
             guard let str = UserDefaults.standard.string(forKey: AppSettings.chatOpsActiveConversationIDKey) else { return nil }
             return UUID(uuidString: str)
         }
         set {
-            UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsActiveConversationIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.activeConversationID) {
+                UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsActiveConversationIDKey)
+            }
         }
     }
 
     // MARK: - Discord Configuration
 
-    @Published var discordConnectionState: ChatOpsConnectionState = .disconnected
+    var discordConnectionState: ChatOpsConnectionState = .disconnected
 
     var discordBotToken: String? {
-        get { keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey) }
+        get {
+            access(keyPath: \.discordBotToken)
+            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
+        }
         set {
-            if let value = newValue {
-                _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
-            } else {
-                _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
+            withMutation(keyPath: \.discordBotToken) {
+                if let value = newValue {
+                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
+                } else {
+                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsDiscordBotTokenKey)
+                }
             }
-            objectWillChange.send()
         }
     }
 
     var discordAuthorizedChannelID: String? {
-        get { UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordChannelIDKey) }
+        get {
+            access(keyPath: \.discordAuthorizedChannelID)
+            return UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordChannelIDKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordChannelIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.discordAuthorizedChannelID) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordChannelIDKey)
+            }
         }
     }
 
     var discordApplicationID: String? {
-        get { UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordApplicationIDKey) }
+        get {
+            access(keyPath: \.discordApplicationID)
+            return UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordApplicationIDKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordApplicationIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.discordApplicationID) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordApplicationIDKey)
+            }
         }
     }
 
     var discordGuildID: String? {
-        get { UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordGuildIDKey) }
+        get {
+            access(keyPath: \.discordGuildID)
+            return UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordGuildIDKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordGuildIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.discordGuildID) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordGuildIDKey)
+            }
         }
     }
 
     var discordBotUsername: String? {
-        get { UserDefaults.standard.string(forKey: "chatOpsDiscordBotUsername") }
+        get {
+            access(keyPath: \.discordBotUsername)
+            return UserDefaults.standard.string(forKey: "chatOpsDiscordBotUsername")
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: "chatOpsDiscordBotUsername")
-            objectWillChange.send()
+            withMutation(keyPath: \.discordBotUsername) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsDiscordBotUsername")
+            }
         }
     }
 
     var isDiscordEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: AppSettings.chatOpsDiscordEnabledKey) }
+        get {
+            access(keyPath: \.isDiscordEnabled)
+            return UserDefaults.standard.bool(forKey: AppSettings.chatOpsDiscordEnabledKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordEnabledKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.isDiscordEnabled) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsDiscordEnabledKey)
+            }
         }
     }
 
     var discordActiveConversationID: UUID? {
         get {
+            access(keyPath: \.discordActiveConversationID)
             guard let str = UserDefaults.standard.string(forKey: AppSettings.chatOpsDiscordActiveConversationIDKey) else { return nil }
             return UUID(uuidString: str)
         }
         set {
-            UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsDiscordActiveConversationIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.discordActiveConversationID) {
+                UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsDiscordActiveConversationIDKey)
+            }
         }
     }
 
@@ -227,72 +271,98 @@ final class ChatOpsConfigManager: ObservableObject {
 
     // MARK: - Slack Configuration
 
-    @Published var slackConnectionState: ChatOpsConnectionState = .disconnected
+    var slackConnectionState: ChatOpsConnectionState = .disconnected
 
     var slackBotToken: String? {
-        get { keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey) }
+        get {
+            access(keyPath: \.slackBotToken)
+            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
+        }
         set {
-            if let value = newValue {
-                _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
-            } else {
-                _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
+            withMutation(keyPath: \.slackBotToken) {
+                if let value = newValue {
+                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
+                } else {
+                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsSlackBotTokenKey)
+                }
             }
-            objectWillChange.send()
         }
     }
 
     var slackAppToken: String? {
-        get { keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey) }
+        get {
+            access(keyPath: \.slackAppToken)
+            return keychain.retrieve(service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
+        }
         set {
-            if let value = newValue {
-                _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
-            } else {
-                _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
+            withMutation(keyPath: \.slackAppToken) {
+                if let value = newValue {
+                    _ = keychain.save(value: value, service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
+                } else {
+                    _ = keychain.delete(service: Self.keychainService, account: AppSettings.chatOpsSlackAppTokenKey)
+                }
             }
-            objectWillChange.send()
         }
     }
 
     var slackAuthorizedChannelID: String? {
-        get { UserDefaults.standard.string(forKey: AppSettings.chatOpsSlackChannelIDKey) }
+        get {
+            access(keyPath: \.slackAuthorizedChannelID)
+            return UserDefaults.standard.string(forKey: AppSettings.chatOpsSlackChannelIDKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsSlackChannelIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.slackAuthorizedChannelID) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsSlackChannelIDKey)
+            }
         }
     }
 
     var slackBotUsername: String? {
-        get { UserDefaults.standard.string(forKey: "chatOpsSlackBotUsername") }
+        get {
+            access(keyPath: \.slackBotUsername)
+            return UserDefaults.standard.string(forKey: "chatOpsSlackBotUsername")
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: "chatOpsSlackBotUsername")
-            objectWillChange.send()
+            withMutation(keyPath: \.slackBotUsername) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsSlackBotUsername")
+            }
         }
     }
 
     var slackTeamName: String? {
-        get { UserDefaults.standard.string(forKey: "chatOpsSlackTeamName") }
+        get {
+            access(keyPath: \.slackTeamName)
+            return UserDefaults.standard.string(forKey: "chatOpsSlackTeamName")
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: "chatOpsSlackTeamName")
-            objectWillChange.send()
+            withMutation(keyPath: \.slackTeamName) {
+                UserDefaults.standard.set(newValue, forKey: "chatOpsSlackTeamName")
+            }
         }
     }
 
     var isSlackEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: AppSettings.chatOpsSlackEnabledKey) }
+        get {
+            access(keyPath: \.isSlackEnabled)
+            return UserDefaults.standard.bool(forKey: AppSettings.chatOpsSlackEnabledKey)
+        }
         set {
-            UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsSlackEnabledKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.isSlackEnabled) {
+                UserDefaults.standard.set(newValue, forKey: AppSettings.chatOpsSlackEnabledKey)
+            }
         }
     }
 
     var slackActiveConversationID: UUID? {
         get {
+            access(keyPath: \.slackActiveConversationID)
             guard let str = UserDefaults.standard.string(forKey: AppSettings.chatOpsSlackActiveConversationIDKey) else { return nil }
             return UUID(uuidString: str)
         }
         set {
-            UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsSlackActiveConversationIDKey)
-            objectWillChange.send()
+            withMutation(keyPath: \.slackActiveConversationID) {
+                UserDefaults.standard.set(newValue?.uuidString, forKey: AppSettings.chatOpsSlackActiveConversationIDKey)
+            }
         }
     }
 

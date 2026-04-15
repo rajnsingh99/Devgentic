@@ -135,7 +135,7 @@ struct AdvancedPromptEditorView: View {
     @Environment(\.appTheme) private var theme
     
     // State for supporting components
-    @StateObject private var promptLibraryVM = PromptLibraryViewModel()
+    @State private var promptLibraryVM = PromptLibraryViewModel()
     @State private var showingSavePopover: Bool = false
     @State private var showingGuide: Bool = false
     
@@ -157,9 +157,9 @@ struct AdvancedPromptEditorView: View {
             HStack {
                 VStack(alignment: .leading) {
                     Text("System Instructions")
-                        .font(.headline)
+                        .font(theme.fontHeadline)
                     Text("Defines the core persona, logic, and protocols for \(agentName).")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
                 Spacer()
@@ -167,10 +167,10 @@ struct AdvancedPromptEditorView: View {
                 VStack(alignment: .trailing) {
                     VStack(alignment: .trailing) {
                         Text("\(localText.count) characters")
-                            .font(.subheadline)
+                            .font(theme.fontSubheadline)
                             .monospacedDigit()
                         Text("~ \(localText.count / 4) tokens")
-                            .font(.caption)
+                            .font(theme.fontCaption)
                             .foregroundColor(theme.secondaryText)
                     }
                 }
@@ -222,6 +222,7 @@ struct AdvancedPromptEditorView: View {
                     .padding(.top, 16)
                     .padding(.trailing, 32) // Increased padding to avoid scrollbar overlap
                     .help("Explain how to write instructions and use shortcuts")
+                    .accessibilityLabel("Explain how to write instructions and use shortcuts")
                 }
                 
                 if showingGuide {
@@ -245,11 +246,11 @@ struct AdvancedPromptEditorView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
                 Text("Changes sync automatically to the main window.")
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
-                
+
                 Spacer()
-                
+
                 Button(action: {
                     promptLibraryVM.prepareForCreateNewPrompt()
                     promptLibraryVM.editablePromptText = localText
@@ -262,7 +263,7 @@ struct AdvancedPromptEditorView: View {
                 .padding(.horizontal, 8)
                 .popover(isPresented: $showingSavePopover, arrowEdge: .top) {
                     CreateEditPromptView()
-                        .environmentObject(promptLibraryVM)
+                        .environment(promptLibraryVM)
                         .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
                 }
                 
@@ -310,7 +311,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var configuredTools: [Tool]
     var theme: Theme
-    @ObservedObject var promptLibraryVM: PromptLibraryViewModel
+    var promptLibraryVM: PromptLibraryViewModel
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -693,7 +694,7 @@ struct ToolMentionListView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Insert Tool")
-                .font(.caption)
+                .font(theme.fontCaption)
                 .foregroundColor(theme.secondaryText)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -737,17 +738,17 @@ struct ToolMentionRow: View {
             HStack(alignment: .top) {
                 Image(systemName: "wrench.fill")
                     .foregroundColor(isSelected ? .white : theme.accentColor)
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .padding(.top, 4)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(tool.definition.name)
-                        .font(.subheadline)
+                        .font(theme.fontSubheadline)
                         .fontWeight(.medium)
                         .foregroundColor(isSelected ? .white : theme.primaryText)
                     
                     Text(tool.definition.description.split(separator: "\n").first ?? "")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(isSelected ? .white.opacity(0.8) : theme.secondaryText)
                         .lineLimit(1)
                 }
@@ -755,7 +756,7 @@ struct ToolMentionRow: View {
                 
                 // Add an indicator showing the source (Local vs MCP)
                 Text(tool.source.serverName)
-                    .font(.system(size: 9))
+                    .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
                     .foregroundColor(isSelected ? .white.opacity(0.6) : theme.secondaryText.opacity(0.6))
                     .padding(.top, 2)
             }
@@ -781,7 +782,7 @@ struct PromptMentionListView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Insert Prompt")
-                .font(.caption)
+                .font(theme.fontCaption)
                 .foregroundColor(theme.secondaryText)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -825,17 +826,17 @@ struct PromptMentionRow: View {
             HStack(alignment: .top) {
                 Image(systemName: "text.quote")
                     .foregroundColor(isSelected ? .white : theme.accentColor)
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .padding(.top, 4)
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(prompt.title)
-                        .font(.subheadline)
+                        .font(theme.fontSubheadline)
                         .fontWeight(.medium)
                         .foregroundColor(isSelected ? .white : theme.primaryText)
                     
                     Text(prompt.text.split(separator: "\n").first ?? "")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(isSelected ? .white.opacity(0.8) : theme.secondaryText)
                         .lineLimit(1)
                 }
@@ -864,9 +865,9 @@ struct PromptGuideView: View {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Writing Instructions")
-                        .font(.headline)
+                        .font(theme.fontHeadline)
                     Text("Effective instructions define the boundaries and behavior of your agent.")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
                 
@@ -892,7 +893,7 @@ struct PromptGuideView: View {
                 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Shortcuts")
-                        .font(.subheadline)
+                        .font(theme.fontSubheadline)
                         .fontWeight(.bold)
                     
                     shortcutItem(
@@ -917,19 +918,19 @@ struct PromptGuideView: View {
     private func guideSection(title: String, description: String, example: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.subheadline)
+                .font(theme.fontSubheadline)
                 .fontWeight(.bold)
             Text(description)
-                .font(.caption)
+                .font(theme.fontCaption)
                 .foregroundColor(theme.secondaryText)
-            
+
             Text(example)
-                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .font(.system(size: 11, weight: .regular, design: .monospaced)) // Fixed size: monospaced
                 .padding(8)
                 .background(theme.primaryBackground.opacity(0.5))
-                .cornerRadius(6)
+                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
                         .stroke(theme.dividerColor, lineWidth: 0.5)
                 )
         }
@@ -938,18 +939,18 @@ struct PromptGuideView: View {
     private func shortcutItem(symbol: String, label: String, description: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text(symbol)
-                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                .font(.system(size: 16, weight: .bold, design: .monospaced)) // Fixed size: monospaced
                 .foregroundColor(theme.accentColor)
                 .frame(width: 24, height: 24)
                 .background(theme.accentColor.opacity(0.1))
-                .cornerRadius(4)
-            
+                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusSmall))
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .fontWeight(.bold)
                 Text(description)
-                    .font(.system(size: 10))
+                    .font(.system(.caption2))
                     .foregroundColor(theme.secondaryText)
             }
         }

@@ -52,6 +52,7 @@ private enum ConfigMode: String, CaseIterable {
 
 struct AddMCPServerView: View {
     @Environment(\.dismiss) var dismiss
+    @Environment(\.appTheme) private var theme
     
     // Edit Mode Properties
     var existingSource: ToolSource? = nil
@@ -115,7 +116,10 @@ struct AddMCPServerView: View {
             // 3. Footer
             bottomControls
                 .padding()
-                .background(.regularMaterial)
+                // MARK: Liquid Glass
+                .glassEffect(.regular, in: .rect(cornerRadius: 0))
+                // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+                // .background(.regularMaterial)
         }
         .frame(minWidth: 600, minHeight: 700)
         .alert("Duplicate Server", isPresented: $isShowingDuplicateAlert) {
@@ -224,6 +228,7 @@ struct AddMCPServerView: View {
                                         .foregroundColor(.secondary)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Remove variable")
                             }
                         }
                         
@@ -269,7 +274,7 @@ struct AddMCPServerView: View {
                 .font(.system(.body, design: .monospaced))
                 .padding(8)
                 .background(Color(nsColor: .textBackgroundColor))
-                .cornerRadius(8)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(isJSONValid ? Color.secondary.opacity(0.2) : Color.red, lineWidth: 1)
@@ -305,7 +310,7 @@ struct AddMCPServerView: View {
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.blue.opacity(0.1))
-                .cornerRadius(8)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
                 
             } else if let error = activeError {
                 // Error Card
@@ -334,7 +339,7 @@ struct AddMCPServerView: View {
                                     .padding(8)
                                     .background(Color.black.opacity(0.8))
                                     .foregroundColor(.green)
-                                    .cornerRadius(4)
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
                             }
                             .font(.caption)
                             .padding(.top, 4)
@@ -342,9 +347,9 @@ struct AddMCPServerView: View {
                     }
                 }
                 .padding()
-                .background(Color.orange.opacity(0.05))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.3)))
-                .cornerRadius(12)
+                .background(theme.warningColor.opacity(0.05))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.warningColor.opacity(0.3)))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
                 
             } else if let tools = discoveredTools {
                 // Success Card
@@ -361,8 +366,8 @@ struct AddMCPServerView: View {
                             .font(.caption)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
-                            .background(Color.green.opacity(0.1))
-                            .cornerRadius(12)
+                            .background(theme.successColor.opacity(0.1))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                     
                     Divider()
@@ -377,7 +382,7 @@ struct AddMCPServerView: View {
                                 .padding(6)
                                 .frame(maxWidth: .infinity)
                                 .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.1)))
                         }
                         if tools.count > 6 {
@@ -388,9 +393,9 @@ struct AddMCPServerView: View {
                     }
                 }
                 .padding()
-                .background(Color.green.opacity(0.05))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.3)))
-                .cornerRadius(12)
+                .background(theme.successColor.opacity(0.05))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(theme.successColor.opacity(0.3)))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
                 
             } else {
                 // Idle State

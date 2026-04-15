@@ -16,12 +16,12 @@ struct MLXModelStoreContainerView: View {
 
     let filterForTools: Bool
 
-    @StateObject private var viewModel: MLXModelStoreViewModel
+    @State private var viewModel: MLXModelStoreViewModel
     @Environment(\.appTheme) private var theme
 
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
-        _viewModel = StateObject(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
+        _viewModel = State(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
     }
 
     var body: some View {
@@ -30,7 +30,7 @@ struct MLXModelStoreContainerView: View {
                 // Search bar in center
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
 
                     TextField(
@@ -38,14 +38,14 @@ struct MLXModelStoreContainerView: View {
                         text: $viewModel.searchText
                     )
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
 
                     if !viewModel.searchText.isEmpty {
                         Button {
                             viewModel.searchText = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                         }
                         .buttonStyle(.plain)
@@ -71,7 +71,7 @@ struct MLXModelStoreContainerView: View {
                     }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(theme.accentColor)
                 }
                 .menuStyle(.borderlessButton)
@@ -82,7 +82,7 @@ struct MLXModelStoreContainerView: View {
                     viewModel.refresh()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(theme.accentColor)
                 }
                 .buttonStyle(.plain)
@@ -97,6 +97,5 @@ struct MLXModelStoreContainerView: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.primaryBackground)
     }
 }

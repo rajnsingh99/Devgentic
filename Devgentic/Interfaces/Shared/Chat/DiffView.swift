@@ -23,7 +23,7 @@ struct DiffView: View {
             // Header
             HStack {
                 Text(fileName ?? "Diff")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundColor(theme.secondaryText)
                 Spacer()
                 HStack(spacing: 12) {
@@ -73,7 +73,7 @@ struct DiffView: View {
         .onAppear {
             computeDiff()
         }
-        .cornerRadius(8)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
     }
 
@@ -94,7 +94,7 @@ struct DiffLineRow: View {
         HStack(alignment: .top, spacing: 0) {
             // Line Number
             Text("\(line.number)")
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced
                 .foregroundColor(theme.secondaryText)
                 .frame(width: 30, alignment: .trailing)
                 .padding(.trailing, 8)
@@ -102,7 +102,7 @@ struct DiffLineRow: View {
 
             // Content
             Text(line.text.isEmpty ? " " : line.text) // Force height for empty lines
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 12, design: .monospaced)) // Fixed size: monospaced
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 4)
         }

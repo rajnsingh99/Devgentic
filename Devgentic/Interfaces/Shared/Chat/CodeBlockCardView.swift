@@ -33,13 +33,13 @@ struct CodeBlockCardView: View {
                         .frame(width: 44, height: 44)
 
                     Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(size: 16, weight: .bold))
+                        .font(.system(.body, weight: .bold))
                         .foregroundColor(theme.accentColor)
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(theme.fontBody.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
                     Text("\(lineCount) lines • Tap to expand")
@@ -51,12 +51,12 @@ struct CodeBlockCardView: View {
 
                 // Language Badge
                 Text(language.uppercased())
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .font(.system(size: 10, weight: .bold, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(theme.surfaceOverlayStrong)
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.surfaceOverlayStrong, lineWidth: 1))
 
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -64,16 +64,23 @@ struct CodeBlockCardView: View {
                     .foregroundColor(theme.secondaryText.opacity(0.5))
             }
             .padding(12)
-            .background(.ultraThinMaterial)
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(isHovering ? theme.accentColor.opacity(0.5) : theme.surfaceOverlayStrong, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+            // MARK: Liquid Glass
+            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+            // .background(.ultraThinMaterial)
+            // .clipShape(RoundedRectangle(cornerRadius: 12))
+            // .overlay(
+            //     RoundedRectangle(cornerRadius: 12)
+            //         .stroke(isHovering ? theme.accentColor.opacity(0.5) : theme.surfaceOverlayStrong, lineWidth: 1)
+            // )
+            // .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
             .scaleEffect(isHovering ? 1.01 : 1.0)
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), \(lineCount) lines")
+        .accessibilityHint("Double-tap to open in code viewer")
+        .accessibilityAddTraits(.isButton)
         .frame(maxWidth: 400, alignment: .leading)
         .padding(.vertical, 8)
         .onHover { hovering in

@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ThemeSettingsView: View {
-    @EnvironmentObject var themeManager: ThemeManager
+    @Environment(ThemeManager.self) var themeManager
     @Environment(\.appTheme) private var theme
 
     let columns = [GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 24)]
@@ -21,10 +21,11 @@ struct ThemeSettingsView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(spacing: 8) {
                         Image(systemName: "paintbrush.fill")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.system(.body, weight: .semibold))
                             .foregroundColor(theme.accentColor)
+                            .accessibilityHidden(true)
                         Text("App Appearance")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(.system(.title3, weight: .semibold))
                             .foregroundColor(theme.primaryText)
                     }
 
@@ -50,15 +51,16 @@ struct ThemeSettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
                             Image(systemName: "circle.dotted")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(.system(.body, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
+                                .accessibilityHidden(true)
                             Text("Accent Color")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(.title3, weight: .semibold))
                                 .foregroundColor(theme.primaryText)
                         }
                         
                         Text("Choose a personal touch that applies to interactive elements across the entire app.")
-                            .font(.system(size: 13))
+                            .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
@@ -88,15 +90,16 @@ struct ThemeSettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
                             Image(systemName: "textformat.size")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(.system(.body, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
+                                .accessibilityHidden(true)
                             Text("Chat Font")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(.title3, weight: .semibold))
                                 .foregroundColor(theme.primaryText)
                         }
 
                         Text("Adjust the font size and line spacing for chat messages.")
-                            .font(.system(size: 13))
+                            .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
@@ -105,11 +108,11 @@ struct ThemeSettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Font Size")
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(theme.fontSubheadline.weight(.medium))
                                     .foregroundColor(theme.primaryText)
                                 Spacer()
                                 Text("\(Int(themeManager.chatFontSize)) pt")
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced (pt value label)
                                     .foregroundColor(theme.secondaryText)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 2)
@@ -120,7 +123,7 @@ struct ThemeSettingsView: View {
                             }
                             HStack(spacing: 8) {
                                 Text("A")
-                                    .font(.system(size: 11))
+                                    .font(.system(.caption))
                                     .foregroundColor(theme.tertiaryText)
                                 Slider(
                                     value: Binding(
@@ -132,7 +135,7 @@ struct ThemeSettingsView: View {
                                 )
                                 .tint(theme.accentColor)
                                 Text("A")
-                                    .font(.system(size: 18, weight: .medium))
+                                    .font(.system(.title3, weight: .medium))
                                     .foregroundColor(theme.tertiaryText)
                             }
                         }
@@ -141,11 +144,11 @@ struct ThemeSettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Text("Line Spacing")
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(theme.fontSubheadline.weight(.medium))
                                     .foregroundColor(theme.primaryText)
                                 Spacer()
                                 Text(String(format: "%.0f pt", themeManager.chatLineSpacing))
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced (pt value label)
                                     .foregroundColor(theme.secondaryText)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 2)
@@ -168,12 +171,12 @@ struct ThemeSettingsView: View {
                         // Live Preview
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Preview")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                                 .foregroundColor(theme.tertiaryText)
                                 .textCase(.uppercase)
 
                             Text("The quick brown fox jumps over the lazy dog. This is how your chat messages will look with the current font settings.")
-                                .font(.system(size: themeManager.chatFontSize, weight: .regular))
+                                .font(.system(size: themeManager.chatFontSize, weight: .regular)) // Fixed size: user-configured chat font size
                                 .foregroundColor(theme.primaryText)
                                 .lineSpacing(themeManager.chatLineSpacing)
                                 .padding(12)
@@ -198,7 +201,7 @@ struct ThemeSettingsView: View {
                                 }
                             } label: {
                                 Text("Reset to Default")
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(.system(.caption, weight: .medium))
                                     .foregroundColor(theme.secondaryText)
                             }
                             .buttonStyle(.plain)
@@ -215,15 +218,16 @@ struct ThemeSettingsView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 8) {
                             Image(systemName: "chevron.left.forwardslash.chevron.right")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(.system(.body, weight: .semibold))
                                 .foregroundColor(theme.accentColor)
+                                .accessibilityHidden(true)
                             Text("Code Viewer")
-                                .font(.system(size: 15, weight: .semibold))
+                                .font(.system(.title3, weight: .semibold))
                                 .foregroundColor(theme.primaryText)
                         }
                         
                         Text("When set to Default, the code viewer follows the app theme. Select a specific theme to override it.")
-                            .font(.system(size: 13))
+                            .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                     }
 
@@ -309,14 +313,15 @@ struct ThemePreviewCard: View {
                 // Title
                 HStack {
                     Text(previewTheme.displayName)
-                        .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                        .font(currentTheme.fontSubheadline.weight(isSelected ? .semibold : .medium))
                         .foregroundColor(isSelected ? currentTheme.primaryText : currentTheme.secondaryText)
                     
                     if isSelected {
                         Spacer()
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(currentTheme.accentColor)
-                            .font(.system(size: 14))
+                            .font(.system(.body))
+                            .accessibilityHidden(true)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -359,17 +364,17 @@ struct CodeViewerPreviewCard: View {
                     VStack(alignment: .leading, spacing: 6) {
                         // Code block mock lines
                         HStack(spacing: 6) {
-                            Text("1").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced))
+                            Text("1").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced)) // Fixed size: monospaced code preview
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.keywords)).frame(width: 25, height: 5)
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.types)).frame(width: 35, height: 5)
                         }
                         HStack(spacing: 6) {
-                            Text("2").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced))
+                            Text("2").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced)) // Fixed size: monospaced code preview
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.commands)).frame(width: 30, height: 5)
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.strings)).frame(width: 50, height: 5)
                         }
                         HStack(spacing: 6) {
-                            Text("3").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced))
+                            Text("3").foregroundColor(Color(nsColor: syntaxTheme.comments)).font(.system(size: 8, design: .monospaced)) // Fixed size: monospaced code preview
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.attributes)).frame(width: 20, height: 5)
                             RoundedRectangle(cornerRadius: 2).fill(Color(nsColor: syntaxTheme.variables)).frame(width: 40, height: 5)
                         }
@@ -388,7 +393,7 @@ struct CodeViewerPreviewCard: View {
                 // Title
                 HStack {
                     Text(override.displayName)
-                        .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                        .font(appTheme.fontSubheadline.weight(isSelected ? .semibold : .medium))
                         .foregroundColor(isSelected ? appTheme.primaryText : appTheme.secondaryText)
                         .lineLimit(1)
                     
@@ -396,7 +401,8 @@ struct CodeViewerPreviewCard: View {
                         Spacer()
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(appTheme.accentColor)
-                            .font(.system(size: 14))
+                            .font(.system(.body))
+                            .accessibilityHidden(true)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -424,7 +430,7 @@ struct AccentColorCircle: View {
                             .frame(width: 32, height: 32)
                         
                         Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 14, weight: .bold))
+                            .font(.system(.body, weight: .bold))
                             .foregroundColor(.white)
                     } else {
                         Circle()
@@ -445,7 +451,7 @@ struct AccentColorCircle: View {
                 .contentShape(Circle())
                 
                 Text(accent.displayName)
-                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                    .font(.system(.caption, weight: isSelected ? .semibold : .regular))
                     .foregroundColor(isSelected ? appTheme.primaryText : appTheme.secondaryText)
             }
         }
@@ -457,6 +463,6 @@ struct AccentColorCircle: View {
 struct ThemeSettingsView_Previews: PreviewProvider {
     static var previews: some View {
         ThemeSettingsView()
-            .environmentObject(ThemeManager())
+            .environment(ThemeManager())
     }
 }

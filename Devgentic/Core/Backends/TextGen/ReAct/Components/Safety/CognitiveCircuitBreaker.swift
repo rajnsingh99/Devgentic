@@ -54,6 +54,14 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     /// Reset whenever a different action pattern is observed.
     private(set) var lastIterationFingerprint: String? = nil
     private(set) var consecutiveIdenticalIterations: Int = 0
+
+    /// Tracks per-tool invocation frequency across ALL iterations (regardless of
+    /// what other tools ran in the same iteration). Catches models that evade the
+    /// iteration-level fingerprint by alternating tool combinations while
+    /// repeating the same core action (e.g., read_file alone then read_file + list_directory).
+    /// Key: "toolName|argsHash|outputHash", Value: total count across all iterations.
+    private(set) var globalToolFrequency: [String: Int] = [:]
+    private let maxGlobalToolRepetitions: Int = 5
     
     // MARK: - Tool Loop Evaluation
     
@@ -118,6 +126,7 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             }
         let fingerprint = components.joined(separator: ";;")
 
+        // --- Check 1: Iteration-level fingerprint (existing) ---
         if fingerprint == lastIterationFingerprint {
             consecutiveIdenticalIterations += 1
         } else {
@@ -137,6 +146,20 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         if current == limit - 1 {
             let toolNames = observations.map(\.toolName).joined(separator: ", ")
             logger.info("⚠️ Repetitive action warning: [\(toolNames)] repeated \(current) times. One more will trigger abort.")
+        }
+
+        // --- Check 2: Per-tool global frequency (catches alternating combos) ---
+        // Tracks individual tool+args+output across ALL iterations. A model that
+        // alternates [read_file] and [read_file, list_directory] evades the
+        // iteration fingerprint but each read_file call is still identical.
+        for key in components {
+            globalToolFrequency[key, default: 0] += 1
+            let count = globalToolFrequency[key]!
+            if count >= maxGlobalToolRepetitions {
+                let toolName = key.components(separatedBy: "|").first ?? "unknown"
+                logger.warning("🔁 Global repetition limit: '\(toolName)' executed \(count) times with identical args+output. Aborting.")
+                return .abort(reason: "Tool '\(toolName)' has been called \(count) times with the same parameters and results across multiple iterations. Breaking stale loop.")
+            }
         }
 
         return .proceed

@@ -97,11 +97,11 @@ final class ChatMessageObservableTests: XCTestCase {
         XCTAssertTrue(msg.timelineEvents.isEmpty)
 
         let thoughtId = UUID()
-        msg.timelineEvents.append(.thought(id: thoughtId, text: "Hmm..."))
+        msg.appendTimelineEvent(.thought(id: thoughtId, text: "Hmm..."))
         XCTAssertEqual(msg.timelineEvents.count, 1)
 
         let toolId = UUID()
-        msg.timelineEvents.append(.toolExecution(
+        msg.appendTimelineEvent(.toolExecution(
             ToolExecutionData(id: toolId, name: "bash", params: "{}", output: "ok", isSuccess: true, isExecuting: false)
         ))
         XCTAssertEqual(msg.timelineEvents.count, 2)

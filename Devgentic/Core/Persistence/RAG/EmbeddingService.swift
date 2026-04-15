@@ -28,7 +28,7 @@ enum EmbeddingError: LocalizedError {
 
 /// A service responsible for generating text embeddings using a local Core ML model
 /// with a real WordPiece tokenizer loaded from bundled Hugging Face tokenizer files.
-class EmbeddingService {
+actor EmbeddingService {
 
     // MARK: - Singleton Instance
     static let shared = EmbeddingService()
@@ -41,9 +41,8 @@ class EmbeddingService {
     /// The fixed sequence length the Core ML model expects.
     private let sequenceLength = 128
 
-    /// Thread-safe lazy-loaded tokenizer instance.
+    /// Lazy-loaded tokenizer instance (actor isolation provides thread safety).
     private var _tokenizer: (any Tokenizer)?
-    private let tokenizerLock = NSLock()
 
     /// Logger for diagnostics and error reporting.
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "EmbeddingService")
@@ -122,9 +121,7 @@ class EmbeddingService {
         // Load from bundle
         let tokenizer = try await _loadTokenizer()
 
-        // Thread-safe cache
-        tokenizerLock.lock()
-        defer { tokenizerLock.unlock() }
+        // Actor isolation provides thread safety
         if let existing = _tokenizer { return existing }
         _tokenizer = tokenizer
         logger.info("Successfully loaded WordPiece tokenizer for All-MiniLM-L6-v2.")

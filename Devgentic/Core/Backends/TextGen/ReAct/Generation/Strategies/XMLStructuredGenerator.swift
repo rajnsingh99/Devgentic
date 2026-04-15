@@ -20,7 +20,7 @@ private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.d
 struct XMLStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
 
-    private let dialectRules = """
+    let dialectRules: String? = """
     TOOL CALLING FORMAT:
     When you need to call a tool, you MUST use the following XML format EXACTLY:
     <tool_call>
@@ -55,11 +55,7 @@ struct XMLStructuredGenerator: CognitiveGenerator {
 
         var executionMessages = compileMessages(from: context)
 
-        let promptTrigger = (iteration == 1)
-            ? "Begin ReAct loop. Analyze Active Memory. Use the <tool_call> XML format if you need to invoke a tool."
-            : "Review OBSERVATION. Decide next step. Use the <tool_call> XML format if you need to invoke a tool."
-
-        executionMessages.append(["role": "user", "content": promptTrigger])
+        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
 
         logLLMOps.debug("📤 [MistralXML:\(reqId)] Sending request...")
         let startTime = Date()

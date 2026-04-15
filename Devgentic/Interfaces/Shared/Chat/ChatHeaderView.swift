@@ -46,6 +46,7 @@ struct ChatHeaderView: View {
             .buttonStyle(.plain)
             .foregroundColor(isConversationSelected ? theme.secondaryText : theme.secondaryText.opacity(0.5)) // Use secondary color, gray out if disabled
             .help(isConversationSelected ? "Continue this chat in Quick Access overlay" : "Select a chat to transfer")
+            .accessibilityLabel("Transfer to Quick Access")
             .disabled(!isConversationSelected) // Disable if no conversation is selected
             // --- END NEW ---
             
@@ -57,6 +58,7 @@ struct ChatHeaderView: View {
             .buttonStyle(.plain)
             .foregroundColor(isFilterActive ? theme.streamingIndicator : theme.secondaryText)
             .help(isFilterActive ? "Show all messages" : "Show only my messages")
+            .accessibilityLabel(isFilterActive ? "Show all messages" : "Show only my messages")
         }
         .padding(.horizontal) // Horizontal padding for content
         .padding(.vertical, 12) // Vertical padding

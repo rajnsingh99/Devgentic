@@ -23,9 +23,16 @@ struct NativeStructuredGenerator: CognitiveGenerator {
         self.toolAdapter = toolAdapter
         self.dialectRules = dialectRules
     }
-    
+
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
         return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: true)
+    }
+
+    func promptTrigger(for iteration: Int) -> String {
+        let base = iteration == 1
+            ? "Analyze the task and working memory, then decide your next action."
+            : "New observations have been recorded in working memory. Decide your next action."
+        return base + " If you need to take an action, use one of the provided tools."
     }
     
     func generateCognitiveStep(model: any LLMProvider, context: SemanticContext, iteration: Int) async throws -> ModernCognitiveStep {
@@ -34,16 +41,7 @@ struct NativeStructuredGenerator: CognitiveGenerator {
 
         var executionMessages = compileMessages(from: context)
         
-        // --- NATURAL PROMPT TRIGGER ---
-        // We no longer force the model to output strict JSON markdown.
-        // We let it act naturally and rely on the LLMProvider to intercept native tool_calls.
-        // However, for local models (like Llama 3 Groq) to reliably trigger native tool outputs,
-        // we append a stronger call-to-action to use the provided tool schema.
-        let promptTrigger = (iteration == 1)
-            ? "Begin ReAct loop. Analyze Active Memory. Decide your next step. If you need to take an action, you MUST use one of the provided tools using its exact function calling format."
-            : "Review OBSERVATION. Update State. Decide your next step. If you need to take an action, you MUST use one of the provided tools using its exact function calling format."
-
-        executionMessages.append(["role": "user", "content": promptTrigger])
+        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
 
         logLLMOps.debug("📤 [Native:\(reqId)] Sending request to model with native tool execution...")
         let startTime = Date()

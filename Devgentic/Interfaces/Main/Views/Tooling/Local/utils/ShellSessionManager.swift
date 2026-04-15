@@ -12,19 +12,17 @@ import os
 /// Manages "Virtual" Shell Sessions by tracking the Current Working Directory (CWD)
 /// for each conversation. This avoids the memory overhead and complexity of maintaining
 /// live 'zsh' process handles while still allowing agents to 'cd' around.
-final class ShellSessionManager: @unchecked Sendable {
-    
+actor ShellSessionManager {
+
     static let shared = ShellSessionManager()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ShellSessionManager")
-    
+
     // Maps ConversationID -> Current Directory Path
     private var sessionCWDs: [UUID: String] = [:]
-    
+
     // Safety: Track running processes to kill them on app termination
     private var activeProcesses: [Process] = []
-    
-    private let lock = NSLock()
-    
+
     private init() {}
     
     /// Executes a command within the context of the conversation's current directory.
@@ -35,11 +33,9 @@ final class ShellSessionManager: @unchecked Sendable {
         // FIX: Default to User Home (~/) instead of App Bundle/Root.
         var cwd = FileManager.default.homeDirectoryForCurrentUser.path
         
-        lock.lock()
         if let savedCWD = sessionCWDs[conversationID] {
             cwd = savedCWD
         }
-        lock.unlock()
         
         // 2. Safety & Timeout Setup
         // Phase 10: Token-aware blocking to prevent false positives on non-interactive invocations
@@ -83,9 +79,7 @@ final class ShellSessionManager: @unchecked Sendable {
                 let newCWD = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
                 
                 if !newCWD.isEmpty && FileManager.default.fileExists(atPath: newCWD) {
-                    lock.lock()
                     sessionCWDs[conversationID] = newCWD
-                    lock.unlock()
                 }
             }
         }
@@ -100,9 +94,6 @@ final class ShellSessionManager: @unchecked Sendable {
     
     /// Called by AppDelegate when the application terminates.
     func cleanup() {
-        lock.lock()
-        defer { lock.unlock() }
-        
         logger.info("Cleaning up ShellSessionManager...")
         
         // Terminate any commands currently running (e.g., long greps)
@@ -120,51 +111,56 @@ final class ShellSessionManager: @unchecked Sendable {
     }
     
     private func getCWD(for id: UUID) -> String {
-        lock.lock()
-        defer { lock.unlock() }
         return sessionCWDs[id] ?? FileManager.default.homeDirectoryForCurrentUser.path
     }
     
+    private func trackProcess(_ process: Process) {
+        activeProcesses.append(process)
+    }
+
+    private func untrackProcess(_ process: Process) {
+        if let index = activeProcesses.firstIndex(of: process) {
+            activeProcesses.remove(at: index)
+        }
+    }
+
     private func runZshProcess(_ command: String) async throws -> String {
         // We capture 'self' strongly here, which is fine because ShellSessionManager is a singleton.
-        return try await Task.detached(priority: .userInitiated) {
-            let process = Process()
-            let pipe = Pipe()
-            
-            process.standardOutput = pipe
-            process.standardError = pipe
-            process.arguments = ["-c", command]
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            
-            // Environment setup
-            var env = ProcessInfo.processInfo.environment
-            env["TERM"] = "dumb"
-            process.environment = env
-            
-            // TRACK PROCESS
-            self.lock.lock()
-            self.activeProcesses.append(process)
-            self.lock.unlock()
-            
-            defer {
-                // UNTRACK PROCESS ON EXIT
-                self.lock.lock()
-                if let index = self.activeProcesses.firstIndex(of: process) {
-                    self.activeProcesses.remove(at: index)
-                }
-                self.lock.unlock()
-            }
-            
-            try process.run()
+        let process = Process()
+        let pipe = Pipe()
+
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.arguments = ["-c", command]
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+
+        // Environment setup
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "dumb"
+        process.environment = env
+
+        // TRACK PROCESS (actor-isolated)
+        trackProcess(process)
+
+        // Run the blocking process work on a detached task
+        nonisolated(unsafe) let detachedProcess = process
+        nonisolated(unsafe) let detachedPipe = pipe
+        let result: String = try await Task.detached(priority: .userInitiated) {
+            try detachedProcess.run()
 
             // Phase 10: Removed the 30s hard kill. Shell commands (git clone, find,
             // large builds, etc.) can legitimately exceed 30s. The cognitive loop's
             // task cancellation and maxIterations cap are the real safety nets.
             // Process cleanup on app termination is handled by cleanup().
-            process.waitUntilExit()
+            detachedProcess.waitUntilExit()
 
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let data = detachedPipe.fileHandleForReading.readDataToEndOfFile()
             return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }.value
+
+        // UNTRACK PROCESS ON EXIT (actor-isolated)
+        untrackProcess(process)
+
+        return result
     }
 }

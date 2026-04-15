@@ -13,7 +13,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 
 struct TaskSchedulerSidebarView: View {
 
-    @StateObject private var viewModel = SchedulerViewModel()
+    @State private var viewModel = SchedulerViewModel()
     @Environment(MainApplicationViewModel.self) var mainViewModel
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme

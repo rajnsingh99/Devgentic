@@ -14,7 +14,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devg
 /// A new SwiftUI view to display the Prompt Library directly in the sidebar.
 /// This view replaces the old modal panel approach.
 struct PromptLibrarySidebarView: View {
-    @StateObject private var viewModel = PromptLibraryViewModel()
+    @State private var viewModel = PromptLibraryViewModel()
     @State private var showingAddPromptPopover: Bool = false
     @FocusState private var isSearchFieldFocused: Bool
     @Environment(\.appTheme) private var theme
@@ -46,7 +46,7 @@ struct PromptLibrarySidebarView: View {
             .padding(.bottom, 8)
             .popover(isPresented: $showingAddPromptPopover, arrowEdge: .bottom) {
                 CreateEditPromptView()
-                    .environmentObject(viewModel)
+                    .environment(viewModel)
                     .frame(minWidth: 480, idealWidth: 550, minHeight: 450, idealHeight: 500)
             }
 
@@ -120,11 +120,12 @@ struct CategoryChip: View {
     let action: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                .font(.system(.caption, weight: isSelected ? .semibold : .medium))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(isSelected ? theme.primaryText : theme.surfaceOverlay)
@@ -132,10 +133,15 @@ struct CategoryChip: View {
                 .clipShape(Capsule())
                 .overlay(
                     Capsule()
-                        .stroke(isSelected ? Color.clear : theme.surfaceOverlay, lineWidth: 0.5)
+                        .stroke(
+                            isSelected ? Color.clear : (isHovered ? theme.primaryText.opacity(0.6) : theme.surfaceOverlay),
+                            lineWidth: isHovered && !isSelected ? 1 : 0.5
+                        )
                 )
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
     }
 }

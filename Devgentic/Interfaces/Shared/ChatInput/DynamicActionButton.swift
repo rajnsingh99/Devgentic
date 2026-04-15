@@ -66,14 +66,34 @@ struct DynamicActionButton: View {
         .disabled(isDisabled)
         .help(helpText)
         .accessibilityLabel(helpText)
-        .popover(isPresented: Bindable(inputViewModel).showModelSelectorPopover, arrowEdge: .top) {
+        .popover(isPresented: popoverBinding, arrowEdge: .top) {
             WhisperModelSelectorPopover(
-                isPresented: Bindable(inputViewModel).showModelSelectorPopover,
+                isPresented: popoverBinding,
                 currentModelName: inputViewModel.currentSpeechModelName,
+                downloadedModelIds: WhisperModelDownloadService.shared.downloadedModelIds,
                 onSelectModel: { modelName in
-                    inputViewModel.selectAndDownloadModel(modelName)
+                    inputViewModel.selectDownloadedModel(modelName)
+                },
+                onSelectUndownloadedModel: { modelName in
+                    inputViewModel.requestDownloadConfirmation(for: modelName)
+                },
+                onDeleteModel: { modelName in
+                    inputViewModel.requestDeleteConfirmation(for: modelName)
                 }
             )
+        }
+        .alert(
+            whisperAlertTitle,
+            isPresented: Bindable(inputViewModel).showWhisperAlert
+        ) {
+            if inputViewModel.activeWhisperAlert == .delete {
+                Button("Delete", role: .destructive) { inputViewModel.confirmWhisperAlert() }
+            } else {
+                Button("Download") { inputViewModel.confirmWhisperAlert() }
+            }
+            Button("Cancel", role: .cancel) { inputViewModel.cancelWhisperAlert() }
+        } message: {
+            Text(whisperAlertMessage)
         }
     }
 
@@ -228,6 +248,40 @@ struct DynamicActionButton: View {
         case .stopVoice: return "Stop Voice Input"
         case .stopStreaming: return "Stop generating response"
         case .mic: return "Voice Input"
+        }
+    }
+
+    // MARK: - Whisper Alert Helpers
+
+    /// Single Bindable wrapper reused for both popover presenter and popover content (#13).
+    private var popoverBinding: Binding<Bool> {
+        Bindable(inputViewModel).showModelSelectorPopover
+    }
+
+    private var whisperAlertTitle: String {
+        switch inputViewModel.activeWhisperAlert {
+        case .download: return "Download Required"
+        case .delete: return "Delete Model"
+        case .none: return ""
+        }
+    }
+
+    private var whisperAlertMessage: String {
+        switch inputViewModel.activeWhisperAlert {
+        case .download:
+            if let modelId = inputViewModel.pendingDownloadModelId,
+               let model = WhisperModelCatalog.availableModels.first(where: { $0.id == modelId }) {
+                return "The \(model.displayName) model (\(model.size)) needs to be downloaded before use."
+            }
+            return "This model needs to be downloaded before use."
+        case .delete:
+            if let modelId = inputViewModel.pendingDeleteModelId,
+               let model = WhisperModelCatalog.availableModels.first(where: { $0.id == modelId }) {
+                return "Delete the \(model.displayName) model? It will need to be re-downloaded to use again."
+            }
+            return "Delete this model? It will need to be re-downloaded to use again."
+        case .none:
+            return ""
         }
     }
 }

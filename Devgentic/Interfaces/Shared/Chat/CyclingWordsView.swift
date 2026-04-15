@@ -47,12 +47,12 @@ struct CyclingWordsView: View {
                     )
             }
         }
-        .font(.system(size: 13, weight: .medium))
+        .font(theme.fontSubheadline.weight(.medium))
         .foregroundColor(theme.primaryText)
         .lineLimit(1)
         .animation(.easeInOut(duration: 0.35), value: currentIndex)
         .onAppear { startCycling() }
-        .onChange(of: agentState) { _ in
+        .onChange(of: agentState) {
             // Reset index when state changes to start fresh with new word pool
             currentIndex = 0
         }

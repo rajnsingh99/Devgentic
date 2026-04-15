@@ -13,36 +13,65 @@ import MLXLMCommon
 import os
 
 /// Manages the lifecycle of local MLX models and fetches remote metadata from Hugging Face.
-@MainActor
-class MLXModelService: ObservableObject {
+@Observable @MainActor
+class MLXModelService {
     static let shared = MLXModelService()
-    
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MLXModelService")
-    
-    // MARK: - Published State
-    
+
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MLXModelService")
+
+    // MARK: - Observable State
+
     /// Local models found on disk
-    @Published var installedModels: [MLXModelItem] = []
-    
+    var installedModels: [MLXModelItem] = []
+
     /// Remote models fetched from the store (with rich metadata)
-    @Published var availableModels: [MLXDisplayModel] = []
-    @Published var isLoadingRemoteModels: Bool = false
-    
+    var availableModels: [MLXDisplayModel] = []
+    var isLoadingRemoteModels: Bool = false
+
     // Download State
-    @Published var downloadProgress: Double = 0.0
-    @Published var isDownloading: Bool = false
-    @Published var currentDownloadName: String = ""
-    @Published var errorMessage: String?
-    
+    var downloadProgress: Double = 0.0
+    var isDownloading: Bool = false
+    var currentDownloadName: String = ""
+    var errorMessage: String?
+
     // Task management for cancellation
-    private var downloadTask: Task<Void, Never>?
-    
+    @ObservationIgnored private var downloadTask: Task<Void, Never>?
+
     // Cache for model sizes to avoid re-fetching
-    @Published var modelSizes: [String: String] = [:]
+    var modelSizes: [String: String] = [:]
+
+    // MARK: - Cognitive Profile Cache
+    /// Caches CognitiveProfile results keyed by model display name.
+    /// Invalidated automatically when the installed model list changes.
+    /// Eliminates redundant file I/O from repeated detectCognitiveProfile calls.
+    private var profileCache: [String: CognitiveProfile] = [:]
+
+    /// Returns a cached CognitiveProfile for the given model, computing and caching it on first access.
+    func cachedCognitiveProfile(for model: MLXModelItem) -> CognitiveProfile {
+        if let cached = profileCache[model.displayName] {
+            return cached
+        }
+        let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: model.displayName)
+        profileCache[model.displayName] = profile
+        return profile
+    }
+
+    /// Pre-computes and caches profiles for all installed models in one pass.
+    /// Call after refreshInstalledModels() completes to warm the cache.
+    private func rebuildProfileCache() {
+        profileCache.removeAll(keepingCapacity: true)
+        for model in installedModels {
+            let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: model.displayName)
+            profileCache[model.displayName] = profile
+        }
+        logger.debug("Profile cache rebuilt for \(self.installedModels.count) model(s).")
+    }
 
     // Debounce guard to prevent rapid-fire filesystem scans (e.g. init + onAppear)
     private var lastScanTime: Date? = nil
-    private let scanDebounceInterval: TimeInterval = 2.0
+    private let scanDebounceInterval: TimeInterval = 30.0
+    /// Snapshot of model count from last scan — used to skip no-op refreshes
+    private var lastScanModelCount: Int = 0
     
     // MARK: - Configuration
     
@@ -62,11 +91,19 @@ class MLXModelService: ObservableObject {
     }
     
     init() {
-        refreshInstalledModels()
+        // Force-refresh on first launch to populate both the model list and profile cache
+        forceRefreshInstalledModels()
     }
     
     // MARK: - Local Discovery (Deep Scan)
     
+    /// Forces a fresh filesystem scan, bypassing the debounce timer.
+    /// Use after downloads or deletions where the model list is known to have changed.
+    func forceRefreshInstalledModels() {
+        lastScanTime = nil
+        refreshInstalledModels()
+    }
+
     func refreshInstalledModels() {
         // Debounce: skip if last scan was within the debounce interval (prevents init + onAppear double-fire)
         if let lastScan = lastScanTime, Date().timeIntervalSince(lastScan) < scanDebounceInterval {
@@ -76,11 +113,11 @@ class MLXModelService: ObservableObject {
         lastScanTime = Date()
 
         logger.info("Starting Deep Scan (Config-based) at: \(self.modelsDirectory.path)")
-        
+
         var foundModels: [MLXModelItem] = []
         let fileManager = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey, .creationDateKey]
-        
+
         if let enumerator = fileManager.enumerator(
             at: modelsDirectory,
             includingPropertiesForKeys: keys,
@@ -90,9 +127,9 @@ class MLXModelService: ObservableObject {
                 if fileURL.lastPathComponent == "config.json" {
                     let modelDir = fileURL.deletingLastPathComponent()
                     let parentDir = modelDir.deletingLastPathComponent()
-                    
+
                     var displayName = modelDir.lastPathComponent
-                    
+
                     // Reconstruct clean names from nested folders
                     if parentDir.lastPathComponent == "mlx-community" {
                         displayName = "\(parentDir.lastPathComponent)/\(modelDir.lastPathComponent)"
@@ -101,7 +138,7 @@ class MLXModelService: ObservableObject {
                             .replacingOccurrences(of: "models--", with: "")
                             .replacingOccurrences(of: "--", with: "/")
                     }
-                    
+
                     // Read creation date from the config.json file (reflects download time)
                     let createdAt = try? fileURL.resourceValues(forKeys: [.creationDateKey]).creationDate
 
@@ -112,9 +149,20 @@ class MLXModelService: ObservableObject {
                 }
             }
         }
-        
-        self.installedModels = foundModels.sorted { $0.displayName < $1.displayName }
-        self.logger.info("Scan complete. Models ready: \(self.installedModels.count)")
+
+        let sorted = foundModels.sorted { $0.displayName < $1.displayName }
+
+        // Only update and rebuild cache if the model list actually changed
+        let newNames = Set(sorted.map(\.displayName))
+        let oldNames = Set(installedModels.map(\.displayName))
+        if newNames != oldNames {
+            self.installedModels = sorted
+            rebuildProfileCache()
+            self.logger.info("Scan complete. Models changed — rebuilt cache. Models ready: \(self.installedModels.count)")
+        } else {
+            self.logger.info("Scan complete. Models unchanged (\(self.installedModels.count)). Cache retained.")
+        }
+        lastScanModelCount = sorted.count
     }
     
     // MARK: - Remote Discovery (Metadata & Store)
@@ -278,7 +326,7 @@ class MLXModelService: ObservableObject {
                 }
                 
                 logger.notice("Download finished successfully.")
-                self.refreshInstalledModels()
+                self.forceRefreshInstalledModels()
                 self.isDownloading = false
                 
             } catch where error is CancellationError {
@@ -306,7 +354,7 @@ class MLXModelService: ObservableObject {
     func deleteModel(_ item: MLXModelItem) {
         do {
             try FileManager.default.removeItem(at: item.localPath)
-            refreshInstalledModels()
+            forceRefreshInstalledModels()
         } catch {
             self.errorMessage = "Failed to delete: \(error.localizedDescription)"
         }

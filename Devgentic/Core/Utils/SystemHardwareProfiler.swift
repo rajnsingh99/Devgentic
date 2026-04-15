@@ -5,7 +5,7 @@
 //  Created by Devgentic Architect
 //
 
-import Foundation
+@preconcurrency import Foundation
 import Metal
 import os
 
@@ -141,7 +141,8 @@ final class SystemHardwareProfiler: @unchecked Sendable {
             // Fallback: assume 50% of total is available
             return ProcessInfo.processInfo.physicalMemory / 2
         }
-        let pageSize = UInt64(vm_kernel_page_size)
+        nonisolated(unsafe) let rawPageSize = vm_kernel_page_size
+        let pageSize = UInt64(rawPageSize)
         let free = UInt64(stats.free_count) * pageSize
         let inactive = UInt64(stats.inactive_count) * pageSize
         return free + inactive

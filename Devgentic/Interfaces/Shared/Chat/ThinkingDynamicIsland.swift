@@ -18,6 +18,7 @@ struct ThinkingDynamicIsland: View {
 
     @State private var gradientRotation: Double = 0
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Returns a static headline for states that shouldn't cycle (tool use, interactions, workflow, capabilities).
     /// Returns nil for generic thinking states, which triggers CyclingWordsView's animated word rotation.
@@ -49,7 +50,13 @@ struct ThinkingDynamicIsland: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button(action: { withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { isExpanded.toggle() } }) {
+            Button(action: {
+                if reduceMotion {
+                    isExpanded.toggle()
+                } else {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { isExpanded.toggle() }
+                }
+            }) {
                 HStack(spacing: 8) {
                     ZStack {
                         Circle()
@@ -57,7 +64,7 @@ struct ThinkingDynamicIsland: View {
                             .frame(width: 24, height: 24)
 
                         Image(systemName: "brain.head.profile")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(isStreaming ? theme.streamingIndicator : theme.secondaryText)
                             .symbolEffect(.pulse, options: .repeating, value: isStreaming)
                     }
@@ -69,7 +76,7 @@ struct ThinkingDynamicIsland: View {
                         )
                     } else {
                         Text("Thought Process")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(theme.fontSubheadline.weight(.medium))
                             .foregroundColor(theme.secondaryText)
 
                         Text("• \(thoughts.count) steps")
@@ -86,25 +93,34 @@ struct ThinkingDynamicIsland: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-                .overlay(
-                    Capsule()
-                        .strokeBorder(
-                            AngularGradient(gradient: Gradient(colors: isStreaming ? [theme.streamingIndicator, theme.accentColor, theme.streamingIndicator] : [.clear]), center: .center, angle: .degrees(gradientRotation)),
-                            lineWidth: isStreaming ? 1.5 : 0.5
-                        )
-                        .foregroundColor(theme.primaryText.opacity(0.1))
-                )
-                .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
+                // MARK: Liquid Glass
+                .glassEffect(.regular, in: .capsule)
+                // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+                // .background(.ultraThinMaterial)
+                // .clipShape(Capsule())
+                // .overlay(
+                //     Capsule()
+                //         .strokeBorder(
+                //             AngularGradient(gradient: Gradient(colors: isStreaming ? [theme.streamingIndicator, theme.accentColor, theme.streamingIndicator] : [.clear]), center: .center, angle: .degrees(gradientRotation)),
+                //             lineWidth: isStreaming ? 1.5 : 0.5
+                //         )
+                //         .foregroundColor(theme.primaryText.opacity(0.1))
+                // )
+                // .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Collapse thought process" : "Expand thought process")
             .onAppear {
-                if isStreaming {
+                if isStreaming && !reduceMotion {
                     withAnimation(.linear(duration: 2).repeatForever(autoreverses: false)) {
                         gradientRotation = 360
                     }
                 }
+            }
+            .onDisappear {
+                // Reset rotation so the repeatForever animation stops when the view
+                // is removed from the hierarchy (e.g., streaming ends, view navigated away).
+                gradientRotation = 0
             }
 
             if isExpanded {
@@ -114,7 +130,7 @@ struct ThinkingDynamicIsland: View {
                         HStack(alignment: .top, spacing: 8) {
                             Circle().fill(theme.secondaryText.opacity(0.3)).frame(width: 4, height: 4).padding(.top, 6)
                             Text(thought.text)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(.system(size: 12, design: .monospaced)) // Fixed size: monospaced
                                 .foregroundColor(theme.secondaryText)
                                 .fixedSize(horizontal: false, vertical: true)
                         }

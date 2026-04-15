@@ -70,6 +70,15 @@ struct ProfileValidator {
             case .agent(let config):
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))
                 errors.append(contentsOf: validateInstructions(config.instructions))
+                // Warn if local model lacks tool capabilities (cloud providers always support tools)
+                let localProviders: [ApiProvider] = [.ollama, .mlx]
+                if localProviders.contains(config.llmConfig.apiProvider),
+                   config.llmConfig.cognitiveProfile.capability == .none {
+                    errors.append(ProfileValidationError(
+                        field: "modelCapabilities",
+                        message: "Selected model does not support tool calling. Agent features may not work correctly."
+                    ))
+                }
 
             case .imageGen(let config):
                 errors.append(contentsOf: validateLLMConfig(config.llmConfig))

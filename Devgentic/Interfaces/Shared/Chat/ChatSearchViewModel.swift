@@ -14,14 +14,31 @@ struct SearchMatch: Identifiable {
     let matchIndex: Int // Which match within this message (0-based)
 }
 
-@MainActor
-class ChatSearchViewModel: ObservableObject {
-    @Published var isSearchActive: Bool = false
-    @Published var searchQuery: String = ""
-    @Published var matches: [SearchMatch] = []
-    @Published var currentMatchIndex: Int = 0
+@Observable @MainActor
+class ChatSearchViewModel {
+    var isSearchActive: Bool = false
+    var searchQuery: String = "" {
+        didSet {
+            if searchQuery != oldValue {
+                currentMatchIndex = 0
+                debouncedQuerySubject.send(searchQuery)
+            }
+        }
+    }
+    var matches: [SearchMatch] = []
+    var currentMatchIndex: Int = 0
 
-    private var searchCancellable: AnyCancellable?
+    // MARK: - Debounce Infrastructure
+    /// Subject that receives raw query changes for debouncing.
+    @ObservationIgnored private let debouncedQuerySubject = PassthroughSubject<String, Never>()
+    /// The debounced query that actually triggers search execution.
+    @ObservationIgnored private(set) var debouncedQuery: String = ""
+    @ObservationIgnored private var debounceCancellable: AnyCancellable?
+    /// Pre-computed lowercase content index for O(1) lookup per message.
+    @ObservationIgnored private var lowercaseIndex: [(id: UUID, text: String)] = []
+
+    /// Debounce interval in seconds. 150ms balances responsiveness with performance.
+    static let debounceInterval: TimeInterval = 0.15
 
     var totalMatchCount: Int { matches.count }
 
@@ -37,12 +54,32 @@ class ChatSearchViewModel: ObservableObject {
     }
 
     init() {
-        searchCancellable = $searchQuery
-            .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
-            .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.currentMatchIndex = 0
+        setupDebounce()
+    }
+
+    /// Sets up the Combine debounce pipeline.
+    /// Search executes only after the user stops typing for `debounceInterval`.
+    private func setupDebounce() {
+        debounceCancellable = debouncedQuerySubject
+            .debounce(for: .seconds(Self.debounceInterval), scheduler: RunLoop.main)
+            .sink { [weak self] query in
+                self?.debouncedQuery = query
             }
+    }
+
+    /// Rebuilds the pre-computed lowercase index from the current message array.
+    /// Call this when messages change (new message added, conversation switched).
+    func rebuildSearchIndex(from messages: [ChatMessage]) {
+        lowercaseIndex = messages.reversed().compactMap { message in
+            let content: String?
+            if message.sender == .agent, let agentContent = message.currentAgentContent {
+                content = agentContent.textContent
+            } else {
+                content = message.content.textContent
+            }
+            guard let text = content, !text.isEmpty else { return nil }
+            return (id: message.id, text: text.lowercased())
+        }
     }
 
     func performSearch(in messages: [ChatMessage]) {
@@ -53,32 +90,41 @@ class ChatSearchViewModel: ObservableObject {
             return
         }
 
+        let lowercasedQuery = query.lowercased()
         var results: [SearchMatch] = []
 
-        // Messages are stored newest-first; iterate reversed for oldest-first display order
-        for message in messages.reversed() {
-            let content: String?
-            if message.sender == .agent, let agentContent = message.currentAgentContent {
-                content = agentContent.textContent
-            } else {
-                content = message.content.textContent
+        // Use pre-computed lowercase index if available, otherwise fall back to direct scan
+        let searchSource: [(id: UUID, text: String)]
+        if !lowercaseIndex.isEmpty {
+            searchSource = lowercaseIndex
+        } else {
+            // Fallback: build on-the-fly (first search before index is built)
+            searchSource = messages.reversed().compactMap { message in
+                let content: String?
+                if message.sender == .agent, let agentContent = message.currentAgentContent {
+                    content = agentContent.textContent
+                } else {
+                    content = message.content.textContent
+                }
+                guard let text = content, !text.isEmpty else { return nil }
+                return (id: message.id, text: text.lowercased())
             }
+        }
 
-            guard let text = content, !text.isEmpty else { continue }
-
-            var searchRange = text.startIndex..<text.endIndex
+        for entry in searchSource {
+            var searchRange = entry.text.startIndex..<entry.text.endIndex
             var matchIndexInMessage = 0
 
-            while let range = text.range(of: query, options: .caseInsensitive, range: searchRange) {
-                results.append(SearchMatch(messageID: message.id, matchIndex: matchIndexInMessage))
+            while let range = entry.text.range(of: lowercasedQuery, range: searchRange) {
+                results.append(SearchMatch(messageID: entry.id, matchIndex: matchIndexInMessage))
                 matchIndexInMessage += 1
-                searchRange = range.upperBound..<text.endIndex
+                searchRange = range.upperBound..<entry.text.endIndex
             }
         }
 
         matches = results
         if currentMatchIndex >= results.count {
-            currentMatchIndex = results.isEmpty ? 0 : 0
+            currentMatchIndex = 0
         }
     }
 

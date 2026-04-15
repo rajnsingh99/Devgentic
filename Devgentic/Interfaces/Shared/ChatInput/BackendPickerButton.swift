@@ -11,7 +11,10 @@ struct BackendPickerButton: View {
 
     let profileThemeColor: Color
     let profileButtonText: String
-    @ObservedObject var backendConfiguration: BackendConfiguration
+    var backendConfiguration: BackendConfiguration
+
+    /// Profile types to show in the popup. Nil = show all (legacy).
+    var allowedProfileTypes: Set<ProfileType>? = nil
 
     @Binding var showingPopup: Bool
     @Environment(\.appTheme) private var theme
@@ -27,12 +30,12 @@ struct BackendPickerButton: View {
                     .shadow(color: profileThemeColor.opacity(0.4), radius: 2, x: 0, y: 0)
 
                 Text(profileButtonText)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(theme.fontSubheadline.weight(.medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge/chip text)
                     .foregroundColor(theme.secondaryText.opacity(0.8))
             }
             .padding(.horizontal, 10)
@@ -51,7 +54,8 @@ struct BackendPickerButton: View {
         .popover(isPresented: $showingPopup, arrowEdge: .bottom) {
             BackendSelectorPopup(
                 configuration: backendConfiguration,
-                isPresented: $showingPopup
+                isPresented: $showingPopup,
+                allowedProfileTypes: allowedProfileTypes
             )
         }
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isHovering = hover } }

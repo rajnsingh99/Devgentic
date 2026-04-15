@@ -14,15 +14,15 @@ struct ExecutionLimitsSection: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
 
             // Max Iterations
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Max Iterations")
-                        .fontWeight(.medium)
+                        .font(theme.fontBody.weight(.medium))
                     Text("Maximum reasoning cycles before forced termination")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -39,15 +39,13 @@ struct ExecutionLimitsSection: View {
                 .fixedSize()
             }
 
-            Divider()
-
             // Execution Timeout
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Execution Timeout")
-                        .fontWeight(.medium)
+                        .font(theme.fontBody.weight(.medium))
                     Text("Maximum wall-clock time for a single execution")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -69,20 +67,20 @@ struct ExecutionLimitsSection: View {
                         Button("Remove") {
                             executionTimeout = nil
                         }
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                 } else {
                     HStack(spacing: 8) {
                         Text("No limit")
-                            .font(.callout)
+                            .font(theme.fontCallout)
                             .foregroundColor(theme.secondaryText)
 
                         Button("Set") {
                             executionTimeout = 120
                         }
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
@@ -101,15 +99,15 @@ struct ErrorRecoverySection: View {
     private var effectiveRecovery: ErrorRecovery { errorRecovery ?? ErrorRecovery() }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
 
             // Parse Failure Retries
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Parse Failure")
-                        .fontWeight(.medium)
+                        .font(theme.fontBody.weight(.medium))
                     Text("When the model returns unparseable output")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -131,15 +129,13 @@ struct ErrorRecoverySection: View {
                 .fixedSize()
             }
 
-            Divider()
-
             // Backoff Strategy
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Backoff Strategy")
-                        .fontWeight(.medium)
+                        .font(theme.fontBody.weight(.medium))
                     Text("Delay pattern between retries")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -161,15 +157,13 @@ struct ErrorRecoverySection: View {
                 .fixedSize()
             }
 
-            Divider()
-
             // Tool Failure Policy
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Tool Failure")
-                        .fontWeight(.medium)
+                        .font(theme.fontBody.weight(.medium))
                     Text("When a tool execution fails repeatedly")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -191,15 +185,62 @@ struct ErrorRecoverySection: View {
                 .fixedSize()
             }
 
-            Divider()
+            // Fallback Prompt Custom Message (shown only when .fallbackPrompt is selected)
+            if effectiveRecovery.onToolFailure == .fallbackPrompt {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Fallback Message")
+                            .font(theme.fontCaption.weight(.medium))
+                            .foregroundColor(theme.secondaryText)
+                        Spacer()
+                        if effectiveRecovery.fallbackMessage != nil {
+                            Button("Reset to Default") {
+                                var recovery = effectiveRecovery
+                                recovery.fallbackMessage = nil
+                                errorRecovery = recovery
+                            }
+                            .font(theme.fontCaption)
+                            .buttonStyle(.plain)
+                            .foregroundColor(theme.accentColor)
+                        }
+                    }
+
+                    TextEditor(text: Binding(
+                        get: {
+                            effectiveRecovery.fallbackMessage ?? ErrorRecovery.defaultFallbackMessage
+                        },
+                        set: { newValue in
+                            var recovery = effectiveRecovery
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            recovery.fallbackMessage = trimmed == ErrorRecovery.defaultFallbackMessage ? nil : (trimmed.isEmpty ? nil : newValue)
+                            errorRecovery = recovery
+                        }
+                    ))
+                    .font(theme.fontBody)
+                    .frame(minHeight: 60, maxHeight: 120)
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .background(theme.codeBlockEditorBackground.opacity(0.5))
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(theme.dividerColor.opacity(0.3), lineWidth: 1)
+                    )
+
+                    Text("This message is injected into the agent's working memory when tools fail repeatedly. The failure reason is automatically prepended.")
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.tertiaryText)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             // Exhaustion Policy
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Budget Exhausted")
-                        .fontWeight(.medium)
+                        .font(theme.fontBody.weight(.medium))
                     Text("When max iterations are reached without completion")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -221,15 +262,6 @@ struct ErrorRecoverySection: View {
                 .fixedSize()
             }
 
-            // Info note
-            HStack(spacing: 4) {
-                Image(systemName: "info.circle")
-                    .font(.caption2)
-                Text("These settings apply when this agent runs standalone or as a workflow node.")
-                    .font(.caption2)
-            }
-            .foregroundColor(theme.secondaryText)
-            .padding(.top, 4)
         }
     }
 }

@@ -76,6 +76,10 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
     case delegationStarted      // "Delegating to SecurityReviewer"
     case delegationCompleted    // "SecurityReviewer completed"
 
+    // History Compaction
+    case compactionStarted      // "Compacting 15 turns..."
+    case compactionCompleted    // "History compacted — 15 turns summarized"
+
     /// SF Symbol for rendering in the timeline.
     var icon: String {
         switch self {
@@ -89,6 +93,8 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case .reflectionAccepted: return "checkmark.seal"
         case .delegationStarted: return "person.line.dotted.person"
         case .delegationCompleted: return "person.fill.checkmark"
+        case .compactionStarted: return "archivebox"
+        case .compactionCompleted: return "archivebox.fill"
         }
     }
 
@@ -98,6 +104,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case .planGenerated, .planReviewRequested, .subtaskStarted, .subtaskCompleted: return .planning
         case .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted: return .reflection
         case .delegationStarted, .delegationCompleted: return .delegation
+        case .compactionStarted, .compactionCompleted: return .compaction
         }
     }
 
@@ -105,6 +112,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
         case planning    // blue tint
         case reflection  // purple tint
         case delegation  // green tint
+        case compaction  // orange tint
     }
 }
 
@@ -118,6 +126,10 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// The distributed trace ID for the request that produced this message.
     /// Set when agent execution begins; used to retrieve trace data for the Report UI.
     var traceID: String?
+
+    /// The profile type that generated this message (bot, agent, workflow, imageGen).
+    /// Tagged at creation time by ActiveStreamManager — eliminates runtime profile store lookups.
+    var profileType: ProfileType?
 
     /// Where this message originated from (local Mac UI, Telegram, Discord, etc.).
     /// Transient — not persisted to CoreData. Used by RemoteMirrorService to decide
@@ -143,7 +155,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     var artifacts: [ToolOutput] {
         timelineEvents.compactMap { event in
             if case .toolExecution(let data) = event, !data.isExecuting {
-                return ToolOutput(toolName: data.name, output: data.output ?? "", isSuccess: data.isSuccess ?? false)
+                return ToolOutput(toolName: data.name, params: data.params, output: data.output ?? "", isSuccess: data.isSuccess ?? false)
             }
             return nil
         }
@@ -152,8 +164,33 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// Chronological timeline of agent reasoning steps, tool executions, and capability milestones.
     /// Ordering is guaranteed by @MainActor serialization in ActiveStreamManager's event loop.
     /// SwiftUI ForEach preserves insertion order via unique UUID identities.
+    /// Capped at `maxTimelineEvents` to prevent unbounded memory growth in long-running agents.
+    static let maxTimelineEvents = 500
+
     var timelineEvents: [TimelineEvent] = []
+
+    /// Appends a timeline event, evicting the oldest non-tool events if the cap is exceeded.
+    /// Tool execution events are preserved to maintain output correctness; only thoughts are trimmed.
+    func appendTimelineEvent(_ event: TimelineEvent) {
+        timelineEvents.append(event)
+        if timelineEvents.count > Self.maxTimelineEvents {
+            // Evict oldest thought events first to stay under budget
+            if let firstThoughtIndex = timelineEvents.firstIndex(where: {
+                if case .thought = $0 { return true }
+                return false
+            }) {
+                timelineEvents.remove(at: firstThoughtIndex)
+            } else {
+                // All events are tool/milestone — drop the oldest one
+                timelineEvents.removeFirst()
+            }
+        }
+    }
     
+    // MARK: - Token Usage (Persisted)
+    /// Token usage for this message's LLM generation, extracted from provider API responses.
+    var tokenUsage: TokenUsage?
+
     // MARK: - Transient UI State (Not Persisted)
     var thinkingHeadline: String? = nil
     var agentState: AgentState = .idle
@@ -205,11 +242,52 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // No longer polled; index occurs on stream completion.
 
     /// Estimated token count for the message content.
-    /// Uses a heuristic of ~4 characters per token (standard for English/code text).
-    /// This avoids expensive tokenizer calls for UI display and cost estimation.
+    /// Avoids expensive tokenizer calls for UI display and cost estimation.
+    ///
+    /// Heuristics by content type:
+    /// - Prose / markdown: ~4 characters per token (standard BPE for English)
+    /// - Code: ~3 characters per token (shorter identifiers, more symbols)
+    /// - Mixed (markdown with code blocks): weighted blend
     var tokenCountEstimate: Int {
-        guard let text = content.textContent else { return 0 }
-        return max(1, text.count / 4)
+        switch content {
+        case .codeBlock(_, let code):
+            // Pure code: ~3 chars per token (operators, braces, short identifiers)
+            return max(1, code.count / 3)
+        case .markdownText(let text):
+            // If >30% of content is inside ``` blocks, use code ratio for that portion
+            let codeCharCount = Self.estimateCodeBlockCharCount(in: text)
+            let proseCharCount = max(0, text.count - codeCharCount)
+            let codeTokens = codeCharCount / 3
+            let proseTokens = proseCharCount / 4
+            return max(1, codeTokens + proseTokens)
+        case .plainText(let text):
+            return max(1, text.count / 4)
+        case .error(let title, let details):
+            return max(1, ((title?.count ?? 0) + details.count) / 4)
+        case .image, .mediaArtifact:
+            return 0
+        case .checkpoint(let summary):
+            return max(1, summary.count / 4)
+        }
+    }
+
+    /// Fast estimate of how many characters live inside ``` code fences.
+    private static func estimateCodeBlockCharCount(in text: String) -> Int {
+        var count = 0
+        var inBlock = false
+        var blockStart = text.startIndex
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("```") {
+                if inBlock {
+                    count += text.distance(from: blockStart, to: line.endIndex)
+                    inBlock = false
+                } else {
+                    blockStart = line.startIndex
+                    inBlock = true
+                }
+            }
+        }
+        return count
     }
 
     // MARK: - Performance Caching
@@ -267,6 +345,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return [ContentBlock(id: "block-0", type: .code(language: language ?? "text", content: code, fileName: nil))]
         case .error, .image, .mediaArtifact:
             return []
+        case .checkpoint(let summary):
+            return getOrCreateMarkdownBlocks(from: summary)
         }
     }
 
@@ -295,7 +375,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         case schemaVersion
         case id, conversationId, timestamp, sender, content
         case agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
-        case timelineEvents, traceID
+        case timelineEvents, traceID, profileType, tokenUsage
     }
 
     /// Legacy keys only used for v1 migration — never encoded.
@@ -317,6 +397,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.attachedTextFiles = try container.decodeIfPresent([AttachedTextFile].self, forKey: .attachedTextFiles)
         self.attachedImageFiles = try container.decodeIfPresent([AttachedImageFile].self, forKey: .attachedImageFiles)
         self.traceID = try container.decodeIfPresent(String.self, forKey: .traceID)
+        self.profileType = try container.decodeIfPresent(ProfileType.self, forKey: .profileType)
+        self.tokenUsage = try container.decodeIfPresent(TokenUsage.self, forKey: .tokenUsage)
 
         if version == 1 {
             self.timelineEvents = try Self.migrateV1Timeline(from: decoder)
@@ -346,7 +428,9 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         try container.encodeIfPresent(attachedTextFiles, forKey: .attachedTextFiles)
         try container.encodeIfPresent(attachedImageFiles, forKey: .attachedImageFiles)
         try container.encodeIfPresent(traceID, forKey: .traceID)
+        try container.encodeIfPresent(profileType, forKey: .profileType)
         try container.encode(timelineEvents, forKey: .timelineEvents)
+        try container.encodeIfPresent(tokenUsage, forKey: .tokenUsage)
         // agentState, thoughts, artifacts are NOT encoded (transient / computed)
     }
 
@@ -393,8 +477,12 @@ enum MessageContent: Equatable, Codable {
     case image(url: URL?, alt: String?, imageData: Data?)
     case mediaArtifact(MediaArtifact)
 
+    /// A compacted history checkpoint produced by IC-powered summarization.
+    /// Contains a structured summary of older conversation turns.
+    case checkpoint(summary: String)
+
     enum CodingKeys: String, CodingKey {
-        case type, text, language, code, title, details, imageUrl, imageAlt, imageData, artifact
+        case type, text, language, code, title, details, imageUrl, imageAlt, imageData, artifact, summary
     }
 
     init(from decoder: Decoder) throws {
@@ -425,6 +513,9 @@ enum MessageContent: Equatable, Codable {
         case "mediaArtifact":
             let artifact = try container.decode(MediaArtifact.self, forKey: .artifact)
             self = .mediaArtifact(artifact)
+        case "checkpoint":
+            let summary = try container.decode(String.self, forKey: .summary)
+            self = .checkpoint(summary: summary)
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Invalid MessageContent type: \(type)")
         }
@@ -455,6 +546,9 @@ enum MessageContent: Equatable, Codable {
         case .mediaArtifact(let artifact):
             try container.encode("mediaArtifact", forKey: .type)
             try container.encode(artifact, forKey: .artifact)
+        case .checkpoint(let summary):
+            try container.encode("checkpoint", forKey: .type)
+            try container.encode(summary, forKey: .summary)
         }
     }
 
@@ -466,6 +560,7 @@ enum MessageContent: Equatable, Codable {
         case .error(let title, let details): return "\(title ?? "Error"): \(details)"
         case .image: return nil
         case .mediaArtifact: return nil
+        case .checkpoint(let summary): return summary
         }
     }
 }

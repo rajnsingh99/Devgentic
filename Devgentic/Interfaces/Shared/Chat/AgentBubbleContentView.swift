@@ -16,9 +16,10 @@ struct AgentBubbleContentView: View {
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
     @Environment(MainApplicationViewModel.self) private var mainAppViewModel
-    @EnvironmentObject private var searchViewModel: ChatSearchViewModel
-    @EnvironmentObject private var themeManager: ThemeManager
+    @Environment(ChatSearchViewModel.self) private var searchViewModel
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
@@ -26,11 +27,12 @@ struct AgentBubbleContentView: View {
         VStack(alignment: .leading, spacing: theme.spacingMedium) {
 
             // 1. INDICATORS
-            if message.isStreaming || !message.thoughts.isEmpty {
-                if isAgentic {
+            if isAgentic {
+                // Agent: full ThinkingDynamicIsland with reasoning steps, tool calls, etc.
+                if message.isStreaming || !message.thoughts.isEmpty {
                     if agentViewVariant == .timeline {
                         AgentTimelineView(message: message)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
+                            .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                     } else {
                         ThinkingDynamicIsland(
                             thoughts: message.thoughts,
@@ -39,13 +41,12 @@ struct AgentBubbleContentView: View {
                             isStreaming: message.isStreaming,
                             isExpanded: Bindable(message).isThinkingExpanded
                         )
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                } else if message.isStreaming {
-                    if message.content.textContent?.isEmpty ?? true {
-                        SparkleLoadingView(headline: message.thinkingHeadline)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                     }
                 }
+            } else if message.isStreaming {
+                // Bot: simple "Generating..." indicator while streaming
+                SparkleLoadingView(headline: "Generating response...")
             }
 
             // 2. ARTIFACTS
@@ -72,7 +73,7 @@ struct AgentBubbleContentView: View {
                     }
                 }
                 .padding(.bottom, 8)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 .accessibilityElement(children: .combine)
             }
 
@@ -84,6 +85,11 @@ struct AgentBubbleContentView: View {
                 AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
                     .environment(chatHistoryViewModel)
                     .opacity(0.6)
+            }
+
+            // 6. TOKEN USAGE BADGE
+            if let usage = message.tokenUsage, !message.isStreaming {
+                TokenUsageBadge(usage: usage)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -106,7 +112,11 @@ struct AgentBubbleContentView: View {
 
         case .markdownText(let text):
             if !text.isEmpty {
-                let blocks = message.isStreaming ? parseMarkdown(text) : message.getOrCreateMarkdownBlocks(from: text)
+                // During streaming: use getOrCreateMarkdownBlocks which caches blocks and only
+                // reparses when text changes. Previously called parseMarkdown() on every body
+                // evaluation — O(n) per keystroke. Now O(1) when text hasn't changed.
+                // The cache is invalidated by ActiveStreamManager when content updates.
+                let blocks = message.getOrCreateMarkdownBlocks(from: text)
                 let query = searchViewModel.isSearchActive ? searchViewModel.searchQuery : ""
                 let activeLocalIdx = searchViewModel.activeMatchLocalIndex(for: message.id)
 
@@ -169,37 +179,88 @@ struct AgentBubbleContentView: View {
                     .foregroundColor(theme.secondaryText)
                     .italic()
             }
+
+        case .checkpoint(let summary):
+            VStack(alignment: .leading, spacing: 4) {
+                Label("History Checkpoint", systemImage: "archivebox.fill")
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundColor(.orange)
+                Text(summary)
+                    .font(themeManager.chatFont)
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(4)
+                    .textSelection(.enabled)
+            }
+            .padding(theme.spacingSmall)
+            .background(Color.orange.opacity(0.06))
+            .cornerRadius(8)
         }
     }
 
     // MARK: - Search Highlighting
 
     private func highlightPlainText(_ text: String) -> AttributedString {
-        var attrString = AttributedString(text)
         let query = searchViewModel.isSearchActive ? searchViewModel.searchQuery : ""
+        let activeLocalIdx = searchViewModel.activeMatchLocalIndex(for: message.id)
+        return Self.highlightText(text, query: query, activeMatchIndex: activeLocalIdx)
+    }
+
+    /// Highlights search matches in plain text. Optimized to avoid O(n²) repeated
+    /// String.distance calls by tracking character offsets incrementally during the
+    /// match-finding pass and applying highlights in a single forward scan.
+    ///
+    /// Extracted as static for testability and performance benchmarking.
+    static func highlightText(_ text: String, query: String, activeMatchIndex: Int? = nil) -> AttributedString {
+        var attrString = AttributedString(text)
         guard !query.isEmpty else { return attrString }
 
         let lowercasedText = text.lowercased()
         let lowercasedQuery = query.lowercased()
-        let activeLocalIdx = searchViewModel.activeMatchLocalIndex(for: message.id)
+        let queryCharCount = lowercasedQuery.count
 
-        var matchRanges: [Range<String.Index>] = []
-        var searchStart = lowercasedText.startIndex
-        while searchStart < lowercasedText.endIndex,
-              let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
-            matchRanges.append(range)
-            searchStart = range.upperBound
+        // Single-pass: find matches and record character offsets incrementally.
+        // Each `distance(from: searchStart, to: range.lowerBound)` is short (gap only),
+        // avoiding repeated O(n) `distance(from: startIndex, ...)` calls.
+        struct MatchOffset {
+            let start: Int
+            let end: Int
         }
 
-        for (index, range) in matchRanges.enumerated().reversed() {
-            let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
-            let endOffset = text.distance(from: text.startIndex, to: range.upperBound)
-            let attrStart = attrString.index(attrString.startIndex, offsetByCharacters: startOffset)
-            let attrEnd = attrString.index(attrString.startIndex, offsetByCharacters: endOffset)
-            let attrRange = attrStart..<attrEnd
+        var matchOffsets: [MatchOffset] = []
+        var searchStart = lowercasedText.startIndex
+        var runningOffset = 0
 
-            let isActiveMatch = (activeLocalIdx == index)
-            attrString[attrRange].backgroundColor = isActiveMatch ? Color.orange.opacity(0.6) : Color.yellow.opacity(0.4)
+        while searchStart < lowercasedText.endIndex,
+              let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
+            runningOffset += lowercasedText.distance(from: searchStart, to: range.lowerBound)
+            matchOffsets.append(MatchOffset(start: runningOffset, end: runningOffset + queryCharCount))
+            searchStart = range.upperBound
+            runningOffset += queryCharCount
+        }
+
+        guard !matchOffsets.isEmpty else { return attrString }
+
+        // Apply highlights in a single forward pass through the AttributedString.
+        // Cursor advances incrementally — each `index(_:offsetByCharacters:)` is O(gap) not O(n).
+        var cursor = attrString.startIndex
+        var cursorOffset = 0
+
+        for (index, match) in matchOffsets.enumerated() {
+            let advanceToStart = match.start - cursorOffset
+            if advanceToStart > 0 {
+                cursor = attrString.index(cursor, offsetByCharacters: advanceToStart)
+                cursorOffset = match.start
+            }
+            let attrStart = cursor
+
+            let advanceToEnd = match.end - cursorOffset
+            cursor = attrString.index(cursor, offsetByCharacters: advanceToEnd)
+            cursorOffset = match.end
+
+            let isActiveMatch = (activeMatchIndex == index)
+            attrString[attrStart..<cursor].backgroundColor = isActiveMatch
+                ? Color.orange.opacity(0.6) // Static context — no theme access
+                : Color.yellow.opacity(0.4)
         }
 
         return attrString

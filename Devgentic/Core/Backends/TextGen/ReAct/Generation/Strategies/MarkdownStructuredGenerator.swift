@@ -26,7 +26,7 @@ private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.d
 struct MarkdownStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
 
-    private let dialectRules = """
+    let dialectRules: String? = """
     RESPONSE FORMAT:
     You MUST respond using the following structured format EXACTLY:
 
@@ -48,12 +48,14 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
     5. One action per response only.
     """
 
+    var promptWrapping: PromptWrapping { .markdown }
+
     init(toolAdapter: ToolSchemaAdapter = LegacyPromptAdapter()) {
         self.toolAdapter = toolAdapter
     }
 
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, wrapping: .markdown)
     }
 
     func generateCognitiveStep(
@@ -66,11 +68,7 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
 
         var executionMessages = compileMessages(from: context)
 
-        let promptTrigger = (iteration == 1)
-            ? "Begin ReAct loop. Analyze Active Memory. Respond using Thought/Action/Action Input format."
-            : "Review OBSERVATION. Decide your next step. Respond using Thought/Action/Action Input format."
-
-        executionMessages.append(["role": "user", "content": promptTrigger])
+        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
 
         logLLMOps.debug("📤 [ReActMD:\(reqId)] Sending request...")
         let startTime = Date()

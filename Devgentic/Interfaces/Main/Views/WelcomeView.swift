@@ -13,7 +13,7 @@ struct WelcomeView: View {
     @Environment(\.appTheme) private var theme
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(MainViewRouter.self) private var router
-    @StateObject private var briefService = MorningBriefService.shared
+    private var briefService = MorningBriefService.shared
 
     @State private var briefChecked = false
     @State private var showContent = false
@@ -112,16 +112,16 @@ struct WelcomeView: View {
             // Time-aware greeting
             HStack(spacing: 10) {
                 Image(systemName: greetingIcon)
-                    .font(.system(size: 24))
+                    .font(.system(size: 24)) // Fixed size: intentional (icon)
                     .foregroundStyle(greetingGradient)
 
                 Text(greetingText)
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .font(.system(size: 28, weight: .bold, design: .rounded)) // Fixed size: intentional (display heading)
                     .foregroundColor(theme.primaryText)
             }
 
             Text("What would you like to work on?")
-                .font(.system(size: 15))
+                .font(.system(.title3))
                 .foregroundColor(theme.secondaryText)
         }
     }
@@ -276,7 +276,7 @@ private struct QuickActionCard: View {
                         .frame(width: 38, height: 38)
 
                     Image(systemName: icon)
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(.body, weight: .medium))
                         .foregroundStyle(
                             LinearGradient(
                                 colors: accentColors,
@@ -290,22 +290,22 @@ private struct QuickActionCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(title)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(.subheadline, weight: .semibold))
                             .foregroundColor(theme.primaryText)
 
                         if let shortcut {
                             Text(shortcut)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                                 .foregroundColor(theme.tertiaryText)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
                                 .background(theme.secondaryBackground)
-                                .cornerRadius(4)
+                                .clipShape(RoundedRectangle(cornerRadius: 4))
                         }
                     }
 
                     Text(subtitle)
-                        .font(.system(size: 11))
+                        .font(.system(.caption))
                         .foregroundColor(theme.tertiaryText)
                 }
 
@@ -347,12 +347,12 @@ private struct KeyHint: View {
             HStack(spacing: 3) {
                 ForEach(keys, id: \.self) { key in
                     Text(key)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                         .foregroundColor(theme.tertiaryText)
                         .padding(.horizontal, 4)
                         .padding(.vertical, 2)
                         .background(theme.secondaryBackground)
-                        .cornerRadius(4)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
                                 .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
@@ -361,7 +361,7 @@ private struct KeyHint: View {
             }
 
             Text(label)
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundColor(theme.tertiaryText)
         }
     }

@@ -58,7 +58,7 @@ struct SpeechControlIsland: View {
                 }
             } label: {
                 Text(formatRate(speechService.currentRate))
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(speechService.currentRate != 1.0 ? theme.accentColor : theme.primaryText)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
@@ -71,7 +71,7 @@ struct SpeechControlIsland: View {
 
             // MARK: - Segment Progress
             Text("\(speechService.currentSegmentIndex) of \(speechService.totalSegmentCount)")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                 .foregroundColor(theme.secondaryText)
                 .padding(.horizontal, 6)
                 .accessibilityLabel("Segment \(speechService.currentSegmentIndex) of \(speechService.totalSegmentCount)")
@@ -116,23 +116,26 @@ struct SpeechControlIsland: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
-        .clipShape(Capsule())
-        .overlay(
-            Capsule()
-                .stroke(
-                    LinearGradient(
-                        gradient: Gradient(colors: [
-                            Color.white.opacity(0.3),
-                            Color.white.opacity(0.05)
-                        ]),
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+        // MARK: Liquid Glass
+        .glassEffect(.regular, in: .capsule)
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(.ultraThinMaterial)
+        // .clipShape(Capsule())
+        // .overlay(
+        //     Capsule()
+        //         .stroke(
+        //             LinearGradient(
+        //                 gradient: Gradient(colors: [
+        //                     Color.white.opacity(0.3),
+        //                     Color.white.opacity(0.05)
+        //                 ]),
+        //                 startPoint: .topLeading,
+        //                 endPoint: .bottomTrailing
+        //             ),
+        //             lineWidth: 1
+        //         )
+        // )
+        // .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
         .onHover { hovering in
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isHovering = hovering
@@ -219,7 +222,7 @@ struct VoicePickerView: View {
                 Image(systemName: "waveform")
                     .foregroundColor(theme.accentColor)
                 Text("Voice")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.fontSubheadline.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Spacer()
             }
@@ -229,16 +232,16 @@ struct VoicePickerView: View {
             // Search
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.tertiaryText)
                 TextField("Search voices...", text: $searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(theme.surfaceOverlay)
-            .cornerRadius(6)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
 
@@ -249,7 +252,7 @@ struct VoicePickerView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(groupedVoices, id: \.locale) { group in
                         Text(group.locale)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(.caption2, weight: .semibold))
                             .foregroundColor(theme.tertiaryText)
                             .textCase(.uppercase)
                             .padding(.horizontal, 12)
@@ -260,12 +263,12 @@ struct VoicePickerView: View {
                             Button(action: { onSelect(voice) }) {
                                 HStack {
                                     Text(voice.name)
-                                        .font(.system(size: 12))
+                                        .font(.system(.caption))
                                         .foregroundColor(theme.primaryText)
                                     Spacer()
                                     if voice.id == selectedVoice {
                                         Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 12))
+                                            .font(.system(.caption))
                                             .foregroundColor(theme.accentColor)
                                     }
                                 }

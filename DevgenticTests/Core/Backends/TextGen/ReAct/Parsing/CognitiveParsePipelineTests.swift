@@ -312,4 +312,94 @@ final class CognitiveParsePipelineTests: XCTestCase {
         // DeepXML fallback parser should be selected
         XCTAssertGreaterThanOrEqual(result.toolCalls.count, 1, "Should recover via DeepXML fallback, not flat JSON")
     }
+
+    // MARK: - Bug 4: parseExhausted Flag
+
+    func testParseExhausted_TotalFailure_FlagSet() {
+        // Input that defeats ALL parse stages: contains "tool_calls" key (triggers drift
+        // detector signals) but the JSON is completely broken so no tools can be extracted.
+        // This forces the pipeline through Stage 1 (degraded) → Stage 2/3 (fail) → Stage 4 (fail).
+        let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
+        let input = """
+        {
+          "content":<BROKEN HTML THAT IS NOT A STRING>,
+          "tool_calls": [INVALID ARRAY CONTENT HERE]
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertTrue(result.parseExhausted, "parseExhausted should be true when all pipeline stages fail to extract tools")
+    }
+
+    func testParseExhausted_SuccessfulParse_FlagNotSet() {
+        let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
+        let input = """
+        {"content": "Listing.", "tool_calls": [{"name": "list_directory", "arguments": {"path": "/"}}]}
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertFalse(result.parseExhausted, "parseExhausted should be false when parse succeeds at Stage 1")
+    }
+
+    func testParseExhausted_PlainTextExit_FlagNotSet() {
+        // Plain text conversational exit with no JSON structure and no tool signals.
+        // Stage 1 returns text as reasoning, classifyOutcome sees no signals → confident.
+        // Should NOT be marked as parseExhausted.
+        let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
+        let input = "I have completed the task. Here are the results."
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertFalse(result.parseExhausted, "Plain text exit should not be marked as parse exhaustion")
+    }
+
+    // MARK: - Bug 3: Malformed Content Recovery Through Pipeline
+
+    // MARK: - Bug 5: Explicit Empty tool_calls Should NOT Trigger parseExhausted
+
+    func testExplicitEmptyToolCalls_ClassifiedAsConfident() {
+        // Model genuinely signals completion with well-formed JSON + empty tool_calls.
+        // classifyOutcome must detect the explicit empty array and return confident,
+        // preventing the pipeline from cascading through drift detection → Stage 4
+        // → parseExhausted = true → false suspectedFormatFailure.
+        let pipeline = CognitiveParsePipeline(expectedDialect: .heuristicJson)
+        let input = """
+        {
+          "content": "Since the file was successfully created and its contents read, no further actions are needed.",
+          "tool_calls": []
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertFalse(result.parseExhausted, "Explicit empty tool_calls array is a genuine completion — must NOT set parseExhausted")
+    }
+
+    func testExplicitEmptyToolCalls_WithWhitespace_StillConfident() {
+        // Same as above but with extra whitespace inside the empty array
+        let pipeline = CognitiveParsePipeline(expectedDialect: .heuristicJson)
+        let input = """
+        {
+          "content": "Task complete.",
+          "tool_calls": [   ]
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertFalse(result.parseExhausted, "Empty tool_calls with whitespace should still be confident")
+    }
+
+    func testMalformedContent_ValidToolCalls_RecoveredThroughPipeline() {
+        let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
+        let input = """
+        {
+          "content":<p>HTML content that breaks JSON</p>,
+          "tool_calls": [
+            {"name": "fs_smart_search", "arguments": {"search_term": "test"}}
+          ]
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Pipeline should recover valid tool_calls despite malformed content field")
+        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertFalse(result.parseExhausted, "Should not be marked as exhausted since tools were recovered")
+    }
 }

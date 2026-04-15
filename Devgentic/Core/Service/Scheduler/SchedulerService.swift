@@ -16,11 +16,12 @@ import os
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SchedulerService")
 
 @MainActor
-final class SchedulerService: ObservableObject {
+@Observable
+final class SchedulerService {
 
     static let shared = SchedulerService()
 
-    @Published private(set) var scheduledTasks: [ScheduledTask] = []
+    private(set) var scheduledTasks: [ScheduledTask] = []
 
     private var timers: [UUID: DispatchSourceTimer] = [:]
     private var runningTaskIDs: Set<UUID> = []

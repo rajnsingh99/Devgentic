@@ -20,8 +20,8 @@ import os
 ///
 /// Note: Unlike Telegram which uses HTTP long-polling, Discord requires a full
 /// WebSocket Gateway connection even for pairing.
-@MainActor
-final class DiscordPairingService: ObservableObject {
+@Observable @MainActor
+final class DiscordPairingService {
 
     private let logger = Logger(subsystem: "com.devgentic", category: "DiscordPairing")
     private let config = ChatOpsConfigManager.shared

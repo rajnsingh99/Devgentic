@@ -9,10 +9,10 @@
 //import SwiftUI
 //
 //struct AgentOnboardingRootView: View {
-//    @StateObject private var viewModel: AgentOnboardingViewModel
+//    @State private var viewModel: AgentOnboardingViewModel
 //    
 //    init(onComplete: @escaping () -> Void, onAgentReady: @escaping (URL, Int32) -> Void) {
-//        _viewModel = StateObject(wrappedValue: AgentOnboardingViewModel(onComplete: onComplete, onAgentReady: onAgentReady))
+//        _viewModel = State(initialValue: AgentOnboardingViewModel(onComplete: onComplete, onAgentReady: onAgentReady))
 //    }
 //
 //    var body: some View {

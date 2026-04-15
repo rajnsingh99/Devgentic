@@ -677,24 +677,33 @@ struct BatchCommandTool: DevgenticTool {
             return "Error: \(error.localizedDescription)"
         }
 
-        // Timeout enforcement
-        let deadline = DispatchTime.now() + .seconds(timeout)
-        let group = DispatchGroup()
-        group.enter()
+        // Timeout enforcement via structured concurrency
+        nonisolated(unsafe) let detachedProcess = process
+        nonisolated(unsafe) let detachedOutPipe = outPipe
+        nonisolated(unsafe) let detachedErrPipe = errPipe
 
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            group.leave()
+        let timedOut = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            nonisolated(unsafe) var resumed = false
+            DispatchQueue.global().async {
+                detachedProcess.waitUntilExit()
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: false)
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + .seconds(timeout)) {
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: true)
+            }
         }
 
-        let waitResult = group.wait(timeout: deadline)
-        if waitResult == .timedOut {
+        if timedOut {
             process.terminate()
             return "Error: Command timed out after \(timeout)s and was terminated."
         }
 
-        let stdoutData = outPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdoutData = detachedOutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = detachedErrPipe.fileHandleForReading.readDataToEndOfFile()
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         let exitCode = process.terminationStatus

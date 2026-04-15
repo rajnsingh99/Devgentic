@@ -10,12 +10,13 @@ import AppKit
 
 struct ExplorerSidebarView: View {
 
-    @EnvironmentObject var viewModel: ExplorerViewModel
-    @EnvironmentObject var themeManager: ThemeManager
+    @Environment(ExplorerViewModel.self) var viewModel
+    @Environment(ThemeManager.self) var themeManager
     @Environment(\.appTheme) private var theme
     @Environment(\.openWindow) var openWindow
     
     var body: some View {
+        @Bindable var viewModel = viewModel
         VStack(alignment: .leading, spacing: 0) {
             // MARK: - Header
             SidebarHeaderView(
@@ -41,7 +42,7 @@ struct ExplorerSidebarView: View {
                     // Error State
                     SidebarEmptyStateView(
                         title: "Load Error",
-                        subtitle: errorMessage,
+                        subtitle: LocalizedStringKey(errorMessage),
                         buttonTitle: "Retry",
                         systemImage: "exclamationmark.triangle",
                         onAction: {
@@ -96,7 +97,7 @@ struct ExplorerSidebarView: View {
 
 struct HeaderActionButton: View {
     let icon: String
-    let help: String
+    let help: LocalizedStringKey
     let action: () -> Void
     
     @Environment(\.appTheme) private var theme
@@ -105,14 +106,15 @@ struct HeaderActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 10))
+                .font(.system(.caption2))
                 .foregroundColor(isHovering ? theme.primaryText : theme.secondaryText)
                 .frame(width: 20, height: 20)
                 .background(isHovering ? theme.surfaceOverlay : Color.clear)
-                .cornerRadius(4)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
         .help(help)
+        .accessibilityLabel(help)
         .onHover { isHovering = $0 }
     }
 }
@@ -120,8 +122,8 @@ struct HeaderActionButton: View {
 
 // MARK: - NSViewRepresentable for NSOutlineView
 struct FileOutlineView: NSViewRepresentable {
-    @ObservedObject var viewModel: ExplorerViewModel
-    @EnvironmentObject var themeManager: ThemeManager
+    var viewModel: ExplorerViewModel
+    @Environment(ThemeManager.self) var themeManager
     @Environment(\.openWindow) var openWindow
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -236,7 +238,7 @@ struct FileOutlineView: NSViewRepresentable {
             guard let fileItem = item as? FileSystemItem else { return nil }
 
             let view = ExplorerItemContentRow(item: fileItem, viewModel: viewModel)
-                .environmentObject(themeManager) // Use injected theme manager
+                .environment(themeManager) // Use injected theme manager
             let hostingView = NSHostingView(rootView: view)
             
             return hostingView
@@ -275,21 +277,23 @@ struct FileOutlineView: NSViewRepresentable {
 
 struct ExplorerItemContentRow: View {
     let item: FileSystemItem
-    @ObservedObject var viewModel: ExplorerViewModel
-    @EnvironmentObject var themeManager: ThemeManager
+    var viewModel: ExplorerViewModel
+    @Environment(ThemeManager.self) var themeManager
     @Environment(\.appTheme) private var theme
     @FocusState private var isTextFieldFocused: Bool
-    
+
     var body: some View {
+        @Bindable var viewModel = viewModel
         HStack(spacing: 6) {
             Image(systemName: item.iconName)
                 .foregroundColor(item.isDirectory ? .secondary : item.iconColor(for: themeManager.currentTheme))
-                .font(.system(size: 13))
+                .font(theme.fontSubheadline)
+                .accessibilityHidden(true)
             
             if viewModel.itemBeingRenamedID == item.id {
                 TextField("", text: $viewModel.currentEditName)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .focused($isTextFieldFocused)
                     .onSubmit { viewModel.commitRename() }
                     .onChange(of: isTextFieldFocused) { oldState, newState in
@@ -303,10 +307,10 @@ struct ExplorerItemContentRow: View {
                     }
                     .padding(.horizontal, 4)
                     .background(theme.controlBackground)
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
             } else {
                 Text(item.name)
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .foregroundColor(.primary.opacity(0.9))
                     .lineLimit(1)
             }
@@ -334,15 +338,15 @@ struct ExplorerSidebarView_Previews: PreviewProvider {
 
         return Group {
             ExplorerSidebarView()
-                .environmentObject(noFolderViewModel)
-                .environmentObject(ThemeManager())
+                .environment(noFolderViewModel)
+                .environment(ThemeManager())
                 .previewDisplayName("No Folder")
                 .frame(width: 300, height: 500)
                 .background(Color(NSColor.windowBackgroundColor)) // Simulate sidebar
 
             ExplorerSidebarView()
-                .environmentObject(folderOpenedViewModel)
-                .environmentObject(ThemeManager())
+                .environment(folderOpenedViewModel)
+                .environment(ThemeManager())
                 .previewDisplayName("Active Project")
                 .frame(width: 300, height: 500)
                 .background(AppThemes.DefaultTheme().primaryBackground)

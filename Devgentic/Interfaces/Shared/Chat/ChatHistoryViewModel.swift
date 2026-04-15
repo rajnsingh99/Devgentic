@@ -37,6 +37,13 @@ final class ChatHistoryViewModel {
     var isSending: Bool = false
     var isUserMessagesOnlyFilterActive: Bool = false
 
+    /// Aggregated token usage across all messages in the current conversation.
+    var conversationTokenUsage: TokenUsage? {
+        let usages = currentChatMessages.compactMap(\.tokenUsage)
+        guard !usages.isEmpty else { return nil }
+        return usages.dropFirst().reduce(into: usages[0]) { $0.accumulate($1) }
+    }
+
     // MARK: - Initialization
     init(
         persistenceService: ChatPersistenceProtocol = ChatPersistenceStore.shared,
@@ -138,7 +145,25 @@ final class ChatHistoryViewModel {
                     fileURL.stopAccessingSecurityScopedResource()
                 }
             }
-            try newContent.write(to: fileURL, atomically: true, encoding: .utf8)
+
+            // Transaction safety: write to a temp file in the same directory first,
+            // then atomically replace. This prevents partial writes from corrupting
+            // the original if the app crashes or disk fills mid-write.
+            let tempURL = fileURL.deletingLastPathComponent()
+                .appendingPathComponent(".devgentic_tmp_\(UUID().uuidString)")
+            try newContent.write(to: tempURL, atomically: true, encoding: .utf8)
+
+            // Verify the temp file was written correctly before replacing
+            let verifyContent = try String(contentsOf: tempURL, encoding: .utf8)
+            guard verifyContent == newContent else {
+                try? FileManager.default.removeItem(at: tempURL)
+                throw NSError(domain: "ChatHistoryViewModel", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Write verification failed — content mismatch"])
+            }
+
+            // Atomic replace: original is only removed after temp is in place
+            _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: tempURL)
+
             logger.info("✅ Successfully applied changes to file: \(fileURL.path)")
             withAnimation {
                 self.isShowingDiff = false
@@ -241,6 +266,7 @@ final class ChatHistoryViewModel {
         logger.debug("Loading conversation \(selectedID.uuidString, privacy: .public), merging with active streams.")
 
         isInitiallyLoadingConversation = true
+        await Task.yield()
 
         do {
             try Task.checkCancellation()

@@ -14,7 +14,7 @@ import UniformTypeIdentifiers
 /// Action buttons (Analyze, Edit, Export, Reset) live in the DynamicIslandBar.
 struct UserPersonalContainerView: View {
 
-    @ObservedObject private var service = UserPersonalService.shared
+    private var service = UserPersonalService.shared
     @Environment(\.appTheme) private var theme
 
     @State private var isEditing: Bool = false
@@ -30,16 +30,17 @@ struct UserPersonalContainerView: View {
                 // Center: Title + status
                 HStack(spacing: 8) {
                     Image(systemName: "person.text.rectangle.fill")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.accentColor)
+                        .accessibilityHidden(true)
 
                     Text("Your Profile")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .font(.system(size: 13, weight: .semibold, design: .rounded)) // Fixed size: intentional (rounded design heading)
                         .foregroundColor(theme.primaryText)
 
                     if let lastUpdated = service.lastUpdated {
                         Text("· \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                             .foregroundColor(theme.tertiaryText)
                     }
                 }
@@ -80,7 +81,7 @@ struct UserPersonalContainerView: View {
                     withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
                 } label: {
                     Text("Revert")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(theme.primaryText)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -93,11 +94,11 @@ struct UserPersonalContainerView: View {
                     withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
                 } label: {
                     Text("Save")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.green))
+                        .background(Capsule().fill(theme.successColor))
                 }
                 .buttonStyle(.plain)
             } else {
@@ -111,10 +112,10 @@ struct UserPersonalContainerView: View {
                                 .controlSize(.mini)
                         } else {
                             Image(systemName: "sparkles")
-                                .font(.system(size: 10))
+                                .font(.system(.caption2))
                         }
                         Text(service.isAnalyzing ? "Analyzing..." : "Analyze")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                     }
                     .foregroundColor(theme.accentColor)
                     .padding(.horizontal, 12)
@@ -129,7 +130,7 @@ struct UserPersonalContainerView: View {
                     showExportDialog = true
                 } label: {
                     Image(systemName: "square.and.arrow.up")
-                        .font(.system(size: 11))
+                        .font(.system(.caption))
                         .foregroundColor(theme.primaryText)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
@@ -137,13 +138,14 @@ struct UserPersonalContainerView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Export as Markdown")
+                .accessibilityLabel("Export as Markdown")
 
                 Button {
                     editableText = service.profileMarkdown
                     withAnimation(.easeInOut(duration: 0.2)) { isEditing = true }
                 } label: {
                     Text("Edit")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(theme.primaryText)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
@@ -159,7 +161,7 @@ struct UserPersonalContainerView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(.caption, weight: .bold))
                         .foregroundColor(theme.primaryText)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
@@ -167,6 +169,7 @@ struct UserPersonalContainerView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .accessibilityLabel("More options")
             }
         }
     }
@@ -182,7 +185,7 @@ struct UserPersonalContainerView: View {
                 }
             }
             .padding(24)
-            .frame(maxWidth: 800)
+            .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity)
         }
     }
@@ -191,10 +194,10 @@ struct UserPersonalContainerView: View {
 
     private var editView: some View {
         TextEditor(text: $editableText)
-            .font(.system(size: 13, design: .monospaced))
+            .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced input
             .scrollContentBackground(.hidden)
             .padding(16)
-            .frame(maxWidth: 800)
+            .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(theme.secondaryBackground.opacity(0.3))
     }
@@ -206,7 +209,7 @@ struct UserPersonalContainerView: View {
 /// and lets the user tap to view the full profile.
 struct UserPersonalWelcomeCard: View {
 
-    @ObservedObject private var service = UserPersonalService.shared
+    private var service = UserPersonalService.shared
     @Environment(\.appTheme) private var theme
     @Environment(MainViewRouter.self) private var router
 
@@ -252,20 +255,21 @@ struct UserPersonalWelcomeCard: View {
                         .frame(width: 38, height: 38)
 
                     Image(systemName: "person.text.rectangle.fill")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(.body, weight: .medium))
                         .foregroundStyle(theme.accentColor)
                 }
+                .accessibilityHidden(true)
 
                 // Info
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text("Your Profile")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(theme.fontSubheadline.weight(.semibold))
                             .foregroundColor(theme.primaryText)
 
                         if hasContent {
                             Text("\(populatedSectionCount)/\(UserProfileSection.allCases.count)")
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .font(.system(size: 9, weight: .bold, design: .monospaced)) // Fixed size: monospaced
                                 .foregroundColor(theme.accentColor)
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
@@ -277,12 +281,12 @@ struct UserPersonalWelcomeCard: View {
                     if hasContent {
                         if let lastUpdated = service.lastUpdated {
                             Text("Updated \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.tertiaryText)
                         }
                     } else {
                         Text("Tap to view — learns from your conversations")
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                             .foregroundColor(theme.tertiaryText)
                     }
                 }
@@ -290,8 +294,9 @@ struct UserPersonalWelcomeCard: View {
                 Spacer()
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(.caption2, weight: .bold))
                     .foregroundColor(theme.tertiaryText)
+                    .accessibilityHidden(true)
             }
             .padding(14)
             .background(
@@ -338,12 +343,12 @@ struct ProfileBlockRenderer: View {
                 .padding(.vertical, 8)
         case .code(_, let content, _):
             Text(content)
-                .font(.system(size: 12, design: .monospaced))
+                .font(.system(size: 12, design: .monospaced)) // Fixed size: monospaced code block
                 .foregroundColor(theme.primaryText)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(theme.secondaryBackground)
-                .cornerRadius(6)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
         case .table(let headers, let rows):
             tableView(headers: headers, rows: rows)
         case .image:
@@ -361,13 +366,14 @@ struct ProfileBlockRenderer: View {
                 // Section headers get their icon
                 if let section = UserProfileSection.allCases.first(where: { text.contains($0.rawValue) }) {
                     Image(systemName: section.icon)
-                        .font(.system(size: 13))
+                        .font(theme.fontSubheadline)
                         .foregroundColor(theme.accentColor)
+                        .accessibilityHidden(true)
                 }
             }
 
             Text(text)
-                .font(.system(size: size, weight: weight, design: .rounded))
+                .font(.system(size: size, weight: weight, design: .rounded)) // Fixed size: variable heading level (design: .rounded)
                 .foregroundColor(theme.primaryText)
         }
         .padding(.top, level == 1 ? 4 : 16)
@@ -379,7 +385,7 @@ struct ProfileBlockRenderer: View {
             if text.hasPrefix("_") && text.hasSuffix("_") {
                 // Italic placeholder text
                 Text(text.trimmingCharacters(in: CharacterSet(charactersIn: "_")))
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .italic()
                     .foregroundColor(theme.tertiaryText)
             } else if text.hasPrefix(">") {
@@ -390,14 +396,14 @@ struct ProfileBlockRenderer: View {
                         .frame(width: 3)
 
                     Text(text.trimmingCharacters(in: CharacterSet(charactersIn: "> ")))
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                         .lineSpacing(3)
                 }
                 .padding(.vertical, 4)
             } else {
                 Text(text)
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .foregroundColor(theme.primaryText)
                     .lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -414,7 +420,7 @@ struct ProfileBlockRenderer: View {
                 .padding(.top, 6)
 
             Text(text)
-                .font(.system(size: 13))
+                .font(theme.fontSubheadline)
                 .foregroundColor(theme.primaryText)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -428,7 +434,7 @@ struct ProfileBlockRenderer: View {
             HStack {
                 ForEach(headers, id: \.self) { header in
                     Text(header)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(theme.primaryText)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -440,7 +446,7 @@ struct ProfileBlockRenderer: View {
                 HStack {
                     ForEach(row, id: \.self) { cell in
                         Text(cell)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -448,7 +454,7 @@ struct ProfileBlockRenderer: View {
                 .padding(8)
             }
         }
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
                 .stroke(theme.dividerColor, lineWidth: 0.5)

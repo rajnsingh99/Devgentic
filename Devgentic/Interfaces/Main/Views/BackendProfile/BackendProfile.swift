@@ -46,6 +46,12 @@ struct AgentConfig: Codable, Hashable, Sendable {
     // Capabilities
     var capabilities: AgentCapabilities
 
+    // History
+    var historyStrategy: HistoryStrategy?
+
+    // Skills
+    var skillConfig: SkillFolderConfig?
+
     init(llmConfig: ProviderConfig,
          tools: [Tool] = [],
          description: String? = nil,
@@ -55,7 +61,9 @@ struct AgentConfig: Codable, Hashable, Sendable {
          executionTimeout: TimeInterval? = nil,
          retryPolicy: RetryPolicy? = nil,
          errorRecovery: ErrorRecovery? = nil,
-         capabilities: AgentCapabilities = AgentCapabilities()) {
+         capabilities: AgentCapabilities = AgentCapabilities(),
+         historyStrategy: HistoryStrategy? = nil,
+         skillConfig: SkillFolderConfig? = nil) {
         self.llmConfig = llmConfig
         self.tools = tools
         self.description = description
@@ -66,6 +74,8 @@ struct AgentConfig: Codable, Hashable, Sendable {
         self.retryPolicy = retryPolicy
         self.errorRecovery = errorRecovery
         self.capabilities = capabilities
+        self.historyStrategy = historyStrategy
+        self.skillConfig = skillConfig
     }
 }
 
@@ -74,14 +84,22 @@ struct AgentConfig: Codable, Hashable, Sendable {
 struct RetryPolicy: Codable, Hashable, Sendable {
     var maxRetries: Int
     var backoffStrategy: BackoffStrategy
-    var retryableErrors: Set<RetryableError>
 
     init(maxRetries: Int = 3,
-         backoffStrategy: BackoffStrategy = .exponential,
-         retryableErrors: Set<RetryableError> = [.parseFailure, .rateLimit, .networkTimeout]) {
+         backoffStrategy: BackoffStrategy = .exponential) {
         self.maxRetries = maxRetries
         self.backoffStrategy = backoffStrategy
-        self.retryableErrors = retryableErrors
+    }
+
+    // Backward-compat: silently ignore the removed retryableErrors field on decode
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.maxRetries = (try? container.decode(Int.self, forKey: .maxRetries)) ?? 3
+        self.backoffStrategy = (try? container.decode(BackoffStrategy.self, forKey: .backoffStrategy)) ?? .exponential
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case maxRetries, backoffStrategy
     }
 }
 
@@ -90,22 +108,22 @@ enum BackoffStrategy: String, Codable, Hashable, Sendable, CaseIterable {
     case exponential
 }
 
-enum RetryableError: String, Codable, Hashable, Sendable {
-    case parseFailure
-    case rateLimit
-    case networkTimeout
-    case toolTimeout
-}
-
 struct ErrorRecovery: Codable, Hashable, Sendable {
     var onToolFailure: ToolFailurePolicy
     var onIterationExhaustion: ExhaustionPolicy
+    /// Custom message injected into working memory when `.fallbackPrompt` is active.
+    /// `nil` uses the default system message.
+    var fallbackMessage: String?
 
     init(onToolFailure: ToolFailurePolicy = .abort,
-         onIterationExhaustion: ExhaustionPolicy = .synthesizeBestEffort) {
+         onIterationExhaustion: ExhaustionPolicy = .synthesizeBestEffort,
+         fallbackMessage: String? = nil) {
         self.onToolFailure = onToolFailure
         self.onIterationExhaustion = onIterationExhaustion
+        self.fallbackMessage = fallbackMessage
     }
+
+    static let defaultFallbackMessage = "Try a completely different approach or answer from your own knowledge without using tools."
 }
 
 enum ToolFailurePolicy: String, Codable, Hashable, Sendable, CaseIterable, Identifiable {
@@ -138,6 +156,55 @@ enum ExhaustionPolicy: String, Codable, Hashable, Sendable, CaseIterable, Identi
     }
 }
 
+// MARK: - History Strategy
+
+/// Controls how conversation history is delivered to the LLM.
+/// Native providers receive proper user/assistant turn pairs;
+/// non-native providers receive XML episodic memory in the system prompt.
+enum HistoryStrategy: String, Codable, Hashable, Sendable, CaseIterable, Identifiable {
+    /// Last 10 turns — default for all profiles.
+    case recentHistory
+    /// Full conversation history, token-capped at 60% of context window.
+    case fullHistory
+    /// All turns as skeletons (goal, tools, status) with on-demand detail via tool call.
+    case pointer
+    /// Last 3 turns inline + older turns as pointer skeletons. Best balance of context and tokens.
+    case hybrid
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .recentHistory: "Recent"
+        case .fullHistory: "Full"
+        case .pointer: "On-Demand"
+        case .hybrid: "Smart"
+        }
+    }
+
+    var strategyDescription: String {
+        switch self {
+        case .recentHistory:
+            "Remembers your last 10 conversations. Works well for most everyday tasks."
+        case .fullHistory:
+            "Remembers everything from the entire conversation. Best when working on long, multi-step projects."
+        case .pointer:
+            "Keeps a lightweight overview of all conversations and recalls details only when needed. Uses the least resources."
+        case .hybrid:
+            "Full recall of recent conversations with a lightweight overview of older ones. Best overall balance of speed and context."
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .recentHistory: "clock"
+        case .fullHistory: "text.book.closed"
+        case .pointer: "sparkle.magnifyingglass"
+        case .hybrid: "brain"
+        }
+    }
+}
+
 // MARK: - Agent Capability Types
 
 struct AgentCapabilities: Codable, Hashable, Sendable {
@@ -155,13 +222,13 @@ struct AgentCapabilities: Codable, Hashable, Sendable {
 }
 
 extension AgentCapabilities {
-    /// Derives the legacy architecture for ExecutorFactory routing during the transition period.
-    @available(*, deprecated, message: "Temporary bridge — Phase 1 removes architecture-based routing.")
-    var derivedArchitecture: AgentArchitecture {
-        if agentDelegation != nil { return .supervisor }
-        if selfReflection != nil { return .reflexion }
-        if planning != nil { return .planAndExecute }
-        return .reAct
+    /// Human-readable summary of enabled capabilities for logging/display.
+    var summary: String {
+        var parts: [String] = ["ReAct"]
+        if planning != nil { parts.append("Planning") }
+        if selfReflection != nil { parts.append("Self-Reflection") }
+        if agentDelegation != nil { parts.append("Delegation") }
+        return parts.joined(separator: " + ")
     }
 }
 
@@ -171,7 +238,10 @@ struct PlanningCapabilityConfig: Codable, Hashable, Sendable {
     var subtaskToolFiltering: Bool
     var requiresPlanApproval: Bool
 
-    init(maxSubtasks: Int = 5, parallelSubtasks: Bool = true, subtaskToolFiltering: Bool = true, requiresPlanApproval: Bool = false) {
+    // parallelSubtasks default changed to false: parallel execution serializes at the
+    // LLM layer (single GPU for local, rate-limited for cloud) making it illusory.
+    // Field retained for future batch inference / multi-model routing support.
+    init(maxSubtasks: Int = 5, parallelSubtasks: Bool = false, subtaskToolFiltering: Bool = true, requiresPlanApproval: Bool = false) {
         self.maxSubtasks = maxSubtasks
         self.parallelSubtasks = parallelSubtasks
         self.subtaskToolFiltering = subtaskToolFiltering
@@ -190,101 +260,65 @@ struct SelfReflectionConfig: Codable, Hashable, Sendable {
 }
 
 struct AgentDelegationConfig: Codable, Hashable, Sendable {
-    /// Inline sub-agent definitions. Each sub-agent is a leaf-node specialist
-    /// that runs plain ReAct with no capabilities and no `call_agent` tool.
-    var subAgents: [SubAgentConfig]
+    /// Maximum number of spawned agents that can run in parallel.
+    var maxConcurrentAgents: Int
+    /// ReAct loop iteration cap for each spawned agent.
+    var maxIterationsPerAgent: Int
 
-    init(subAgents: [SubAgentConfig] = []) {
-        self.subAgents = subAgents
+    init(maxConcurrentAgents: Int = 3, maxIterationsPerAgent: Int = 10) {
+        self.maxConcurrentAgents = maxConcurrentAgents
+        self.maxIterationsPerAgent = maxIterationsPerAgent
     }
 
-    // Backward-compat: decode old maxDelegationDepth/allowedAgentIDs as empty subAgents
+    // Backward-compat: decode old formats gracefully
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let agents = try? container.decode([SubAgentConfig].self, forKey: .subAgents) {
-            self.subAgents = agents
-        } else {
-            // Legacy format — old fields present, no sub-agents to migrate automatically
-            self.subAgents = []
-        }
+        self.maxConcurrentAgents = (try? container.decode(Int.self, forKey: .maxConcurrentAgents)) ?? 3
+        self.maxIterationsPerAgent = (try? container.decode(Int.self, forKey: .maxIterationsPerAgent)) ?? 10
     }
 
     private enum CodingKeys: String, CodingKey {
-        case subAgents
+        case maxConcurrentAgents, maxIterationsPerAgent
     }
 }
 
-/// A lightweight, inline specialist agent defined within a parent agent's config.
-/// Sub-agents are leaf nodes: they run plain ReAct with their own model/tools/instructions,
-/// but have NO capabilities and NO `call_agent` tool — they cannot delegate further.
-struct SubAgentConfig: Codable, Hashable, Sendable, Identifiable {
-    let id: UUID
-    var name: String                    // Used in call_agent(agent_name: "...")
-    var purpose: String                 // Tool description shown to parent LLM
-    var instructions: String            // System prompt when sub-agent runs
-    var llmConfig: ProviderConfig       // Model & provider (can differ from parent)
-    var tools: [Tool]                   // Selected tools from tool library
-    var maxIterations: Int
-
-    init(
-        id: UUID = UUID(),
-        name: String = "",
-        purpose: String = "",
-        instructions: String = "",
-        llmConfig: ProviderConfig = ProviderConfig(apiProvider: .ollama, modelName: ""),
-        tools: [Tool] = [],
-        maxIterations: Int = 15
-    ) {
-        self.id = id
-        self.name = name
-        self.purpose = purpose
-        self.instructions = instructions
-        self.llmConfig = llmConfig
-        self.tools = tools
-        self.maxIterations = maxIterations
-    }
-}
-
-// MARK: - Legacy Migration Helper
-
-extension AgentConfig {
-    /// Migrate from architecture-based to capability-based config.
-    static func migrate(fromArchitecture architecture: AgentArchitecture,
-                        llmConfig: ProviderConfig,
-                        tools: [Tool],
-                        description: String?,
-                        instructions: String?,
-                        knowledgeSources: [KnowledgeSource]?) -> AgentConfig {
-        var capabilities = AgentCapabilities()
-
-        switch architecture {
-        case .reAct:
-            break
-        case .planAndExecute:
-            capabilities.planning = PlanningCapabilityConfig()
-        case .reflexion:
-            capabilities.selfReflection = SelfReflectionConfig()
-        case .supervisor:
-            capabilities.agentDelegation = AgentDelegationConfig()
-        case .workflow:
-            break
-        }
-
-        return AgentConfig(
-            llmConfig: llmConfig,
-            tools: tools,
-            description: description,
-            instructions: instructions,
-            knowledgeSources: knowledgeSources,
-            capabilities: capabilities
-        )
-    }
-}
-
-/// Configuration for a Workflow profile (DAG of agent references).
+/// Configuration for a Workflow profile (DAG of agent references + execution defaults).
 struct WorkflowConfig: Codable, Hashable, Sendable {
     /// References to agent profiles by UUID — resolved at execution time.
     var agentProfileIDs: [UUID]
+
+    // MARK: - Execution Defaults (nil = use hardcoded system defaults)
+
+    /// Default timeout per node in seconds. Overridden by per-node `WorkflowNodeConfig.hardTimeout`.
+    var defaultNodeTimeout: TimeInterval?
+
+    /// Default cascade behavior when a node fails. Overridden by per-node `WorkflowNodeConfig.onFailure`.
+    var defaultFailurePolicy: NodeFailurePolicy?
+
+    /// Default retry count for failed nodes. Overridden by per-node `WorkflowNodeConfig.maxNodeRetries`.
+    var defaultMaxRetries: Int?
+
+    // MARK: - Context Pipeline
+
+    /// Maximum characters per upstream node output before truncation. nil = 2000.
+    var contextBudgetPerNode: Int?
+
+    /// Maximum total characters for all upstream context combined. nil = 6000.
+    var totalContextBudget: Int?
+
+    // MARK: - Advanced
+
+    /// Maximum sub-workflow nesting depth. nil = 5.
+    var maxNestingDepth: Int?
+
+    // MARK: - Resolved Defaults
+
+    var resolvedNodeTimeout: TimeInterval { defaultNodeTimeout ?? 120 }
+    var resolvedFailurePolicy: NodeFailurePolicy { defaultFailurePolicy ?? .skipDependents }
+    var resolvedMaxRetries: Int { defaultMaxRetries ?? 0 }
+    var resolvedContextBudgetPerNode: Int { contextBudgetPerNode ?? 2000 }
+    var resolvedTotalContextBudget: Int { totalContextBudget ?? 6000 }
+    var resolvedMaxNestingDepth: Int { maxNestingDepth ?? 5 }
 }
 
 /// Configuration for an Image Generation profile.
@@ -303,8 +337,11 @@ enum ProfileSchemaVersion: Int, Codable, Sendable {
     case v1 = 1  // Initial versioned schema (pre-existing data treated as v1)
     case v2 = 2  // Capability-based agents (architecture → capabilities migration)
     case v3 = 3  // Inline sub-agents (delegation maxDelegationDepth/allowedAgentIDs → subAgents)
+    case v4 = 4  // Auto-spawn delegation (subAgents → maxConcurrentAgents + maxIterationsPerAgent)
+    case v5 = 5  // Skills support (SkillFolderConfig on AgentConfig)
+    case v6 = 6  // Workflow execution config (WorkflowConfig expansion)
 
-    static let current: ProfileSchemaVersion = .v3
+    static let current: ProfileSchemaVersion = .v6
 }
 
 /// Chains versioned transforms to migrate ProfileDetails JSON from older schemas to current.
@@ -329,6 +366,15 @@ enum ProfileMigrator {
         }
         if storedVersion < 3 {
             json = migrateToV3(json)
+        }
+        if storedVersion < 4 {
+            json = migrateToV4(json)
+        }
+        if storedVersion < 5 {
+            json = migrateToV5(json)
+        }
+        if storedVersion < 6 {
+            json = migrateToV6(json)
         }
 
         guard let migrated = try? JSONSerialization.data(withJSONObject: json) else {
@@ -417,6 +463,55 @@ enum ProfileMigrator {
 
         return result
     }
+
+    /// v3 → v4: Converts inline sub-agents to auto-spawn delegation config.
+    private static func migrateToV4(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 4
+
+        guard let profileType = result["profileType"] as? String, profileType == "Agent",
+              var capabilities = result["capabilities"] as? [String: Any],
+              var delegation = capabilities["agentDelegation"] as? [String: Any]
+        else {
+            return result
+        }
+
+        // Extract settings from old subAgents array
+        var maxConcurrent = 3
+        var maxIterations = 10
+        if let subAgents = delegation["subAgents"] as? [[String: Any]], !subAgents.isEmpty {
+            maxConcurrent = max(subAgents.count, 1)
+            let iterations = subAgents.compactMap { $0["maxIterations"] as? Int }
+            if let maxIter = iterations.max() {
+                maxIterations = maxIter
+            }
+        }
+
+        // Replace with new fields
+        delegation.removeValue(forKey: "subAgents")
+        delegation["maxConcurrentAgents"] = maxConcurrent
+        delegation["maxIterationsPerAgent"] = maxIterations
+
+        capabilities["agentDelegation"] = delegation
+        result["capabilities"] = capabilities
+
+        return result
+    }
+
+    /// v4 → v5: Skills support. No data transformation needed — `skillConfig` is optional
+    /// and defaults to nil via `decodeIfPresent`. This migration just stamps the version.
+    private static func migrateToV5(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 5
+        return result
+    }
+
+    /// v5 → v6: Stamp-only. WorkflowConfig new fields are all optional; nil = system defaults.
+    private static func migrateToV6(_ json: [String: Any]) -> [String: Any] {
+        var result = json
+        result["schemaVersion"] = 6
+        return result
+    }
 }
 
 // MARK: - Profile Details Enum
@@ -440,9 +535,12 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         case architecture // legacy — read for migration, never written
         case tools, description, knowledgeSources
         case maxIterations, executionTimeout, retryPolicy, errorRecovery
-        case capabilities
+        case capabilities, historyStrategy, skillConfig
         // Workflow-specific
         case agentProfileIDs
+        case defaultNodeTimeout, defaultFailurePolicy, defaultMaxRetries
+        case contextBudgetPerNode, totalContextBudget
+        case maxNestingDepth
         // ImageGen-specific
         case negativePrompt, defaultAspectRatio, advancedSettings
     }
@@ -469,22 +567,25 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             let retryPolicy = try container.decodeIfPresent(RetryPolicy.self, forKey: .retryPolicy)
             let errorRecovery = try container.decodeIfPresent(ErrorRecovery.self, forKey: .errorRecovery)
 
-            // Decode capabilities — if missing (legacy v1), migrate from architecture
+            // Decode capabilities — if missing (legacy v1), migrate from architecture string
             let capabilities: AgentCapabilities
             if let decoded = try container.decodeIfPresent(AgentCapabilities.self, forKey: .capabilities) {
                 capabilities = decoded
             } else {
-                // Legacy migration: architecture → capabilities
-                let legacyArch = try container.decodeIfPresent(AgentArchitecture.self, forKey: .architecture) ?? .reAct
+                // Legacy migration: raw architecture string → capabilities
+                let legacyArch = try container.decodeIfPresent(String.self, forKey: .architecture)
                 var migrated = AgentCapabilities()
                 switch legacyArch {
-                case .planAndExecute: migrated.planning = PlanningCapabilityConfig()
-                case .reflexion: migrated.selfReflection = SelfReflectionConfig()
-                case .supervisor: migrated.agentDelegation = AgentDelegationConfig()
-                case .reAct, .workflow: break
+                case "Plan & Execute": migrated.planning = PlanningCapabilityConfig()
+                case "Reflexion": migrated.selfReflection = SelfReflectionConfig()
+                case "Supervisor": migrated.agentDelegation = AgentDelegationConfig()
+                default: break // "ReAct", "Workflow", nil → base capabilities
                 }
                 capabilities = migrated
             }
+
+            let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
+            let skillConfig = try container.decodeIfPresent(SkillFolderConfig.self, forKey: .skillConfig)
 
             self = .agent(AgentConfig(
                 llmConfig: llmConfig,
@@ -496,12 +597,21 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 executionTimeout: executionTimeout,
                 retryPolicy: retryPolicy,
                 errorRecovery: errorRecovery,
-                capabilities: capabilities
+                capabilities: capabilities,
+                historyStrategy: historyStrategy,
+                skillConfig: skillConfig
             ))
 
         case .workflow:
             let ids = try container.decodeIfPresent([UUID].self, forKey: .agentProfileIDs) ?? []
-            self = .workflow(WorkflowConfig(agentProfileIDs: ids))
+            var config = WorkflowConfig(agentProfileIDs: ids)
+            config.defaultNodeTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .defaultNodeTimeout)
+            config.defaultFailurePolicy = try container.decodeIfPresent(NodeFailurePolicy.self, forKey: .defaultFailurePolicy)
+            config.defaultMaxRetries = try container.decodeIfPresent(Int.self, forKey: .defaultMaxRetries)
+            config.contextBudgetPerNode = try container.decodeIfPresent(Int.self, forKey: .contextBudgetPerNode)
+            config.totalContextBudget = try container.decodeIfPresent(Int.self, forKey: .totalContextBudget)
+            config.maxNestingDepth = try container.decodeIfPresent(Int.self, forKey: .maxNestingDepth)
+            self = .workflow(config)
 
         case .imageGen:
             let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
@@ -542,10 +652,18 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encodeIfPresent(config.retryPolicy, forKey: .retryPolicy)
             try container.encodeIfPresent(config.errorRecovery, forKey: .errorRecovery)
             try container.encode(config.capabilities, forKey: .capabilities)
+            try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
+            try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)
 
         case .workflow(let config):
             try container.encode(ProfileType.workflow, forKey: .profileType)
             try container.encode(config.agentProfileIDs, forKey: .agentProfileIDs)
+            try container.encodeIfPresent(config.defaultNodeTimeout, forKey: .defaultNodeTimeout)
+            try container.encodeIfPresent(config.defaultFailurePolicy, forKey: .defaultFailurePolicy)
+            try container.encodeIfPresent(config.defaultMaxRetries, forKey: .defaultMaxRetries)
+            try container.encodeIfPresent(config.contextBudgetPerNode, forKey: .contextBudgetPerNode)
+            try container.encodeIfPresent(config.totalContextBudget, forKey: .totalContextBudget)
+            try container.encodeIfPresent(config.maxNestingDepth, forKey: .maxNestingDepth)
 
         case .imageGen(let config):
             try container.encode(ProfileType.imageGen, forKey: .profileType)
@@ -553,31 +671,6 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encodeIfPresent(config.negativePrompt, forKey: .negativePrompt)
             try container.encodeIfPresent(config.defaultAspectRatio, forKey: .defaultAspectRatio)
             try container.encodeIfPresent(config.advancedSettings, forKey: .advancedSettings)
-        }
-    }
-}
-
-// MARK: - Agent Architecture Enum (Legacy — removed from AgentConfig in v2, kept for executor routing until Phase 1)
-
-/// Legacy architecture enum. No longer stored in AgentConfig; replaced by AgentCapabilities.
-/// Retained temporarily for ExecutorFactory routing and profile migration.
-@available(*, deprecated, message: "Use AgentCapabilities instead. Will be removed in Phase 1.")
-enum AgentArchitecture: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
-    case reAct = "ReAct"
-    case planAndExecute = "Plan & Execute"
-    case reflexion = "Reflexion"
-    case supervisor = "Supervisor"
-    case workflow = "Workflow"
-
-    var id: String { rawValue }
-
-    var description: String {
-        switch self {
-        case .reAct: return "Reason & Action loop."
-        case .planAndExecute: return "formulates a plan first, then executes it."
-        case .reflexion: return "Self-reflects on past actions to improve."
-        case .supervisor: return "Delegates tasks to sub-workers."
-        case .workflow: return "DAG-based multi-node pipeline orchestration."
         }
     }
 }
@@ -592,6 +685,26 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
     case imageGen = "Image Generator"
 
     var id: String { self.rawValue }
+
+    /// SF Symbol name for this profile type (SF Symbols 6, macOS 26+).
+    var iconName: String {
+        switch self {
+        case .bot:      return "text.bubble"
+        case .agent:    return "brain.head.profile"
+        case .workflow:  return "point.3.connected.trianglepath.dotted"
+        case .imageGen: return "wand.and.sparkles"
+        }
+    }
+
+    /// Filled variant for large identity headers (48pt avatars).
+    var iconNameFilled: String {
+        switch self {
+        case .bot:      return "text.bubble.fill"
+        case .agent:    return "brain.head.profile.fill"
+        case .workflow:  return "point.3.filled.connected.trianglepath.dotted"
+        case .imageGen: return "wand.and.sparkles"
+        }
+    }
 }
 
 // MARK: - Image Generation Supporting Types
@@ -695,6 +808,14 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .ollama:    return "ollama"
         case .anthropic: return "anthropic"
         case .mlx:       return "mlx"
+        }
+    }
+
+    /// Whether this provider runs locally on the user's machine.
+    var isLocal: Bool {
+        switch self {
+        case .mlx, .ollama: return true
+        case .openAI, .anthropic, .google: return false
         }
     }
 }

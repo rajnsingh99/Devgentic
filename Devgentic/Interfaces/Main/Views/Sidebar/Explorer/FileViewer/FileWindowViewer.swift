@@ -14,15 +14,18 @@ import os
 
 // MARK: - State Manager
 @MainActor
-class CodeEditFileViewerState: ObservableObject {
-    // MARK: - Published Properties
-    @Published var content: String = ""
-    @Published var language: CodeLanguage
-    @Published var errorMessage: String?
-    @Published var isLoading: Bool = false
-    @Published var fileName: String?
+@Observable
+class CodeEditFileViewerState {
+    // MARK: - Properties
+    var content: String = ""
+    var language: CodeLanguage
+    var errorMessage: String?
+    var isLoading: Bool = false
+    var fileName: String?
 
-    @AppStorage("codeEditFontSize") var fontSize: Double = 14
+    var fontSize: Double {
+        didSet { UserDefaults.standard.set(fontSize, forKey: "codeEditFontSize") }
+    }
     
     let fileURL: URL
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CodeEditFileViewerState")
@@ -31,6 +34,8 @@ class CodeEditFileViewerState: ObservableObject {
         self.fileURL = fileURL
         self.fileName = fileURL.lastPathComponent
         self.language = CodeLanguage.detectLanguageFrom(url: fileURL)
+        let stored = UserDefaults.standard.double(forKey: "codeEditFontSize")
+        self.fontSize = stored > 0 ? stored : 14
         loadFileContent()
     }
 
@@ -88,11 +93,11 @@ class CodeEditFileViewerState: ObservableObject {
 // MARK: - The SwiftUI View
 struct FileWindowViewer: View {
     
-    @StateObject private var state: CodeEditFileViewerState
+    @State private var state: CodeEditFileViewerState
     @State private var justCopied: Bool = false
-    
+
     init(fileURL: URL) {
-        _state = StateObject(wrappedValue: CodeEditFileViewerState(fileURL: fileURL))
+        _state = State(initialValue: CodeEditFileViewerState(fileURL: fileURL))
     }
     
     var body: some View {
@@ -103,7 +108,7 @@ struct FileWindowViewer: View {
             } else if let error = state.errorMessage {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 40))
+                        .font(.system(size: 40)) // Fixed size: intentional (error state icon)
                         .foregroundColor(.red)
                     Text("Error Opening File")
                         .font(.title2.weight(.semibold))
@@ -190,7 +195,7 @@ struct CodeEditFileViewer_Previews: PreviewProvider {
             """
         )
         
-        NavigationView {
+        NavigationStack {
             FileWindowViewer(fileURL: swiftFileURL)
                 .frame(width: 750, height: 600)
         }

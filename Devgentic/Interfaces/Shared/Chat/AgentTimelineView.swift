@@ -6,34 +6,85 @@
 import SwiftUI
 
 struct AgentTimelineView: View {
-    var message: ChatMessage
+    /// The timeline events to render. Can come from a ChatMessage or directly from
+    /// a workflow node's per-node timeline (`WorkflowExecutionState.nodeTimelines[nodeID]`).
+    private let events: [TimelineEvent]
+    private let isStreaming: Bool
+
     @Environment(\.appTheme) private var theme
-    
+
+    /// Cached grouped nodes — avoids O(n) re-grouping on every body evaluation during streaming.
+    @State private var cachedNodes: [TimelineNode] = []
+
+    /// Initialize from a ChatMessage (existing usage in chat bubbles).
+    init(message: ChatMessage) {
+        self.events = message.timelineEvents
+        self.isStreaming = message.isStreaming
+    }
+
+    /// Initialize from raw timeline events (used by workflow per-node detail views).
+    init(events: [TimelineEvent], isStreaming: Bool = false) {
+        self.events = events
+        self.isStreaming = isStreaming
+    }
+
     var body: some View {
-        if !message.timelineEvents.isEmpty {
+        if !cachedNodes.isEmpty {
             VStack(alignment: .leading, spacing: 16) {
-                ForEach(groupedNodes) { node in
+                ForEach(cachedNodes) { node in
                     TimelineNodeGroupView(node: node)
                 }
             }
             .padding(.vertical, 12)
         }
+
+        // Rebuild cached nodes when events change (count is a cheap proxy).
+        let _ = updateNodesIfNeeded()
     }
-    
+
     // MARK: - Grouping Logic
-    
-    private var groupedNodes: [TimelineNode] {
-        var events = message.timelineEvents
-        
+
+    /// Triggers cache rebuild when the event count changes.
+    /// Uses a side-effect in body to keep cache in sync without a separate onChange.
+    private func updateNodesIfNeeded() {
+        let currentCount = events.count
+        // Rebuild if count changed or streaming state toggled (deduplication logic differs)
+        if cachedNodes.isEmpty || currentCount != cachedNodeEventCount(cachedNodes, isStreaming: isStreaming) {
+            cachedNodes = Self.buildGroupedNodes(from: events, isStreaming: isStreaming)
+        }
+    }
+
+    /// Returns the expected event count for the current cached state.
+    private func cachedNodeEventCount(_ nodes: [TimelineNode], isStreaming: Bool) -> Int {
+        var count = 0
+        for node in nodes {
+            switch node {
+            case .thought: count += 1
+            case .actionGroup(let actions): count += actions.count
+            case .capabilityMilestone: count += 1
+            }
+        }
+        // Account for the deduplication removal of last thought when not streaming
+        if !isStreaming, let last = events.last, case .thought = last {
+            count += 1 // The cached version has one fewer
+        }
+        return count
+    }
+
+    /// Builds grouped timeline nodes from raw events.
+    /// Extracted as static for testability. Called from the view body cache.
+    static func buildGroupedNodes(from events: [TimelineEvent], isStreaming: Bool) -> [TimelineNode] {
+        var events = events
+
         // Deduplication: If not streaming and last event is a thought, hide it
         // as it usually duplicates the final outcome shown immediately below.
-        if !message.isStreaming, let last = events.last, case .thought = last {
+        if !isStreaming, let last = events.last, case .thought = last {
             events.removeLast()
         }
-        
+
         var nodes: [TimelineNode] = []
         var currentActionGroup: [TimelineEvent] = []
-        
+
         for event in events {
             switch event {
             case .thought(let id, let text):
@@ -42,7 +93,7 @@ struct AgentTimelineView: View {
                     currentActionGroup = []
                 }
                 nodes.append(.thought(id: id, text: text))
-                
+
             case .toolExecution:
                 currentActionGroup.append(event)
 
@@ -57,11 +108,11 @@ struct AgentTimelineView: View {
                 nodes.append(.capabilityMilestone(id: id, kind: kind, detail: detail))
             }
         }
-        
+
         if !currentActionGroup.isEmpty {
             nodes.append(.actionGroup(currentActionGroup))
         }
-        
+
         return nodes
     }
 }
@@ -87,6 +138,7 @@ enum TimelineNode: Identifiable {
 struct TimelineNodeGroupView: View {
     let node: TimelineNode
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded: Bool = true // Default expanded for fresh logs
     
     var body: some View {
@@ -106,13 +158,17 @@ struct TimelineNodeGroupView: View {
             VStack(alignment: .leading, spacing: 8) {
                 // Group Header
                 Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    if reduceMotion {
                         isExpanded.toggle()
+                    } else {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            isExpanded.toggle()
+                        }
                     }
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(.caption2, weight: .bold))
                             .foregroundColor(theme.tertiaryText)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         
@@ -132,7 +188,7 @@ struct TimelineNodeGroupView: View {
                         }
                     }
                     .padding(.leading, 12)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
             }
         }
@@ -148,17 +204,24 @@ struct TimelineNodeGroupView: View {
             }
         }
 
-        // Multiple actions - try to find common category
-        let tools = actions.compactMap { (event: TimelineEvent) -> String? in
-            if case .toolExecution(let data) = event { return data.name }
-            return nil
+        // Multiple actions — check if all use the same tool (common case).
+        // Early-exit avoids building intermediate arrays/Sets for uniform groups.
+        var firstName: String?
+        var allSame = true
+        for action in actions {
+            if case .toolExecution(let data) = action {
+                if let first = firstName {
+                    if data.name != first { allSame = false; break }
+                } else {
+                    firstName = data.name
+                }
+            }
         }
-        
-        let uniqueTools = Set(tools)
-        if uniqueTools.count == 1, let first = uniqueTools.first {
-            return "\(formatToolName(first)) \(actions.count) times"
+
+        if allSame, let name = firstName {
+            return "\(formatToolName(name)) \(actions.count) times"
         }
-        
+
         return "Executed \(actions.count) tools"
     }
     
@@ -220,11 +283,11 @@ struct ActionDetailView: View {
                         if data.name == "ask_user" {
                             // send = user answered, deny/skip = user skipped
                             Image(systemName: success ? "bubble.left.fill" : "arrow.uturn.left")
-                                .font(.system(size: 10))
+                                .font(.system(.caption2))
                                 .foregroundColor(success ? theme.streamingIndicator.opacity(0.8) : theme.secondaryText.opacity(0.5))
                         } else {
                             Image(systemName: success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                .font(.system(size: 10))
+                                .font(.system(.caption2))
                                 .foregroundColor(success ? theme.successColor.opacity(0.8) : theme.errorColor)
                         }
                     }
@@ -241,7 +304,7 @@ struct ActionDetailView: View {
                             .padding(8)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(theme.surfaceOverlay.opacity(0.4))
-                            .cornerRadius(4)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                         
                         // Small "More" button for long outputs
                         if out.count > 150 {
@@ -249,7 +312,7 @@ struct ActionDetailView: View {
                                 withAnimation { isOutputExpanded.toggle() }
                             } label: {
                                 Text(isOutputExpanded ? "Show less" : "Show more")
-                                    .font(.system(size: 10, weight: .bold))
+                                    .font(.system(.caption2, weight: .bold))
                                     .foregroundColor(theme.accentColor.opacity(0.8))
                             }
                             .buttonStyle(.plain)
@@ -272,12 +335,12 @@ struct ParameterPillsView: View {
         HStack(spacing: 4) {
             ForEach(items, id: \.self) { item in
                 Text(item)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(theme.tertiaryText.opacity(0.1))
                     .foregroundColor(theme.secondaryText)
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                     .lineLimit(1)
             }
         }
@@ -310,12 +373,12 @@ struct CapabilityMilestoneRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: kind.icon)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(.caption, weight: .semibold))
                 .foregroundColor(milestoneColor)
                 .frame(width: 18, alignment: .center)
 
             Text(detail)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(.caption, weight: .medium))
                 .foregroundColor(theme.primaryText.opacity(0.85))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -337,6 +400,7 @@ struct CapabilityMilestoneRow: View {
         case .planning: return .blue
         case .reflection: return .purple
         case .delegation: return .green
+        case .compaction: return .orange
         }
     }
 }

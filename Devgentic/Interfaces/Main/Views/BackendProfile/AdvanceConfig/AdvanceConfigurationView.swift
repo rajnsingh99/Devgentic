@@ -244,7 +244,7 @@ struct OllamaSettingsView: View {
                         .padding(.vertical, 6)
                         .background(theme.accentColor.opacity(0.1))
                         .foregroundColor(theme.accentColor)
-                        .cornerRadius(8)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
             }

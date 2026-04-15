@@ -8,7 +8,7 @@
 
 
 import Foundation
-import ApplicationServices // Required for Accessibility checks
+@preconcurrency import ApplicationServices // Required for Accessibility checks
 import CoreGraphics
 import EventKit
 import Contacts
@@ -54,7 +54,7 @@ actor PermissionManager {
             return CGPreflightScreenCaptureAccess()
         case .calendar:
             let status = EKEventStore.authorizationStatus(for: .event)
-            return status == .fullAccess || status == .authorized
+            return status == .fullAccess
         case .contacts:
             let status = CNContactStore.authorizationStatus(for: .contacts)
             return status == .authorized

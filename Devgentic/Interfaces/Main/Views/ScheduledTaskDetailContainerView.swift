@@ -27,11 +27,16 @@ struct ScheduledTaskDetailContainerView: View {
             DynamicIslandBar()
 
             if let task = task {
-                CreateScheduledTaskView(existingTask: task)
+                ScrollView {
+                    CreateScheduledTaskView(existingTask: task)
+                        .padding(24)
+                        .frame(maxWidth: 1000)
+                        .frame(maxWidth: .infinity)
+                }
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 36))
+                        .font(.system(size: 36)) // Fixed size: intentional (icon)
                         .foregroundColor(theme.secondaryText)
                     Text("Task not found")
                         .font(.title3)

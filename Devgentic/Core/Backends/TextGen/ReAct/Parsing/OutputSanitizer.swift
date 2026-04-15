@@ -78,6 +78,53 @@ struct OutputSanitizer: Sendable {
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Sanitizes model reasoning/thought text for display in the UI thought process.
+    ///
+    /// Small models frequently regurgitate prompt scaffold XML tags (episodic memory,
+    /// working memory, negative constraints, etc.) in their reasoning output. These
+    /// internal infrastructure tags should never be shown to the user.
+    ///
+    /// Strips: `<episodic_memory>`, `<working_memory>`, `<negative_constraints>`,
+    /// `<recent>`, `<turn>`, `<action>`, `<user_correction>`, `<params>`,
+    /// plus their closing tags and self-closing variants.
+    static func sanitizeForUI(_ text: String) -> String {
+        guard !text.isEmpty else { return text }
+        var result = text
+
+        // Strip prompt scaffold XML tags (opening, closing, and self-closing)
+        let scaffoldTags = [
+            // Core prompt scaffold
+            "task", "clarification", "query", "response",
+            "system_instructions", "environment", "semantic_context",
+            "execution_contract", "available_tools", "available_skills",
+            "user_profile", "negative_constraints", "hallucinated_tools",
+            "working_memory", "input", "current_objective",
+            // Episodic memory scaffold
+            "episodic_memory", "recent", "turn", "action",
+            "user_correction", "params",
+            // Legacy tags (backward compat)
+            "system_rules", "tools_available", "objective"
+        ]
+        let pattern = "</?(?:" + scaffoldTags.joined(separator: "|") + ")(?:\\s[^>]*)?\\/?>|<(?:" + scaffoldTags.joined(separator: "|") + ")\\s*/>"
+        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            result = regex.stringByReplacingMatches(
+                in: result,
+                range: NSRange(result.startIndex..., in: result),
+                withTemplate: ""
+            )
+        }
+
+        // Also strip special token markers that may appear in thoughts
+        result = stripSpecialTokenMarkers(result)
+
+        // Collapse multiple blank lines into one
+        while result.contains("\n\n\n") {
+            result = result.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        }
+
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // MARK: - Private Helpers
 
     /// Extracts content from `<think>` tags and returns the stripped text plus the joined thoughts.

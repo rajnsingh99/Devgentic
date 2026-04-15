@@ -42,13 +42,13 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     /// Brief subtitle shown below the category name in the sidebar.
     var subtitle: String {
         switch self {
-        case .general: return "Appearance and behavior"
-        case .coreIntelligence: return "On-device intelligence"
-        case .account: return "API keys and providers"
-        case .notifications: return "Alerts and sounds"
-        case .theme: return "Colors and typography"
-        case .chatOps: return "Remote Telegram control"
-        case .about: return "Version and licenses"
+        case .general: return String(localized: "Appearance and behavior")
+        case .coreIntelligence: return String(localized: "On-device intelligence")
+        case .account: return String(localized: "API keys and providers")
+        case .notifications: return String(localized: "Alerts and sounds")
+        case .theme: return String(localized: "Colors and typography")
+        case .chatOps: return String(localized: "Remote Telegram control")
+        case .about: return String(localized: "Version and licenses")
         }
     }
 
@@ -71,7 +71,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .about:
             VStack(spacing: 16) {
                 Image(systemName: "bolt.fill")
-                    .font(.system(size: 48))
+                    .font(.system(size: 48)) // Fixed size: intentional (icon)
                     .foregroundStyle(.blue)
                 Text("Devgentic")
                     .font(.largeTitle.weight(.bold))
@@ -95,7 +95,7 @@ struct SettingsView: View {
                 NavigationLink(value: category) {
                     Label {
                         Text(category.rawValue)
-                            .font(.system(size: 14, weight: .medium))
+                            .font(theme.fontBody.weight(.medium))
                     } icon: {
                         Image(systemName: category.iconName)
                             .foregroundStyle(theme.accentColor)

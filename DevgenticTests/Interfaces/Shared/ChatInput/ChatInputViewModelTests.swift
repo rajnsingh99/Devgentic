@@ -531,12 +531,12 @@ final class ChatInputViewModelTests: XCTestCase {
         wait(for: [expectation], timeout: 2.0)
     }
 
-    // MARK: - Select and Download Model
+    // MARK: - Select Downloaded Model
 
-    func testSelectAndDownloadModelPersistsAndDismissesPopover() {
+    func testSelectDownloadedModelPersistsAndDismissesPopover() {
         sut.showModelSelectorPopover = true
 
-        sut.selectAndDownloadModel("small.en")
+        sut.selectDownloadedModel("small.en")
 
         XCTAssertFalse(sut.showModelSelectorPopover)
         XCTAssertEqual(UserDefaults.standard.string(forKey: AppSettings.speechModelKey), "small.en")

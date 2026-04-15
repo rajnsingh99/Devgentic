@@ -224,12 +224,13 @@ struct ProviderConfigSection: View {
 
                     Button(action: { isApiKeyVisible.toggle() }) {
                         Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .padding(.trailing, 8)
                     .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
+                    .accessibilityLabel(isApiKeyVisible ? "Hide API key" : "Show API key")
                 }
                 .frame(maxWidth: 350)
             }
@@ -323,10 +324,11 @@ struct ProviderConfigSection: View {
                     }) {
                         Image(systemName: "arrow.uturn.backward.circle.fill")
                             .foregroundColor(theme.secondaryText)
-                            .help("Reset to Default")
                     }
                     .buttonStyle(.plain)
                     .padding(.leading, 4)
+                    .help("Reset to default")
+                    .accessibilityLabel("Reset to default")
                 } else {
                     Text(Self.defaultBaseURL(for: providerConfig.apiProvider))
                         .foregroundColor(theme.secondaryText)
@@ -334,8 +336,8 @@ struct ProviderConfigSection: View {
                         .padding(.vertical, 5)
                         .padding(.horizontal, 8)
                         .background(theme.secondaryBackground.opacity(0.5))
-                        .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(theme.dividerColor, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
+                        .overlay(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium).stroke(theme.dividerColor, lineWidth: 1))
 
                     Button("Edit") {
                         isEditingBaseURL = true

@@ -9,13 +9,13 @@ import SwiftUI
 
 struct MLXModelStoreView: View {
     let filterForTools: Bool
-    @StateObject private var viewModel: MLXModelStoreViewModel
+    @State private var viewModel: MLXModelStoreViewModel
     @Environment(\.dismiss) var dismiss
     @Environment(\.appTheme) private var theme
 
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
-        _viewModel = StateObject(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
+        _viewModel = State(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
     }
 
     var body: some View {
@@ -50,7 +50,7 @@ struct MLXModelStoreView: View {
 // MARK: - Reusable Content (shared between sheet and inline container)
 
 struct MLXModelStoreContent: View {
-    @ObservedObject var viewModel: MLXModelStoreViewModel
+    @Bindable var viewModel: MLXModelStoreViewModel
     let filterForTools: Bool
     /// When false, the search bar is hidden (it's in the DynamicIslandBar instead).
     var showSearchBar: Bool = true
@@ -170,7 +170,7 @@ struct MLXModelStoreContent: View {
                 } else if viewModel.displayedModels.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: viewModel.selectedCategory == .installed ? "externaldrive" : "magnifyingglass")
-                            .font(.system(size: 48))
+                            .font(.system(size: 48)) // Fixed size: intentional (icon)
                             .foregroundColor(theme.secondaryText.opacity(0.5))
 
                         if viewModel.selectedCategory == .installed {
@@ -281,7 +281,7 @@ struct MLXModelStoreContent: View {
 // Updated Model Card to support Deletion
 struct ModelCardView: View {
     let model: MLXDisplayModel
-    @ObservedObject var viewModel: MLXModelStoreViewModel
+    var viewModel: MLXModelStoreViewModel
     @State private var showingDeleteAlert = false
     @State private var showingFitAdvisory = false
     @State private var isHovered = false
@@ -421,11 +421,11 @@ struct ModelCardView: View {
                         .foregroundColor(.green)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Color.green.opacity(0.1))
+                        .background(theme.successColor.opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                                .stroke(theme.successColor.opacity(0.3), lineWidth: 1)
                         )
                     }
                 } else {

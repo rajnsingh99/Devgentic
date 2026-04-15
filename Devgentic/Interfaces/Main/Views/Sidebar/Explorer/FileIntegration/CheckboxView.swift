@@ -29,7 +29,7 @@ struct CheckboxView: View {
             // The checkmark, which scales in when checked
             if isChecked {
                 Image(systemName: "checkmark")
-                    .font(.system(size: size * 0.6, weight: .bold))
+                    .font(.system(size: size * 0.6, weight: .bold)) // Fixed size: user-configured checkbox size
                     .foregroundColor(.white)
                     .transition(.scale(scale: 0.5).combined(with: .opacity))
             }

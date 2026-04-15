@@ -122,7 +122,7 @@ struct ClaudeLLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
@@ -199,7 +199,7 @@ struct ClaudeLLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
@@ -237,7 +237,10 @@ struct ClaudeLLMProvider: LLMProvider {
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
         let fallbackReasoning = finalReasoning.isEmpty && !pendingTools.isEmpty ? "Executing \(pendingTools.count) tools..." : finalReasoning
 
-        return ModernCognitiveStep(reasoning: fallbackReasoning, thought: finalThought, toolCalls: pendingTools)
+        // Extract token usage from Anthropic API response
+        let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
+
+        return ModernCognitiveStep(reasoning: fallbackReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
     }
 
     // MARK: - Bot Flow (Streaming)
@@ -264,7 +267,7 @@ struct ClaudeLLMProvider: LLMProvider {
                     var request = makeRequest(streaming: true)
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .anthropic)
+                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
 
                     // Parse Server-Sent Events (SSE)
                     var currentEvent = ""

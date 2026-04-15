@@ -97,7 +97,7 @@ struct ModelFitAdvisoryView: View {
         VStack(spacing: 20) {
             // Icon
             Image(systemName: assessment.verdict.systemImage)
-                .font(.system(size: 40))
+                .font(.system(size: 40)) // Fixed size: intentional (icon)
                 .foregroundColor(accentColor)
 
             // Title
@@ -156,7 +156,7 @@ struct ModelFitAdvisoryView: View {
             }
             .padding()
             .background(theme.secondaryBackground)
-            .cornerRadius(8)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
 
             // Actions
             HStack(spacing: 12) {

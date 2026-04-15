@@ -10,8 +10,8 @@ import SwiftUI
 // MARK: - Sidebar Header View
 /// The top header of a sidebar, displaying the title and an optional action button.
 struct SidebarHeaderView: View {
-    let title: String
-    var buttonTitle: String? = nil
+    let title: LocalizedStringKey
+    var buttonTitle: LocalizedStringKey? = nil
     var systemImage: String? = nil
     var shortcut: String? = nil
     var onAction: (() -> Void)? = nil
@@ -21,7 +21,7 @@ struct SidebarHeaderView: View {
     var body: some View {
         HStack {
             Text(title)
-                .font(.system(size: 14, weight: .semibold))
+                .font(theme.fontBody.weight(.semibold))
                 .foregroundColor(theme.primaryText)
 
             Spacer()
@@ -30,9 +30,9 @@ struct SidebarHeaderView: View {
                 Button(action: onAction) {
                     HStack(spacing: 4) {
                         Image(systemName: systemImage)
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(.caption, weight: .semibold))
                         Text(buttonTitle)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -42,6 +42,7 @@ struct SidebarHeaderView: View {
                 }
                 .buttonStyle(.plain)
                 .help(shortcut != nil ? "\(buttonTitle) (\(shortcut!))" : buttonTitle)
+                .accessibilityLabel(shortcut != nil ? "\(buttonTitle) (\(shortcut!))" : buttonTitle)
             }
         }
     }
@@ -67,12 +68,13 @@ struct SidebarSearchBarView: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(isFocused ? theme.accentColor : theme.secondaryText)
-                .font(.system(size: 14))
+                .font(theme.fontBody)
                 .animation(.easeInOut(duration: 0.2), value: isFocused)
+                .accessibilityHidden(true)
 
             TextField(placeholder, text: $localText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .font(theme.fontSubheadline)
                 .focused($isFocused)
                 .onChange(of: localText) { _, newValue in
                     debouncedUpdate(newValue)
@@ -92,10 +94,11 @@ struct SidebarSearchBarView: View {
                     }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
                 .transition(.scale.combined(with: .opacity))
             }
         }
@@ -134,9 +137,9 @@ struct SidebarSearchBarView: View {
 
 // MARK: - Sidebar Empty State (Optional Shared)
 struct SidebarEmptyStateView: View {
-    let title: String
-    let subtitle: String
-    var buttonTitle: String? = nil
+    let title: LocalizedStringKey
+    let subtitle: LocalizedStringKey
+    var buttonTitle: LocalizedStringKey? = nil
     let systemImage: String
     var onAction: (() -> Void)? = nil
 
@@ -158,7 +161,7 @@ struct SidebarEmptyStateView: View {
                     .frame(width: 90, height: 90)
 
                 Image(systemName: systemImage)
-                    .font(.system(size: 36))
+                    .font(.system(size: 36)) // Fixed size: intentional (empty state icon)
                     .foregroundStyle(
                         LinearGradient(
                             colors: [theme.accentColor.opacity(0.7), Color.purple.opacity(0.5)],
@@ -170,11 +173,11 @@ struct SidebarEmptyStateView: View {
 
             VStack(spacing: 6) {
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(.title3, weight: .semibold))
                     .foregroundColor(theme.primaryText)
 
                 Text(subtitle)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .multilineTextAlignment(.center)
             }
@@ -183,9 +186,9 @@ struct SidebarEmptyStateView: View {
                 Button(action: onAction) {
                     HStack(spacing: 6) {
                         Image(systemName: "plus")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(.subheadline, weight: .semibold))
                         Text(buttonTitle)
-                            .font(.system(size: 13, weight: .medium))
+                            .font(theme.fontSubheadline.weight(.medium))
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)

@@ -77,10 +77,15 @@ extension NSColor {
 }
 
 // MARK: - GapBuffer Data Structure
-struct GapBuffer {
+struct GapBuffer: Equatable {
     private var buffer: [Character]
     private var gapStart: Int
     private var gapEnd: Int
+
+    /// Equatable compares the logical string content (excluding gap internals).
+    static func == (lhs: GapBuffer, rhs: GapBuffer) -> Bool {
+        lhs.string == rhs.string
+    }
 
     var string: String {
         return String(buffer[0..<gapStart] + buffer[gapEnd..<buffer.count])
@@ -131,13 +136,14 @@ struct GapBuffer {
 }
 
 // MARK: - Centralized Data Model
-class CodeDocument: ObservableObject, Equatable {
+@Observable
+class CodeDocument: Equatable {
     static func == (lhs: CodeDocument, rhs: CodeDocument) -> Bool {
-        return lhs === rhs
+        return lhs.content == rhs.content && lhs.language.id == rhs.language.id
     }
 
-    @Published var content: GapBuffer
-    @Published var language: CodeLanguage
+    var content: GapBuffer
+    var language: CodeLanguage
 
     /// Maps language identifiers not natively supported by CodeEditLanguages
     /// to their closest supported equivalent for syntax highlighting.
@@ -186,7 +192,7 @@ class CodeDocument: ObservableObject, Equatable {
 // MARK: - CodeViewerPanelView (Main SwiftUI View)
 struct CodeViewerPanelView: View {
     @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
-    @EnvironmentObject var themeManager: ThemeManager
+    @Environment(ThemeManager.self) var themeManager
 
     @State private var isHoveringOnDivider = false
     @AppStorage("codeEditFontSize") var fontSize: Double = 13
@@ -195,6 +201,7 @@ struct CodeViewerPanelView: View {
     @State private var document: CodeDocument?
     @State private var didCopy: Bool = false
     @State private var currentSnippet: CodeSnippet?
+    @State private var saveErrorMessage: String?
 
     // MARK: - Resolved Theme Colors (derived from Code Viewer syntax theme)
 
@@ -236,6 +243,14 @@ struct CodeViewerPanelView: View {
                 currentSnippet = nil
                 document = nil
             }
+        }
+        .alert("Save Error", isPresented: Binding(
+            get: { saveErrorMessage != nil },
+            set: { if !$0 { saveErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { saveErrorMessage = nil }
+        } message: {
+            Text(saveErrorMessage ?? "An unknown error occurred.")
         }
     }
 
@@ -305,11 +320,11 @@ struct CodeViewerPanelView: View {
                 // Language badge
                 HStack(spacing: 6) {
                     Image(systemName: languageIcon(for: currentSnippet?.language))
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(accentTint)
 
                     Text(currentSnippet?.language?.capitalized ?? "Code Viewer")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .font(.system(size: 12, weight: .semibold, design: .rounded)) // Fixed size: monospaced rounded badge
                         .foregroundColor(textColor)
                 }
                 .padding(.horizontal, 10)
@@ -347,7 +362,7 @@ struct CodeViewerPanelView: View {
                         action: {
                             copyCodeToClipboard()
                             didCopy = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { didCopy = false }
+                            Task { @MainActor in try? await Task.sleep(for: .seconds(2)); didCopy = false }
                         },
                         icon: didCopy ? "checkmark" : "doc.on.doc",
                         helpText: "Copy code to clipboard",
@@ -399,10 +414,10 @@ struct CodeViewerPanelView: View {
     private var placeholderContent: some View {
         VStack(spacing: 16) {
             Image(systemName: "curlybraces.square")
-                .font(.system(size: 40, weight: .thin))
+                .font(.system(size: 40, weight: .thin)) // Fixed size: intentional (icon)
                 .foregroundColor(secondaryTextColor.opacity(0.4))
             Text("No Code Selected")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(.body, weight: .medium))
                 .foregroundColor(secondaryTextColor.opacity(0.6))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -442,7 +457,7 @@ struct CodeViewerPanelView: View {
                 do {
                     try snippet.code.write(to: url, atomically: true, encoding: .utf8)
                 } catch {
-                    print("Error saving file: \(error.localizedDescription)")
+                    saveErrorMessage = "Failed to save file: \(error.localizedDescription)"
                 }
             }
         }
@@ -484,7 +499,7 @@ fileprivate struct CodeViewerSnippetNavigator: View {
             CodeViewerNavButton(action: onPrevious, icon: "chevron.left", enabled: currentIndex > 0, textColor: textColor, hoverColor: hoverColor)
 
             Text("\(currentIndex + 1) / \(totalCount)")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .font(.system(size: 11, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                 .foregroundColor(secondaryColor)
                 .frame(width: 46)
 
@@ -509,7 +524,7 @@ fileprivate struct CodeViewerNavButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(.caption2, weight: .bold))
                 .foregroundColor(enabled ? textColor : textColor.opacity(0.2))
                 .frame(width: 20, height: 20)
                 .background(isHovering && enabled ? hoverColor : Color.clear)
@@ -518,6 +533,10 @@ fileprivate struct CodeViewerNavButton: View {
         .buttonStyle(.plain)
         .disabled(!enabled)
         .onHover { self.isHovering = $0 }
+        // Expand tap/click target to 44×44 minimum (Apple HIG)
+        .frame(minWidth: 44, minHeight: 44)
+        .contentShape(Rectangle())
+        .accessibilityLabel(icon == "chevron.left" ? "Previous snippet" : "Next snippet")
     }
 }
 
@@ -552,7 +571,7 @@ extension CodeDocument: Identifiable {}
 
 // MARK: - High-Performance NSViewControllerRepresentable
 private struct HighPerformanceCodeViewRepresentable: NSViewControllerRepresentable {
-    @ObservedObject var document: CodeDocument
+    var document: CodeDocument
     var fontSize: Double
     var editorTheme: CodeEditSourceEditor.EditorTheme
     var bracketHighlightColor: NSColor

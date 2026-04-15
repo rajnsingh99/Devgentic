@@ -70,7 +70,7 @@ private struct ClarificationBanner: View {
                     .shadow(color: theme.streamingIndicator.opacity(0.5), radius: 3)
 
                 Text("Question")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundColor(theme.streamingIndicator)
                     .textCase(.uppercase)
                     .tracking(0.6)
@@ -79,13 +79,13 @@ private struct ClarificationBanner: View {
 
                 // Subtle dismiss hint
                 Text("⎋ skip")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(theme.tertiaryText.opacity(0.6))
             }
 
             // Question text
             Text(clarification.question)
-                .font(.system(size: 13, weight: .medium))
+                .font(theme.fontSubheadline.weight(.medium))
                 .foregroundColor(theme.primaryText)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineSpacing(2)
@@ -94,7 +94,7 @@ private struct ClarificationBanner: View {
             HStack(spacing: 8) {
                 TextField("Type your answer...", text: $userInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .foregroundColor(theme.primaryText)
                     .focused($isFocused)
                     .onSubmit { if canSend { submit() } }
@@ -130,15 +130,18 @@ private struct ClarificationBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.ultraThinMaterial)
-                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(theme.streamingIndicator.opacity(0.15), lineWidth: 1)
-        )
+        // MARK: Liquid Glass
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(
+        //     RoundedRectangle(cornerRadius: 16)
+        //         .fill(.ultraThinMaterial)
+        //         .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
+        // )
+        // .overlay(
+        //     RoundedRectangle(cornerRadius: 16)
+        //         .stroke(theme.streamingIndicator.opacity(0.15), lineWidth: 1)
+        // )
         .onAppear { isFocused = true }
     }
 
@@ -183,7 +186,7 @@ private struct PermissionBanner: View {
                     .shadow(color: theme.warningColor.opacity(0.5), radius: 3)
 
                 Text("Permission Required")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundColor(theme.warningColor)
                     .textCase(.uppercase)
                     .tracking(0.6)
@@ -194,11 +197,12 @@ private struct PermissionBanner: View {
             // Tool + params row
             HStack(spacing: 6) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 10))
+                    .font(.system(.caption2))
                     .foregroundColor(theme.secondaryText)
+                    .accessibilityHidden(true)
 
                 Text(confirmation.toolName)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(theme.primaryText)
 
                 if !confirmation.params.isEmpty && confirmation.params != "{}" {
@@ -206,7 +210,7 @@ private struct PermissionBanner: View {
                         .foregroundColor(theme.tertiaryText)
 
                     Text(confirmation.params)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced)) // Fixed size: monospaced
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -249,15 +253,18 @@ private struct PermissionBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.ultraThinMaterial)
-                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(theme.warningColor.opacity(0.2), lineWidth: 1)
-        )
+        // MARK: Liquid Glass
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(
+        //     RoundedRectangle(cornerRadius: 16)
+        //         .fill(.ultraThinMaterial)
+        //         .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
+        // )
+        // .overlay(
+        //     RoundedRectangle(cornerRadius: 16)
+        //         .stroke(theme.warningColor.opacity(0.2), lineWidth: 1)
+        // )
     }
 
     private func decide(approved: Bool) {
@@ -281,30 +288,33 @@ private struct PlanReviewSubtaskRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Text("\(index + 1)")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .font(.system(size: 10, weight: .bold, design: .monospaced)) // Fixed size: monospaced
                 .foregroundColor(theme.streamingIndicator.opacity(0.7))
                 .frame(width: 18, alignment: .center)
 
             TextField("Subtask description", text: $subtask.description)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.primaryText)
 
-            if let hint = subtask.toolHint, !hint.isEmpty {
-                Text(hint)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundColor(theme.tertiaryText)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(theme.surfaceOverlay.opacity(0.6)))
+            if let hints = subtask.toolHints, !hints.isEmpty {
+                ForEach(hints, id: \.self) { hint in
+                    Text(hint)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(theme.tertiaryText)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(theme.surfaceOverlay.opacity(0.6)))
+                }
             }
 
             Button(action: onDelete) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(theme.tertiaryText.opacity(0.5))
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Delete step")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
@@ -336,7 +346,7 @@ private struct PlanReviewBanner: View {
                     .shadow(color: theme.streamingIndicator.opacity(0.5), radius: 3)
 
                 Text("Plan Review")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
                     .foregroundColor(theme.streamingIndicator)
                     .textCase(.uppercase)
                     .tracking(0.6)
@@ -344,7 +354,7 @@ private struct PlanReviewBanner: View {
                 Spacer()
 
                 Text("\(editableSubtasks.count) step\(editableSubtasks.count == 1 ? "" : "s")")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(theme.tertiaryText.opacity(0.6))
             }
 
@@ -377,9 +387,9 @@ private struct PlanReviewBanner: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "plus.circle")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                         Text("Add Step")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                     }
                     .foregroundColor(theme.streamingIndicator.opacity(0.8))
                 }
@@ -396,9 +406,9 @@ private struct PlanReviewBanner: View {
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.counterclockwise")
-                                .font(.system(size: 10))
+                                .font(.system(.caption2))
                             Text("Reset")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                         }
                         .foregroundColor(theme.tertiaryText)
                     }
@@ -436,15 +446,18 @@ private struct PlanReviewBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.ultraThinMaterial)
-                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(theme.streamingIndicator.opacity(0.15), lineWidth: 1)
-        )
+        // MARK: Liquid Glass
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(
+        //     RoundedRectangle(cornerRadius: 16)
+        //         .fill(.ultraThinMaterial)
+        //         .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
+        // )
+        // .overlay(
+        //     RoundedRectangle(cornerRadius: 16)
+        //         .stroke(theme.streamingIndicator.opacity(0.15), lineWidth: 1)
+        // )
         .onAppear {
             editableSubtasks = planReview.subtasks
         }
@@ -517,9 +530,9 @@ private struct BannerActionButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(.caption2, weight: .semibold))
                 Text(label)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
             }
             .foregroundColor(isDisabled ? fgColor.opacity(0.4) : fgColor)
             .padding(.horizontal, 11)

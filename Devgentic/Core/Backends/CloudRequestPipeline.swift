@@ -30,10 +30,12 @@ struct CloudRequestPipeline: Sendable {
     static func execute(
         request: URLRequest,
         provider: RateLimitCategory,
+        rateLimitKey: String? = nil,
         session: URLSession = .shared
     ) async throws -> (Data, HTTPURLResponse) {
-        // 1. Pre-request: respect rate limits
-        await GlobalRateLimiter.shared.wait(for: provider)
+        // 1. Pre-request: respect rate limits (profile-scoped when key provided)
+        let key = rateLimitKey ?? provider.rawValue
+        await GlobalRateLimiter.shared.wait(forKey: key, category: provider)
 
         // 2. Execute the request
         let (data, response) = try await session.data(for: request)
@@ -56,8 +58,8 @@ struct CloudRequestPipeline: Sendable {
             // On 429: drain the rate limiter bucket to prevent further requests
             if httpResponse.statusCode == 429 {
                 let penalty = retryAfter ?? 10.0
-                await GlobalRateLimiter.shared.drainAndPenalize(category: provider, penaltySeconds: penalty)
-                logger.warning("[\(String(describing: provider))] 429 Rate Limited. Retry-After: \(retryAfter ?? -1)s. Penalty applied: \(penalty)s.")
+                await GlobalRateLimiter.shared.drainAndPenalize(key: key, category: provider, penaltySeconds: penalty)
+                logger.warning("[\(key)] 429 Rate Limited. Retry-After: \(retryAfter ?? -1)s. Penalty applied: \(penalty)s.")
             }
 
             throw CloudProviderError(
@@ -76,19 +78,15 @@ struct CloudRequestPipeline: Sendable {
 
     /// Executes a streaming HTTP request through the cloud pipeline.
     /// Validates the initial HTTP response before returning the byte stream.
-    /// - Parameters:
-    ///   - request: The fully constructed URLRequest with `stream: true` in the body.
-    ///   - provider: The rate limit category.
-    ///   - session: The URLSession to use (defaults to `.shared`).
-    /// - Returns: The async byte stream and `HTTPURLResponse`.
-    /// - Throws: `CloudProviderError` on non-2xx initial responses.
     static func executeStream(
         request: URLRequest,
         provider: RateLimitCategory,
+        rateLimitKey: String? = nil,
         session: URLSession = .shared
     ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
-        // 1. Pre-request: respect rate limits
-        await GlobalRateLimiter.shared.wait(for: provider)
+        // 1. Pre-request: respect rate limits (profile-scoped when key provided)
+        let key = rateLimitKey ?? provider.rawValue
+        await GlobalRateLimiter.shared.wait(forKey: key, category: provider)
 
         // 2. Execute the streaming request
         let (bytes, response) = try await session.bytes(for: request)
@@ -118,8 +116,8 @@ struct CloudRequestPipeline: Sendable {
 
             if httpResponse.statusCode == 429 {
                 let penalty = retryAfter ?? 10.0
-                await GlobalRateLimiter.shared.drainAndPenalize(category: provider, penaltySeconds: penalty)
-                logger.warning("[\(String(describing: provider))] 429 on stream. Penalty: \(penalty)s.")
+                await GlobalRateLimiter.shared.drainAndPenalize(key: key, category: provider, penaltySeconds: penalty)
+                logger.warning("[\(key)] 429 on stream. Penalty: \(penalty)s.")
             }
 
             throw CloudProviderError(

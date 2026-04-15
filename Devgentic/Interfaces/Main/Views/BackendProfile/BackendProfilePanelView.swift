@@ -30,7 +30,7 @@ struct BackendProfilePanelView: View {
     @State private var pendingProfileID: UUID? = nil
     @State private var showingDiscardAlert = false
 
-    @EnvironmentObject private var toastManager: ToastManager
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
     /// Profiles filtered by search text (name or type).
@@ -99,15 +99,15 @@ struct BackendProfilePanelView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(theme.secondaryText)
-                        .font(.system(size: 11))
+                        .font(.system(.caption))
                     TextField("Filter profiles...", text: $searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.primaryText)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 6).fill(theme.surfaceOverlay))
+                .background(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium).fill(theme.surfaceOverlay))
                 .padding(.horizontal, 8)
                 .padding(.bottom, 6)
             }
@@ -191,7 +191,11 @@ struct BackendProfilePanelView: View {
             Menu {
                 Button("Export All...") {
                     let success = ProfileExporter.exportProfiles(profileService.profiles)
-                    if success { toastManager.show("Profiles exported", style: .success) }
+                    if success {
+                        toastManager.show("Profiles exported", style: .success)
+                    } else if !profileService.profiles.isEmpty {
+                        toastManager.show("Export failed or was cancelled", style: .warning)
+                    }
                 }
                 Button("Import...") {
                     guard let candidates = ProfileExporter.importProfiles(existingProfiles: profileService.profiles) else { return }
@@ -234,6 +238,7 @@ struct BackendProfilePanelView: View {
             }
             .buttonStyle(.plain)
             .help("Export / Import Profiles")
+            .accessibilityLabel("Export / Import Profiles")
         }
     }
     
@@ -319,16 +324,16 @@ struct ProfileRowView: View {
 
             HStack(spacing: 12) {
                 Image(systemName: iconName(for: profile.profileType))
-                    .font(.system(size: 16))
+                    .font(.system(.body))
                     .foregroundColor(color(for: profile.profileType))
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(profile.displayName)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(theme.fontSubheadline.weight(.medium))
                         .foregroundColor(theme.primaryText)
                     Text(profile.profileType.rawValue)
-                        .font(.system(size: 11))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                 }
                 
@@ -385,12 +390,7 @@ struct ProfileRowView: View {
     }
 
     private func iconName(for type: ProfileType) -> String {
-        switch type {
-        case .bot: return "cpu"
-        case .agent: return "person.fill.viewfinder"
-        case .workflow: return "square.3.layers.3d.down.right"
-        case .imageGen: return "paintbrush.fill"
-        }
+        type.iconName
     }
 
     private func color(for type: ProfileType) -> Color {
@@ -430,7 +430,7 @@ struct DuplicateProfileSheet: View {
             // Header
             HStack(spacing: 12) {
                 Image(systemName: "doc.on.doc")
-                    .font(.system(size: 20))
+                    .font(.system(.title3))
                     .foregroundColor(theme.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Duplicate Profile")
@@ -457,20 +457,20 @@ struct DuplicateProfileSheet: View {
                     .textFieldStyle(.plain)
                     .padding(12)
                     .background(theme.secondaryBackground)
-                    .cornerRadius(10)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(isDuplicateName ? Color.orange : theme.dividerColor, lineWidth: 1)
+                            .stroke(isDuplicateName ? theme.warningColor : theme.dividerColor, lineWidth: 1)
                     )
 
                 if isDuplicateName {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                         Text("A profile named '\(trimmedName)' already exists.")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                     }
-                    .foregroundColor(.orange)
+                    .foregroundColor(theme.warningColor)
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }

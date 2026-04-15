@@ -567,4 +567,52 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(result.toolCalls.count, 1)
         XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
     }
+
+    // MARK: - Bug 3: Malformed Content with Valid tool_calls
+
+    func testMalformedContent_HTMLTags_RecoverToolCalls() {
+        // Exact bug from production: content has HTML tags (not valid JSON string)
+        // but tool_calls array is perfectly valid
+        let input = """
+        {
+          "content":<p>Based on the metadata retrieval results, it seems that there are multiple folders.</p>,
+          "tool_calls": [
+            {
+              "name": "fs_smart_search",
+              "arguments": {
+                "search_term": "*Acme*"
+              }
+            }
+          ]
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Valid tool_calls should be recovered even when content field is malformed HTML")
+        XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
+        XCTAssertEqual(result.toolCalls.first?.arguments["search_term"], .string("*Acme*"))
+    }
+
+    func testMalformedContent_UnquotedValue_RecoverToolCalls() {
+        // Content value not wrapped in quotes
+        let input = """
+        {
+          "content": unquoted text here,
+          "tool_calls": [
+            {"name": "list_directory", "arguments": {"path": "/tmp"}}
+          ]
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Valid tool_calls should be recovered even when content value is unquoted")
+        XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
+    }
+
+    func testMalformedContent_NoToolCalls_ReturnsNil() {
+        // When neither content nor tool_calls can be found, should still return nil
+        // to allow other recovery paths (markdown field format, etc.)
+        let input = "Just plain text without any JSON structure"
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertTrue(result.reasoning.contains("plain text"), "Plain text should be preserved as reasoning")
+    }
 }

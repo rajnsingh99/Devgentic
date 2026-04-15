@@ -109,7 +109,7 @@ struct OpenAILLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
@@ -146,7 +146,7 @@ struct OpenAILLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
@@ -189,7 +189,10 @@ struct OpenAILLMProvider: LLMProvider {
             ? "Executing \(pendingTools.count) tools..."
             : content
 
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: reasoningContent, toolCalls: pendingTools)
+        // Extract token usage from OpenAI API response
+        let usage = json.flatMap { TokenUsage.fromOpenAI($0) }
+
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
     }
 
     // MARK: - Streaming
@@ -213,7 +216,7 @@ struct OpenAILLMProvider: LLMProvider {
                     var request = makeRequest()
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .openAI)
+                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
 
                     // Parse SSE (Server-Sent Events) stream
                     for try await line in bytes.lines {

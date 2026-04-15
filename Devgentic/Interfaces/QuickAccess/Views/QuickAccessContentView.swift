@@ -16,7 +16,7 @@ struct QuickAccessContentView: View {
     // --- View Model ---
     // Ensure QuickAccessViewModel is initialized here.
     // If it's passed from QuickAccessPanelView, adjust accordingly.
-    @StateObject private var viewModel = QuickAccessViewModel()
+    @State private var viewModel = QuickAccessViewModel()
 
     // --- UI State ---
     @State private var inputText: String = ""
@@ -69,17 +69,18 @@ struct QuickAccessContentView: View {
                 .padding(.horizontal, isExpanded ? expandedInputAreaHorizontalMargin : 0)
         }
         .frame(minWidth: contentViewMinWidth)
-        .background(.ultraThinMaterial)
-        .cornerRadius(isExpanded ? panelCornerRadius : 20)
-        .overlay(
-            RoundedRectangle(cornerRadius: isExpanded ? panelCornerRadius : 20)
-                .stroke(borderColor, lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(isExpanded ? 0.45 : 0.35),
-                radius: isExpanded ? 8 : 5, x: 0, y: isExpanded ? 5 : 3)
+        // MARK: Liquid Glass — replace material + stroke + shadow with glassEffect
+        .background(.clear)
+        .clipShape(RoundedRectangle(cornerRadius: isExpanded ? panelCornerRadius : 20, style: .continuous))
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: isExpanded ? panelCornerRadius : 20))
+        // --- To revert to pre-Liquid-Glass, comment out the 3 lines above and uncomment below ---
+        // .background(.ultraThinMaterial)
+        // .cornerRadius(isExpanded ? panelCornerRadius : 20)
+        // .overlay(RoundedRectangle(cornerRadius: isExpanded ? panelCornerRadius : 20).stroke(borderColor, lineWidth: 1))
+        // .shadow(color: Color.black.opacity(isExpanded ? 0.45 : 0.35), radius: isExpanded ? 8 : 5, x: 0, y: isExpanded ? 5 : 3)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isExpanded)
         .animation(.easeInOut(duration: 0.2), value: isPanelZoomedToFullScreen)
-        .onChange(of: isExpanded) { newValue in
+        .onChange(of: isExpanded) { _, newValue in
             let newIdealHeight = newValue ? expandedViewMinHeight : inputBarHeight
             onResize?(newIdealHeight)
             if !newValue {
@@ -117,17 +118,18 @@ extension QuickAccessContentView {
                 isExpanded = false;
                 dismiss()
             }) {
-                Image(systemName: "xmark").font(.system(size: 14, weight: .medium)).foregroundColor(iconColor)
-            }.buttonStyle(PlainButtonStyle()).padding(.leading, 12)
+                Image(systemName: "xmark").font(.system(.body, weight: .medium)).foregroundColor(iconColor)
+            }.buttonStyle(PlainButtonStyle()).padding(.leading, 12).accessibilityLabel("Close panel")
             
             Spacer()
             
             Button(action: { copyLastMessageToClipboard() }) {
-                Image(systemName: "doc.on.doc").font(.system(size: 16, weight: .medium)).foregroundColor(iconColor)
+                Image(systemName: "doc.on.doc").font(.system(.body, weight: .medium)).foregroundColor(iconColor)
             }
             .buttonStyle(PlainButtonStyle())
             .disabled(viewModel.messages.isEmpty)
             .help("Copy last message")
+            .accessibilityLabel("Copy last message")
             
             // --- NEW CHAT BUTTON ---
             Button(action: {
@@ -135,11 +137,12 @@ extension QuickAccessContentView {
                 inputText = "" // Optionally clear input text as well
             }) {
                 Image(systemName: "plus.message.fill")
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(.body, weight: .medium))
                     .foregroundColor(iconColor)
             }
             .buttonStyle(PlainButtonStyle())
             .help("Start New Chat Session")
+            .accessibilityLabel("Start New Chat Session")
             // --- END NEW CHAT BUTTON ---
 
             Button(action: {
@@ -147,12 +150,13 @@ extension QuickAccessContentView {
                 isPanelZoomedToFullScreen.toggle()
             }) {
                 Image(systemName: isPanelZoomedToFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(.title3, weight: .medium))
                     .foregroundColor(iconColor)
             }
             .buttonStyle(PlainButtonStyle())
             .padding(.trailing, 12)
             .help(isPanelZoomedToFullScreen ? "Exit Full Screen" : "Enter Full Screen")
+            .accessibilityLabel(isPanelZoomedToFullScreen ? "Exit Full Screen" : "Enter Full Screen")
         }
         .frame(height: topBarHeight)
         .padding(.top, 5)
@@ -183,7 +187,7 @@ extension QuickAccessContentView {
         }
         .padding(isExpanded ? EdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10) : EdgeInsets(top: (inputBarHeight - textFieldHeight - buttonRowHeight - 5) / 2, leading: 10, bottom: (inputBarHeight - textFieldHeight - buttonRowHeight - 5) / 2, trailing: 10) )
         .background(isExpanded ? expandedInputAreaContainerBackgroundColor : Color.clear)
-        .cornerRadius(isExpanded ? expandedInputAreaContainerCornerRadius : 0)
+        .clipShape(RoundedRectangle(cornerRadius: isExpanded ? expandedInputAreaContainerCornerRadius : 0))
         .frame(height: isExpanded ? nil : inputBarHeight)
         .padding(.bottom, isExpanded ? 10 : 0)
     }
@@ -193,17 +197,17 @@ extension QuickAccessContentView {
         VStack(spacing: 8) {
             HStack {
                 Button(action: { print("Attach File (Not Implemented)") }) {
-                    Image(systemName: "plus").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Attach File (Not Implemented)")
+                    Image(systemName: "plus").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Attach File (Not Implemented)").accessibilityLabel("Attach File")
                 Button(action: { print("Web Search (Not Implemented)") }) {
-                    Image(systemName: "globe").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Web Search (Not Implemented)")
+                    Image(systemName: "globe").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Web Search (Not Implemented)").accessibilityLabel("Web Search")
                 Button(action: { print("Explore (Not Implemented)") }) {
-                    Image(systemName: "binoculars.fill").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Explore (Not Implemented)")
+                    Image(systemName: "binoculars.fill").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Explore (Not Implemented)").accessibilityLabel("Explore")
                 Button(action: { print("Select Mode (Not Implemented)") }) {
-                    Image(systemName: "hand.point.up.left.fill").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Select Mode (Not Implemented)")
+                    Image(systemName: "hand.point.up.left.fill").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Select Mode (Not Implemented)").accessibilityLabel("Select Mode")
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -212,10 +216,10 @@ extension QuickAccessContentView {
             HStack(spacing: 8) {
                 ZStack(alignment: .leading) {
                     if inputText.isEmpty {
-                        Text("Ask anything").foregroundColor(placeholderTextColor).font(.system(size: 15)).padding(.leading, 12)
+                        Text("Ask anything").foregroundColor(placeholderTextColor).font(.system(.title3)).padding(.leading, 12)
                     }
                     TextField("", text: $inputText, axis: .vertical)
-                        .textFieldStyle(PlainTextFieldStyle()).foregroundColor(textColor).font(.system(size: 15))
+                        .textFieldStyle(PlainTextFieldStyle()).foregroundColor(textColor).font(.system(.title3))
                         .lineLimit(1...5)
                         .padding(.horizontal, 12)
                         .onSubmit { submitQuery() }
@@ -223,17 +227,17 @@ extension QuickAccessContentView {
                 .frame(minHeight: textFieldHeight)
 
                 Button(action: { print("Voice Input (Not Implemented)") }) {
-                    Image(systemName: "mic.fill").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Voice Input (Not Implemented)")
+                    Image(systemName: "mic.fill").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Voice Input (Not Implemented)").accessibilityLabel("Voice Input")
 
                 Button(action: { submitQuery() }) {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 20, weight: .medium))
+                    Image(systemName: "arrow.up.circle.fill").font(.system(.title3, weight: .medium))
                         .foregroundColor(inputText.isEmpty ? iconColor.opacity(0.5) : iconColor)
-                }.buttonStyle(PlainButtonStyle()).disabled(inputText.isEmpty).help("Send")
+                }.buttonStyle(PlainButtonStyle()).disabled(inputText.isEmpty).help("Send").accessibilityLabel("Send")
             }
             .padding(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
             .background(expandedTextFieldContainerBackgroundColor)
-            .cornerRadius(expandedTextFieldContainerCornerRadius)
+            .clipShape(RoundedRectangle(cornerRadius: expandedTextFieldContainerCornerRadius))
         }
     }
 
@@ -242,31 +246,31 @@ extension QuickAccessContentView {
         VStack(spacing: 5) {
             ZStack(alignment: .leading) {
                 if inputText.isEmpty {
-                    Text("Ask anything").foregroundColor(placeholderTextColor).font(.system(size: 15)).padding(.horizontal, 12)
+                    Text("Ask anything").foregroundColor(placeholderTextColor).font(.system(.title3)).padding(.horizontal, 12)
                 }
                 TextField("", text: $inputText)
-                    .textFieldStyle(PlainTextFieldStyle()).foregroundColor(textColor).font(.system(size: 15))
+                    .textFieldStyle(PlainTextFieldStyle()).foregroundColor(textColor).font(.system(.title3))
                     .padding(.horizontal, 12).frame(height: textFieldHeight)
                     .onSubmit { submitQuery() }
             }
             HStack {
                 Button(action: { print("Attach File (Not Implemented)") }) {
-                    Image(systemName: "plus").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Attach File (Not Implemented)")
+                    Image(systemName: "plus").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Attach File (Not Implemented)").accessibilityLabel("Attach File")
                 Button(action: { print("Web Search (Not Implemented)") }) {
-                    Image(systemName: "globe").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Web Search (Not Implemented)")
+                    Image(systemName: "globe").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Web Search (Not Implemented)").accessibilityLabel("Web Search")
                 Button(action: { print("Select Mode (Not Implemented)") }) {
-                    Image(systemName: "hand.point.up.left.fill").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Select Mode (Not Implemented)")
+                    Image(systemName: "hand.point.up.left.fill").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Select Mode (Not Implemented)").accessibilityLabel("Select Mode")
                 Spacer()
                 Button(action: { print("Voice Input (Not Implemented)") }) {
-                    Image(systemName: "mic.fill").font(.system(size: 18, weight: .medium)).foregroundColor(iconColor)
-                }.buttonStyle(PlainButtonStyle()).help("Voice Input (Not Implemented)")
+                    Image(systemName: "mic.fill").font(.system(.title3, weight: .medium)).foregroundColor(iconColor)
+                }.buttonStyle(PlainButtonStyle()).help("Voice Input (Not Implemented)").accessibilityLabel("Voice Input")
                 Button(action: { submitQuery() }) {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 20, weight: .medium))
+                    Image(systemName: "arrow.up.circle.fill").font(.system(.title3, weight: .medium))
                         .foregroundColor(inputText.isEmpty ? iconColor.opacity(0.5) : iconColor)
-                }.buttonStyle(PlainButtonStyle()).disabled(inputText.isEmpty).help("Send")
+                }.buttonStyle(PlainButtonStyle()).disabled(inputText.isEmpty).help("Send").accessibilityLabel("Send")
             }
             .padding(.horizontal, 12).frame(height: buttonRowHeight)
         }
@@ -281,6 +285,7 @@ extension QuickAccessContentView {
         case .error(_, let details): textToCopy = details
         case .image(let url, let alt, _): textToCopy = url?.absoluteString ?? alt ?? "Image"
         case .mediaArtifact(let artifact): textToCopy = artifact.label ?? artifact.kind.rawValue
+        case .checkpoint(let summary): textToCopy = summary
         }
         if !textToCopy.isEmpty {
             #if os(macOS)

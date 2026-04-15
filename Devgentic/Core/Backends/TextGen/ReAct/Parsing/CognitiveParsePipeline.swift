@@ -133,6 +133,16 @@ struct CognitiveParsePipeline: Sendable {
             return .confident(result)
         }
 
+        // Explicit empty tool_calls array (e.g., `"tool_calls": []`) is a genuine
+        // completion signal — the model intentionally returned no tools. Don't let
+        // the drift detector classify this as "degraded" just because it finds the
+        // substring `"tool_calls"` in the text. Without this check, Stage 4 sets
+        // `parseExhausted = true` on valid completions, causing the executor to
+        // inject a corrective alert and retry when the model was genuinely done.
+        if containsExplicitEmptyToolCalls(in: sanitizedText) {
+            return .confident(result)
+        }
+
         // Zero tool calls → check if we might be missing something
         let detector = FormatDriftDetector(excludedDialect: expectedDialect, knownToolNames: knownToolNames)
         if detector.containsAnySignal(in: sanitizedText) {
@@ -141,6 +151,15 @@ struct CognitiveParsePipeline: Sendable {
 
         // No tool signals at all → genuinely a text-only response
         return .confident(result)
+    }
+
+    /// Detects an explicit empty `tool_calls` array in the text, distinguishing
+    /// a genuine completion (`"tool_calls": []`) from a missed tool call signal.
+    private func containsExplicitEmptyToolCalls(in text: String) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: #""tool_calls"\s*:\s*\[\s*\]"#
+        ) else { return false }
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 
     /// Stage 4: Falls through to the battle-tested `HeuristicCognitiveParser`.
@@ -161,11 +180,16 @@ struct CognitiveParsePipeline: Sendable {
         }
 
         // Nothing worked. Return the primary result (which has reasoning at least).
+        // Mark `parseExhausted` so the termination evaluator can distinguish this
+        // from a genuine agent completion (where the model intentionally returned
+        // empty tool calls). Without this flag, the evaluator treats both cases as
+        // `.completed` — which silently terminates the loop on a parse failure.
         logger.info("Pipeline: All stages exhausted. Returning primary result (likely termination).")
         return ModernCognitiveStep(
             reasoning: primaryResult.reasoning,
             thought: primaryResult.thought ?? sanitized.thought,
-            toolCalls: primaryResult.toolCalls
+            toolCalls: primaryResult.toolCalls,
+            parseExhausted: true
         )
     }
 

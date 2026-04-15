@@ -16,10 +16,10 @@ class SimplePromptWindowManager {
     private var window: NSWindow?
 
     /// Spawns or brings the editor window to the front.
-    func showEditor(text: Binding<String>, botName: String, theme: Theme) {
+    func showEditor(text: Binding<String>, botName: String, theme: Theme, contextWindow: Int? = nil) {
         if let existingWindow = window, existingWindow.isVisible {
             existingWindow.contentView = NSHostingView(
-                rootView: SimplePromptEditorView(text: text, botName: botName)
+                rootView: SimplePromptEditorView(text: text, botName: botName, contextWindow: contextWindow)
                     .environment(\.appTheme, theme)
             )
             existingWindow.title = "System Instructions: \(botName)"
@@ -28,7 +28,7 @@ class SimplePromptWindowManager {
             return
         }
 
-        let editorView = SimplePromptEditorView(text: text, botName: botName)
+        let editorView = SimplePromptEditorView(text: text, botName: botName, contextWindow: contextWindow)
             .environment(\.appTheme, theme)
         
         let newWindow = NSWindow(
@@ -62,8 +62,10 @@ class SimplePromptWindowManager {
 struct SimplePromptEditorView: View {
     @Binding var text: String
     var botName: String
+    /// Context window size in tokens for the active model. `nil` if unknown.
+    var contextWindow: Int?
     @Environment(\.appTheme) private var theme
-    
+
     // Local state to drive real-time UI updates in the detached window
     @State private var localText: String = ""
 
@@ -74,22 +76,26 @@ struct SimplePromptEditorView: View {
             HStack {
                 VStack(alignment: .leading) {
                     Text("System Instructions")
-                        .font(.headline)
+                        .font(theme.fontHeadline)
                         .foregroundColor(theme.primaryText)
                     Text("Defines the core persona and behavior for \(botName).")
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
                 Spacer()
                 
-                VStack(alignment: .trailing) {
-                    Text("\(localText.count) characters")
-                        .font(.subheadline)
+                VStack(alignment: .trailing, spacing: 2) {
+                    let estimatedTokens = max(1, localText.count / 4)
+                    Text("~ \(estimatedTokens.formatted()) tokens")
+                        .font(theme.fontSubheadline)
                         .monospacedDigit()
-                        .foregroundColor(theme.primaryText)
-                    Text("~ \(localText.count / 4) tokens")
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
+                        .foregroundColor(tokenWarningColor(estimatedTokens: estimatedTokens))
+                    if let cw = contextWindow {
+                        let ratio = Double(estimatedTokens) / Double(cw)
+                        Text("\(Int(ratio * 100))% of \(cw.formatted()) context")
+                            .font(theme.fontCaption)
+                            .foregroundColor(ratio > 0.5 ? .red : ratio > 0.25 ? .orange : theme.secondaryText)
+                    }
                 }
             }
             .padding()
@@ -102,7 +108,7 @@ struct SimplePromptEditorView: View {
             // The Core Editor (Standard SwiftUI TextEditor)
             ZStack(alignment: .topLeading) {
                 TextEditor(text: $localText)
-                    .font(.system(.body, design: .monospaced))
+                    .font(theme.fontCode)
                     .foregroundColor(theme.primaryText)
                     .disableAutocorrection(true)
                     .padding(8)
@@ -111,7 +117,7 @@ struct SimplePromptEditorView: View {
                     
                 if localText.isEmpty {
                     Text("Enter system instructions for \(botName) here...")
-                        .font(.system(.body, design: .monospaced))
+                        .font(theme.fontCode)
                         .foregroundColor(theme.secondaryText.opacity(0.5))
                         .padding(.horizontal, 16)
                         .padding(.vertical, 16)
@@ -128,7 +134,7 @@ struct SimplePromptEditorView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
                 Text("Changes sync automatically to the main window.")
-                    .font(.caption)
+                    .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
                 
                 Spacer()
@@ -160,5 +166,13 @@ struct SimplePromptEditorView: View {
                 localText = newValue
             }
         }
+    }
+
+    private func tokenWarningColor(estimatedTokens: Int) -> Color {
+        guard let cw = contextWindow else { return theme.primaryText }
+        let ratio = Double(estimatedTokens) / Double(cw)
+        if ratio > 0.5 { return .red }
+        if ratio > 0.25 { return .orange }
+        return theme.primaryText
     }
 }

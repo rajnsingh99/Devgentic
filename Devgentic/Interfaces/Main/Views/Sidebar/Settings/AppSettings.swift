@@ -29,6 +29,8 @@ struct AppSettings {
     static let ciFeatureSuggestionKey = "ciFeatureSuggestion"
     static let ciFeatureMorningBriefKey = "ciFeatureMorningBrief"
     static let ciFeatureUserPersonalKey = "ciFeatureUserPersonal"
+    static let ciFeatureResponseSynthesisKey = "ciFeatureResponseSynthesis"
+    static let ciFeatureHistoryCompactionKey = "ciFeatureHistoryCompaction"
     static let ciCustomPromptKey = "ciCustomPrompt"
 
     // Morning Brief

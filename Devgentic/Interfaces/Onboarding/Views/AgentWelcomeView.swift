@@ -16,7 +16,7 @@
 //import SwiftUI
 //
 //struct AgentWelcomeView: View {
-//    @ObservedObject var viewModel: AgentOnboardingViewModel
+//    var viewModel: AgentOnboardingViewModel
 //
 //    var body: some View {
 //        VStack(spacing: 20) {

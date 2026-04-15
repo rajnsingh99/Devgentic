@@ -52,12 +52,12 @@ struct ReportInspectorView: View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(isDeveloperMode ? "Execution Trace" : "Feedback")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(.title3, weight: .semibold))
                     .foregroundStyle(theme.primaryText)
 
                 if let profileName = viewModel.activeTraceRecord?.profileName {
                     Text(profileName)
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundStyle(theme.secondaryText)
                 }
             }
@@ -67,9 +67,9 @@ struct ReportInspectorView: View {
             // Mode indicator pill
             HStack(spacing: 4) {
                 Image(systemName: isDeveloperMode ? "hammer.fill" : "person.fill")
-                    .font(.system(size: 9))
+                    .font(.system(size: 9)) // Fixed size: badge chip ≤9pt
                 Text(isDeveloperMode ? "Developer" : "User")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(.caption2, weight: .medium))
             }
             .foregroundStyle(theme.secondaryText)
             .padding(.horizontal, 8)
@@ -79,7 +79,7 @@ struct ReportInspectorView: View {
 
             Button(action: { dismiss() }) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(.caption2, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
                     .frame(width: 22, height: 22)
                     .background(theme.secondaryBackground)

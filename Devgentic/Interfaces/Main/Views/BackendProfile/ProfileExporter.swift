@@ -74,8 +74,13 @@ struct ProfileExporter {
         }
 
         do {
-            // Strip API keys from exported data (security)
-            let sanitized = profiles.map { profile -> BackendProfileSnapshot in
+            // Validate and strip API keys from exported data (security)
+            let sanitized = profiles.compactMap { profile -> BackendProfileSnapshot? in
+                let errors = ProfileValidator.validate(profile, strict: false)
+                if !errors.isEmpty {
+                    logger.warning("Skipping invalid profile '\(profile.displayName)' during export: \(errors.map(\.message).joined(separator: ", "))")
+                    return nil
+                }
                 var copy = profile
                 copy.details = clearApiKey(in: copy.details)
                 return copy

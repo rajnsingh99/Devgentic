@@ -12,27 +12,35 @@ import os
 struct BackendSelectorPopup: View {
 
     // MARK: - State Bindings
-    @ObservedObject var configuration: BackendConfiguration
+    var configuration: BackendConfiguration
     @Binding var isPresented: Bool
-    
+
+    /// Profile types to display. When nil, shows all types (legacy behavior).
+    /// Populated from `MainApplicationViewModel.interfaceMode.allowedProfileTypes`.
+    var allowedProfileTypes: Set<ProfileType>? = nil
+
     // MARK: - Environment
     @Environment(\.openWindow) var openWindow
 
     // MARK: - Data Source
     @State private var profiles: [BackendProfileModel] = []
-    
+
     // MARK: - Computed Properties for Data Filtering
+    private var filteredProfiles: [BackendProfileModel] {
+        guard let allowed = allowedProfileTypes else { return profiles }
+        return profiles.filter { allowed.contains($0.profileType) }
+    }
     private var botProfiles: [BackendProfileModel] {
-        profiles.filter { $0.profileType == .bot }.sorted { $0.displayName < $1.displayName }
+        filteredProfiles.filter { $0.profileType == .bot }.sorted { $0.displayName < $1.displayName }
     }
     private var agentProfiles: [BackendProfileModel] {
-        profiles.filter { $0.profileType == .agent }.sorted { $0.displayName < $1.displayName }
+        filteredProfiles.filter { $0.profileType == .agent }.sorted { $0.displayName < $1.displayName }
     }
     private var workflowProfiles: [BackendProfileModel] {
-        profiles.filter { $0.profileType == .workflow }.sorted { $0.displayName < $1.displayName }
+        filteredProfiles.filter { $0.profileType == .workflow }.sorted { $0.displayName < $1.displayName }
     }
     private var imageGenProfiles: [BackendProfileModel] {
-        profiles.filter { $0.profileType == .imageGen }.sorted { $0.displayName < $1.displayName }
+        filteredProfiles.filter { $0.profileType == .imageGen }.sorted { $0.displayName < $1.displayName }
     }
 
     var body: some View {
@@ -126,7 +134,7 @@ struct BackendSelectorPopup: View {
 private struct ProfileColumnView: View {
     let title: String
     let profiles: [BackendProfileModel]
-    @ObservedObject var configuration: BackendConfiguration
+    var configuration: BackendConfiguration
     let onSelect: () -> Void
     let onEdit: (UUID) -> Void
 
@@ -209,7 +217,7 @@ private struct ItemCell: View {
         .padding(.horizontal)
         .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         .contentShape(Rectangle())
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .padding(.horizontal, 8)
     }
 }

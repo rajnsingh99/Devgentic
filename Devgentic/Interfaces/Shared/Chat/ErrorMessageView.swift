@@ -24,7 +24,7 @@ struct ErrorMessageView: View {
                         .foregroundColor(theme.primaryText.opacity(0.9))
                 }
                 Text(details)
-                    .font(.system(size: 15)) // Increased font size for readability
+                    .font(.system(.title3)) // Increased font size for readability
                     // Use .secondary for less emphasis, but ensure readability
                     .foregroundColor(theme.secondaryText)
                     .textSelection(.enabled) // Allow copying error details
@@ -32,6 +32,9 @@ struct ErrorMessageView: View {
             // Allow VStack to expand
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Error: \(title ?? "Unknown"). \(details)")
+        .accessibilityAddTraits(.isStaticText)
         // Add some internal padding within the bubble (handled by container)
         // No background needed here, container view will add it
     }
@@ -59,7 +62,7 @@ struct ErrorMessageView_Previews: PreviewProvider {
         .padding()
         // Simulate bubble appearance for preview
         .background(Color.gray.opacity(0.15))
-        .cornerRadius(10)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
         .frame(width: 400)
     }
 }

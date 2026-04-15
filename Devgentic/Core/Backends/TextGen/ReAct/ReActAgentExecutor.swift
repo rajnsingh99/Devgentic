@@ -22,7 +22,7 @@ actor ReActAgentExecutor: Executor {
     
     // MARK: - Properties
     
-    nonisolated let architecture: AgentArchitecture = .reAct
+    nonisolated let executorLabel: String = "ReAct"
     nonisolated private let maxIterations: Int
     
     // MARK: - Initialization
@@ -44,7 +44,12 @@ actor ReActAgentExecutor: Executor {
                 
                 // --- Phase 2: State Component ---
                 // Initialized here so it is accessible in the cancellation/catch blocks
-                var sessionState: SessionGraph = input.activeState ?? SessionGraphStore.shared.getActiveState(for: input.conversationID)
+                var sessionState: SessionGraph
+                if let activeState = input.activeState {
+                    sessionState = activeState
+                } else {
+                    sessionState = await SessionGraphStore.shared.getActiveState(for: input.conversationID)
+                }
                 let currentConstraints = Set(sessionState.negativeConstraints)
                 
                 do {
@@ -53,7 +58,8 @@ actor ReActAgentExecutor: Executor {
                     let spyModel = APISpyModel(inner: model)
                     
                     var currentIteration = 0
-                    var latestClarification: String? = nil
+                    var latestClarification: ClarificationContext? = nil
+                    var accumulatedTokenUsage = TokenUsage()
                     var executionSummary = ExecutionSummary(originalGoal: input.userInput)
                     let executionTrace = input.traceContext
                     
@@ -70,11 +76,15 @@ actor ReActAgentExecutor: Executor {
                     let terminationEvaluator = EpisodeTerminationEvaluator()
                     
                     // --- Start Episode ---
-                    logState.info("New Top-Level Request Detected: Appending new MemoryEpisode.")
-                    sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
-                    sessionState.workingMemory.removeValue(forKey: "current_focus")
-                    sessionState.workingMemory.removeValue(forKey: "last_status")
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    // [G3/G5] When wrapped by a capability (Planning, Reflexion), the wrapper
+                    // owns the episode lifecycle. Skip to avoid N+1 duplicate episodes.
+                    if !input.suppressEpisodeManagement {
+                        logState.info("New Top-Level Request Detected: Appending new MemoryEpisode.")
+                        sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
+                        sessionState.workingMemory.removeValue(forKey: "current_focus")
+                        sessionState.workingMemory.removeValue(forKey: "last_status")
+                        await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    }
                     
                     // MARK: - Cognitive Loop
                     cognitiveLoop: while currentIteration < self.maxIterations {
@@ -82,7 +92,7 @@ actor ReActAgentExecutor: Executor {
                         currentIteration += 1
                         
                         // --- Rate Limit Check ---
-                        let projectedWait = await GlobalRateLimiter.shared.timeUntilNextToken(for: input.rateLimitCategory)
+                        let projectedWait = await GlobalRateLimiter.shared.timeUntilNextToken(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         if projectedWait > 1.5 {
                             logger.warning("Rate limit approaching. Throttling for \(Int(projectedWait))s.")
                             let waitMsg = "Throttling for \(Int(projectedWait))s to respect \(input.rateLimitCategory) limits..."
@@ -100,7 +110,7 @@ actor ReActAgentExecutor: Executor {
                             ))
                         }
                         
-                        await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
+                        await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         
                         let iterationSpan = executionTrace.newSpan()
                         var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
@@ -119,19 +129,24 @@ actor ReActAgentExecutor: Executor {
                             currentDate: Date().formatted(date: .numeric, time: .shortened)
                         )
                         
-                        // Read User Personal profile for prompt injection (first iteration only to save tokens)
-                        let userProfile: String? = currentIteration == 1
-                            ? await MainActor.run {
+                        // Read User Personal profile for prompt injection (first iteration only to save tokens).
+                        // Suppressed in workflow mode — workflow nodes operate on task+input, not personal context.
+                        let userProfile: String?
+                        if input.workflowContext == nil, currentIteration == 1 {
+                            userProfile = await MainActor.run {
                                 guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
                                 return UserPersonalService.shared.getProfileForInjection()
                             }
-                            : nil
+                        } else {
+                            userProfile = nil
+                        }
 
                         let context = SemanticContext(
                             instructions: input.instructions,
                             environmentFacts: envFacts,
                             longTermMemory: input.longTermMemory,
                             recentHistory: input.recentHistory,
+                            nativeHistoryTurns: input.nativeHistoryTurns,
                             originalQuery: input.userInput,
                             currentIteration: currentIteration,
                             compiledScratchpad: memoryStrategy.compileForPrompt(),
@@ -139,24 +154,46 @@ actor ReActAgentExecutor: Executor {
                             negativeConstraints: currentConstraints,
                             hallucinatedTools: circuitBreaker.hallucinatedTools,
                             availableTools: input.tools,
-                            userProfile: userProfile
+                            userProfile: userProfile,
+                            skillManifests: input.skillManifests,
+                            taskDescription: input.workflowContext?.taskDescription
                         )
                         
                         try Task.checkCancellation()
+
+                        // --- Memory Pressure Check ---
+                        let utilization = memoryStrategy.budgetUtilization
+                        if utilization > 0.75 {
+                            let pct = Int(utilization * 100)
+                            let message = utilization >= 1.0
+                                ? "Memory pressure: \(pct)% of scratchpad budget used — older observations are being evicted."
+                                : "Memory pressure: \(pct)% of scratchpad budget used."
+                            logger.warning("⚠️ \(message)")
+                            continuation.yield(.thought("⚠️ \(message)"))
+
+                            // Proactive throttling: when budget is fully exhausted, nudge the
+                            // model toward synthesis rather than continued exploration.
+                            // This is a soft signal — the agent can still call tools if needed.
+                            if utilization >= 1.0 {
+                                memoryStrategy.recordSystemAlert(
+                                    msg: "Working memory is full. Older observations have been evicted. "
+                                       + "Prioritize synthesizing a final answer from available context "
+                                       + "rather than calling additional tools."
+                                )
+                            }
+                        }
 
                         // --- Structured Generation ---
                         let step: ModernCognitiveStep
                         do {
                             logger.info("⚡️ Invoking Strategy.generate (Attempt: \(retryStrategy.consecutiveRetries + 1))")
-                            
+
                             // --- ENHANCED VISIBILITY LOGGING ---
                             logger.notice("--- COGNITIVE STEP [ITERATION \(currentIteration)] ---")
                             logger.info("🤖 Active Model: \(model.modelName)")
                             logger.info("🧠 Generator Strategy: \(String(describing: type(of: input.generatorStrategy)))")
-                            
-                            logger.info("🧠 Generator Strategy: \(String(describing: type(of: input.generatorStrategy)))")
-                            
-                            logger.info("📝 Compiled Scratchpad Length: \(memoryStrategy.compileForPrompt().count) chars.")
+
+                            logger.info("📝 Compiled Scratchpad Length: \(context.compiledScratchpad.count) chars. Budget utilization: \(String(format: "%.0f", utilization * 100))%.")
                             
                             step = try await input.generatorStrategy.generateCognitiveStep(
                                 model: spyModel,
@@ -164,6 +201,11 @@ actor ReActAgentExecutor: Executor {
                                 iteration: currentIteration
                             )
                             
+                            // Accumulate token usage from this cognitive step
+                            if let usage = step.tokenUsage {
+                                accumulatedTokenUsage.accumulate(usage)
+                            }
+
                             logger.info("📄 Model Reasoning: \(step.reasoning)")
                             if step.toolCalls.isEmpty {
                                 logger.info("🛑 No tool calls produced.")
@@ -178,7 +220,7 @@ actor ReActAgentExecutor: Executor {
                             let action = retryStrategy.handleError(error)
                             switch action {
                             case .throttle(let seconds, let message):
-                                await GlobalRateLimiter.shared.drainAndPenalize(category: input.rateLimitCategory, penaltySeconds: seconds)
+                                await GlobalRateLimiter.shared.drainAndPenalize(key: input.rateLimitKey, category: input.rateLimitCategory, penaltySeconds: seconds)
                                 continuation.yield(.thought(message))
                                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                                 currentIteration -= 1
@@ -192,7 +234,7 @@ actor ReActAgentExecutor: Executor {
                             case .parseRetry(let systemAlert, let attemptCount, let maxAttempts):
                                 memoryStrategy.recordSystemAlert(msg: systemAlert)
                                 continuation.yield(.thought("⚠️ Error: Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
-                                await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
+                                await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                                 continue cognitiveLoop
 
                             case .modelReload(let message):
@@ -207,9 +249,11 @@ actor ReActAgentExecutor: Executor {
                                 continue cognitiveLoop
 
                             case .abort(let reason):
-                                sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
-                                SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
-                                logState.info("💾 Auto-Patched Active Episode to: FAILED")
+                                if !input.suppressEpisodeManagement {
+                                    sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
+                                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                                    logState.info("💾 Auto-Patched Active Episode to: FAILED")
+                                }
                                 continuation.yield(.content(reason))
                                 continuation.finish()
                                 return
@@ -221,13 +265,19 @@ actor ReActAgentExecutor: Executor {
                         
                         // Yield the internal thought trace if the provider extracted one (e.g., Native Thinking)
                         if let thought = step.thought, !thought.isEmpty {
-                            continuation.yield(.thought("Step \(currentIteration) — \(thought)"))
+                            let sanitized = OutputSanitizer.sanitizeForUI(thought)
+                            if !sanitized.isEmpty {
+                                continuation.yield(.thought("Step \(currentIteration) — \(sanitized)"))
+                            }
                         }
 
                         // Yield the assistant monologue/reasoning text
                         // (Avoid yielding redundant text if thought and reasoning are identical)
                         if !step.reasoning.isEmpty && step.reasoning != step.thought {
-                            continuation.yield(.thought(step.reasoning))
+                            let sanitized = OutputSanitizer.sanitizeForUI(step.reasoning)
+                            if !sanitized.isEmpty {
+                                continuation.yield(.thought(sanitized))
+                            }
                         }
                         
                         // --- Termination Evaluation (Phase 4 Component) ---
@@ -269,6 +319,12 @@ actor ReActAgentExecutor: Executor {
                             memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
                         }
 
+                        // Wire ask_user responses to latestClarification for prompt injection
+                        for obs in observations where obs.toolName == "ask_user" && obs.isSuccess {
+                            let answer = obs.result.replacingOccurrences(of: "User Response: ", with: "")
+                            latestClarification = ClarificationContext(query: obs.params, response: answer)
+                        }
+
                         var shouldAbort = false
                         var abortReason = ""
 
@@ -297,15 +353,44 @@ actor ReActAgentExecutor: Executor {
                         }
 
                         if shouldAbort {
-                            executionSummary.markComplete(failureReason: abortReason)
-                            continuation.yield(.thought("⚠️ Circuit breaker triggered — recovering…"))
-                            let response = await ResponseSynthesizer.synthesize(summary: executionSummary, model: model, personaInstructions: input.instructions, originalQuery: input.userInput)
-                            sessionState.closeActiveEpisode(status: "FAILED", outcome: response)
-                            SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
-                            logState.info("💾 Auto-Patched Active Episode to: FAILED")
-                            continuation.yield(.content(response))
-                            continuation.finish()
-                            return
+                            // Consult ErrorRecovery.onToolFailure policy before aborting
+                            switch input.errorRecovery.onToolFailure {
+                            case .skipAndContinue:
+                                // Log the failure but let the agent continue reasoning
+                                continuation.yield(.thought("⚠️ Tool failures detected — skipping and continuing."))
+                                memoryStrategy.recordSystemAlert(msg: "Previous tool calls failed: \(abortReason). Continue with available information.")
+                                circuitBreaker.resetCountersOnSuccess()
+                                // Don't abort — fall through to next iteration
+
+                            case .fallbackPrompt:
+                                // Inject a fallback hint and let the agent try a different approach
+                                continuation.yield(.thought("⚠️ Tool failures detected — trying alternative approach."))
+                                let userMessage = input.errorRecovery.fallbackMessage ?? ErrorRecovery.defaultFallbackMessage
+                                memoryStrategy.recordSystemAlert(msg: "Tools are failing repeatedly: \(abortReason). \(userMessage)")
+                                circuitBreaker.resetCountersOnSuccess()
+                                // Don't abort — fall through to next iteration
+
+                            case .abort:
+                                // Default behavior: synthesize best-effort response and exit
+                                executionSummary.markComplete(failureReason: abortReason)
+                                continuation.yield(.thought("⚠️ Circuit breaker triggered — recovering…"))
+                                // Circuit breaker abort: always force synthesis so the user
+                                // gets a coherent explanation, not raw partial reasoning.
+                                let response = await ResponseSynthesizer.synthesize(
+                                    summary: executionSummary,
+                                    personaInstructions: input.instructions,
+                                    originalQuery: input.userInput,
+                                    forceSynthesis: true
+                                )
+                                if !input.suppressEpisodeManagement {
+                                    sessionState.closeActiveEpisode(status: "FAILED", outcome: response)
+                                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                                    logState.info("💾 Auto-Patched Active Episode to: FAILED")
+                                }
+                                continuation.yield(.content(response))
+                                continuation.finish()
+                                return
+                            }
                         }
 
                         circuitBreaker.resetCountersOnSuccess()
@@ -321,12 +406,39 @@ actor ReActAgentExecutor: Executor {
                         ))
                         
                     } // End While Loop
-                    
+
+                    // --- Cancellation Gate ---
+                    // Check for cancellation BEFORE post-loop synthesis. Without this,
+                    // a cancel that arrives while the model response is in-flight allows
+                    // the executor to complete via Null-Termination and run the full
+                    // synthesis path — but the continuation is already closed by
+                    // ActiveStreamManager, so the content is silently dropped and the
+                    // user sees an empty message instead of the cancellation placeholder.
+                    try Task.checkCancellation()
+
                     // --- Post-Loop Handoff ---
-                    let exitStatus = (currentIteration >= self.maxIterations) ? "FAILED" : "COMPLETED"
-                    
-                    if exitStatus == "FAILED" {
-                        executionSummary.markComplete(failureReason: "Reached maximum allowed steps (\(maxIterations)) without completion.")
+                    let iterationExhausted = currentIteration >= self.maxIterations
+
+                    if iterationExhausted {
+                        // Consult ErrorRecovery.onIterationExhaustion policy
+                        switch input.errorRecovery.onIterationExhaustion {
+                        case .failHard:
+                            // Fail immediately without synthesis
+                            let failureMsg = "Reached maximum allowed steps (\(maxIterations)) without completion."
+                            executionSummary.markComplete(failureReason: failureMsg)
+                            if !input.suppressEpisodeManagement {
+                                sessionState.closeActiveEpisode(status: "FAILED", outcome: failureMsg)
+                                await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                                logState.info("💾 Auto-Patched Active Episode to: FAILED (failHard)")
+                            }
+                            continuation.yield(.error(failureMsg))
+                            continuation.finish()
+                            return
+
+                        case .synthesizeBestEffort:
+                            // Default: synthesize best response from accumulated work
+                            executionSummary.markComplete(failureReason: "Reached maximum allowed steps (\(maxIterations)) without completion.")
+                        }
                     } else {
                         executionSummary.markComplete()
                     }
@@ -334,18 +446,21 @@ actor ReActAgentExecutor: Executor {
                     // --- UI Progress: Synthesis ---
                     continuation.yield(.thought("Composing final response…"))
 
+                    let exitStatus = iterationExhausted ? "FAILED" : "COMPLETED"
                     let response = await ResponseSynthesizer.synthesize(
                         summary: executionSummary,
-                        model: model,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
-                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator
+                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
+                        forceSynthesis: input.responseSynthesisEnabled
                     )
 
-                    sessionState.closeActiveEpisode(status: exitStatus, outcome: response)
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
-                    logState.info("💾 Auto-Patched Active Episode to: \(exitStatus)")
-                    
+                    if !input.suppressEpisodeManagement {
+                        sessionState.closeActiveEpisode(status: exitStatus, outcome: response)
+                        await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                        logState.info("💾 Auto-Patched Active Episode to: \(exitStatus)")
+                    }
+
                     onTraceUpdate(AgentTraceLog(
                         traceID: input.traceContext.traceID,
                         spanID: input.traceContext.spanID,
@@ -354,21 +469,32 @@ actor ReActAgentExecutor: Executor {
                         state: .thinking(.finalizing),
                         content: exitStatus == "COMPLETED" ? "Task completed successfully." : "Task failed or reached max iterations."
                     ))
-                    
+
                     logger.info("--- 🏁 REACT EXECUTION COMPLETE 🏁 ---")
                     logger.info("Model: \(model.modelName)")
                     logger.info("Final Synthesized Response: \(response)")
                     logger.info("--------------------------------------")
 
+                    // Emit accumulated token usage before finishing
+                    if accumulatedTokenUsage.totalTokens > 0 {
+                        continuation.yield(.tokenUsage(accumulatedTokenUsage))
+                    }
+
                     continuation.yield(.content(response))
                     continuation.finish()
-                    
+
                 } catch is CancellationError {
                     logger.notice("🚫 Execution Task Cancelled cleanly.")
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
-                    sessionState.cancelActiveEpisode()
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    if !input.suppressEpisodeManagement {
+                        sessionState.cancelActiveEpisode()
+                        await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    }
                     continuation.yield(.thought("Cancelled by user."))
+                    // Emit a content placeholder so the message bubble isn't left empty.
+                    // Without this, cancelled messages show an empty bubble with action
+                    // buttons as if the agent completed normally.
+                    continuation.yield(.content("*Operation stopped by user.*"))
                     continuation.finish()
                 } catch {
                     logger.error("ReAct Fatal Error: \(error.localizedDescription)")

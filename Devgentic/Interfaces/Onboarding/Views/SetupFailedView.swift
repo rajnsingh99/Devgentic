@@ -9,7 +9,7 @@
 //
 //// Define a protocol for the ViewModel that SetupFailedView expects.
 //// This should align with the properties and methods used from AgentOnboardingViewModel.
-//protocol SetupFailedViewModelProtocol: ObservableObject {
+//protocol SetupFailedViewModelProtocol: Observable, AnyObject {
 //    var errorMessage: String? { get }
 //    var scriptLog: [String] { get }
 //    func startOnboardingFlow() // To retry the entire interactive setup
@@ -17,7 +17,7 @@
 //}
 //
 //struct SetupFailedView<ViewModelType: SetupFailedViewModelProtocol>: View {
-//    @ObservedObject var viewModel: ViewModelType
+//    var viewModel: ViewModelType
 //
 //    var body: some View {
 //        VStack(spacing: 20) {
@@ -102,9 +102,10 @@
 //// Mock ViewModel for SetupFailedView's preview
 //// This mock should conform to SetupFailedViewModelProtocol and simulate
 //// the relevant parts of the actual AgentOnboardingViewModel.
+//@Observable
 //class MockSetupFailedViewModel: SetupFailedViewModelProtocol {
-//    @Published var errorMessage: String? = "Python installation check failed.\nDetails: Command '/usr/bin/which python3' failed with exit code 1. Error: Not found"
-//    @Published var scriptLog: [String] = [
+//    var errorMessage: String? = "Python installation check failed.\nDetails: Command '/usr/bin/which python3' failed with exit code 1. Error: Not found"
+//    var scriptLog: [String] = [
 //        "[10:00:00 AM] Starting setup...",
 //        "[10:00:01 AM] Checking Python installation...",
 //        "[10:00:01 AM] Error: Python not found during interactive check."

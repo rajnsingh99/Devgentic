@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import Combine
 
 // MARK: - Code Viewer Theme Override
 
@@ -41,7 +40,7 @@ enum CodeViewerThemeOverride: String, CaseIterable {
 /// - Persisting the user's theme choice to `UserDefaults`.
 /// - Applying a new theme and ensuring the UI updates reactively.
 /// - Managing the per-component Code Viewer theme override.
-final class ThemeManager: ObservableObject {
+@Observable final class ThemeManager {
 
     /// The key used to store the selected theme's ID in UserDefaults.
     private static let selectedThemeKey = "selectedThemeID"
@@ -59,21 +58,21 @@ final class ThemeManager: ObservableObject {
 
     /// The currently active theme. Published to allow SwiftUI views to automatically
     /// update when the theme changes.
-    @Published private(set) var currentTheme: any Theme
+    private(set) var currentTheme: any Theme
 
     private var baseTheme: any Theme
 
     /// The Code Viewer theme override. When `.default`, follows the global app theme.
-    @Published private(set) var codeViewerThemeOverride: CodeViewerThemeOverride
+    private(set) var codeViewerThemeOverride: CodeViewerThemeOverride
 
     /// The customizable accent color override.
-    @Published private(set) var selectedAccentColor: AppAccentColor
+    private(set) var selectedAccentColor: AppAccentColor
 
     // MARK: - Chat Font Customization
     /// The font size for chat message body text. Default: 15pt (matches fontBody).
-    @Published var chatFontSize: CGFloat
+    var chatFontSize: CGFloat
     /// The line spacing for chat message text. Default: 4pt.
-    @Published var chatLineSpacing: CGFloat
+    var chatLineSpacing: CGFloat
 
     /// A computed `Font` built from the user's chat font size preference.
     var chatFont: Font {

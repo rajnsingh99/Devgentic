@@ -57,6 +57,7 @@ struct FileTagPopoverView: View {
             HStack {
                 Image(systemName: fileItem.iconName)
                     .foregroundColor(.secondary)
+                    .accessibilityHidden(true)
                 Text(fileItem.name)
                     .font(.headline)
                 Spacer()
@@ -65,6 +66,7 @@ struct FileTagPopoverView: View {
                         .foregroundColor(.gray.opacity(0.7))
                 }
                 .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel("Close")
             }
 
             Text("Path: \(fileItem.url.path)")
@@ -108,7 +110,7 @@ struct FileTagPopoverView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(5)
                         .background(Color.gray.opacity(0.1))
-                        .cornerRadius(4)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .frame(maxHeight: 150)
             } else if isLoadingPreview {

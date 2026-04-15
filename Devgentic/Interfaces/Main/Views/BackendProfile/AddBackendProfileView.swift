@@ -53,7 +53,7 @@ struct AddBackendProfileView: View {
                     // Name Input Section
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Identity")
-                            .font(.headline)
+                            .font(theme.fontHeadline)
                             .foregroundColor(theme.primaryText)
                         
                         TextField("Profile Name (e.g. 'Coding Assistant')", text: $displayName)
@@ -61,20 +61,20 @@ struct AddBackendProfileView: View {
                             .textFieldStyle(.plain)
                             .padding(12)
                             .background(theme.secondaryBackground)
-                            .cornerRadius(10)
+                            .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                             .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke(isDuplicateName ? Color.orange : theme.dividerColor, lineWidth: 1)
+                                RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
+                                    .stroke(isDuplicateName ? theme.warningColor : theme.dividerColor, lineWidth: 1)
                             )
 
                         if isDuplicateName {
                             HStack(spacing: 4) {
                                 Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 11))
+                                    .font(theme.fontCaption)
                                 Text("A profile named '\(trimmedName)' already exists.")
-                                    .font(.system(size: 12))
+                                    .font(theme.fontCaption)
                             }
-                            .foregroundColor(.orange)
+                            .foregroundColor(theme.warningColor)
                             .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
@@ -82,7 +82,7 @@ struct AddBackendProfileView: View {
                     // Type Selection Section
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Architecture Type")
-                            .font(.headline)
+                            .font(theme.fontHeadline)
                             .foregroundColor(theme.primaryText)
                         
                         VStack(spacing: 12) {
@@ -178,21 +178,21 @@ struct AddBackendProfileView: View {
     private var headerView: some View {
         HStack(spacing: 16) {
             ZStack {
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: theme.cornerRadiusLarge)
                     .fill(Color.accentColor.opacity(0.1))
                     .frame(width: 52, height: 52)
                 Image(systemName: "plus.square.dashed")
-                    .font(.system(size: 24))
+                    .font(.system(size: 24)) // Fixed size: intentional
                     .foregroundColor(.accentColor)
             }
             
             VStack(alignment: .leading, spacing: 4) {
                 Text("New Profile")
-                    .font(.title2)
+                    .font(theme.fontTitle2)
                     .fontWeight(.bold)
                     .foregroundColor(theme.primaryText)
                 Text("Configure a new intelligence unit.")
-                    .font(.subheadline)
+                    .font(theme.fontSubheadline)
                     .foregroundColor(theme.secondaryText)
             }
             
@@ -223,17 +223,17 @@ struct ProfileTypeCard: View {
                         .frame(width: 44, height: 44)
                     
                     Image(systemName: icon)
-                        .font(.system(size: 20))
+                        .font(.system(.title3))
                         .foregroundColor(isSelected ? color : theme.secondaryText)
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(type.rawValue)
-                        .font(.headline)
+                        .font(theme.fontHeadline)
                         .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.9))
                     
                     Text(description)
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -252,11 +252,11 @@ struct ProfileTypeCard: View {
             }
             .padding(16)
             .background(
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: theme.cornerRadiusLarge)
                     .fill(backgroundColor)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: theme.cornerRadiusLarge)
                     .stroke(borderColor, lineWidth: isSelected ? 2 : 1)
             )
             .shadow(color: shadowColor, radius: isSelected ? 8 : 4, x: 0, y: 2)
@@ -288,14 +288,7 @@ struct ProfileTypeCard: View {
         return isHovering ? Color.black.opacity(0.05) : Color.clear
     }
     
-    var icon: String {
-        switch type {
-        case .bot: return "cpu"
-        case .agent: return "person.fill.viewfinder"
-        case .workflow: return "square.3.layers.3d.down.right"
-        case .imageGen: return "paintbrush.fill"
-        }
-    }
+    var icon: String { type.iconName }
 
     var color: Color {
         switch type {

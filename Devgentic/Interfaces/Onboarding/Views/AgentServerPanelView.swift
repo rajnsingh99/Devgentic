@@ -8,7 +8,7 @@
 //import SwiftUI
 //
 //struct AgentServerPanelView: View {
-//    @ObservedObject var viewModel: AgentOnboardingViewModel
+//    var viewModel: AgentOnboardingViewModel
 //
 //    var body: some View {
 //        VStack(alignment: .leading, spacing: 20) {

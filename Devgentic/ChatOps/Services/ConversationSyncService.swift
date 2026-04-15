@@ -60,7 +60,7 @@ final class ConversationSyncService {
                 Task { @MainActor [weak self] in
                     guard let self, let chvm = self.chatHistoryViewModel, let asm = self.activeStreamManager else { return }
                     guard let displayedID = self.displayedConversationID else {
-                        observe()
+                        self.setupActiveStreamsObserver()
                         return
                     }
 
@@ -79,7 +79,7 @@ final class ConversationSyncService {
                         self.logger.info("[Sync] Injected streaming message \(message.id) into displayed conversation.")
                     }
 
-                    observe()
+                    self.setupActiveStreamsObserver()
                 }
             }
         }

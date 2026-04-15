@@ -12,9 +12,6 @@ struct AgentCapabilitiesSection: View {
     @Binding var capabilities: AgentCapabilities
     @Environment(\.appTheme) private var theme
 
-    @State private var editingSubAgent: SubAgentConfig?
-    @State private var showAddSubAgent = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
 
@@ -49,23 +46,12 @@ struct AgentCapabilitiesSection: View {
                         .fixedSize()
                     }
 
-                    Divider().background(theme.dividerColor)
-
-                    // Parallel subtasks
-                    settingsRow(
-                        title: "Parallel Subtasks",
-                        description: "Run independent subtasks concurrently for faster execution."
-                    ) {
-                        Toggle("", isOn: Binding(
-                            get: { planning.parallelSubtasks },
-                            set: { newVal in
-                                planning.parallelSubtasks = newVal
-                                capabilities.planning = planning
-                            }
-                        ))
-                        .toggleStyle(.checkbox)
-                        .labelsHidden()
-                    }
+                    // Parallel subtasks — HIDDEN from UI
+                    // Parallel subtask execution serializes at the LLM layer (single GPU for
+                    // local models, rate-limited for cloud). The parallelism is illusory and
+                    // adds complexity without throughput gain. The config field is preserved
+                    // for future use when batch inference or multi-model routing makes true
+                    // parallelism viable. Default is forced to false below.
 
                     Divider().background(theme.dividerColor)
 
@@ -139,101 +125,14 @@ struct AgentCapabilitiesSection: View {
                 }
             }
 
-            Divider().background(theme.dividerColor)
-
-            // MARK: - Agent Delegation
-
-            capabilityToggle(
-                label: "Agent Delegation",
-                icon: "person.2.fill",
-                description: "Delegate subtasks to inline sub-agents.",
-                isOn: Binding(
-                    get: { capabilities.agentDelegation != nil },
-                    set: { capabilities.agentDelegation = $0 ? AgentDelegationConfig() : nil }
-                )
-            ) {
-                if var delegation = capabilities.agentDelegation {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Sub-Agents")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundColor(theme.primaryText)
-                                Text("Specialist agents this agent can delegate tasks to.")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(theme.secondaryText)
-                            }
-                            Spacer(minLength: 16)
-                            Button {
-                                showAddSubAgent = true
-                            } label: {
-                                Label("Add", systemImage: "plus.circle")
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-
-                        if delegation.subAgents.isEmpty {
-                            Text("No sub-agents configured yet.")
-                                .font(.caption2)
-                                .foregroundColor(theme.secondaryText)
-                                .italic()
-                                .padding(.vertical, 2)
-                        } else {
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 8) {
-                                    ForEach(delegation.subAgents) { agent in
-                                        SubAgentChipView(
-                                            subAgent: agent,
-                                            onConfigure: {
-                                                editingSubAgent = agent
-                                            },
-                                            onDelete: {
-                                                delegation.subAgents.removeAll { $0.id == agent.id }
-                                                capabilities.agentDelegation = delegation
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .sheet(isPresented: $showAddSubAgent) {
-                        let newAgent = SubAgentConfig()
-                        SubAgentConfigView(
-                            subAgent: .constant(newAgent),
-                            isNew: true,
-                            onSave: { saved in
-                                delegation.subAgents.append(saved)
-                                capabilities.agentDelegation = delegation
-                                showAddSubAgent = false
-                            },
-                            onCancel: { showAddSubAgent = false }
-                        )
-                    }
-                    .sheet(item: $editingSubAgent) { agent in
-                        let index = delegation.subAgents.firstIndex(where: { $0.id == agent.id })
-                        if let index {
-                            SubAgentConfigView(
-                                subAgent: Binding(
-                                    get: { delegation.subAgents[index] },
-                                    set: { newVal in
-                                        delegation.subAgents[index] = newVal
-                                        capabilities.agentDelegation = delegation
-                                    }
-                                ),
-                                isNew: false,
-                                onSave: { _ in
-                                    editingSubAgent = nil
-                                },
-                                onCancel: { editingSubAgent = nil }
-                            )
-                        }
-                    }
-                }
-            }
+            // MARK: - Agent Delegation — HIDDEN from UI
+            // Agent delegation spawns concurrent sub-agents that all share the same LLM.
+            // On local models (MLX/Ollama) this serializes at the GPU actor, and on cloud
+            // providers it competes with the parent for rate-limit tokens. The result is
+            // illusory parallelism with added overhead. Hidden until true parallel inference
+            // (batch, multi-model, or dedicated cloud concurrency) is supported.
+            // The backend code (CallAgentTool, ConcurrencyLimiter, AgentConnect injection)
+            // is fully implemented and preserved — only the UI toggle is removed.
         }
     }
 
@@ -251,14 +150,14 @@ struct AgentCapabilitiesSection: View {
             // Toggle row — icon + labels on left, switch on right
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(.system(.body))
                     .foregroundColor(isOn.wrappedValue ? .accentColor : theme.secondaryText)
                     .frame(width: 24, alignment: .center)
                     .padding(.top, 2)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(theme.fontBody.weight(.medium))
                         .foregroundColor(theme.primaryText)
                     Text(description)
                         .font(.caption)
@@ -306,10 +205,10 @@ struct AgentCapabilitiesSection: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(theme.fontSubheadline.weight(.medium))
                     .foregroundColor(theme.primaryText)
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)

@@ -32,7 +32,6 @@ final class MainApplicationViewModel {
     @ObservationIgnored private var conversationLoadTask: Task<Void, Never>?
     @ObservationIgnored private var useStreamingResponseObserver: AnyCancellable?
     @ObservationIgnored private var intelligenceCoreObserver: AnyCancellable?
-    @ObservationIgnored private var profileObserver: AnyCancellable?
     @ObservationIgnored private var conversationLoaderObserver: AnyCancellable?
 
     @ObservationIgnored private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
@@ -63,6 +62,63 @@ final class MainApplicationViewModel {
 
     var streamingMessageID: UUID? = nil
     var streamingMessage: ChatMessage? = nil
+
+    // MARK: - Interface Mode (User-Switchable)
+
+    /// The interface mode — user-switchable via the floating mode picker.
+    /// Workflow mode renders WorkflowDedicatedView; chat mode renders ChatHistoryView.
+    /// Also controls sidebar filtering and backend picker profile types.
+    enum InterfaceMode: String, CaseIterable {
+        case chat = "Chat"
+        case workflow = "Workflow"
+
+        var icon: String {
+            switch self {
+            case .chat: return "bubble.left.and.text.bubble.right"
+            case .workflow: return "point.3.connected.trianglepath.dotted"
+            }
+        }
+
+        /// Profile types visible in the backend picker for this mode.
+        var allowedProfileTypes: Set<ProfileType> {
+            switch self {
+            case .chat: return [.bot, .agent, .imageGen]
+            case .workflow: return [.workflow]
+            }
+        }
+    }
+
+    /// The active interface mode — persisted to UserDefaults for session continuity.
+    var interfaceMode: InterfaceMode = .chat
+
+    /// Resolved profile type — derived from the currently selected profile ID.
+    var selectedProfileType: ProfileType? {
+        guard let pid = backendConfiguration.selectedProfileID,
+              let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == pid })
+        else { return nil }
+        return profile.profileType
+    }
+
+    /// Switches to the given interface mode, clearing conversation and profile selection.
+    /// This resets the view to either the Welcome screen (chat) or the Empty Workflow view (workflow).
+    func switchInterfaceMode(to mode: InterfaceMode) {
+        guard mode != interfaceMode else { return }
+        interfaceMode = mode
+        clearAttachedFiles()
+        selectedConversationID = nil
+        backendConfiguration.selectedProfileID = nil
+        chatHistoryViewModel.currentChatMessages = []
+        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
+        UserDefaults.standard.set(mode.rawValue, forKey: "devgentic.interfaceMode")
+        logger.info("Switched interface mode to \(mode.rawValue).")
+    }
+
+    // MARK: - Workflow Execution State
+    /// Live workflow execution state keyed by conversation ID.
+    var workflowExecutionStates: [UUID: WorkflowExecutionState] = [:]
+
+    /// Persistent run history keyed by conversation ID.
+    var workflowRunHistory: [UUID: [WorkflowRunRecord]] = [:]
 
     // MARK: - Query History Properties
     private(set) var queryHistory: [String] = []
@@ -100,10 +156,16 @@ final class MainApplicationViewModel {
         self.chatHistoryViewModel = chatHistoryViewModel
 
         logger.info("MainApplicationViewModel initialized.")
-        
+
+        // Restore persisted interface mode
+        if let saved = UserDefaults.standard.string(forKey: "devgentic.interfaceMode"),
+           let mode = InterfaceMode(rawValue: saved) {
+            self.interfaceMode = mode
+        }
+
         loadSettings()
-        setupBindings()
         setupConversationLoader()
+        migrateWorkflowRunHistoryIfNeeded()
         
         self.webSearchAPIKey = UserDefaults.standard.string(forKey: webSearchAPIKeyDefaultsKey)
         self.isWebSearchEnabled = (self.webSearchAPIKey != nil && !self.webSearchAPIKey!.isEmpty)
@@ -230,7 +292,6 @@ final class MainApplicationViewModel {
         logger.info("MainApplicationViewModel deinitialized.")
         useStreamingResponseObserver?.cancel()
         intelligenceCoreObserver?.cancel()
-        profileObserver?.cancel()
         conversationLoaderObserver?.cancel()
         NotificationCenter.default.removeObserver(self)
         conversationLoadTask?.cancel()
@@ -248,17 +309,21 @@ final class MainApplicationViewModel {
         logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(self.useStreamingResponse)")
     }
 
-    // MARK: - Bindings Setup
-    private func setupBindings() {
-        // BackendConfiguration still uses @Published, so we bridge with Combine for it.
-        profileObserver = backendConfiguration.$selectedProfileID
-            .dropFirst()
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] profileID in
-                guard let self = self, let conversationID = self.selectedConversationID else { return }
-                logger.info("Backend profile changed. Updating current conversation \(conversationID.uuidString).")
-                self.updateBackendForCurrentConversation(conversationID: conversationID, profileID: profileID)
-            }
+    /// One-time migration from profile-keyed to conversation-keyed workflow run history.
+    private func migrateWorkflowRunHistoryIfNeeded() {
+        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        let workflowIDs = profiles.filter { $0.profileType == .workflow }.map(\.id)
+        guard !workflowIDs.isEmpty else { return }
+        WorkflowRunHistoryStore.shared.migrateFromProfileKeyedStorage(profileIDs: workflowIDs)
+    }
+
+    /// Lazily loads workflow run history for a conversation from disk when first needed.
+    func loadWorkflowRunHistoryIfNeeded(for conversationID: UUID) {
+        guard workflowRunHistory[conversationID] == nil else { return }
+        let records = WorkflowRunHistoryStore.shared.load(forConversation: conversationID)
+        if !records.isEmpty {
+            workflowRunHistory[conversationID] = records
+        }
     }
 
     private func setupConversationLoader() {
@@ -305,6 +370,7 @@ final class MainApplicationViewModel {
                         await self.chatHistoryViewModel.loadConversation(id: conversationID)
                         if let id = conversationID {
                             self.loadBackendStateForSelectedConversation(conversationID: id)
+                            self.loadWorkflowRunHistoryIfNeeded(for: id)
                         }
                     }
 
@@ -370,6 +436,9 @@ final class MainApplicationViewModel {
 
         let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
 
+        // Persist the selected profile to the conversation at send time.
+        updateBackendForCurrentConversation(conversationID: conversationIDToUse, profileID: backendConfiguration.selectedProfileID)
+
         // Auto-title if empty
         if let conversationSD = persistenceService.getConversation(withId: conversationIDToUse) {
             if conversationSD.userDefinedTitle == nil || conversationSD.userDefinedTitle?.isEmpty == true {
@@ -401,6 +470,14 @@ final class MainApplicationViewModel {
                 logger.debug("User message persisted successfully.")
             }
 
+            // Prepare workflow execution state if this is a workflow profile
+            let workflowState: WorkflowExecutionState? = {
+                guard config.profile.profileType == .workflow else { return nil }
+                let state = WorkflowExecutionState()
+                workflowExecutionStates[conversationIDToUse] = state
+                return state
+            }()
+
             let agentMessage = activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationIDToUse,
@@ -408,11 +485,32 @@ final class MainApplicationViewModel {
                 history: chatHistoryViewModel.currentChatMessages.reversed(),
                 files: filesForBackend,
                 updating: nil,
+                workflowExecutionState: workflowState,
                 onComplete: { [weak self] in
                     DispatchQueue.main.async {
                         self?.streamingMessageID = nil
                         self?.streamingMessage = nil
                         logger.info("Stream completed. Resetting streamingMessageID.")
+
+                        // Freeze workflow execution state into a persistent run record
+                        if let self, let wfState = workflowState, config.profile.profileType == .workflow {
+                            let layout = WorkflowLayoutStore.shared.load(for: config.profile.id)
+                            let record = WorkflowRunRecord.freeze(
+                                from: wfState,
+                                conversationID: conversationIDToUse,
+                                workflowProfileID: config.profile.id,
+                                workflowName: config.profile.displayName,
+                                userInput: plainUserQueryFromEditor,
+                                timestamp: Date(),
+                                layout: layout
+                            )
+                            self.workflowRunHistory[conversationIDToUse, default: []].insert(record, at: 0)
+                            if self.workflowRunHistory[conversationIDToUse]!.count > 20 {
+                                self.workflowRunHistory[conversationIDToUse] = Array(self.workflowRunHistory[conversationIDToUse]!.prefix(20))
+                            }
+                            WorkflowRunHistoryStore.shared.append(record, forConversation: conversationIDToUse)
+                            logger.info("Workflow run record frozen: \(record.id) — \(record.status.rawValue)")
+                        }
                     }
                 }
             )
@@ -699,6 +797,7 @@ final class MainApplicationViewModel {
 
         clearAttachedFiles()
         selectedConversationID = nil
+        backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
         logger.info("Deselected conversation, returning to welcome screen.")
     }
@@ -706,15 +805,12 @@ final class MainApplicationViewModel {
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
 
-        let profileID = backendConfiguration.selectedProfileID
-
         // Reuse an existing empty conversation if one exists — prevents duplicate empties.
         if let emptyConvID = findReusableEmptyConversation() {
             logger.info("[NewChat] Reusing existing empty conversation \(emptyConvID.uuidString).")
             chatHistoryViewModel.currentChatMessages = []
             selectedConversationID = emptyConvID
             chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-            updateBackendForCurrentConversation(conversationID: emptyConvID, profileID: profileID)
             return emptyConvID
         }
 
@@ -723,14 +819,12 @@ final class MainApplicationViewModel {
             messages: [],
             timestamp: Date(),
             backendType: .none,
-            backendEntityId: profileID
+            backendEntityId: nil
         )
         persistenceService.addConversation(from: newConversation)
         chatHistoryViewModel.currentChatMessages = []
         selectedConversationID = newConversation.id
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-
-        updateBackendForCurrentConversation(conversationID: newConversation.id, profileID: profileID)
 
         return newConversation.id
     }
@@ -756,7 +850,7 @@ final class MainApplicationViewModel {
         let profileID = conversationSD.backendEntityId
         self.backendConfiguration.selectedProfileID = profileID
 
-        logger.info("Loaded backend profile ID \(profileID?.uuidString ?? "nil") for conversation \(conversationID, privacy: .public)")
+        logger.info("Loaded backend profile ID \(profileID?.uuidString ?? "nil") (type: \(self.selectedProfileType?.rawValue ?? "nil")) for conversation \(conversationID, privacy: .public)")
     }
 
     private func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
@@ -800,6 +894,9 @@ final class MainApplicationViewModel {
     
     func deleteConversation(conversationID: UUID) {
         persistenceService.deleteConversation(with: conversationID)
+        workflowExecutionStates.removeValue(forKey: conversationID)
+        workflowRunHistory.removeValue(forKey: conversationID)
+        WorkflowRunHistoryStore.shared.clearHistory(forConversation: conversationID)
         if selectedConversationID == conversationID {
             selectedConversationID = nil
         }
@@ -807,7 +904,12 @@ final class MainApplicationViewModel {
     
     func deleteMultipleConversations(ids: Set<UUID>) {
         guard !ids.isEmpty else { return }
-        for id in ids { persistenceService.deleteConversation(with: id) }
+        for id in ids {
+            persistenceService.deleteConversation(with: id)
+            workflowExecutionStates.removeValue(forKey: id)
+            workflowRunHistory.removeValue(forKey: id)
+            WorkflowRunHistoryStore.shared.clearHistory(forConversation: id)
+        }
         if let currentSelected = selectedConversationID, ids.contains(currentSelected) { selectedConversationID = nil }
     }
     

@@ -17,9 +17,7 @@ actor ChatExecutor: Executor {
 
     // MARK: - Properties
 
-    // We default to ReAct or a generic type since this executor doesn't strictly follow an agentic architecture.
-    // This satisfies the protocol requirement.
-    nonisolated let architecture: AgentArchitecture = .reAct
+    nonisolated let executorLabel: String = "Chat"
 
     // MARK: - Execution Entry Point
 
@@ -101,6 +99,13 @@ actor ChatExecutor: Executor {
                     logger.info("Final Response: \(fullResponse)")
                     logger.info("-----------------------------------")
 
+                    // Emit token usage — estimated from character lengths since
+                    // streaming responses don't include usage metadata for most providers.
+                    let inputChars = messages.reduce(0) { $0 + ($1["content"]?.count ?? 0) }
+                    continuation.yield(.tokenUsage(
+                        .estimated(inputChars: inputChars, outputChars: fullResponse.count)
+                    ))
+
                     // 4. Trace: End
                     onTraceUpdate(AgentTraceLog(
                         traceID: traceSpan.traceID,
@@ -130,51 +135,89 @@ actor ChatExecutor: Executor {
         }
     }
 
-    // MARK: - Helper Methods
+    // MARK: - Message Construction
 
-    /// Builds the messages array in OpenAI-compatible format from the AgentInput.
+    /// Builds the messages array using the unified `PromptBuilder`.
+    /// Bot uses `.bot` layer config: task, instructions, environment, RAG, episodic history.
+    /// The user's current query is passed as `userMessagePrefix` so it appears as the
+    /// final user message — maintaining natural conversational flow.
     nonisolated private func buildMessages(input: AgentInput) -> [[String: String]] {
-        var messages: [[String: String]] = []
-
-        // A. System Instructions / RAG Context
-        var systemTextParts: [String] = []
-
-        if let instructions = input.instructions, !instructions.isEmpty {
-            systemTextParts.append(instructions)
+        // Workflow-aware branch
+        if let wfCtx = input.workflowContext {
+            return buildWorkflowMessages(input: input, workflowContext: wfCtx)
         }
 
-        // If grounding context is present, we inject it into the system prompt or as a preamble.
-        // For Bots, we typically prepend it to ensure adherence.
-        let grounding = input.longTermMemory.getStaticGrounding()
-        if !grounding.isEmpty {
-            let contextBlock = """
-            ### CONTEXT FROM KNOWLEDGE BASE
-            \(grounding)
-            ### END CONTEXT
-            (Please use the context above if relevant to answer the following question)
-            """
-            systemTextParts.append(contextBlock)
+        let context = buildSemanticContext(from: input)
+
+        // Determine native flow from which history field AgentConnect populated
+        let isNativeFlow = input.nativeHistoryTurns != nil
+
+        return PromptBuilder.buildStandardMessages(
+            context: context,
+            isNativeFlow: isNativeFlow,
+            layerConfig: .bot,
+            userMessagePrefix: input.userInput
+        )
+    }
+
+    // MARK: - Workflow Message Building
+
+    /// Builds workflow bot messages using the unified `PromptBuilder` with `.workflow` config.
+    nonisolated private func buildWorkflowMessages(
+        input: AgentInput,
+        workflowContext: WorkflowExecutionContext
+    ) -> [[String: String]] {
+        logger.info("[Workflow] Building workflow messages for bot node '\(workflowContext.nodeName)'")
+
+        let context = buildSemanticContext(from: input, taskDescription: workflowContext.taskDescription)
+
+        let prefix: String
+        if workflowContext.isFirstNode {
+            prefix = "Execute your task."
+        } else if workflowContext.upstreamInput.isEmpty {
+            prefix = "No input data provided. Execute your task based on the task description."
+        } else {
+            prefix = "<input>\n\(workflowContext.upstreamInput)\n</input>"
         }
 
-        if !systemTextParts.isEmpty {
-            let combinedSystem = systemTextParts.joined(separator: "\n\n")
-            messages.append(["role": "system", "content": combinedSystem])
-        }
+        return PromptBuilder.buildStandardMessages(
+            context: context,
+            layerConfig: .workflow,
+            userMessagePrefix: prefix
+        )
+    }
 
-        // B. Chat History
-        for msg in input.chatHistory {
-            guard let text = msg.content.textContent else { continue }
-            if msg.sender == .user {
-                messages.append(["role": "user", "content": text])
-            } else {
-                messages.append(["role": "assistant", "content": text])
-            }
-        }
+    // MARK: - SemanticContext Construction
 
-        // C. Current User Input
-        // Note: Some models expect the last entry to be the user prompt.
-        messages.append(["role": "user", "content": input.userInput])
+    /// Builds a lightweight SemanticContext from AgentInput for Bot/Workflow-Bot usage.
+    /// Bot-irrelevant fields (tools, working memory, guardrails, skills) are empty/nil.
+    nonisolated private func buildSemanticContext(
+        from input: AgentInput,
+        taskDescription: String? = nil
+    ) -> SemanticContext {
+        let envFacts = EnvironmentFacts(
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            shellType: "Zsh (Non-Interactive Mode)",
+            userName: NSUserName(),
+            currentDate: Date().formatted(date: .numeric, time: .shortened)
+        )
 
-        return messages
+        return SemanticContext(
+            instructions: input.instructions,
+            environmentFacts: envFacts,
+            longTermMemory: input.longTermMemory,
+            recentHistory: input.recentHistory,
+            nativeHistoryTurns: input.nativeHistoryTurns,
+            originalQuery: input.userInput,
+            currentIteration: 0,
+            compiledScratchpad: "",
+            latestClarification: nil,
+            negativeConstraints: [],
+            hallucinatedTools: [],
+            availableTools: [],
+            userProfile: nil,
+            skillManifests: nil,
+            taskDescription: taskDescription
+        )
     }
 }

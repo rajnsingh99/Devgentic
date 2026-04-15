@@ -17,8 +17,8 @@ import os
 /// Uses the single-path architecture: remote messages flow through
 /// `MainApplicationViewModel.submitRemoteMessage()` — the same path as the Mac UI.
 /// The `RemoteMirrorService` handles mirroring events back to the transport.
-@MainActor
-final class DiscordChatOpsBridge: ObservableObject {
+@Observable @MainActor
+final class DiscordChatOpsBridge {
 
     private let logger = Logger(subsystem: "com.devgentic", category: "DiscordChatOpsBridge")
 
@@ -35,7 +35,7 @@ final class DiscordChatOpsBridge: ObservableObject {
     // MARK: - State
 
     private var listeningTask: Task<Void, Never>?
-    @Published private(set) var isRunning: Bool = false
+    private(set) var isRunning: Bool = false
 
     /// Tracks whether the bridge is awaiting a clarification response.
     private var awaitingClarification: Bool = false

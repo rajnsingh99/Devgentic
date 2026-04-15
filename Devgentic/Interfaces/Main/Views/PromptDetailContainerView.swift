@@ -14,7 +14,7 @@ struct PromptDetailContainerView: View {
 
     let promptID: UUID
 
-    @StateObject private var viewModel = PromptLibraryViewModel()
+    @State private var viewModel = PromptLibraryViewModel()
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
@@ -40,13 +40,13 @@ struct PromptDetailContainerView: View {
                         // Title
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Title")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(.caption, weight: .semibold))
                                 .foregroundColor(theme.secondaryText)
                                 .textCase(.uppercase)
                                 .tracking(0.5)
 
                             TextField("Enter a clear and concise title", text: $viewModel.editablePromptTitle)
-                                .font(.system(size: 18, weight: .medium))
+                                .font(.system(.title3, weight: .medium))
                                 .textFieldStyle(.plain)
                                 .foregroundColor(theme.primaryText)
                                 .focused($isTitleFocused)
@@ -61,7 +61,7 @@ struct PromptDetailContainerView: View {
                         // Category
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Category")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(.caption, weight: .semibold))
                                 .foregroundColor(theme.secondaryText)
                                 .textCase(.uppercase)
                                 .tracking(0.5)
@@ -77,13 +77,13 @@ struct PromptDetailContainerView: View {
                         // Prompt Text
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Prompt Text")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(.caption, weight: .semibold))
                                 .foregroundColor(theme.secondaryText)
                                 .textCase(.uppercase)
                                 .tracking(0.5)
 
                             TextEditor(text: $viewModel.editablePromptText)
-                                .font(.system(size: 14))
+                                .font(theme.fontBody)
                                 .scrollContentBackground(.hidden)
                                 .padding(12)
                                 .frame(minHeight: 250)
@@ -100,13 +100,13 @@ struct PromptDetailContainerView: View {
                         // Tags
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Tags")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(.caption, weight: .semibold))
                                 .foregroundColor(theme.secondaryText)
                                 .textCase(.uppercase)
                                 .tracking(0.5)
 
                             TextField("Comma-separated, e.g., coding, python", text: $viewModel.editablePromptTagsString)
-                                .font(.system(size: 14))
+                                .font(theme.fontBody)
                                 .textFieldStyle(.plain)
                                 .foregroundColor(theme.primaryText)
                                 .padding(.horizontal, 14)
@@ -124,7 +124,7 @@ struct PromptDetailContainerView: View {
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 36))
+                        .font(.system(size: 36)) // Fixed size: intentional (icon)
                         .foregroundColor(theme.secondaryText)
                     Text("Prompt not found")
                         .font(.title3)
@@ -136,7 +136,7 @@ struct PromptDetailContainerView: View {
         .onAppear {
             loadPrompt()
         }
-        .onChange(of: promptID) { _ in
+        .onChange(of: promptID) {
             loadPrompt()
         }
     }
@@ -144,7 +144,8 @@ struct PromptDetailContainerView: View {
     private func loadPrompt() {
         if let prompt = prompt {
             viewModel.prepareToEditPrompt(prompt)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(0.1))
                 isTitleFocused = true
             }
         }
@@ -157,7 +158,7 @@ struct PromptDetailContainerView: View {
                 viewModel.savePromptFromSheet()
             } label: {
                 Text("Save")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
             }
             .buttonStyle(.plain)
             .foregroundColor(theme.primaryText)
@@ -175,7 +176,7 @@ struct PromptDetailContainerView: View {
                 }
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundColor(isDeleteHovered ? .white : .red.opacity(0.8))
                     .frame(width: 28, height: 28)
                     .background(

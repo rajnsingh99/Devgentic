@@ -324,4 +324,82 @@ final class OutputSanitizerTests: XCTestCase {
         XCTAssertTrue(result.contains("print(\"hello world\")"))
         XCTAssertTrue(result.contains("That's all!"))
     }
+
+    // MARK: - sanitizeForUI: Prompt Scaffold Tag Stripping
+
+    func testSanitizeForUI_EpisodicMemoryTag_Stripped() {
+        let input = "<episodic_memory> contains the recent calculation of '2 + 2' which is equal to 4.</working_memory>"
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertFalse(result.contains("<episodic_memory>"), "Episodic memory tag should be stripped")
+        XCTAssertFalse(result.contains("</working_memory>"), "Working memory closing tag should be stripped")
+        XCTAssertTrue(result.contains("calculation of '2 + 2'"), "Content between tags should be preserved")
+    }
+
+    func testSanitizeForUI_WorkingMemoryBlock_Stripped() {
+        let input = """
+        <working_memory>
+        Step 1: read_file succeeded with content "Hello"
+        </working_memory>
+        I will now proceed to answer.
+        """
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertFalse(result.contains("<working_memory>"))
+        XCTAssertFalse(result.contains("</working_memory>"))
+        XCTAssertTrue(result.contains("I will now proceed to answer"))
+    }
+
+    func testSanitizeForUI_NegativeConstraintsTag_Stripped() {
+        let input = "<negative_constraints>\nFAILED PATHS:\n- delete_file denied\n</negative_constraints>"
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertFalse(result.contains("<negative_constraints>"))
+        XCTAssertFalse(result.contains("</negative_constraints>"))
+    }
+
+    func testSanitizeForUI_FullEpisodicBlock_Stripped() {
+        let input = """
+        <episodic_memory>
+          <recent>
+            <turn status="completed" goal="list files" recency="1 turn ago">
+              <action tool="list_directory" status="success">
+                <params path="/Users/alice/Desktop"/>
+              </action>
+            </turn>
+          </recent>
+        </episodic_memory>
+        Now I need to read the file.
+        """
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertFalse(result.contains("<episodic_memory>"))
+        XCTAssertFalse(result.contains("<recent>"))
+        XCTAssertFalse(result.contains("<turn"))
+        XCTAssertFalse(result.contains("<action"))
+        XCTAssertFalse(result.contains("<params"))
+        XCTAssertTrue(result.contains("Now I need to read the file"))
+    }
+
+    func testSanitizeForUI_PlainText_Unchanged() {
+        let input = "I will search for files on the Desktop using fs_smart_search."
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertEqual(result, input, "Plain text without scaffold tags should pass through unchanged")
+    }
+
+    func testSanitizeForUI_EmptyString_ReturnsEmpty() {
+        XCTAssertEqual(OutputSanitizer.sanitizeForUI(""), "")
+    }
+
+    func testSanitizeForUI_SpecialTokensAlsoStripped() {
+        let input = "<|im_start|>assistant\nI will help you.<|im_end|>"
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertFalse(result.contains("<|im_start|>"))
+        XCTAssertFalse(result.contains("<|im_end|>"))
+        XCTAssertTrue(result.contains("I will help you"))
+    }
+
+    func testSanitizeForUI_CollapsesMultipleBlankLines() {
+        let input = "Line 1\n\n\n\n\nLine 2"
+        let result = OutputSanitizer.sanitizeForUI(input)
+        XCTAssertFalse(result.contains("\n\n\n"), "Triple+ newlines should be collapsed")
+        XCTAssertTrue(result.contains("Line 1"))
+        XCTAssertTrue(result.contains("Line 2"))
+    }
 }

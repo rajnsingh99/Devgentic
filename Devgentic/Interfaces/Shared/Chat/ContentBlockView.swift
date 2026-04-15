@@ -36,7 +36,7 @@ struct ContentBlockView: View, Equatable {
     var activeHighlightIndex: Int? = nil
 
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
-    @EnvironmentObject private var themeManager: ThemeManager
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
     // MARK: - Equatable Memoization
@@ -62,10 +62,12 @@ struct ContentBlockView: View, Equatable {
                     let snippet = CodeSnippet(language: lang, code: codeContent)
                     chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
                 }
+                .accessibilityLabel("\(lang) code block, \(codeContent.components(separatedBy: .newlines).count) lines. Tap to open in viewer.")
             } else {
                 CodeBlockView(language: lang, content: codeContent)
                     .padding(.bottom, theme.spacingMedium)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("\(lang) code block")
             }
 
         case .heading(let level, let text):
@@ -104,7 +106,7 @@ struct ContentBlockView: View, Equatable {
                     case .success(let image):
                         image.resizable()
                             .aspectRatio(contentMode: .fit)
-                            .cornerRadius(theme.cornerRadiusMedium)
+                            .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                             .overlay(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium).stroke(theme.dividerColor, lineWidth: 1))
                     case .failure(_):
                         VStack(spacing: theme.spacingXSmall) {
@@ -113,7 +115,7 @@ struct ContentBlockView: View, Equatable {
                         }
                         .frame(maxWidth: 500, minHeight: 150, alignment: .center)
                         .background(theme.controlBackground)
-                        .cornerRadius(theme.cornerRadiusMedium)
+                        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                     case .empty:
                         HStack {
                             Spacer()
@@ -125,7 +127,7 @@ struct ContentBlockView: View, Equatable {
                         }
                         .frame(height: 150)
                         .background(theme.controlBackground)
-                        .cornerRadius(theme.cornerRadiusMedium)
+                        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusMedium))
                     @unknown default: EmptyView()
                     }
                 }
@@ -171,7 +173,7 @@ struct ContentBlockView: View, Equatable {
         HStack(spacing: theme.spacingXSmall) {
             Image(systemName: isFolder ? "folder.fill" : "doc.fill")
                 .foregroundColor(theme.accentColor)
-                .font(.system(size: 11))
+                .font(.system(.caption))
             
             renderTextView(text: cleanText)
         }
@@ -216,37 +218,56 @@ struct ContentBlockView: View, Equatable {
     }
 
     /// Applies yellow/orange background highlighting to all occurrences of the search query.
+    ///
+    /// **Optimized:** Uses a forward incremental cursor instead of reversed O(n) `distance(from: startIndex)` calls.
+    /// Each `index(_:offsetByCharacters:)` advances only by the gap since the last match (O(gap)), making
+    /// the total highlighting pass O(n) instead of O(n * matchCount).
     private func applySearchHighlighting(to attrString: AttributedString, query: String) -> AttributedString {
         var result = attrString
         let plainText = String(result.characters)
         let lowercasedText = plainText.lowercased()
         let lowercasedQuery = query.lowercased()
+        let queryLen = lowercasedQuery.count
 
         guard !lowercasedQuery.isEmpty else { return result }
 
-        // Find all match ranges in the plain text
-        var matchRanges: [Range<String.Index>] = []
+        // Single pass: find matches and record character offsets incrementally.
+        struct MatchOffset { let start: Int; let end: Int }
+        var matchOffsets: [MatchOffset] = []
         var searchStart = lowercasedText.startIndex
+        var runningOffset = 0
+
         while searchStart < lowercasedText.endIndex,
               let range = lowercasedText.range(of: lowercasedQuery, range: searchStart..<lowercasedText.endIndex) {
-            matchRanges.append(range)
+            runningOffset += lowercasedText.distance(from: searchStart, to: range.lowerBound)
+            matchOffsets.append(MatchOffset(start: runningOffset, end: runningOffset + queryLen))
             searchStart = range.upperBound
+            runningOffset += queryLen
         }
 
-        // Apply highlighting in reverse to preserve range validity
-        let highlightColor = Color.yellow.opacity(0.4)
-        let activeHighlightColor = Color.orange.opacity(0.6)
+        guard !matchOffsets.isEmpty else { return result }
 
-        for (index, range) in matchRanges.enumerated().reversed() {
-            // Convert String.Index range to AttributedString range
-            let startOffset = plainText.distance(from: plainText.startIndex, to: range.lowerBound)
-            let endOffset = plainText.distance(from: plainText.startIndex, to: range.upperBound)
-            let attrStart = result.index(result.startIndex, offsetByCharacters: startOffset)
-            let attrEnd = result.index(result.startIndex, offsetByCharacters: endOffset)
-            let attrRange = attrStart..<attrEnd
+        // Forward cursor through AttributedString — each advance is O(gap), total is O(n).
+        let highlightColor = Color.yellow.opacity(0.4)
+        let activeHighlightColor = theme.warningColor.opacity(0.6)
+
+        var cursor = result.startIndex
+        var cursorOffset = 0
+
+        for (index, match) in matchOffsets.enumerated() {
+            let advanceToStart = match.start - cursorOffset
+            if advanceToStart > 0 {
+                cursor = result.index(cursor, offsetByCharacters: advanceToStart)
+                cursorOffset = match.start
+            }
+            let attrStart = cursor
+
+            let advanceToEnd = match.end - cursorOffset
+            cursor = result.index(cursor, offsetByCharacters: advanceToEnd)
+            cursorOffset = match.end
 
             let isActiveMatch = (activeHighlightIndex == index)
-            result[attrRange].backgroundColor = isActiveMatch ? activeHighlightColor : highlightColor
+            result[attrStart..<cursor].backgroundColor = isActiveMatch ? activeHighlightColor : highlightColor
         }
 
         return result
@@ -273,6 +294,7 @@ struct ContentBlockView: View, Equatable {
 struct BlinkingCursor: View {
     @Environment(\.appTheme) private var theme
     @State private var isVisible = true
+    @State private var animationTask: Task<Void, Never>?
 
     var body: some View {
         Rectangle()
@@ -280,9 +302,20 @@ struct BlinkingCursor: View {
             .frame(width: 8, height: 16)
             .opacity(isVisible ? 1 : 0)
             .onAppear {
-                withAnimation(Animation.easeInOut(duration: 0.6).repeatForever()) {
-                    isVisible.toggle()
+                // Use a cancellable Task instead of repeatForever() so the animation
+                // stops when the view is removed from the hierarchy.
+                animationTask = Task { @MainActor in
+                    while !Task.isCancelled {
+                        withAnimation(.easeInOut(duration: 0.6)) {
+                            isVisible.toggle()
+                        }
+                        try? await Task.sleep(for: .seconds(0.6))
+                    }
                 }
+            }
+            .onDisappear {
+                animationTask?.cancel()
+                animationTask = nil
             }
     }
 }

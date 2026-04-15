@@ -25,12 +25,12 @@ struct CodeBlockView: View {
             HStack {
                 // Language Badge (Aligned Left)
                 Text(language.isEmpty ? "plaintext" : language.lowercased())
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced)) // Fixed size: monospaced
                     .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(theme.surfaceOverlay)
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                     .padding(.leading, 4)
 
                 Spacer()
@@ -39,17 +39,18 @@ struct CodeBlockView: View {
                 Button(action: copyToClipboard) {
                     HStack(spacing: 4) {
                         Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                         Text(isCopied ? "Copied" : "Copy")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(.caption2, weight: .medium))
                     }
                     .foregroundColor(isCopied ? theme.successColor : theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(isHovering ? Color.white.opacity(0.1) : Color.clear)
-                    .cornerRadius(4)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(isCopied ? "Copied" : "Copy code")
                 .onHover { hovering in withAnimation { isHovering = hovering } }
             }
             .padding(.horizontal, 12)
@@ -65,7 +66,7 @@ struct CodeBlockView: View {
                 .padding(12)
                 .background(theme.codeBlockEditorBackground)
         }
-        .cornerRadius(12)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
@@ -81,10 +82,9 @@ struct CodeBlockView: View {
             isCopied = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            withAnimation {
-                isCopied = false
-            }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            withAnimation { isCopied = false }
         }
     }
 }
@@ -108,26 +108,34 @@ struct AsyncHighlightedCodeView: View {
             }
     }
 
+    /// The monospaced font used for code rendering, computed once and cached.
+    static let monoFont: NSFont = {
+        if let descriptor = NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced),
+           let font = NSFont(descriptor: descriptor, size: 12) {
+            return font
+        }
+        // Fallback: use Menlo or system font if monospaced design unavailable
+        return NSFont(name: "Menlo", size: 12) ?? NSFont.systemFont(ofSize: 12)
+    }()
+
     /// Performs syntax highlighting on a background thread.
     private func highlightCodeAsync(language: String, code: String) async -> NSAttributedString {
+        let baseFont = Self.monoFont
         // Use Task.detached to ensure this doesn't run on a main-actor-bound context.
         return await Task.detached {
-            // It's safe to create a new Highlightr instance here.
-            let highlightr = Highlightr()!
-            highlightr.setTheme(to: "atom-one-dark") // Enforce dark theme for IDE look
-
-            // Define the base font for the code (SF Mono or similar).
-            let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 12)!
-
-            // Perform the potentially slow highlighting operation.
-            let attributedCode = highlightr.highlight(code, as: language, fastRender: true) ?? NSAttributedString(string: code)
+            // Highlightr() can return nil if resources are missing — fall back to plain text.
+            let attributedCode: NSAttributedString
+            if let highlightr = Highlightr() {
+                highlightr.setTheme(to: "atom-one-dark") // Enforce dark theme for IDE look
+                attributedCode = highlightr.highlight(code, as: language, fastRender: true) ?? NSAttributedString(string: code)
+            } else {
+                attributedCode = NSAttributedString(string: code)
+            }
 
             // Apply the base font to the entire string, preserving the colors from Highlightr.
             let finalAttributedString = NSMutableAttributedString(attributedString: attributedCode)
             let fullRange = NSRange(location: 0, length: finalAttributedString.length)
             finalAttributedString.addAttribute(.font, value: baseFont, range: fullRange)
-
-            // Adjust colors to ensure contrast if needed (optional)
 
             return finalAttributedString
         }.value
@@ -171,9 +179,8 @@ struct HighlightedCodeViewRepresentable: NSViewRepresentable {
             textToSet = attributedString
         } else {
             // Otherwise, show a plain text placeholder while loading.
-            let baseFont = NSFont(descriptor: NSFont.systemFont(ofSize: 12, weight: .regular).fontDescriptor.withDesign(.monospaced)!, size: 12)!
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: baseFont,
+                .font: AsyncHighlightedCodeView.monoFont,
                 .foregroundColor: NSColor(calibratedRed: 0.8, green: 0.8, blue: 0.8, alpha: 1.0) // Light grey text for dark mode
             ]
             textToSet = NSAttributedString(string: code, attributes: attributes)

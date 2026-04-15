@@ -32,13 +32,13 @@ struct EventTimelineView: View {
     private var emptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "tray")
-                .font(.system(size: 24))
+                .font(.system(size: 24)) // Fixed size: icon frame ≥24pt
                 .foregroundStyle(theme.tertiaryText)
             Text("No events to display")
-                .font(.system(size: 13))
+                .font(theme.fontSubheadline)
                 .foregroundStyle(theme.secondaryText)
             Text("Select a span or adjust filters")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundStyle(theme.tertiaryText)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -72,7 +72,7 @@ private struct EventRow: View {
 
                 // Timestamp
                 Text(timeString)
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced design
                     .foregroundStyle(theme.tertiaryText)
                     .frame(width: 72, alignment: .leading)
                     .padding(.top, 1)
@@ -83,7 +83,7 @@ private struct EventRow: View {
                 // Content
                 VStack(alignment: .leading, spacing: 3) {
                     Text(event.content ?? "—")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundStyle(isError ? theme.errorColor : theme.primaryText)
                         .lineLimit(isExpanded ? nil : 2)
 
@@ -94,9 +94,9 @@ private struct EventRow: View {
                         } label: {
                             HStack(spacing: 3) {
                                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                                    .font(.system(size: 8, weight: .bold))
+                                    .font(.system(size: 8, weight: .bold)) // Fixed size: badge chip ≤9pt
                                 Text("details")
-                                    .font(.system(size: 10))
+                                    .font(.system(.caption2))
                             }
                             .foregroundStyle(theme.tertiaryText)
                         }
@@ -119,7 +119,7 @@ private struct EventRow: View {
             // Expanded detail JSON
             if isExpanded, let details = event.detailJSON {
                 Text(formatJSON(details))
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced)) // Fixed size: monospaced design
                     .foregroundStyle(theme.secondaryText)
                     .textSelection(.enabled)
                     .padding(10)
@@ -142,9 +142,9 @@ private struct EventRow: View {
     private var typeBadge: some View {
         HStack(spacing: 3) {
             Image(systemName: typeIcon)
-                .font(.system(size: 8))
+                .font(.system(size: 8)) // Fixed size: badge chip ≤9pt
             Text(typeLabel)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold)) // Fixed size: badge chip ≤9pt
         }
         .foregroundStyle(typeColor)
         .padding(.horizontal, 5)

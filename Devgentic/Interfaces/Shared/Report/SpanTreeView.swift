@@ -39,20 +39,20 @@ private struct SpanRow: View {
 
             // Kind icon
             Image(systemName: iconName)
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundStyle(kindColor)
                 .frame(width: 16)
 
             // Name — cleaned up, no "Trace:" prefix clutter
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
-                    .font(.system(size: 12, weight: isTopLevel ? .semibold : .regular))
+                    .font(.system(.caption, weight: isTopLevel ? .semibold : .regular))
                     .foregroundStyle(theme.primaryText)
                     .lineLimit(1)
 
                 if let subtitle = kindLabel {
                     Text(subtitle)
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundStyle(theme.tertiaryText)
                 }
             }
@@ -63,9 +63,9 @@ private struct SpanRow: View {
             if errorCount > 0 {
                 HStack(spacing: 2) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 8))
+                        .font(.system(size: 8)) // Fixed size: badge chip ≤9pt
                     Text("\(errorCount)")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .font(.system(size: 9, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
                 }
                 .foregroundStyle(theme.errorColor)
                 .padding(.horizontal, 5)
@@ -77,7 +77,7 @@ private struct SpanRow: View {
             // Duration
             if let duration = span.durationMs {
                 Text(DurationFormat.format(ms: duration))
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced design
                     .foregroundStyle(theme.tertiaryText)
             }
         }

@@ -89,7 +89,7 @@ struct GeminiLLMProvider: LLMProvider {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let candidates = json?["candidates"] as? [[String: Any]],
@@ -174,7 +174,7 @@ struct GeminiLLMProvider: LLMProvider {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let candidates = json?["candidates"] as? [[String: Any]],
@@ -221,7 +221,10 @@ struct GeminiLLMProvider: LLMProvider {
 
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
 
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools)
+        // Extract token usage from Gemini API response
+        let usage = json.flatMap { TokenUsage.fromGemini($0) }
+
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
     }
 
     // MARK: - Bot Flow (Streaming)
@@ -250,7 +253,7 @@ struct GeminiLLMProvider: LLMProvider {
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .geminiFlash)
+                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
 
                     // Parse Server-Sent Events (SSE)
                     for try await line in bytes.lines {

@@ -12,7 +12,7 @@ import SwiftUI
 
 struct DownloadSidebarView: View {
 
-    @ObservedObject private var manager = DownloadManager.shared
+    var manager = DownloadManager.shared
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
@@ -67,9 +67,9 @@ struct DownloadSidebarView: View {
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
+    private func sectionHeader(_ title: LocalizedStringKey) -> some View {
         Text(title)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(.caption2, weight: .semibold))
             .foregroundColor(theme.secondaryText)
             .textCase(.uppercase)
             .tracking(0.5)
@@ -92,19 +92,19 @@ private struct ActiveDownloadRowView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Image(systemName: entry.backend.icon)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(entry.backend.tintColor)
                     .frame(width: 20)
 
                 Text(entry.modelName)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 Spacer()
 
                 Text("\(Int(entry.progress * 100))%")
-                    .font(.system(size: 10, weight: .bold).monospacedDigit())
+                    .font(.system(.caption2, weight: .bold).monospacedDigit())
                     .foregroundColor(theme.accentColor)
 
                 if isHovering {
@@ -112,7 +112,7 @@ private struct ActiveDownloadRowView: View {
                         manager.cancelDownload(for: entry)
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
                     }
                     .buttonStyle(.plain)
@@ -126,7 +126,7 @@ private struct ActiveDownloadRowView: View {
                 .tint(entry.backend.tintColor)
                 .controlSize(.small)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -152,14 +152,14 @@ private struct CompletedDownloadRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: entry.backend.icon)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(entry.backend.tintColor)
                 .frame(width: 20)
 
             statusIcon
 
             Text(entry.modelName)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.primaryText)
                 .lineLimit(1)
 
@@ -170,7 +170,7 @@ private struct CompletedDownloadRowView: View {
                     withAnimation { manager.removeCompleted(entry) }
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (small dismiss icon)
                         .foregroundColor(theme.secondaryText)
                 }
                 .buttonStyle(.plain)
@@ -178,8 +178,8 @@ private struct CompletedDownloadRowView: View {
                 .transition(.opacity)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(isHovering ? theme.surfaceOverlay : Color.clear)
@@ -196,15 +196,15 @@ private struct CompletedDownloadRowView: View {
         switch entry.status {
         case .completed:
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.successColor)
         case .failed:
             Image(systemName: "exclamationmark.circle.fill")
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.errorColor)
         case .cancelled:
             Image(systemName: "minus.circle.fill")
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.warningColor)
         case .downloading:
             ProgressView()

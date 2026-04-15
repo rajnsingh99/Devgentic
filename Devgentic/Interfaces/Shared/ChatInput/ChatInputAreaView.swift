@@ -7,7 +7,6 @@
 
 import SwiftUI
 import os
-import Combine
 import AppKit
 import UniformTypeIdentifiers
 
@@ -25,12 +24,12 @@ struct ChatInputAreaView: View {
     let isSending: Bool
     var isInputFocused: FocusState<Bool>.Binding
 
-    @ObservedObject var backendConfiguration: BackendConfiguration
+    var backendConfiguration: BackendConfiguration
 
     let onSendMessage: (NSAttributedString, BackendRequestConfig) -> Void
     let onToggleContext: () -> Void
 
-    @EnvironmentObject private var explorerViewModel: ExplorerViewModel
+    @Environment(ExplorerViewModel.self) private var explorerViewModel
     @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring & APIKeyInputPopup sheet
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
@@ -168,7 +167,7 @@ struct ChatInputAreaView: View {
         .onChange(of: backendConfiguration.selectedProfileID) { _, newID in updateSelectedProfile(profileID: newID) }
 
         // Refresh files if Explorer/Context changes (Lazy refresh)
-        .onReceive(explorerViewModel.objectWillChange) { _ in
+        .onChange(of: explorerViewModel.rootItems.count) { _, _ in
             if inputViewModel.fileSuggestionState.isShowing {
                 inputViewModel.refreshFileSuggestions(using: explorerViewModel)
             }
@@ -298,7 +297,10 @@ struct ChatInputAreaView: View {
                 case .processing: return "Processing..."
                 case .finalizingSilence: return "Finalizing..."
                 case .error: return "Voice error..."
-                default: return "Type a message..."
+                default:
+                    return mainViewModel.interfaceMode == .workflow
+                        ? "Enter workflow input..."
+                        : "Type a message..."
             }
         }
         return ""
@@ -325,6 +327,7 @@ struct ChatInputAreaView: View {
                 profileThemeColor: profileThemeColor,
                 profileButtonText: profileButtonText,
                 backendConfiguration: backendConfiguration,
+                allowedProfileTypes: mainViewModel.interfaceMode.allowedProfileTypes,
                 showingPopup: $showingBackendSelectorPopup
             )
             .disabled(!isInputEnabled)

@@ -14,7 +14,7 @@ import SwiftUI
 
 struct OllamaModelStoreContainerView: View {
 
-    @StateObject private var viewModel = OllamaModelStoreViewModel()
+    @State private var viewModel = OllamaModelStoreViewModel()
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -23,12 +23,12 @@ struct OllamaModelStoreContainerView: View {
                 // Search bar in center
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
 
                     TextField("Search or enter model name to pull...", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13))
+                        .font(theme.fontSubheadline)
                         .onSubmit {
                             if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
                                 viewModel.downloadModel(name: viewModel.searchText)
@@ -40,7 +40,7 @@ struct OllamaModelStoreContainerView: View {
                             viewModel.searchText = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                         }
                         .buttonStyle(.plain)
@@ -66,7 +66,7 @@ struct OllamaModelStoreContainerView: View {
                     }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(theme.accentColor)
                 }
                 .menuStyle(.borderlessButton)
@@ -79,7 +79,7 @@ struct OllamaModelStoreContainerView: View {
                         viewModel.downloadModel(name: viewModel.searchText)
                     } label: {
                         Image(systemName: "arrow.down.circle.fill")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundColor(theme.accentColor)
                     }
                     .buttonStyle(.plain)
@@ -90,7 +90,7 @@ struct OllamaModelStoreContainerView: View {
                     viewModel.refresh()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundColor(theme.accentColor)
                 }
                 .buttonStyle(.plain)
@@ -104,6 +104,5 @@ struct OllamaModelStoreContainerView: View {
             )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.primaryBackground)
     }
 }

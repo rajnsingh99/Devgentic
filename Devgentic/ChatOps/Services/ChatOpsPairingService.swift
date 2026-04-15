@@ -17,8 +17,8 @@ import os
 /// 4. Starts a temporary polling loop waiting for `PAIR <pin>`
 /// 5. On match: stores chat_id, transitions to `.connected`
 /// 6. On timeout (5 min): transitions to `.disconnected`
-@MainActor
-final class ChatOpsPairingService: ObservableObject {
+@Observable @MainActor
+final class ChatOpsPairingService {
 
     private let logger = Logger(subsystem: "com.devgentic", category: "ChatOpsPairing")
     private let config = ChatOpsConfigManager.shared

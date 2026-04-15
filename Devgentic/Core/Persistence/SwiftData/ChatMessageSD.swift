@@ -16,11 +16,13 @@ final class ChatMessageSD {
     var timestamp: Date
     var senderType: String
     var traceID: String?
+    var profileTypeRaw: String?
 
     // Content stored as JSON Data — no ValueTransformer needed
     var contentData: Data
     var agentResponseData: Data?
     var timelineEventsData: Data?
+    var tokenUsageData: Data?
 
     var conversation: ConversationSD?
 
@@ -47,6 +49,7 @@ final class ChatMessageSD {
         )
 
         message.traceID = traceID
+        message.profileType = profileTypeRaw.flatMap { ProfileType(rawValue: $0) }
 
         if let data = agentResponseData {
             message.agentResponse = try? JSONDecoder().decode(AgentResponse.self, from: data)
@@ -54,6 +57,10 @@ final class ChatMessageSD {
 
         if let data = timelineEventsData {
             message.timelineEvents = (try? JSONDecoder().decode([TimelineEvent].self, from: data)) ?? []
+        }
+
+        if let data = tokenUsageData {
+            message.tokenUsage = try? JSONDecoder().decode(TokenUsage.self, from: data)
         }
 
         return message
@@ -66,6 +73,7 @@ final class ChatMessageSD {
         let timelineEventsData = message.timelineEvents.isEmpty
             ? nil
             : (try? JSONEncoder().encode(message.timelineEvents))
+        let tokenUsageData = message.tokenUsage.flatMap { try? JSONEncoder().encode($0) }
 
         let sd = ChatMessageSD(
             id: message.id,
@@ -73,9 +81,11 @@ final class ChatMessageSD {
             timestamp: message.timestamp,
             senderType: message.sender.rawValue,
             traceID: message.traceID,
+            profileTypeRaw: message.profileType?.rawValue,
             contentData: contentData,
             agentResponseData: agentResponseData,
-            timelineEventsData: timelineEventsData
+            timelineEventsData: timelineEventsData,
+            tokenUsageData: tokenUsageData
         )
 
         if let textFiles = message.attachedTextFiles {
@@ -89,15 +99,17 @@ final class ChatMessageSD {
     }
 
     init(id: UUID, conversationId: UUID, timestamp: Date, senderType: String,
-         traceID: String?, contentData: Data, agentResponseData: Data?,
-         timelineEventsData: Data?) {
+         traceID: String?, profileTypeRaw: String? = nil, contentData: Data,
+         agentResponseData: Data?, timelineEventsData: Data?, tokenUsageData: Data? = nil) {
         self.id = id
         self.conversationId = conversationId
         self.timestamp = timestamp
         self.senderType = senderType
         self.traceID = traceID
+        self.profileTypeRaw = profileTypeRaw
         self.contentData = contentData
         self.agentResponseData = agentResponseData
         self.timelineEventsData = timelineEventsData
+        self.tokenUsageData = tokenUsageData
     }
 }

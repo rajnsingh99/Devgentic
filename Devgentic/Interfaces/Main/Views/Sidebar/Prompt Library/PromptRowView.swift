@@ -61,15 +61,15 @@ struct PromptRowView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
                     Text(prompt.title)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(theme.fontSubheadline.weight(.medium))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
-                    
+
                     Spacer()
-                    
+
                     if !isHovering {
                         Text(prompt.category)
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 10, weight: .medium)) // Fixed size: intentional (badge/chip text)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(theme.accentColor.opacity(0.1))
@@ -78,9 +78,9 @@ struct PromptRowView: View {
                             .transition(.opacity)
                     }
                 }
-                
+
                 Text(prompt.text)
-                    .font(.system(size: 11, weight: .regular))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.tail)

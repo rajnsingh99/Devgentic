@@ -24,7 +24,7 @@ struct MLXModelPickerView: View {
     @Environment(\.appTheme) private var theme
     @Environment(MainViewRouter.self) private var router
 
-    @StateObject private var service = MLXModelService.shared
+    private var service: MLXModelService { MLXModelService.shared }
     @State private var showUnsupportedAlert = false
     @State private var currentFitAssessment: ModelFitAssessment?
 
@@ -41,9 +41,10 @@ struct MLXModelPickerView: View {
                         .foregroundColor(theme.secondaryText)
                         .font(.caption)
                 } else {
+                    // Use cached profiles instead of calling detectCognitiveProfile inline
                     let visibleModels = filterForTools
                         ? service.installedModels.filter {
-                            MLXTokenizerAnalyzer.detectCognitiveProfile(for: $0.localPath, modelName: $0.displayName).capability != .none
+                            service.cachedCognitiveProfile(for: $0).capability != .none
                         }
                         : service.installedModels
 
@@ -82,20 +83,21 @@ struct MLXModelPickerView: View {
             Text("You have selected a Chat-Only model. Agent profiles require models with Tool Calling capabilities. Please select a supported model.")
         }
     }
-    
+
     private func attemptAutoSelect() {
         // Ensure we have models to select from
         guard let first = service.installedModels.first else { return }
-        
+
         // Check if the current selection is valid (exists in the installed list)
         let isSelectionValid = service.installedModels.contains { $0.displayName == selectedModel }
-        
+
         // If nothing is selected OR the current selection is invalid (e.g. deleted), pick the first one.
         if selectedModel.isEmpty || !isSelectionValid {
             DispatchQueue.main.async {
                 if filterForTools {
+                    // Use cached profiles instead of calling detectCognitiveProfile inline
                     let validModel = service.installedModels.first(where: {
-                        MLXTokenizerAnalyzer.detectCognitiveProfile(for: $0.localPath, modelName: $0.displayName).capability != .none
+                        service.cachedCognitiveProfile(for: $0).capability != .none
                     })
                     let target = validModel ?? first
                     self.selectedModel = target.displayName
@@ -110,11 +112,12 @@ struct MLXModelPickerView: View {
             evaluateCognitiveCapability(for: selectedModel)
         }
     }
-    
+
     private func evaluateCognitiveCapability(for modelName: String) {
         guard let model = service.installedModels.first(where: { $0.displayName == modelName }) else { return }
 
-        let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: modelName)
+        // Use cached profile — no file I/O on every evaluation
+        let profile = service.cachedCognitiveProfile(for: model)
 
         DispatchQueue.main.async {
             self.cognitiveCapability = profile.capability

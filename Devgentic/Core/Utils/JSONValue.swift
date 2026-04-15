@@ -7,6 +7,14 @@
 
 import Foundation
 
+/// A thin wrapper that asserts Sendable conformance for types that are
+/// practically safe to send across isolation boundaries but can't formally conform
+/// (e.g., `[String: Any]` dictionaries destined for MLX tokenizer APIs).
+struct UnsafeSendable<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
 /// A type-safe, Sendable, and Codable representation of a JSON value.
 /// Used to replace `Any` in structures that must conform to `Sendable`.
 public enum JSONValue: Sendable, Hashable {
@@ -101,7 +109,7 @@ public enum JSONValue: Sendable, Hashable {
         return nil
     }
 
-    // MARK: - AnyCodable Bridge (Phase 1B Migration)
+    // MARK: - Serialization
 
     /// Serialize to Data for tool argument dispatch.
     public func toJSONData() throws -> Data {

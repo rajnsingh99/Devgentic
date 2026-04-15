@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import Combine
 import AVFoundation
 import os
 import WhisperKit
@@ -33,7 +32,6 @@ protocol ChatInputMainDelegate: AnyObject {
 
 protocol RecognitionServiceProtocol {
     var loadingState: ModelLoadingState { get }
-    var loadingStatePublisher: AnyPublisher<ModelLoadingState, Never> { get }
 
     // Batch transcription (retained)
     func transcribe(audioArray: [Float]) async throws -> String?
@@ -64,11 +62,7 @@ protocol PromptServiceProtocol {
 
 // MARK: - Service Conformance Extensions
 
-extension WhisperRecognitionService: RecognitionServiceProtocol {
-    var loadingStatePublisher: AnyPublisher<ModelLoadingState, Never> {
-        $loadingState.eraseToAnyPublisher()
-    }
-}
+extension WhisperRecognitionService: RecognitionServiceProtocol {}
 
 extension WebSearchService: WebSearchServiceProtocol {}
 extension PromptService: PromptServiceProtocol {}
@@ -117,6 +111,13 @@ final class ChatInputViewModel {
     var userInput: String = ""
     var voiceInputState: VoiceInputState = .idle
     var showModelSelectorPopover: Bool = false
+    var pendingDownloadModelId: String?
+    var pendingDeleteModelId: String?
+
+    /// Unified alert type to prevent download and delete alerts from clashing (#15).
+    enum WhisperAlertKind { case download, delete }
+    var activeWhisperAlert: WhisperAlertKind?
+    var showWhisperAlert: Bool = false
     var showAPIKeyInputPopup: Bool = false
     var apiKeyInput: String = ""
     var validationState: ValidationState = .idle
@@ -153,7 +154,6 @@ final class ChatInputViewModel {
     @ObservationIgnored private let promptService: PromptServiceProtocol
 
     // MARK: - Private State
-    @ObservationIgnored private var cancellables = Set<AnyCancellable>()
     @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatInputViewModel")
     @ObservationIgnored private var recordingTimer: Timer?
     @ObservationIgnored private let maxPowerLevelsToShow = 100
@@ -184,16 +184,9 @@ final class ChatInputViewModel {
         if let injectedService = recognitionService {
             self.recognitionService = injectedService
         } else {
-            // Load saved speech settings
-            let savedModel = UserDefaults.standard.string(forKey: AppSettings.speechModelKey) ?? "base.en"
-            let savedLanguage = UserDefaults.standard.string(forKey: AppSettings.speechLanguageKey)
-            let savedAutoStop = (UserDefaults.standard.object(forKey: AppSettings.speechAutoStopOnSilenceKey) as? Bool) ?? true
-
-            self.recognitionService = WhisperRecognitionService(
-                modelName: savedModel,
-                language: savedLanguage,
-                autoStop: savedAutoStop
-            )
+            // Use the shared singleton — avoids loading WhisperKit model on every
+            // ChatInputViewModel recreation caused by SwiftUI view lifecycle.
+            self.recognitionService = WhisperRecognitionService.shared
         }
 
         setupSuggestionPipelines()
@@ -201,12 +194,7 @@ final class ChatInputViewModel {
 
         Task {
             await checkMicPermissions()
-            self.recognitionService?.loadingStatePublisher
-                .receive(on: RunLoop.main)
-                .sink { [weak self] newState in
-                    self?.handleModelLoadingState(newState)
-                }
-                .store(in: &cancellables)
+            observeRecognitionLoadingState()
         }
     }
 
@@ -511,19 +499,79 @@ final class ChatInputViewModel {
         }
     }
 
-    /// Called from the model selector popover when the user picks a model.
-    func selectAndDownloadModel(_ modelName: String) {
+    /// Called from the model selector popover when the user picks an already-downloaded model.
+    func selectDownloadedModel(_ modelName: String) {
         showModelSelectorPopover = false
 
         // Persist the selection
         UserDefaults.standard.set(modelName, forKey: AppSettings.speechModelKey)
 
         // Notify WhisperRecognitionService to switch/load the model.
-        // The service already listens for this notification via setupSettingsObservers().
         NotificationCenter.default.post(
             name: GlobalConstants.speechModelChangedNotification,
             object: modelName
         )
+    }
+
+    /// Called from the model selector popover when the user picks an undownloaded model.
+    /// Dismisses the popover first, then shows the alert on the next run-loop tick (#8).
+    func requestDownloadConfirmation(for modelName: String) {
+        pendingDownloadModelId = modelName
+        showModelSelectorPopover = false
+        // Defer alert presentation so the popover dismissal animation completes first
+        Task { @MainActor in
+            activeWhisperAlert = .download
+            showWhisperAlert = true
+        }
+    }
+
+    /// Called when the user confirms the download in the alert dialog.
+    func confirmWhisperAlert() {
+        switch activeWhisperAlert {
+        case .download:
+            guard let modelId = pendingDownloadModelId else { return }
+            pendingDownloadModelId = nil
+            WhisperModelDownloadService.shared.downloadModel(modelId)
+        case .delete:
+            guard let modelId = pendingDeleteModelId else { return }
+            pendingDeleteModelId = nil
+            Task {
+                let fallback = await WhisperModelDownloadService.shared.deleteModel(modelId)
+                if let fallback {
+                    selectDownloadedModel(fallback)
+                } else {
+                    // Fix #6: No models remain — notify service so it goes idle.
+                    // Don't pretend base.en is selected; just tell the service
+                    // the current model is gone.
+                    voiceInputState = .idle
+                    NotificationCenter.default.post(
+                        name: GlobalConstants.speechModelChangedNotification,
+                        object: UserDefaults.standard.string(forKey: AppSettings.speechModelKey) ?? "base.en"
+                    )
+                }
+            }
+        case .none:
+            break
+        }
+        activeWhisperAlert = nil
+    }
+
+    /// Called when the user cancels the alert dialog.
+    func cancelWhisperAlert() {
+        pendingDownloadModelId = nil
+        pendingDeleteModelId = nil
+        activeWhisperAlert = nil
+    }
+
+    /// Called from the popover when the user taps the trash icon on a downloaded model.
+    /// Dismisses the popover first, then shows the alert on the next run-loop tick (#8).
+    func requestDeleteConfirmation(for modelName: String) {
+        pendingDeleteModelId = modelName
+        showModelSelectorPopover = false
+        Task { @MainActor in
+            activeWhisperAlert = .delete
+            showWhisperAlert = true
+        }
     }
 
     func cancelRecording() {
@@ -545,6 +593,23 @@ final class ChatInputViewModel {
     }
 
     // MARK: - State Management (Internal)
+
+    /// Observes the recognition service's loadingState using @Observable tracking,
+    /// replacing the previous Combine publisher bridge.
+    private func observeRecognitionLoadingState() {
+        guard let service = recognitionService as? WhisperRecognitionService else { return }
+        withObservationTracking {
+            _ = service.loadingState
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, let service = self.recognitionService as? WhisperRecognitionService else { return }
+                self.handleModelLoadingState(service.loadingState)
+                self.observeRecognitionLoadingState()
+            }
+        }
+        // Handle initial state
+        handleModelLoadingState(service.loadingState)
+    }
 
     private func handleModelLoadingState(_ state: ModelLoadingState) {
         switch state {

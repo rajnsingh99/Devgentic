@@ -12,15 +12,15 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "NotificationConfiguration")
 
-@MainActor
-final class NotificationConfiguration: ObservableObject {
+@Observable @MainActor
+final class NotificationConfiguration {
 
     static let shared = NotificationConfiguration()
 
-    @AppStorage(AppSettings.notificationsEnabledKey) var isGloballyEnabled: Bool = true
+    @ObservationIgnored @AppStorage(AppSettings.notificationsEnabledKey) var isGloballyEnabled: Bool = true
 
     /// Per-conversation override. `true` = force enabled, `false` = force disabled, absent = use global.
-    @Published var perConversationOverrides: [UUID: Bool] = [:] {
+    var perConversationOverrides: [UUID: Bool] = [:] {
         didSet { persistOverrides() }
     }
 

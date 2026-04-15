@@ -53,18 +53,30 @@ struct PendingToolCall: Sendable, Codable, Equatable, Identifiable {
 struct ModernCognitiveStep: Sendable {
     /// The agent's reasoning, internal monologue, or conversational text that is NOT the raw thought trace.
     let reasoning: String
-    
+
     /// Optional: The internal reasoning trace (Thinking) from the provider.
     /// This is separate from the 'reasoning' block which is intended for conversational text.
     let thought: String?
-    
+
     /// An array of tools to execute. If empty, the loop terminates.
     let toolCalls: [PendingToolCall]
 
-    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = []) {
+    /// Token usage for this cognitive step, extracted from the provider's API response.
+    /// `nil` when the provider doesn't report usage (e.g. mid-stream) or parsing failed.
+    let tokenUsage: TokenUsage?
+
+    /// Set by `CognitiveParsePipeline` when ALL parse stages (primary, drift, fallback,
+    /// heuristic) failed to extract tool calls. When `true` and `toolCalls` is empty,
+    /// the termination evaluator should treat this as a format failure — not a genuine
+    /// agent completion — and retry with a corrective system alert.
+    let parseExhausted: Bool
+
+    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseExhausted: Bool = false) {
         self.reasoning = reasoning
         self.thought = thought
         self.toolCalls = toolCalls
+        self.tokenUsage = tokenUsage
+        self.parseExhausted = parseExhausted
     }
 }
 
@@ -351,15 +363,36 @@ struct AgentInput: Sendable {
     let generatorStrategy: any CognitiveGenerator
     let workingMemory: any WorkingMemoryStrategy
 
-    // [Phase 2 Rate Limiting]
-    // The specific quota profile to enforce for this execution
+    // [Phase 2 Rate Limiting — profile-scoped]
+    // Bucket key derived from (provider + apiKey/baseURL) for profile-scoped rate limiting.
+    let rateLimitKey: String
     let rateLimitCategory: RateLimitCategory
 
     let instructions: String?
 
+    // Skills — on-demand discovery layer
+    let skillManifests: [SkillManifest]?
+    let skillFolderPath: String?
+
     // Resilience configuration from AgentConfig
     let retryPolicy: RetryPolicy
     let errorRecovery: ErrorRecovery
+
+    /// Whether IC-powered response synthesis is enabled for this run.
+    let responseSynthesisEnabled: Bool
+
+    /// Pre-built native history turns for providers that support turn-by-turn conversation.
+    /// Nil when using XML episodic memory (non-native providers).
+    let nativeHistoryTurns: [[String: String]]?
+
+    /// [G3/G5] When true, the inner executor skips episode append/close because
+    /// the wrapping capability (Planning or Reflexion) owns the episode lifecycle.
+    let suppressEpisodeManagement: Bool
+
+    /// Workflow execution context — non-nil when this agent is running as a node
+    /// within a workflow DAG. Signals downstream components (generators, executors)
+    /// to use the workflow-specific prompt pipeline: no RAG, no history, clean task+input.
+    let workflowContext: WorkflowExecutionContext?
 
     // The Trace Context for distributed observability
     let traceContext: TraceContext
@@ -379,11 +412,18 @@ struct AgentInput: Sendable {
         activeState: SessionGraph? = nil,
         recentHistory: String? = nil,
         generatorStrategy: (any CognitiveGenerator)? = nil,
-        workingMemory: (any WorkingMemoryStrategy)? = nil,
-        rateLimitCategory: RateLimitCategory = .geminiFlash, // Default to strict for safety
+        workingMemory: any WorkingMemoryStrategy,
+        rateLimitKey: String = "geminiFlash",
+        rateLimitCategory: RateLimitCategory = .geminiFlash,
         instructions: String? = nil,
+        skillManifests: [SkillManifest]? = nil,
+        skillFolderPath: String? = nil,
         retryPolicy: RetryPolicy = RetryPolicy(),
         errorRecovery: ErrorRecovery = ErrorRecovery(),
+        responseSynthesisEnabled: Bool = false,
+        nativeHistoryTurns: [[String: String]]? = nil,
+        suppressEpisodeManagement: Bool = false,
+        workflowContext: WorkflowExecutionContext? = nil,
         traceContext: TraceContext
     ) {
         self.userInput = userInput
@@ -396,12 +436,19 @@ struct AgentInput: Sendable {
         self.recentHistory = recentHistory
 
         self.generatorStrategy = generatorStrategy ?? NativeStructuredGenerator()
-        self.workingMemory = workingMemory ?? HighContextLinearMemory()
+        self.workingMemory = workingMemory
+        self.rateLimitKey = rateLimitKey
         self.rateLimitCategory = rateLimitCategory
 
         self.instructions = instructions
+        self.skillManifests = skillManifests
+        self.skillFolderPath = skillFolderPath
         self.retryPolicy = retryPolicy
         self.errorRecovery = errorRecovery
+        self.responseSynthesisEnabled = responseSynthesisEnabled
+        self.nativeHistoryTurns = nativeHistoryTurns
+        self.suppressEpisodeManagement = suppressEpisodeManagement
+        self.workflowContext = workflowContext
         self.traceContext = traceContext
     }
 }
@@ -415,30 +462,43 @@ struct EnvironmentFacts: Sendable {
     let currentDate: String
 }
 
+/// Captures an ask_user Q+A pair for prompt injection as a `<clarification>` tag.
+struct ClarificationContext: Sendable {
+    let query: String    // what the agent asked
+    let response: String // what the user answered
+}
+
 struct SemanticContext: Sendable {
     // 1. System & Identity
     let instructions: String?
     let environmentFacts: EnvironmentFacts
-    
+
     // 2. Memory & Long-Term State
     let longTermMemory: any LongTermMemoryStrategy
     let recentHistory: String?
-    
+    let nativeHistoryTurns: [[String: String]]?
+
     // 3. Current Execution State
     let originalQuery: String
     let currentIteration: Int
     let compiledScratchpad: String
-    let latestClarification: String?
-    
+    let latestClarification: ClarificationContext?
+
     // 4. Guardrails & Circuit Breakers
     let negativeConstraints: Set<String>
     let hallucinatedTools: Set<String>
-    
+
     // 5. Capabilities
     let availableTools: [AgentTool]
 
     // 6. User Personal Profile
     let userProfile: String?
+
+    // 7. Skills — on-demand discovery layer (name + description one-liners)
+    let skillManifests: [SkillManifest]?
+
+    // 8. Workflow — per-node task description (nil for normal chat)
+    let taskDescription: String?
 }
 
 // MARK: - Agent Failure Reasons
@@ -496,18 +556,53 @@ struct AgentExecutionError: Error, Sendable {
 struct SubTask: Sendable, Codable, Identifiable, Equatable, Hashable {
     let id: String
     var description: String
-    var toolHint: String?
+    var toolHints: [String]?
     var status: SubTaskStatus
     var result: String?
     var dependsOn: [String]?
 
-    init(id: String = UUID().uuidString, description: String, toolHint: String? = nil, status: SubTaskStatus = .pending, result: String? = nil, dependsOn: [String]? = nil) {
+    init(id: String = UUID().uuidString, description: String, toolHints: [String]? = nil, status: SubTaskStatus = .pending, result: String? = nil, dependsOn: [String]? = nil) {
         self.id = id
         self.description = description
-        self.toolHint = toolHint
+        self.toolHints = toolHints
         self.status = status
         self.result = result
         self.dependsOn = dependsOn
+    }
+
+    // MARK: - Backward-Compatible Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case id, description, toolHints, status, result, dependsOn
+        case toolHint // Legacy key — decode only, never encoded
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.description = try container.decode(String.self, forKey: .description)
+        self.status = (try? container.decode(SubTaskStatus.self, forKey: .status)) ?? .pending
+        self.result = try? container.decode(String.self, forKey: .result)
+        self.dependsOn = try? container.decode([String].self, forKey: .dependsOn)
+
+        // New format first, fallback to legacy single-string key
+        if let hints = try? container.decode([String].self, forKey: .toolHints) {
+            self.toolHints = hints.isEmpty ? nil : hints
+        } else if let legacyHint = try? container.decode(String.self, forKey: .toolHint) {
+            self.toolHints = legacyHint.isEmpty ? nil : [legacyHint]
+        } else {
+            self.toolHints = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(description, forKey: .description)
+        try container.encodeIfPresent(toolHints, forKey: .toolHints)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(result, forKey: .result)
+        try container.encodeIfPresent(dependsOn, forKey: .dependsOn)
     }
 }
 

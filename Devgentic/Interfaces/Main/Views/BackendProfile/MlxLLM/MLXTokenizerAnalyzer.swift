@@ -66,7 +66,7 @@ enum MLXTokenizerAnalyzer {
         // Collect all special tokens across files for template family detection
         var allSpecialTokensRaw: String = ""
 
-        let toolTokensToDetect = ["<tool_call>", "[TOOL_CALLS]", "<|eom_id|>", "tool_calls", "[AVAILABLE_TOOLS]"]
+        let toolTokensToDetect = ["<tool_call>", "[TOOL_CALLS]", "<|eom_id|>", "tool_calls", "[AVAILABLE_TOOLS]", "<function_call>"]
 
         // 1. Check config.json for the true model origin and quantization info
         let configURL = modelPath.appendingPathComponent("config.json")
@@ -91,7 +91,7 @@ enum MLXTokenizerAnalyzer {
             hasSpecialToolTokens = toolTokensToDetect.contains(where: { jsonString.contains($0) })
 
             // Mistral XML-style call markers
-            if jsonString.contains("[TOOL_CALLS]") || jsonString.contains("<tool_call>") || jsonString.contains("[AVAILABLE_TOOLS]") {
+            if jsonString.contains("[TOOL_CALLS]") || jsonString.contains("<tool_call>") || jsonString.contains("[AVAILABLE_TOOLS]") || jsonString.contains("<function_call>") {
                 hasMistralXMLSignal = true
             }
         }
@@ -105,7 +105,7 @@ enum MLXTokenizerAnalyzer {
             if toolTokensToDetect.contains(where: { jsonString.contains($0) }) {
                 hasSpecialToolTokens = true
             }
-            if jsonString.contains("[TOOL_CALLS]") || jsonString.contains("<tool_call>") || jsonString.contains("[AVAILABLE_TOOLS]") {
+            if jsonString.contains("[TOOL_CALLS]") || jsonString.contains("<tool_call>") || jsonString.contains("[AVAILABLE_TOOLS]") || jsonString.contains("<function_call>") {
                 hasMistralXMLSignal = true
             }
         }
@@ -122,7 +122,7 @@ enum MLXTokenizerAnalyzer {
                     hasSpecialToolTokens = true
                 }
 
-                if configStr.contains("[TOOL_CALLS]") || configStr.contains("<tool_call>") || configStr.contains("[AVAILABLE_TOOLS]") {
+                if configStr.contains("[TOOL_CALLS]") || configStr.contains("<tool_call>") || configStr.contains("[AVAILABLE_TOOLS]") || configStr.contains("<function_call>") {
                     hasMistralXMLSignal = true
                 }
             }

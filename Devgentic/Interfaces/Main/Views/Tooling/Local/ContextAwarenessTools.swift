@@ -4,7 +4,7 @@
 //
 
 import Foundation
-import AppKit
+@preconcurrency import AppKit
 
 struct GetFocusContextTool: DevgenticTool {
     let name = "get_focus_context"

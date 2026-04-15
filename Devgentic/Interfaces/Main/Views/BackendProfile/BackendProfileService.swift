@@ -218,7 +218,7 @@ final class BackendProfileService {
 
         case .agent(let config):
             logOutput += "[AGENT CONFIGURATION]\n"
-            logOutput += "Capabilities: \(config.capabilities.derivedArchitecture.rawValue)\n"
+            logOutput += "Capabilities: \(config.capabilities.summary)\n"
             logOutput += "Description: \(config.description ?? "None")\n"
             logOutput += "Instructions (Length): \(config.instructions?.count ?? 0) characters\n\n"
 

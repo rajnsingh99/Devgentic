@@ -18,6 +18,19 @@ struct MarkdownTableView: View {
     @Environment(\.appTheme) private var theme
     @State private var hoveredRowIndex: Int? = nil
 
+    /// Maximum rows rendered before showing "Show all" button.
+    /// Prevents Grid from rendering 100+ rows on initial layout.
+    private static let initialRowLimit = 50
+    @State private var isExpanded: Bool = false
+
+    /// The rows actually rendered — capped unless expanded.
+    private var visibleRows: ArraySlice<[String]> {
+        if isExpanded || rows.count <= Self.initialRowLimit {
+            return rows[...]
+        }
+        return rows[..<Self.initialRowLimit]
+    }
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: true) {
             Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
@@ -33,11 +46,11 @@ struct MarkdownTableView: View {
                 Divider()
                     .gridCellColumns(headers.count)
 
-                // MARK: - Data Rows
-                ForEach(rows.indices, id: \.self) { rowIndex in
+                // MARK: - Data Rows (virtualized via visibleRows)
+                ForEach(Array(visibleRows.enumerated()), id: \.offset) { rowIndex, row in
                     GridRow {
-                        ForEach(rows[rowIndex].indices, id: \.self) { colIndex in
-                            TableCellView(content: rows[rowIndex][colIndex], isHeader: false)
+                        ForEach(row.indices, id: \.self) { colIndex in
+                            TableCellView(content: row[colIndex], isHeader: false)
                                 .background(rowBackgroundColor(for: rowIndex))
                                 .onHover { isHovering in
                                     if isHovering {
@@ -49,10 +62,26 @@ struct MarkdownTableView: View {
                         }
                     }
 
-                    // Row Divider (except after the last row)
-                    if rowIndex < rows.count - 1 {
+                    // Row Divider (except after the last visible row)
+                    if rowIndex < visibleRows.count - 1 {
                         Divider()
                             .gridCellColumns(headers.count)
+                    }
+                }
+
+                // MARK: - "Show All" Row
+                if !isExpanded && rows.count > Self.initialRowLimit {
+                    GridRow {
+                        Button(action: { withAnimation { isExpanded = true } }) {
+                            Text("Show all \(rows.count) rows (\(rows.count - Self.initialRowLimit) more)")
+                                .font(.caption)
+                                .foregroundColor(theme.accentColor)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                        .gridCellColumns(headers.count)
+                        .accessibilityLabel("Show all \(rows.count) table rows")
                     }
                 }
             }
@@ -106,7 +135,7 @@ private struct TableCellView: View {
                         image.resizable()
                              .aspectRatio(contentMode: .fit)
                              .frame(maxHeight: 150)
-                             .cornerRadius(4)
+                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     case .failure(let error):
                         Image(systemName: "photo.fill")
                             .font(.largeTitle)
@@ -123,7 +152,7 @@ private struct TableCellView: View {
                 }
                 .help(url.absoluteString)
             } else {
-                Text(try! AttributedString(markdown: content))
+                Text((try? AttributedString(markdown: content)) ?? AttributedString(content))
                     .font(isHeader ? theme.fontBody.weight(.bold) : theme.fontBody)
                     .foregroundColor(theme.primaryText)
                     .multilineTextAlignment(.leading)

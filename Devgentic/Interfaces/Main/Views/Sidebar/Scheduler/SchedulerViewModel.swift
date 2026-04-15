@@ -7,7 +7,6 @@
 //
 
 import Foundation
-import Combine
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SchedulerViewModel")
@@ -22,22 +21,13 @@ enum SchedulerFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-@MainActor
-final class SchedulerViewModel: ObservableObject {
+@Observable @MainActor
+final class SchedulerViewModel {
 
-    @Published var searchText: String = ""
-    @Published var selectedFilter: SchedulerFilter = .all
+    var searchText: String = ""
+    var selectedFilter: SchedulerFilter = .all
 
-    private var cancellable: AnyCancellable?
-
-    init() {
-        // Observe SchedulerService changes to trigger UI refresh
-        cancellable = SchedulerService.shared.objectWillChange
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-    }
+    init() { }
 
     var tasks: [ScheduledTask] {
         SchedulerService.shared.scheduledTasks

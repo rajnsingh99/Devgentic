@@ -15,7 +15,7 @@ struct ProfileSidebarListView: View {
 
     @Environment(BackendProfileService.self) private var profileService
     @Environment(MainViewRouter.self) private var router
-    @EnvironmentObject private var toastManager: ToastManager
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
     @State private var searchText = ""
@@ -96,14 +96,14 @@ struct ProfileSidebarListView: View {
                         title: "No Profiles",
                         subtitle: "Create an AI profile to get started.",
                         buttonTitle: "New Profile",
-                        systemImage: "cpu",
+                        systemImage: "brain.head.profile",
                         onAction: { isAddingProfile = true }
                     )
                 } else {
                     VStack(spacing: 8) {
                         Spacer()
                         Text("No matches")
-                            .font(.system(size: 13))
+                            .font(theme.fontSubheadline)
                             .foregroundColor(theme.secondaryText)
                         Spacer()
                     }

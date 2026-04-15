@@ -61,13 +61,13 @@ struct PromptSuggestionView: View {
                 }
             }
             .frame(maxHeight: maxListHeight)
-            .background(VisualEffectBlur(material: .popover).opacity(0.9))
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadiusValue)
-                    .stroke(theme.dividerColor, lineWidth: 1)
-            )
-            .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+            // MARK: Liquid Glass
+            .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
+            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+            // .background(VisualEffectBlur(material: .popover).opacity(0.9))
+            // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
+            // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
+            // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .onAppear {
                 // When the view appears, if no item is selected, select the first one.
@@ -81,13 +81,13 @@ struct PromptSuggestionView: View {
                 .foregroundColor(theme.secondaryText)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(VisualEffectBlur(material: .popover).opacity(0.9))
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadiusValue)
-                        .stroke(theme.dividerColor, lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
+                // MARK: Liquid Glass
+                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadiusValue))
+                // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+                // .background(VisualEffectBlur(material: .popover).opacity(0.9))
+                // .clipShape(RoundedRectangle(cornerRadius: cornerRadiusValue))
+                // .overlay(RoundedRectangle(cornerRadius: cornerRadiusValue).stroke(theme.dividerColor, lineWidth: 1))
+                // .shadow(color: Color.black.opacity(0.15), radius: 5, x: 0, y: 4)
                 .transition(.opacity)
         }
     }
@@ -105,11 +105,12 @@ struct PromptSuggestionView: View {
                 .frame(width: iconSize, height: iconSize)
                 .foregroundColor(theme.secondaryText)
                 .frame(width: 20, alignment: .center)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 2) {
                 // Prompt title with the matched query part highlighted
                 Text(highlightedText(for: prompt.title, query: suggestionQuery))
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .lineLimit(1)
 
                 // The beginning of the prompt's text for context
@@ -127,7 +128,7 @@ struct PromptSuggestionView: View {
         .background(
             (isSelected || isHovered) ? theme.secondaryText.opacity(isSelected ? 0.25 : 0.15) : Color.clear
         )
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     // MARK: - Helper Methods
@@ -137,7 +138,7 @@ struct PromptSuggestionView: View {
         attributedString.foregroundColor = theme.primaryText
 
         if !query.isEmpty, let range = attributedString.range(of: query, options: .caseInsensitive) {
-            attributedString[range].font = .system(size: 13, weight: .bold)
+            attributedString[range].font = .system(.subheadline, weight: .bold)
         }
         
         return attributedString

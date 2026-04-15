@@ -38,7 +38,7 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
                 }
             } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                     .foregroundColor(theme.accentColor)
                     .frame(width: 28, height: 28)
                     .background(
@@ -60,15 +60,11 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(
-            Capsule()
-                .fill(theme.secondaryBackground)
-                .shadow(color: theme.primaryText.opacity(0.08), radius: 12, x: 0, y: 4)
-        )
-        .overlay(
-            Capsule()
-                .stroke(theme.surfaceOverlayStrong.opacity(0.4), lineWidth: 0.5)
-        )
+        // MARK: Liquid Glass — capsule bar with glass treatment
+        .glassEffect(.regular, in: .capsule)
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(Capsule().fill(theme.secondaryBackground).shadow(color: theme.primaryText.opacity(0.08), radius: 12, x: 0, y: 4))
+        // .overlay(Capsule().stroke(theme.surfaceOverlayStrong.opacity(0.4), lineWidth: 0.5))
         .frame(maxWidth: 1000)
         .padding(.horizontal, 20)
         .padding(.top, 12)

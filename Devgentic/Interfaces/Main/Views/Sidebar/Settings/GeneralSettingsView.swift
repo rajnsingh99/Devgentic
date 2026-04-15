@@ -21,29 +21,39 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
     @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
+    // Download/delete confirmation state
+    enum SettingsWhisperAlert { case download, delete }
+    @State private var activeAlert: SettingsWhisperAlert?
+    @State private var showWhisperAlert = false
+    @State private var pendingModelId: String?
+    /// Tracks the last valid (downloaded) model so the picker can revert on cancel.
+    /// Initialized from @AppStorage on first appear (#14).
+    @State private var previousModelId: String?
+
     // Available Whisper models (shared catalog)
     private var availableModels: [WhisperModelInfo] { WhisperModelCatalog.availableModels }
+    private var downloadService: WhisperModelDownloadService { .shared }
 
     // Common languages (subset of WhisperKit's 99)
     private let availableLanguages: [(code: String, display: String)] = [
-        ("", "Auto-detect"),
-        ("en", "English"),
-        ("es", "Spanish"),
-        ("fr", "French"),
-        ("de", "German"),
-        ("it", "Italian"),
-        ("pt", "Portuguese"),
-        ("ru", "Russian"),
-        ("ja", "Japanese"),
-        ("ko", "Korean"),
-        ("zh", "Chinese"),
-        ("ar", "Arabic"),
-        ("hi", "Hindi"),
-        ("nl", "Dutch"),
-        ("sv", "Swedish"),
-        ("pl", "Polish"),
-        ("tr", "Turkish"),
-        ("uk", "Ukrainian"),
+        ("", String(localized: "Auto-detect")),
+        ("en", String(localized: "English")),
+        ("es", String(localized: "Spanish")),
+        ("fr", String(localized: "French")),
+        ("de", String(localized: "German")),
+        ("it", String(localized: "Italian")),
+        ("pt", String(localized: "Portuguese")),
+        ("ru", String(localized: "Russian")),
+        ("ja", String(localized: "Japanese")),
+        ("ko", String(localized: "Korean")),
+        ("zh", String(localized: "Chinese")),
+        ("ar", String(localized: "Arabic")),
+        ("hi", String(localized: "Hindi")),
+        ("nl", String(localized: "Dutch")),
+        ("sv", String(localized: "Swedish")),
+        ("pl", String(localized: "Polish")),
+        ("tr", String(localized: "Turkish")),
+        ("uk", String(localized: "Ukrainian")),
     ]
 
     private var isEnglishOnlyModel: Bool {
@@ -100,29 +110,60 @@ struct GeneralSettingsView: View {
 
                 // 2. Speech Recognition Section
                 SettingsCard(title: "Speech Recognition", icon: "waveform", theme: theme) {
-                    
+
                     // Model Picker
                     SettingsRow(
                         title: "Model",
                         description: "Larger models are more accurate but slower and use more memory. Multilingual models support 99 languages; English-only models (.en) are faster for English.",
                         theme: theme
                     ) {
-                        Picker("", selection: $selectedModel) {
-                            ForEach(availableModels) { model in
-                                Text("\(model.displayName)  \(model.size)")
+                        HStack(spacing: 8) {
+                            Picker("", selection: $selectedModel) {
+                                ForEach(availableModels) { model in
+                                    HStack(spacing: 4) {
+                                        Text("\(model.displayName)  \(model.size)")
+                                        if downloadService.downloadedModelIds.contains(model.id) {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundColor(.green)
+                                                .imageScale(.small)
+                                        }
+                                    }
                                     .tag(model.id)
+                                }
                             }
-                        }
-                        .labelsHidden()
-                        .fixedSize()
-                        .onChange(of: selectedModel) { _, newModel in
-                            NotificationCenter.default.post(
-                                name: GlobalConstants.speechModelChangedNotification,
-                                object: newModel
-                            )
-                            // Force English when switching to an English-only model
-                            if newModel.hasSuffix(".en") && selectedLanguage != "en" && !selectedLanguage.isEmpty {
-                                selectedLanguage = "en"
+                            .labelsHidden()
+                            .fixedSize()
+                            .onAppear { if previousModelId == nil { previousModelId = selectedModel } }
+                            .onChange(of: selectedModel) { _, newModel in
+                                if downloadService.isModelDownloaded(newModel) {
+                                    previousModelId = newModel
+                                    NotificationCenter.default.post(
+                                        name: GlobalConstants.speechModelChangedNotification,
+                                        object: newModel
+                                    )
+                                } else {
+                                    pendingModelId = newModel
+                                    selectedModel = previousModelId ?? "base.en"
+                                    activeAlert = .download
+                                    showWhisperAlert = true
+                                }
+                                if newModel.hasSuffix(".en") && selectedLanguage != "en" && !selectedLanguage.isEmpty {
+                                    selectedLanguage = "en"
+                                }
+                            }
+
+                            if downloadService.isModelDownloaded(selectedModel) {
+                                Button {
+                                    pendingModelId = selectedModel
+                                    activeAlert = .delete
+                                    showWhisperAlert = true
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(.caption))
+                                        .foregroundColor(theme.errorColor.opacity(0.7))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Delete downloaded model")
                             }
                         }
                     }
@@ -171,6 +212,25 @@ struct GeneralSettingsView: View {
                                 )
                             }
                     }
+
+                    // Floating download progress
+                    if downloadService.isDownloading {
+                        Divider().background(theme.dividerColor)
+                        WhisperDownloadProgressOverlay()
+                    }
+                }
+                .alert(settingsAlertTitle, isPresented: $showWhisperAlert) {
+                    if activeAlert == .delete {
+                        Button("Delete", role: .destructive) { performSettingsAlertAction() }
+                    } else {
+                        Button("Download") { performSettingsAlertAction() }
+                    }
+                    Button("Cancel", role: .cancel) {
+                        pendingModelId = nil
+                        activeAlert = nil
+                    }
+                } message: {
+                    Text(settingsAlertMessage)
                 }
 
                 // 3. Intelligence Core — Moved to dedicated settings section
@@ -182,12 +242,73 @@ struct GeneralSettingsView: View {
         .scrollContentBackground(.hidden)
         .background(theme.primaryBackground)
     }
+
+    // MARK: - Settings Alert Helpers
+
+    private var settingsAlertTitle: String {
+        switch activeAlert {
+        case .download: return "Download Required"
+        case .delete: return "Delete Model"
+        case .none: return ""
+        }
+    }
+
+    private var settingsAlertMessage: String {
+        switch activeAlert {
+        case .download:
+            if let modelId = pendingModelId,
+               let model = availableModels.first(where: { $0.id == modelId }) {
+                return "The \(model.displayName) model (\(model.size)) needs to be downloaded before use."
+            }
+            return "This model needs to be downloaded before use."
+        case .delete:
+            if let modelId = pendingModelId,
+               let model = availableModels.first(where: { $0.id == modelId }) {
+                return "Delete the \(model.displayName) model? It will need to be re-downloaded to use again."
+            }
+            return "Delete this model? It will need to be re-downloaded to use again."
+        case .none:
+            return ""
+        }
+    }
+
+    private func performSettingsAlertAction() {
+        guard let modelId = pendingModelId else { return }
+        pendingModelId = nil
+
+        switch activeAlert {
+        case .download:
+            downloadService.downloadModel(modelId)
+        case .delete:
+            Task {
+                let fallback = await downloadService.deleteModel(modelId)
+                if let fallback {
+                    selectedModel = fallback
+                    previousModelId = fallback
+                    NotificationCenter.default.post(
+                        name: GlobalConstants.speechModelChangedNotification,
+                        object: fallback
+                    )
+                } else {
+                    // Fix #6: No models remain — service will go idle via notification.
+                    // Keep picker on whatever is stored; user must download to use voice.
+                    NotificationCenter.default.post(
+                        name: GlobalConstants.speechModelChangedNotification,
+                        object: selectedModel
+                    )
+                }
+            }
+        case .none:
+            break
+        }
+        activeAlert = nil
+    }
 }
 
 // MARK: - Reusable Modern UI Components
 
 struct SettingsCard<Content: View>: View {
-    let title: String
+    let title: LocalizedStringKey
     let icon: String
     let theme: any Theme
     @ViewBuilder let content: Content
@@ -196,16 +317,18 @@ struct SettingsCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundStyle(theme.secondaryText)
-                Text(title.uppercased())
-                    .font(.system(size: 11, weight: .bold))
+                Text(title)
+                    .font(.system(.caption, weight: .bold))
                     .foregroundColor(theme.secondaryText)
                     .tracking(0.5)
+                    .textCase(.uppercase)
             }
 
             VStack(spacing: 0) {
                 content
+                    .padding(16)
             }
             .background(theme.surfaceOverlay)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -214,34 +337,35 @@ struct SettingsCard<Content: View>: View {
 }
 
 struct SettingsRow<Control: View>: View {
-    let title: String
-    let description: String
+    let title: LocalizedStringKey
+    let description: LocalizedStringKey
     var isWarning: Bool = false
     let theme: any Theme
+    @ScaledMetric private var rowPadding: CGFloat = 16
     @ViewBuilder let control: Control
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(theme.fontBody.weight(.medium))
                     .foregroundColor(theme.primaryText)
-                
+
                 Text(description)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(isWarning ? theme.warningColor : theme.secondaryText)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            
+
             Spacer(minLength: 24)
-            
+
             VStack {
                 Spacer(minLength: 0)
                 control
                 Spacer(minLength: 0)
             }
         }
-        .padding(16)
+        .padding(rowPadding)
     }
 }

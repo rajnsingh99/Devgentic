@@ -144,7 +144,10 @@ struct OllamaLLMProvider: LLMProvider {
             ? "Executing \(pendingTools.count) tools..."
             : content
 
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: thinking, toolCalls: pendingTools)
+        // Extract token usage from Ollama API response
+        let usage = json.flatMap { TokenUsage.fromOllama($0) }
+
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: thinking, toolCalls: pendingTools, tokenUsage: usage)
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {

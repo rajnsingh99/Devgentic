@@ -8,7 +8,7 @@
 import Foundation
 import MLX
 import MLXLLM
-import MLXLMCommon
+@preconcurrency import MLXLMCommon
 import os
 
 // MARK: - IC Caller Identification
@@ -20,6 +20,8 @@ enum ICCallerFeature: String, Sendable {
     case morningBrief = "Morning Brief"
     case suggestion = "Context-Aware Suggestion"
     case userPersonal = "User Personal"
+    case responseSynthesis = "Response Synthesis"
+    case historyCompaction = "History Compaction"
     case unknown = "Unknown"
 }
 
@@ -180,8 +182,9 @@ actor IntelligenceCoreService {
 
         logger.notice("[IC Generate #\(inferenceNum)] BEGIN — Caller: \(caller.rawValue), maxTokens: \(maxTokens), temp: \(temperature), ~promptTokens: \(promptTokenCount)")
 
+        let wrapped = UnsafeSendable(messages)
         let result = try await container.perform { context in
-            let promptTokens = try context.tokenizer.applyChatTemplate(messages: messages.map { $0 as [String: Any] })
+            let promptTokens = try context.tokenizer.applyChatTemplate(messages: wrapped.value.map { $0 as [String: any Sendable] })
             let lmInput = LMInput(tokens: MLXArray(promptTokens))
             let parameters = GenerateParameters(maxTokens: maxTokens, temperature: temperature)
 

@@ -10,10 +10,11 @@ import Foundation
 
 // MARK: - Agent Executor Protocol
 
-/// The contract that all Agent Architectures (ReAct, Plan & Execute, etc.) must fulfill.
+/// The contract that all Agent Executors (ReAct, Plan & Execute, etc.) must fulfill.
 protocol Executor: Sendable {
 
-    var architecture: AgentArchitecture { get }
+    /// A human-readable label for logging (e.g. "ReAct", "Planning → ReAct").
+    var executorLabel: String { get }
 
     // Returns AgentStreamEvent for UI consumption
     func execute(

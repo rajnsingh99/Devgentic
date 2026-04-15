@@ -10,7 +10,7 @@
 //// Define a protocol that outlines the requirements for the ViewModel
 //// that AutomatedSetupInProgressView expects. This helps in creating mocks
 //// or ensuring the passed ViewModel is compatible.
-//protocol AutomatedSetupViewModelProtocol: ObservableObject {
+//protocol AutomatedSetupViewModelProtocol: Observable, AnyObject {
 //    var loadingMessage: String { get }
 //    var scriptLog: [String] { get }
 //    func cancelSetup()
@@ -19,7 +19,7 @@
 //}
 //
 //struct AutomatedSetupInProgressView<ViewModelType: AutomatedSetupViewModelProtocol>: View {
-//    @ObservedObject var viewModel: ViewModelType
+//    var viewModel: ViewModelType
 //
 //    var body: some View {
 //        VStack(spacing: 20) {
@@ -87,9 +87,10 @@
 //}
 //
 //// Mock ViewModel for previewing AutomatedSetupInProgressView
+//@Observable
 //class MockAutomatedSetupViewModel: AutomatedSetupViewModelProtocol {
-//    @Published var loadingMessage: String = "Initializing setup..."
-//    @Published var scriptLog: [String] = [
+//    var loadingMessage: String = "Initializing setup..."
+//    var scriptLog: [String] = [
 //        "[10:00:00 AM] Starting setup...",
 //        "[10:00:01 AM] Checking prerequisites...",
 //    ]

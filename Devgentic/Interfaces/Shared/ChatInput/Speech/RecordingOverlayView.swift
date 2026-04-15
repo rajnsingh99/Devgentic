@@ -61,7 +61,7 @@ struct RecordingOverlayView: View {
     private var cancelButton: some View {
         Button(action: onCancel) {
             Image(systemName: "xmark")
-                .font(.system(size: 14, weight: .semibold))
+                .font(theme.fontBody.weight(.semibold))
                 .foregroundColor(isCancelHovering ? .white : theme.primaryText)
                 .frame(width: buttonSize, height: buttonSize)
                 .background(
@@ -78,7 +78,7 @@ struct RecordingOverlayView: View {
     private var confirmButton: some View {
         Button(action: onConfirm) {
             Image(systemName: "checkmark")
-                .font(.system(size: 14, weight: .semibold))
+                .font(theme.fontBody.weight(.semibold))
                 .foregroundColor(.white)
                 .frame(width: buttonSize, height: buttonSize)
                 .background(
@@ -202,7 +202,7 @@ private struct LiveTranscriptionTextView: View {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: false) {
                         Text(liveTranscriptionText)
-                            .font(.system(size: 14))
+                            .font(theme.fontBody)
                             .foregroundColor(theme.primaryText)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)

@@ -29,7 +29,7 @@ struct ScheduledTaskRowView: View {
                     .frame(width: 8, height: 8)
 
                 Text(task.displayName)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(theme.fontSubheadline.weight(.medium))
                     .foregroundColor(task.isEnabled ? theme.primaryText : theme.secondaryText)
                     .lineLimit(1)
 
@@ -37,7 +37,7 @@ struct ScheduledTaskRowView: View {
 
                 if task.isEnabled {
                     Text(task.scheduleDescription)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(.caption2, weight: .medium))
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                         .lineLimit(1)
                 }
@@ -53,17 +53,17 @@ struct ScheduledTaskRowView: View {
 
                 if let nextRun = task.nextRunAt, task.isEnabled && !task.isPaused {
                     Text("Next: \(nextRun.timeAgoDisplay())")
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.secondaryText.opacity(0.6))
                 } else if let lastRun = task.lastRunAt {
                     Text("Last: \(lastRun.timeAgoDisplay())")
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.secondaryText.opacity(0.6))
                 }
 
                 if task.runCount > 0 {
                     Text("· Run \(task.runCount)")
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.secondaryText.opacity(0.5))
                 }
 
@@ -71,7 +71,7 @@ struct ScheduledTaskRowView: View {
 
                 if !task.isEnabled {
                     Text("Disabled")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 9, weight: .medium)) // Fixed size: intentional (badge/chip text)
                         .foregroundColor(theme.secondaryText.opacity(0.5))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -79,11 +79,11 @@ struct ScheduledTaskRowView: View {
                         .clipShape(Capsule())
                 } else if task.isPaused {
                     Text("Paused")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 9, weight: .medium)) // Fixed size: intentional (badge/chip text)
                         .foregroundColor(.orange.opacity(0.8))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Color.orange.opacity(0.1))
+                        .background(theme.warningColor.opacity(0.1))
                         .clipShape(Capsule())
                 }
             }
@@ -91,7 +91,7 @@ struct ScheduledTaskRowView: View {
             // Last run summary
             if let summary = task.lastRunSummary, !summary.isEmpty {
                 Text(summary)
-                    .font(.system(size: 10))
+                    .font(.system(.caption2))
                     .foregroundColor(theme.secondaryText.opacity(0.5))
                     .lineLimit(1)
             }

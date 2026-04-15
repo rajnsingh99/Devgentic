@@ -61,7 +61,7 @@ struct ToolLibraryView: View {
     @Binding var selectedToolIDs: Set<String>
 
     @Environment(MainViewRouter.self) private var router
-    @State private var toolStore = UnifiedToolStore.shared
+    private var toolStore: UnifiedToolStore { UnifiedToolStore.shared }
     @Environment(\.appTheme) private var theme
 
     // Sheet state
@@ -124,7 +124,7 @@ struct ToolLibraryView: View {
                     )
                 } header: {
                     Text("Library")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(theme.secondaryText)
                         .textCase(.uppercase)
                         .tracking(0.5)
@@ -140,7 +140,7 @@ struct ToolLibraryView: View {
                         )
                     } header: {
                         Text("Pinned")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(.caption, weight: .semibold))
                             .foregroundColor(theme.secondaryText)
                             .textCase(.uppercase)
                             .tracking(0.5)
@@ -158,7 +158,7 @@ struct ToolLibraryView: View {
                     }
                 } header: {
                     Text("Built-in Tools")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(theme.secondaryText)
                         .textCase(.uppercase)
                         .tracking(0.5)
@@ -188,7 +188,7 @@ struct ToolLibraryView: View {
                                 .foregroundColor(theme.secondaryText)
 
                                 Text(source.serverName)
-                                    .font(.system(size: 13))
+                                    .font(theme.fontSubheadline)
                                     .foregroundColor(theme.primaryText)
 
                                 Spacer()
@@ -199,7 +199,7 @@ struct ToolLibraryView: View {
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
                                     .background(theme.surfaceOverlay)
-                                    .cornerRadius(8)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
 
                                 ConnectionStateIndicator(sourceId: source.id)
                             }
@@ -220,7 +220,7 @@ struct ToolLibraryView: View {
                     }
                 } header: {
                     Text("MCP Servers")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(theme.secondaryText)
                         .textCase(.uppercase)
                         .tracking(0.5)
@@ -234,7 +234,7 @@ struct ToolLibraryView: View {
     private func sidebarRow(label: String, icon: String, count: Int, tag: SidebarSelection) -> some View {
         HStack {
             Label(label, systemImage: icon)
-                .font(.system(size: 13))
+                .font(theme.fontSubheadline)
                 .foregroundColor(theme.primaryText)
             Spacer()
             Text("\(count)")
@@ -243,7 +243,7 @@ struct ToolLibraryView: View {
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
                 .background(theme.surfaceOverlay)
-                .cornerRadius(8)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .tag(tag)
     }
@@ -267,7 +267,7 @@ struct ToolLibraryView: View {
                             Text("State")
                                 .frame(width: 80, alignment: .center)
                         }
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                         .foregroundColor(theme.secondaryText)
                         .textCase(.uppercase)
                         .tracking(0.5)
@@ -302,14 +302,14 @@ struct ToolLibraryView: View {
     private var bulkActionBar: some View {
         HStack(spacing: 12) {
             Text("\(selectedToolIDs.count) selected")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(.caption, weight: .semibold))
                 .foregroundColor(theme.primaryText)
 
             Spacer()
 
             Button { bulkSetState(.ask) } label: {
                 Label("Ask", systemImage: "lock.shield.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .tint(.orange)
@@ -317,7 +317,7 @@ struct ToolLibraryView: View {
 
             Button { bulkSetState(.auto) } label: {
                 Label("Auto", systemImage: "bolt.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .tint(.green)
@@ -325,7 +325,7 @@ struct ToolLibraryView: View {
 
             Button { bulkSetState(.disabled) } label: {
                 Label("Disable", systemImage: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(.caption, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -334,11 +334,12 @@ struct ToolLibraryView: View {
 
             Button { bulkToggleFavorite() } label: {
                 Image(systemName: "star.fill")
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
             }
             .buttonStyle(.bordered)
             .tint(.yellow)
             .controlSize(.small)
+            .accessibilityLabel("Toggle favorite")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -531,7 +532,7 @@ struct ToolLibraryView: View {
     private var emptyStateView: some View {
         VStack(spacing: 16) {
             Image(systemName: searchText.isEmpty ? "puzzlepiece.extension" : "magnifyingglass")
-                .font(.system(size: 48))
+                .font(.system(size: 48)) // Fixed size: intentional
                 .foregroundColor(theme.secondaryText.opacity(0.4))
 
             Text(searchText.isEmpty ? "No Tools Found" : "No Matches for '\(searchText)'")
@@ -570,7 +571,7 @@ private struct ToolRowContent: View {
             // Selection checkbox (bulk mode)
             if isSelectionMode {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 14))
+                    .font(theme.fontBody)
                     .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
                     .frame(width: 20)
                     .onTapGesture { onToggleSelection() }
@@ -590,24 +591,24 @@ private struct ToolRowContent: View {
                 HStack(spacing: 4) {
                     if let title = row.definition.title {
                         Text(title)
-                            .font(.system(size: 13, weight: .medium))
+                            .font(theme.fontSubheadline.weight(.medium))
                             .foregroundColor(theme.primaryText)
                     } else {
                         Text(row.definition.name)
-                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                            .font(.system(size: 13, weight: .medium, design: .monospaced)) // Fixed size: monospaced
                             .foregroundColor(theme.primaryText)
                     }
 
                     if isFavorited {
                         Image(systemName: "star.fill")
-                            .font(.system(size: 9))
+                            .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
                             .foregroundColor(.yellow)
                     }
                 }
 
                 if row.definition.title != nil {
                     Text(row.definition.name)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -615,7 +616,7 @@ private struct ToolRowContent: View {
 
                 if showSourceName {
                     Text(row.source.serverName)
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.secondaryText.opacity(0.7))
                 }
             }
@@ -624,7 +625,7 @@ private struct ToolRowContent: View {
             // Description + info (info button only on hover)
             HStack(alignment: .center, spacing: 8) {
                 Text(row.definition.description)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(2)
 
@@ -686,6 +687,7 @@ private struct ToolDetailsButton: View {
         }
         .buttonStyle(.plain)
         .help("View full tool details & parameters")
+        .accessibilityLabel("View full tool details & parameters")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -756,12 +758,12 @@ private struct ToolDetailsButton: View {
 
                                         if isRequired {
                                             Text("Required")
-                                                .font(.system(size: 9, weight: .bold))
+                                                .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge/chip text)
                                                 .foregroundColor(.red)
                                                 .padding(.horizontal, 4)
                                                 .padding(.vertical, 2)
                                                 .background(Color.red.opacity(0.1))
-                                                .cornerRadius(4)
+                                                .clipShape(RoundedRectangle(cornerRadius: 4))
                                         }
                                     }
 
@@ -775,7 +777,7 @@ private struct ToolDetailsButton: View {
                                 .padding(10)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                                .cornerRadius(6)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
                             }
                         }
@@ -798,6 +800,7 @@ fileprivate struct ToolStateControl: View {
     let definition: ToolDefinition
     let instructions: String
 
+    @Environment(\.appTheme) private var theme
     @State private var showingDependencyAlert = false
 
     private enum ToolControlState {
@@ -819,10 +822,10 @@ fileprivate struct ToolStateControl: View {
         } label: {
             HStack(spacing: 4) {
                 stateIcon
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                 if currentState != .disabled {
                     Text(stateLabel)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(.caption, weight: .semibold))
                 }
             }
             .frame(width: currentState == .disabled ? 28 : 54, height: 16, alignment: .center)
@@ -832,7 +835,7 @@ fileprivate struct ToolStateControl: View {
         .padding(.horizontal, 8)
         .background(stateBackground)
         .foregroundColor(stateForeground)
-        .cornerRadius(6)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .help(helpText)
         .alert("Tool in Use", isPresented: $showingDependencyAlert) {
             Button("OK", role: .cancel) { }
@@ -864,8 +867,8 @@ fileprivate struct ToolStateControl: View {
     private var stateBackground: Color {
         switch currentState {
         case .disabled: return Color.secondary.opacity(0.15)
-        case .ask: return Color.orange
-        case .auto: return Color.green
+        case .ask: return theme.warningColor
+        case .auto: return theme.successColor
         }
     }
 
@@ -935,12 +938,13 @@ private struct ToolSettingsPopover: View {
             isShowingPopover.toggle()
         } label: {
             Image(systemName: "gearshape")
-                .font(.system(size: 11))
+                .font(.system(.caption))
                 .foregroundColor(theme.secondaryText)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("Tool settings")
+        .accessibilityLabel("Tool settings")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
             popoverContent
                 .frame(width: 280)
@@ -968,7 +972,7 @@ private struct ToolSettingsPopover: View {
                     set: { configuredTools[idx].isFavorite = $0 }
                 )) {
                     Label("Favorite", systemImage: "star.fill")
-                        .font(.system(size: 13))
+                        .font(theme.fontSubheadline)
                 }
                 .toggleStyle(.switch)
                 .controlSize(.small)
@@ -985,7 +989,7 @@ private struct ToolSettingsPopover: View {
                         }
                     )) {
                         Label("Timeout", systemImage: "clock")
-                            .font(.system(size: 13))
+                            .font(theme.fontSubheadline)
                     }
                     .toggleStyle(.switch)
                     .controlSize(.small)
@@ -1001,13 +1005,13 @@ private struct ToolSettingsPopover: View {
                                 in: 5...300,
                                 step: 5
                             )
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .fixedSize()
                         }
 
                         VStack(alignment: .leading, spacing: 4) {
                             Text("On Timeout, Send:")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                                 .foregroundColor(theme.secondaryText)
 
                             TextField(
@@ -1019,12 +1023,12 @@ private struct ToolSettingsPopover: View {
                                 axis: .vertical
                             )
                             .lineLimit(2...4)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .textFieldStyle(.roundedBorder)
                         }
 
                         Text("Leave empty for default timeout error")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                             .foregroundColor(theme.secondaryText)
                     }
                 }
@@ -1068,15 +1072,15 @@ private struct AnnotationBadge: View {
     var body: some View {
         HStack(spacing: 2) {
             Image(systemName: symbol)
-                .font(.system(size: 8))
+                .font(.system(size: 8)) // Fixed size: intentional (badge icon)
             Text(text)
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 9, weight: .medium)) // Fixed size: intentional (badge/chip text)
         }
         .foregroundColor(color)
         .padding(.horizontal, 5)
         .padding(.vertical, 2)
         .background(color.opacity(0.1))
-        .cornerRadius(4)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
 

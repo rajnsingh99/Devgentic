@@ -97,6 +97,8 @@ final class MainViewRouter {
             navigate(to: .ollamaModelStore(profileID: profileID))
         case .mlx:
             navigate(to: .mlxModelStore(profileID: profileID, filterForTools: filterForTools))
+        case .whisper:
+            break // Whisper models are managed via Settings > Speech Recognition
         }
     }
 

@@ -8,7 +8,7 @@
 //import SwiftUI
 //
 //struct PythonInstallPromptView: View {
-//    @ObservedObject var viewModel: AgentOnboardingViewModel
+//    var viewModel: AgentOnboardingViewModel
 //    var isEmbedded: Bool = false // To control appearance if embedded vs sheet
 //
 //    @Environment(\.dismiss) var dismiss // Only relevant if used as a sheet

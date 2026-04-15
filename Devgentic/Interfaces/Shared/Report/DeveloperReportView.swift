@@ -29,7 +29,7 @@ struct DeveloperReportView: View {
             if viewModel.isLoading {
                 Spacer()
                 ProgressView("Loading trace data...")
-                    .font(.system(size: 13))
+                    .font(theme.fontSubheadline)
                     .foregroundStyle(theme.secondaryText)
                 Spacer()
             } else if let error = viewModel.error {
@@ -39,7 +39,7 @@ struct DeveloperReportView: View {
                         .font(.largeTitle)
                         .foregroundStyle(theme.errorColor)
                     Text(error)
-                        .font(.system(size: 13))
+                        .font(theme.fontSubheadline)
                         .foregroundStyle(theme.secondaryText)
                 }
                 Spacer()
@@ -96,7 +96,7 @@ struct DeveloperReportView: View {
 
                 Button(action: onExport) {
                     Label("Export", systemImage: "square.and.arrow.up")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -111,7 +111,7 @@ struct DeveloperReportView: View {
 
                 // Event count
                 Text("\(viewModel.visibleEvents.count) events")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced design
                     .foregroundStyle(theme.tertiaryText)
             }
         }
@@ -140,9 +140,9 @@ struct DeveloperReportView: View {
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: filter.icon)
-                    .font(.system(size: 9))
+                    .font(.system(size: 9)) // Fixed size: badge chip ≤9pt
                 Text(filter.rawValue)
-                    .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+                    .font(.system(.caption2, weight: isActive ? .semibold : .regular))
             }
             .foregroundStyle(chipColor)
             .padding(.horizontal, 8)
@@ -171,17 +171,17 @@ struct DeveloperReportView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundStyle(theme.errorColor)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text("\(errors.count) error\(errors.count == 1 ? "" : "s") detected")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundStyle(theme.errorColor)
 
                     if let first = errors.first, let content = first.content {
                         Text(content)
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                             .foregroundStyle(theme.secondaryText)
                             .lineLimit(1)
                     }
@@ -190,7 +190,7 @@ struct DeveloperReportView: View {
                 Spacer()
 
                 Text("Show")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(.caption2, weight: .medium))
                     .foregroundStyle(theme.errorColor)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
@@ -247,14 +247,14 @@ struct DeveloperReportView: View {
         VStack(spacing: 2) {
             HStack(spacing: 3) {
                 Image(systemName: icon)
-                    .font(.system(size: 9))
+                    .font(.system(size: 9)) // Fixed size: badge chip ≤9pt
                 Text(value)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced)) // Fixed size: monospaced design
             }
             .foregroundStyle(color ?? theme.primaryText)
 
             Text(label)
-                .font(.system(size: 9))
+                .font(.system(size: 9)) // Fixed size: badge chip ≤9pt
                 .foregroundStyle(theme.tertiaryText)
         }
         .frame(maxWidth: .infinity)

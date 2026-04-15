@@ -31,8 +31,12 @@ struct ChatHistoryView: View {
     // MARK: - Speech Service
     private var speechService = SpeechService.shared
 
+    // MARK: - Cached Reversed Messages
+    /// Caches the reversed message array to avoid O(n) recomputation on every body evaluation.
+    @State private var displayMessages: [ChatMessage] = []
+
     // MARK: - Search State
-    @StateObject private var searchViewModel = ChatSearchViewModel()
+    @State private var searchViewModel = ChatSearchViewModel()
 
     var body: some View {
         GeometryReader { geometry in
@@ -74,8 +78,9 @@ struct ChatHistoryView: View {
                                 }
 
                                 // Messages are stored [Newest -> Oldest], reversed for display [Oldest -> Newest].
-                                ForEach(chatHistoryViewModel.currentChatMessages.reversed()) { message in
-                                    let isLast = chatHistoryViewModel.currentChatMessages.first?.id == message.id
+                                // Uses cached displayMessages to avoid O(n) reversal on every body evaluation.
+                                ForEach(displayMessages) { message in
+                                    let isLast = message.id == chatHistoryViewModel.currentChatMessages.first?.id
 
                                     ChatBubbleView(message: message)
                                         .id(message.id)
@@ -96,14 +101,20 @@ struct ChatHistoryView: View {
                         .animation(.easeInOut(duration: 0.2), value: searchViewModel.isSearchActive)
                     }
                     .opacity(isContentReady ? 1 : 0)
-                    // MARK: - NEW MESSAGE SCROLLING (Animated)
+                    // MARK: - NEW MESSAGE SCROLLING (Animated) + Cache Update
+                    // Trigger on count changes (new/removed messages).
                     .onChange(of: chatHistoryViewModel.currentChatMessages.count) { _, newCount in
+                        // Update cached reversed array to avoid O(n) reversal on every body evaluation
+                        displayMessages = chatHistoryViewModel.currentChatMessages.reversed()
+                        // Rebuild search index when messages change
+                        searchViewModel.rebuildSearchIndex(from: chatHistoryViewModel.currentChatMessages)
+
                         if !chatHistoryViewModel.isLoadingPage && !chatHistoryViewModel.isInitiallyLoadingConversation {
                             let currentNewestID = chatHistoryViewModel.currentChatMessages.first?.id
 
                             if currentNewestID != lastNewestMessageID {
                                 lastNewestMessageID = currentNewestID
-                                DispatchQueue.main.async {
+                                Task { @MainActor in
                                     scrollToBottom(proxy: proxy, animated: true)
                                 }
                             }
@@ -115,6 +126,8 @@ struct ChatHistoryView: View {
                             // Hide content while messages are being loaded.
                             isContentReady = false
                         } else {
+                            // Refresh cached display order after initial load
+                            displayMessages = chatHistoryViewModel.currentChatMessages.reversed()
                             lastNewestMessageID = chatHistoryViewModel.currentChatMessages.first?.id
                             // Scroll while content is hidden (opacity 0) — invisible to the user.
                             var transaction = Transaction()
@@ -138,8 +151,8 @@ struct ChatHistoryView: View {
                             }
                         }
                     }
-                    // MARK: - Search Query Changes
-                    .onChange(of: searchViewModel.searchQuery) { _, _ in
+                    // MARK: - Search Query Changes (Debounced)
+                    .onChange(of: searchViewModel.debouncedQuery) { _, _ in
                         searchViewModel.performSearch(in: chatHistoryViewModel.currentChatMessages)
                         if let targetID = searchViewModel.currentMatchMessageID {
                             withAnimation(.easeInOut(duration: 0.3)) {
@@ -153,7 +166,7 @@ struct ChatHistoryView: View {
                         ChatSearchBar(searchViewModel: searchViewModel)
                             .padding(.top, 8)
                             .transition(.move(edge: .top).combined(with: .opacity))
-                            .zIndex(10)
+                            .zIndex(ViewZIndex.searchBar)
                     }
 
                     // MARK: - Scroll-to-Bottom FAB
@@ -168,7 +181,7 @@ struct ChatHistoryView: View {
                         .frame(maxWidth: .infinity)
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                         .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
-                        .zIndex(5)
+                        .zIndex(ViewZIndex.fab)
                     }
 
                     // MARK: - Speech Control Island (independent, always above FAB)
@@ -182,7 +195,7 @@ struct ChatHistoryView: View {
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                         .animation(.spring(response: 0.4, dampingFraction: 0.7), value: speechService.isActive)
                         .animation(.easeInOut(duration: 0.2), value: showScrollToBottom)
-                        .zIndex(6)
+                        .zIndex(ViewZIndex.speechControl)
                     }
 
                     // Loading Indicator
@@ -190,7 +203,10 @@ struct ChatHistoryView: View {
                         ProgressView()
                             .controlSize(.large)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(.ultraThinMaterial)
+                            // MARK: Liquid Glass
+                            .glassEffect(.regular, in: .rect(cornerRadius: 0))
+                            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+                            // .background(.ultraThinMaterial)
                             .transition(.opacity)
                             .accessibilityLabel("Loading conversation")
                     }
@@ -198,6 +214,7 @@ struct ChatHistoryView: View {
             }
             .onAppear {
                 lastNewestMessageID = chatHistoryViewModel.currentChatMessages.first?.id
+                displayMessages = chatHistoryViewModel.currentChatMessages.reversed()
             }
             // Stop speech when switching conversations
             .onChange(of: mainAppViewModel.selectedConversationID) { _, _ in
@@ -244,7 +261,7 @@ struct ChatHistoryView: View {
                 }
             }
         }
-        .environmentObject(searchViewModel)
+        .environment(searchViewModel)
     }
 
     // MARK: - Scroll Helper
@@ -270,7 +287,7 @@ struct ScrollToBottomFAB: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "arrow.down")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(.caption2, weight: .semibold))
                 .foregroundColor(theme.primaryText)
                 .frame(width: 27, height: 27)
                 .background(
@@ -322,12 +339,12 @@ private struct EmptyConversationPlaceholder: View {
 
             // Icon
             Image(systemName: isRemoteConversation ? "paperplane.circle" : "bubble.left.and.text.bubble.right")
-                .font(.system(size: 40, weight: .thin))
+                .font(.system(size: 40, weight: .thin)) // Fixed size: intentional (icon)
                 .foregroundStyle(theme.secondaryText.opacity(0.5))
 
             // Title
             Text(conversationTitle)
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(.title3, weight: .semibold))
                 .foregroundStyle(theme.primaryText.opacity(0.8))
 
             // Subtitle / guidance
@@ -335,7 +352,7 @@ private struct EmptyConversationPlaceholder: View {
                  ? "This conversation was started from Telegram.\nType here or reply from your phone."
                  : "Start the conversation by typing a message below."
             )
-            .font(.system(size: 13))
+            .font(theme.fontSubheadline)
             .foregroundStyle(theme.secondaryText.opacity(0.6))
             .multilineTextAlignment(.center)
             .lineSpacing(4)
@@ -358,12 +375,12 @@ private struct EmptyConversationPlaceholder: View {
     private func hintRow(icon: String, text: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(.caption, weight: .medium))
                 .foregroundStyle(theme.accentColor.opacity(0.6))
                 .frame(width: 16, alignment: .center)
 
             Text(text)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundStyle(theme.secondaryText.opacity(0.5))
         }
     }

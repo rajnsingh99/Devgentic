@@ -22,6 +22,10 @@ struct MainApplicationView: View {
     
     @State private var isSidebarVisible: Bool = true
     @State private var currentSidebarPaneWidth: CGFloat = 300
+    @State private var showModePicker: Bool = true
+    #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+    @State private var scrollDirectionMonitor: Any?
+    #endif
 
     private let activityBarWidth: CGFloat = 50
     private let sidebarGap: CGFloat = 12
@@ -34,7 +38,8 @@ struct MainApplicationView: View {
     // MARK: - Body
     var body: some View {
         ZStack(alignment: .leading) {
-            ChatGPTBackgroundView()
+            theme.primaryBackground
+                .edgesIgnoringSafeArea(.all)
             
             ZStack {
                 // LAYER 1: Chat — always alive, visibility toggled via opacity
@@ -47,6 +52,8 @@ struct MainApplicationView: View {
                     destinationView
                         .transition(.opacity)
                 }
+
+                // Floating mode switcher is an overlay on chatArea's input VStack
             }
             .padding(.leading, totalSidebarWidth)
             .frame(maxWidth: .infinity)
@@ -68,12 +75,17 @@ struct MainApplicationView: View {
             }
 
             Button(action: {
-                viewModel.startNewConversation()
-                 logger.debug("Triggered new conversation via Cmd+N.")
-                 if isSidebarVisible {
-                      isSidebarVisible = false
-                      logger.debug("Hid sidebar pane via Cmd+N.")
-                 }
+                if viewModel.interfaceMode == .workflow {
+                    viewModel.deselectConversationAndShowWelcome()
+                    logger.debug("Triggered new workflow (deselect) via Cmd+N.")
+                } else {
+                    viewModel.startNewConversation()
+                    logger.debug("Triggered new conversation via Cmd+N.")
+                }
+                if isSidebarVisible {
+                    isSidebarVisible = false
+                    logger.debug("Hid sidebar pane via Cmd+N.")
+                }
             }) { EmptyView() }
                 .hidden()
                 .keyboardShortcut("n", modifiers: .command)
@@ -84,20 +96,28 @@ struct MainApplicationView: View {
              if viewModel.selectedConversationID != nil && router.isShowingChat {
                  DispatchQueue.main.async { isInputFocused = true }
              }
+             #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+             setupScrollDirectionMonitor()
+             #endif
          }
-        .onChange(of: router.activeDestination) { newDestination in
+        .onDisappear {
+             #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+             teardownScrollDirectionMonitor()
+             #endif
+         }
+        .onChange(of: router.activeDestination) { _, newDestination in
             if newDestination == .chat && viewModel.selectedConversationID != nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             } else if newDestination != .chat {
                 isInputFocused = false
             }
         }
-        .onChange(of: chatHistoryViewModel.isSending) { isNowSending in
+        .onChange(of: chatHistoryViewModel.isSending) { _, isNowSending in
             if !isNowSending && router.isShowingChat && viewModel.selectedConversationID != nil {
                  DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { isInputFocused = true }
             }
         }
-        .onChange(of: viewModel.selectedConversationID) { newID in
+        .onChange(of: viewModel.selectedConversationID) { _, newID in
             if newID != nil {
                 if chatHistoryViewModel.isUserMessagesOnlyFilterActive {
                     chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
@@ -145,20 +165,38 @@ struct MainApplicationView: View {
     @ViewBuilder
     private var chatArea: some View {
         ZStack(alignment: .bottom) {
-            ChatHistoryView()
-                .environment(chatHistoryViewModel)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.bottom, 115)
-                .overlay {
-                    if viewModel.selectedConversationID == nil {
-                        WelcomeView()
-                    }
+            // Content area: switches based on interface mode
+            switch viewModel.interfaceMode {
+            case .workflow:
+                if let profileID = viewModel.backendConfiguration.selectedProfileID {
+                    WorkflowDedicatedView(
+                        workflowProfileID: profileID,
+                        conversationID: viewModel.selectedConversationID
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.bottom, 115)
+                } else {
+                    workflowEmptyState
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.bottom, 115)
                 }
 
+            case .chat:
+                ChatHistoryView()
+                    .environment(chatHistoryViewModel)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.bottom, 115)
+                    .overlay {
+                        if viewModel.selectedConversationID == nil {
+                            WelcomeView()
+                        }
+                    }
+            }
+
+            // Input area container
             VStack(spacing: 0) {
-                // Wrapper observes the ChatMessage directly so banner reacts
-                // to pendingClarification/pendingToolConfirmation changes.
-                if let streamingMsg = viewModel.streamingMessage {
+                // HITL banner — only for chat mode (workflow uses WorkflowInteractionPanel)
+                if viewModel.interfaceMode == .chat, let streamingMsg = viewModel.streamingMessage {
                     StreamingMessageBannerWrapper(message: streamingMsg)
                         .environment(viewModel)
                 }
@@ -178,6 +216,129 @@ struct MainApplicationView: View {
                 .padding(.top, 4)
                 .padding(.bottom, 15)
                 .shadow(color: SwiftUI.Color.black.opacity(0.2), radius: 10, x: 0, y: 5)
+            }
+            // Floating mode picker — overlays above the input area
+            .overlay(alignment: .top) {
+                InterfaceModePicker()
+                    .offset(y: -38)
+                    .opacity(showModePicker ? 1 : 0)
+                    .scaleEffect(showModePicker ? 1 : 0.9)
+                    .allowsHitTesting(showModePicker)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.75), value: showModePicker)
+            }
+        }
+        .onChange(of: viewModel.interfaceMode) { _, _ in
+            showModePicker = true
+        }
+        .onChange(of: viewModel.selectedConversationID) { _, _ in
+            showModePicker = true
+        }
+    }
+
+    private var workflowEmptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 40))
+                .foregroundColor(.purple.opacity(0.4))
+            Text("Select a workflow")
+                .font(theme.fontSubheadline)
+                .foregroundColor(theme.secondaryText)
+            Text("Choose a workflow profile from the picker below.")
+                .font(theme.fontCaption)
+                .foregroundColor(theme.secondaryText)
+        }
+    }
+
+    // MARK: - Scroll Direction Monitor
+
+    #if canImport(AppKit) && !targetEnvironment(macCatalyst)
+    private func setupScrollDirectionMonitor() {
+        scrollDirectionMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [self] event in
+            let deltaY = event.scrollingDeltaY
+            // Threshold avoids reacting to tiny/incidental scrolls
+            guard abs(deltaY) > 3 else { return event }
+
+            // deltaY > 0 → content scrolls toward top (reading older) → hide picker
+            // deltaY < 0 → content scrolls toward bottom (back to input) → show picker
+            let shouldShow = deltaY < 0
+            if shouldShow != showModePicker {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    showModePicker = shouldShow
+                }
+            }
+            return event
+        }
+    }
+
+    private func teardownScrollDirectionMonitor() {
+        if let monitor = scrollDirectionMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollDirectionMonitor = nil
+        }
+    }
+    #endif
+}
+
+// MARK: - Interface Mode Picker (Liquid Glass)
+
+/// Floating Chat/Workflow mode switcher using macOS 26+ Liquid Glass.
+/// Uses `matchedGeometryEffect` for a sliding active-indicator that
+/// glides between tabs on selection change.
+private struct InterfaceModePicker: View {
+    @Environment(MainApplicationViewModel.self) private var viewModel
+    @Namespace private var modeAnimation
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(MainApplicationViewModel.InterfaceMode.allCases, id: \.self) { mode in
+                ModeTabButton(mode: mode, namespace: modeAnimation)
+            }
+        }
+        .padding(3)
+        .glassEffect(.regular, in: .capsule)
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: viewModel.interfaceMode)
+    }
+}
+
+/// Individual tab button within the mode picker.
+/// Extracted as a separate struct to hold its own @State for hover tracking.
+/// The active tab's background capsule is animated via `matchedGeometryEffect`.
+private struct ModeTabButton: View {
+    let mode: MainApplicationViewModel.InterfaceMode
+    var namespace: Namespace.ID
+    @Environment(MainApplicationViewModel.self) private var viewModel
+    @State private var isHovering = false
+
+    private var isActive: Bool { viewModel.interfaceMode == mode }
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                viewModel.switchInterfaceMode(to: mode)
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: mode.icon)
+                    .font(.system(size: 11, weight: .medium))
+                Text(mode.rawValue)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundColor(isActive ? .primary : .secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .opacity(isActive ? 1.0 : (isHovering ? 0.8 : 0.6))
+            .background {
+                if isActive {
+                    Capsule()
+                        .fill(.primary.opacity(0.1))
+                        .matchedGeometryEffect(id: "activeModeIndicator", in: namespace)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
             }
         }
     }
@@ -204,3 +365,4 @@ private struct StreamingMessageBannerWrapper: View {
         .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingInteraction != nil)
     }
 }
+

@@ -65,7 +65,7 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
     for child in document.children {
         // Format the entire block back to string for simple text nodes
         let text = child.format().trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         // --- Custom File Markers ---
         if let match = text.firstMatch(of: /---\s*Start of file:\s*(.*?)\s*---/) {
             pendingFileName = String(match.1)
@@ -75,7 +75,7 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
             pendingFileName = nil
             continue
         }
-        
+
         // --- Image parsing ---
         // Standalone images are often wrapped inside a single Paragraph node
         if let paragraph = child as? Paragraph,
@@ -84,7 +84,7 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
             appendBlock(.image(url: image.source ?? "", altText: image.plainText))
             continue
         }
-        
+
         // --- Standard AST Node Mapping ---
         if let paragraph = child as? Paragraph {
             appendBlock(.paragraph(preprocessMarkdownText(text)))
@@ -129,6 +129,13 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
             appendBlock(.paragraph(preprocessMarkdownText(text)))
         }
     }
-    
+
+    // If the AST produced zero blocks but the input was non-empty, the parser silently
+    // dropped everything (e.g., deeply malformed markdown). Fall back to rendering the
+    // raw text as a paragraph so the user sees *something* instead of a blank bubble.
+    if blocks.isEmpty && !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        blocks.append(ContentBlock(id: "block-0", type: .paragraph(markdown)))
+    }
+
     return blocks
 }

@@ -47,7 +47,8 @@ struct ConversationExporter {
                     let registry = DocumentExtractionRegistry.shared
                     for file in files {
                         if registry.canExtract(from: file.url) {
-                            if let result = try? await registry.extract(from: file.url, maxSize: 10_000) {
+                            do {
+                                let result = try await registry.extract(from: file.url, maxSize: 10_000)
                                 lines.append("<details>")
                                 lines.append("<summary>Content of \(file.name)</summary>")
                                 lines.append("")
@@ -55,6 +56,10 @@ struct ConversationExporter {
                                 lines.append(result.text)
                                 lines.append("```")
                                 lines.append("</details>")
+                                lines.append("")
+                            } catch {
+                                logger.warning("Failed to extract content from \(file.name) during export: \(error.localizedDescription)")
+                                lines.append("> ⚠️ Could not extract content from `\(file.name)`")
                                 lines.append("")
                             }
                         }
@@ -83,6 +88,9 @@ struct ConversationExporter {
 
             case .mediaArtifact(let artifact):
                 lines.append("*[Media: \(artifact.label ?? artifact.kind.rawValue)]*")
+
+            case .checkpoint(let summary):
+                lines.append("---\n**History Checkpoint**\n\(summary)\n---")
             }
 
             lines.append("")
@@ -111,6 +119,14 @@ struct ConversationExporter {
                 logger.info("Exported conversation to \(url.path)")
             } catch {
                 logger.error("Failed to export conversation: \(error.localizedDescription)")
+                Task { @MainActor in
+                    let alert = NSAlert()
+                    alert.messageText = "Export Failed"
+                    alert.informativeText = "Could not save the conversation: \(error.localizedDescription)"
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
             }
         }
     }

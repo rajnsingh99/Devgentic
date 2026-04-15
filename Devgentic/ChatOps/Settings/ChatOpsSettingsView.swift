@@ -51,10 +51,10 @@ struct ChatOpsSettingsView: View {
     @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
 
-    @StateObject private var config = ChatOpsConfigManager.shared
-    @StateObject private var pairingService = ChatOpsPairingService()
-    @StateObject private var discordPairingService = DiscordPairingService()
-    @StateObject private var slackPairingService = SlackPairingService()
+    @State private var config = ChatOpsConfigManager.shared
+    @State private var pairingService = ChatOpsPairingService()
+    @State private var discordPairingService = DiscordPairingService()
+    @State private var slackPairingService = SlackPairingService()
 
     @State private var selectedPlatform: ChatOpsPlatform = .telegram
     // Telegram state
@@ -177,9 +177,9 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                             Text("@\(username)")
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
                                 .foregroundColor(theme.primaryText)
                         }
                     }
@@ -191,7 +191,7 @@ struct ChatOpsSettingsView: View {
                 HStack(spacing: 8) {
                     SecureField("Bot Token", text: $tokenInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
                         .padding(10)
                         .background(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -218,15 +218,14 @@ struct ChatOpsSettingsView: View {
                     .controlSize(.small)
                     .disabled(tokenInput.isEmpty || isValidating || config.connectionState.isConnected)
                 }
-                .padding(16)
 
                 if let error = validationError {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                             .foregroundColor(theme.warningColor)
                         Text(error)
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                             .foregroundColor(theme.warningColor)
                     }
                     .padding(.horizontal, 16)
@@ -262,20 +261,19 @@ struct ChatOpsSettingsView: View {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Validating token...")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
                     }
-                    .padding(16)
 
                 case .awaitingPairing(let pin):
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Send this message to your bot on Telegram:")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
 
                         HStack(spacing: 10) {
                             Text("PAIR \(pin)")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced))
+                                .font(.system(size: 20, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
                                 .foregroundColor(theme.accentColor)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
@@ -293,7 +291,7 @@ struct ChatOpsSettingsView: View {
                                 NSPasteboard.general.setString("PAIR \(pin)", forType: .string)
                             } label: {
                                 Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 12))
+                                    .font(.system(.caption))
                             }
                             .buttonStyle(.borderless)
                             .help("Copy to clipboard")
@@ -301,7 +299,7 @@ struct ChatOpsSettingsView: View {
 
                         HStack(spacing: 12) {
                             Text("Waiting for pairing... (expires in 5 minutes)")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
 
                             Button("Cancel") {
@@ -312,7 +310,6 @@ struct ChatOpsSettingsView: View {
                             .controlSize(.small)
                         }
                     }
-                    .padding(16)
 
                 case .connected(let chatID):
                     SettingsRow(
@@ -323,7 +320,7 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Circle().fill(.green).frame(width: 7, height: 7)
                             Text("Active")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                                 .foregroundColor(.green)
                         }
                     }
@@ -332,12 +329,11 @@ struct ChatOpsSettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(theme.warningColor)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                         Text(message)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.warningColor)
                     }
-                    .padding(16)
                 }
             }
         }
@@ -349,7 +345,7 @@ struct ChatOpsSettingsView: View {
         SettingsCard(title: "Security", icon: "lock.shield.fill", theme: theme) {
             SettingsRow(
                 title: "Security Tier",
-                description: config.securityTier.description,
+                description: LocalizedStringKey(config.securityTier.description),
                 theme: theme
             ) {
                 Picker("", selection: Binding(
@@ -405,7 +401,7 @@ struct ChatOpsSettingsView: View {
                             .fill(statusColor)
                             .frame(width: 7, height: 7)
                         Text(config.connectionState.statusText)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundColor(theme.primaryText)
                     }
                 }
@@ -422,7 +418,6 @@ struct ChatOpsSettingsView: View {
                             }
                         }
                     }
-                    .padding(16)
                 }
             }
         }
@@ -484,9 +479,9 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                             Text(username)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
                                 .foregroundColor(theme.primaryText)
                         }
                     }
@@ -497,7 +492,7 @@ struct ChatOpsSettingsView: View {
                 HStack(spacing: 8) {
                     SecureField("Bot Token", text: $discordTokenInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
                         .padding(10)
                         .background(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -524,15 +519,14 @@ struct ChatOpsSettingsView: View {
                     .controlSize(.small)
                     .disabled(discordTokenInput.isEmpty || isDiscordValidating || config.discordConnectionState.isConnected)
                 }
-                .padding(16)
 
                 if let error = discordValidationError {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                             .foregroundColor(theme.warningColor)
                         Text(error)
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                             .foregroundColor(theme.warningColor)
                     }
                     .padding(.horizontal, 16)
@@ -544,13 +538,12 @@ struct ChatOpsSettingsView: View {
                 // Intent reminder
                 HStack(spacing: 6) {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.secondaryText)
                     Text("Enable the MESSAGE CONTENT privileged intent in your bot's settings on the Discord Developer Portal.")
-                        .font(.system(size: 11))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                 }
-                .padding(16)
             }
         }
     }
@@ -581,20 +574,19 @@ struct ChatOpsSettingsView: View {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Validating token...")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
                     }
-                    .padding(16)
 
                 case .awaitingPairing(let pin):
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Type this in any channel where your bot is present:")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
 
                         HStack(spacing: 10) {
                             Text("PAIR \(pin)")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced))
+                                .font(.system(size: 20, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
                                 .foregroundColor(ChatOpsPlatform.discord.color)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
@@ -612,7 +604,7 @@ struct ChatOpsSettingsView: View {
                                 NSPasteboard.general.setString("PAIR \(pin)", forType: .string)
                             } label: {
                                 Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 12))
+                                    .font(.system(.caption))
                             }
                             .buttonStyle(.borderless)
                             .help("Copy to clipboard")
@@ -620,7 +612,7 @@ struct ChatOpsSettingsView: View {
 
                         HStack(spacing: 12) {
                             Text("Waiting for pairing... (expires in 5 minutes)")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
 
                             Button("Cancel") {
@@ -631,7 +623,6 @@ struct ChatOpsSettingsView: View {
                             .controlSize(.small)
                         }
                     }
-                    .padding(16)
 
                 case .connected:
                     SettingsRow(
@@ -642,7 +633,7 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Circle().fill(.green).frame(width: 7, height: 7)
                             Text("Active")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                                 .foregroundColor(.green)
                         }
                     }
@@ -651,12 +642,11 @@ struct ChatOpsSettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(theme.warningColor)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                         Text(message)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.warningColor)
                     }
-                    .padding(16)
                 }
             }
         }
@@ -701,7 +691,7 @@ struct ChatOpsSettingsView: View {
                             .fill(discordStatusColor)
                             .frame(width: 7, height: 7)
                         Text(config.discordConnectionState.statusText)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundColor(theme.primaryText)
                     }
                 }
@@ -718,7 +708,6 @@ struct ChatOpsSettingsView: View {
                             }
                         }
                     }
-                    .padding(16)
                 }
             }
         }
@@ -779,9 +768,9 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .foregroundColor(.green)
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                             Text(username)
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .font(.system(size: 12, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
                                 .foregroundColor(theme.primaryText)
                         }
                     }
@@ -792,7 +781,7 @@ struct ChatOpsSettingsView: View {
                 HStack(spacing: 8) {
                     SecureField("xoxb-...", text: $slackBotTokenInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
                         .padding(10)
                         .background(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -804,7 +793,6 @@ struct ChatOpsSettingsView: View {
                         )
                         .disabled(config.slackConnectionState.isConnected)
                 }
-                .padding(16)
             }
         }
     }
@@ -827,7 +815,7 @@ struct ChatOpsSettingsView: View {
                 HStack(spacing: 8) {
                     SecureField("xapp-...", text: $slackAppTokenInput)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced design
                         .padding(10)
                         .background(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -854,15 +842,14 @@ struct ChatOpsSettingsView: View {
                     .controlSize(.small)
                     .disabled(slackBotTokenInput.isEmpty || slackAppTokenInput.isEmpty || isSlackValidating || config.slackConnectionState.isConnected)
                 }
-                .padding(16)
 
                 if let error = slackValidationError {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
+                            .font(.system(.caption2))
                             .foregroundColor(theme.warningColor)
                         Text(error)
-                            .font(.system(size: 11))
+                            .font(.system(.caption))
                             .foregroundColor(theme.warningColor)
                     }
                     .padding(.horizontal, 16)
@@ -899,20 +886,19 @@ struct ChatOpsSettingsView: View {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text("Validating tokens...")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
                     }
-                    .padding(16)
 
                 case .awaitingPairing(let pin):
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Type this in any Slack channel where your bot is present:")
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.secondaryText)
 
                         HStack(spacing: 10) {
                             Text("PAIR \(pin)")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced))
+                                .font(.system(size: 20, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
                                 .foregroundColor(ChatOpsPlatform.slack.color)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
@@ -930,7 +916,7 @@ struct ChatOpsSettingsView: View {
                                 NSPasteboard.general.setString("PAIR \(pin)", forType: .string)
                             } label: {
                                 Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 12))
+                                    .font(.system(.caption))
                             }
                             .buttonStyle(.borderless)
                             .help("Copy to clipboard")
@@ -938,7 +924,7 @@ struct ChatOpsSettingsView: View {
 
                         HStack(spacing: 12) {
                             Text("Waiting for pairing... (expires in 5 minutes)")
-                                .font(.system(size: 11))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
 
                             Button("Cancel") {
@@ -949,7 +935,6 @@ struct ChatOpsSettingsView: View {
                             .controlSize(.small)
                         }
                     }
-                    .padding(16)
 
                 case .connected:
                     SettingsRow(
@@ -960,7 +945,7 @@ struct ChatOpsSettingsView: View {
                         HStack(spacing: 4) {
                             Circle().fill(.green).frame(width: 7, height: 7)
                             Text("Active")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(.caption, weight: .medium))
                                 .foregroundColor(.green)
                         }
                     }
@@ -969,12 +954,11 @@ struct ChatOpsSettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(theme.warningColor)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                         Text(message)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.warningColor)
                     }
-                    .padding(16)
                 }
             }
         }
@@ -1019,7 +1003,7 @@ struct ChatOpsSettingsView: View {
                             .fill(slackStatusColor)
                             .frame(width: 7, height: 7)
                         Text(config.slackConnectionState.statusText)
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundColor(theme.primaryText)
                     }
                 }
@@ -1036,7 +1020,6 @@ struct ChatOpsSettingsView: View {
                             }
                         }
                     }
-                    .padding(16)
                 }
             }
         }
@@ -1090,7 +1073,7 @@ private struct PlatformTab: View {
             HStack(spacing: 8) {
                 ZStack(alignment: .topTrailing) {
                     Image(systemName: platform.icon)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(theme.fontBody.weight(.medium))
                         .foregroundStyle(isSelected ? platform.color : theme.secondaryText.opacity(0.5))
 
                     if isConnected {
@@ -1102,12 +1085,12 @@ private struct PlatformTab: View {
                 }
 
                 Text(platform.rawValue)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .font(theme.fontSubheadline.weight(isSelected ? .semibold : .regular))
                     .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
 
                 if !platform.isAvailable {
                     Text("Soon")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 9, weight: .bold)) // Fixed size: badge chip ≤9pt
                         .foregroundColor(.white)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
@@ -1146,9 +1129,9 @@ private struct DisconnectButton: View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: "xmark.circle")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                 Text("Disconnect")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
             }
             .foregroundColor(isHovering ? .red : .red.opacity(0.65))
             .padding(.horizontal, 10)

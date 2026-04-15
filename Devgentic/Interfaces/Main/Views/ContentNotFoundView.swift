@@ -25,18 +25,18 @@ struct ContentNotFoundView: View {
                     .frame(width: 80, height: 80)
 
                 Image(systemName: icon)
-                    .font(.system(size: 32))
+                    .font(.system(size: 32)) // Fixed size: intentional (icon)
                     .foregroundColor(theme.secondaryText.opacity(0.6))
             }
 
             VStack(spacing: 6) {
                 Text(title)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(.system(.title3, weight: .semibold))
                     .foregroundColor(theme.primaryText)
 
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 13))
+                        .font(theme.fontSubheadline)
                         .foregroundColor(theme.secondaryText)
                         .multilineTextAlignment(.center)
                 }

@@ -7,212 +7,136 @@
 
 import SwiftUI
 
+// MARK: - Cloud Model Picker (Shared)
+
+/// Shared implementation for cloud provider model pickers (Gemini, Anthropic, OpenAI).
+/// Uses a fetch closure to abstract the service call and a 15-second timeout to prevent hangs.
+private struct CloudModelPickerView: View {
+    @Binding var selectedModel: String
+    let apiKey: String
+    let fetchClosure: (String) async throws -> [String]
+    let fetchOnAppear: Bool
+
+    @State private var models: [String] = []
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String? = nil
+    @State private var fetchTask: Task<Void, Never>?
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack {
+            if isLoading {
+                ProgressView().controlSize(.small)
+                Text("Verifying key...").foregroundColor(theme.secondaryText)
+            } else if let errorMessage = errorMessage {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(theme.errorColor).accessibilityHidden(true)
+                Text(errorMessage).foregroundColor(theme.secondaryText).font(theme.fontCaption)
+            } else if models.isEmpty {
+                Text("Enter a valid API key to see models.").foregroundColor(theme.secondaryText).font(theme.fontCaption)
+            } else {
+                Picker("Available Models", selection: $selectedModel) {
+                    ForEach(models, id: \.self) { modelName in
+                        Text(modelName).tag(modelName)
+                    }
+                }
+            }
+        }
+        .task {
+            if fetchOnAppear, !apiKey.isEmpty, models.isEmpty {
+                await fetchModels()
+            }
+        }
+        .onChange(of: apiKey) { _, _ in
+            fetchTask?.cancel()
+            fetchTask = Task {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                await fetchModels()
+            }
+        }
+        .onDisappear { fetchTask?.cancel() }
+    }
+
+    private func fetchModels() async {
+        guard !apiKey.isEmpty else {
+            self.models = []
+            self.errorMessage = nil
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let fetchedModels = try await withThrowingTaskGroup(of: [String].self) { group in
+                group.addTask { try await fetchClosure(apiKey) }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(15))
+                    throw URLError(.timedOut)
+                }
+                guard let result = try await group.next() else { throw URLError(.timedOut) }
+                group.cancelAll()
+                return result
+            }
+            await MainActor.run {
+                self.models = fetchedModels
+                if !fetchedModels.contains(selectedModel), let firstModel = fetchedModels.first {
+                    self.selectedModel = firstModel
+                }
+                self.isLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                self.models = []
+                self.errorMessage = error is URLError && (error as? URLError)?.code == .timedOut
+                    ? "Request timed out. Check your network connection."
+                    : error.localizedDescription
+                self.isLoading = false
+            }
+        }
+    }
+}
+
+// MARK: - Cloud Provider Wrappers
+
 struct GeminiModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    
-    @State private var models: [String] = []
-    @State private var isLoading: Bool = false
-    @State private var errorMessage: String? = nil
-    
+
     var body: some View {
-        HStack {
-            if isLoading {
-                ProgressView().controlSize(.small)
-                Text("Verifying key...").foregroundColor(.secondary)
-            } else if let errorMessage = errorMessage {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
-                Text(errorMessage).foregroundColor(.secondary).font(.caption)
-            } else if models.isEmpty {
-                Text("Enter a valid API key to see models.").foregroundColor(.secondary).font(.caption)
-            } else {
-                Picker("Available Models", selection: $selectedModel) {
-                    ForEach(models, id: \.self) { modelName in
-                        Text(modelName).tag(modelName)
-                    }
-                }
-            }
-        }
-        .onChange(of: apiKey) { _, _ in
-             // Debounce the API call slightly to avoid firing on every keystroke
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
-                await fetchModels()
-            }
-        }
-    }
-    
-    private func fetchModels() async {
-        guard !apiKey.isEmpty else {
-            self.models = []
-            self.errorMessage = nil
-            return
-        }
-        
-        isLoading = true
-        errorMessage = nil
-        
-        do {
-            let fetchedModels = try await GeminiService().verifyAndFetchModels(apiKey: apiKey)
-            await MainActor.run {
-                self.models = fetchedModels
-                if !fetchedModels.contains(selectedModel), let firstModel = fetchedModels.first {
-                    self.selectedModel = firstModel
-                }
-                self.isLoading = false
-            }
-        } catch {
-            await MainActor.run {
-                self.models = []
-                self.errorMessage = error.localizedDescription
-                self.isLoading = false
-            }
-        }
+        CloudModelPickerView(
+            selectedModel: $selectedModel,
+            apiKey: apiKey,
+            fetchClosure: { key in try await GeminiService().verifyAndFetchModels(apiKey: key) },
+            fetchOnAppear: false
+        )
     }
 }
 
-
-// MARK: - Anthropic Model Picker View
 struct AnthropicModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    
-    @State private var models: [String] = []
-    @State private var isLoading: Bool = false
-    @State private var errorMessage: String? = nil
-    
+
     var body: some View {
-        HStack {
-            if isLoading {
-                ProgressView().controlSize(.small)
-                Text("Verifying key...").foregroundColor(.secondary)
-            } else if let errorMessage = errorMessage {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
-                Text(errorMessage).foregroundColor(.secondary).font(.caption)
-            } else if models.isEmpty {
-                Text("Enter a valid API key to see models.").foregroundColor(.secondary).font(.caption)
-            } else {
-                Picker("Available Models", selection: $selectedModel) {
-                    ForEach(models, id: \.self) { modelName in
-                        Text(modelName).tag(modelName)
-                    }
-                }
-            }
-        }
-        .onAppear {
-            if !apiKey.isEmpty && models.isEmpty {
-                Task {
-                    await fetchModels()
-                }
-            }
-        }
-        .onChange(of: apiKey) { _, _ in
-             // Debounce the API call slightly to avoid firing on every keystroke
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
-                await fetchModels()
-            }
-        }
-    }
-    
-    private func fetchModels() async {
-        guard !apiKey.isEmpty else {
-            self.models = []
-            self.errorMessage = nil
-            return
-        }
-        
-        isLoading = true
-        errorMessage = nil
-        
-        do {
-            let fetchedModels = try await AnthropicService().verifyAndFetchModels(apiKey: apiKey)
-            await MainActor.run {
-                self.models = fetchedModels
-                if !fetchedModels.contains(selectedModel), let firstModel = fetchedModels.first {
-                    self.selectedModel = firstModel
-                }
-                self.isLoading = false
-            }
-        } catch {
-            await MainActor.run {
-                self.models = []
-                self.errorMessage = error.localizedDescription
-                self.isLoading = false
-            }
-        }
+        CloudModelPickerView(
+            selectedModel: $selectedModel,
+            apiKey: apiKey,
+            fetchClosure: { key in try await AnthropicService().verifyAndFetchModels(apiKey: key) },
+            fetchOnAppear: true
+        )
     }
 }
 
-// MARK: - OpenAI Model Picker View
 struct OpenAIModelPickerView: View {
     @Binding var selectedModel: String
     let apiKey: String
-    
-    @State private var models: [String] = []
-    @State private var isLoading: Bool = false
-    @State private var errorMessage: String? = nil
-    
+
     var body: some View {
-        HStack {
-            if isLoading {
-                ProgressView().controlSize(.small)
-                Text("Verifying key...").foregroundColor(.secondary)
-            } else if let errorMessage = errorMessage {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
-                Text(errorMessage).foregroundColor(.secondary).font(.caption)
-            } else if models.isEmpty {
-                Text("Enter a valid API key to see models.").foregroundColor(.secondary).font(.caption)
-            } else {
-                Picker("Available Models", selection: $selectedModel) {
-                    ForEach(models, id: \.self) { modelName in
-                        Text(modelName).tag(modelName)
-                    }
-                }
-            }
-        }
-        .onAppear {
-            if !apiKey.isEmpty && models.isEmpty {
-                Task {
-                    await fetchModels()
-                }
-            }
-        }
-        .onChange(of: apiKey) { _, _ in
-             // Debounce the API call slightly to avoid firing on every keystroke
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
-                await fetchModels()
-            }
-        }
-    }
-    
-    private func fetchModels() async {
-        guard !apiKey.isEmpty else {
-            self.models = []
-            self.errorMessage = nil
-            return
-        }
-        
-        isLoading = true
-        errorMessage = nil
-        
-        do {
-            let fetchedModels = try await OpenAIService().verifyAndFetchModels(apiKey: apiKey)
-            await MainActor.run {
-                self.models = fetchedModels
-                if !fetchedModels.contains(selectedModel), let firstModel = fetchedModels.first {
-                    self.selectedModel = firstModel
-                }
-                self.isLoading = false
-            }
-        } catch {
-            await MainActor.run {
-                self.models = []
-                self.errorMessage = error.localizedDescription
-                self.isLoading = false
-            }
-        }
+        CloudModelPickerView(
+            selectedModel: $selectedModel,
+            apiKey: apiKey,
+            fetchClosure: { key in try await OpenAIService().verifyAndFetchModels(apiKey: key) },
+            fetchOnAppear: true
+        )
     }
 }
 
@@ -231,6 +155,7 @@ struct OllamaModelPickerView: View {
     var filterForTools: Bool = false
 
     @Environment(MainViewRouter.self) private var router
+    @Environment(\.appTheme) private var theme
     @State private var models: [String] = []
     @State private var loadedLocalModels: [LocalModel] = [] // Cache to look up capabilities
     @State private var isLoading: Bool = false
@@ -254,17 +179,18 @@ struct OllamaModelPickerView: View {
                     ProgressView()
                         .controlSize(.small)
                     Text("Loading models...")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(theme.secondaryText)
                 } else if let errorMessage = errorMessage {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
+                        .foregroundColor(theme.errorColor)
+                        .accessibilityHidden(true)
                     Text(errorMessage)
-                        .foregroundColor(.secondary)
-                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                        .font(theme.fontCaption)
                 } else if loadedLocalModels.isEmpty {
                     Text("No models found.")
-                        .foregroundColor(.secondary)
-                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                        .font(theme.fontCaption)
                 } else {
                     let visibleModels = filterForTools
                         ? loadedLocalModels.filter { $0.cognitiveCapability != .none }
@@ -272,8 +198,8 @@ struct OllamaModelPickerView: View {
 
                     if visibleModels.isEmpty && filterForTools {
                         Text("No tool-capable models found.")
-                            .foregroundColor(.orange)
-                            .font(.caption)
+                            .foregroundColor(theme.warningColor)
+                            .font(theme.fontCaption)
                     } else {
                         Picker("Available Models", selection: $selectedModel) {
                             ForEach(visibleModels, id: \.name) { model in
@@ -366,9 +292,10 @@ struct OllamaModelPickerView: View {
                         if !fetchedNames.contains(selectedModel) || selectedModel.isEmpty {
                             if filterForTools {
                                 // Find the first model that actually supports Agent tools
-                                self.selectedModel = sortedModels.first(where: { $0.cognitiveCapability != .none })?.name ?? fetchedNames.first!
+                                self.selectedModel = sortedModels.first(where: { $0.cognitiveCapability != .none })?.name
+                                    ?? fetchedNames.first ?? ""
                             } else {
-                                self.selectedModel = fetchedNames.first!
+                                self.selectedModel = fetchedNames.first ?? ""
                             }
                         }
                     } else if self.errorMessage == nil {

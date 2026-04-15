@@ -7,35 +7,37 @@
 
 import Foundation
 import SwiftUI
-import Combine
 
-@MainActor
-class OllamaModelStoreViewModel: ObservableObject {
-    
+@Observable @MainActor
+class OllamaModelStoreViewModel {
+
     // MARK: - Inputs
-    @Published var searchText: String = ""
-    @Published var sortOption: SortOption = .name
-    
+    var searchText: String = "" {
+        didSet { applyFilterAndSort(models: service.localModels, query: searchText, sort: sortOption) }
+    }
+    var sortOption: SortOption = .name {
+        didSet { applyFilterAndSort(models: service.localModels, query: searchText, sort: sortOption) }
+    }
+
     // MARK: - Outputs
-    @Published var displayedModels: [LocalModel] = []
-    @Published var isLoading: Bool = false
-    
+    var displayedModels: [LocalModel] = []
+    var isLoading: Bool = false
+
     // Download State
-    @Published var isDownloading: Bool = false
-    @Published var downloadProgress: Double = 0.0
-    @Published var currentDownloadName: String = ""
-    @Published var downloadErrorMessage: String? = nil
-    
+    var isDownloading: Bool = false
+    var downloadProgress: Double = 0.0
+    var currentDownloadName: String = ""
+    var downloadErrorMessage: String? = nil
+
     // MARK: - Dependencies
-    private let service = OllamaService.shared
-    private var cancellables = Set<AnyCancellable>()
-    
+    @ObservationIgnored private let service = OllamaService.shared
+
     enum SortOption: String, CaseIterable, Identifiable {
         case name = "Name"
         case size = "Size"
-        
+
         var id: String { rawValue }
-        
+
         var icon: String {
             switch self {
             case .name: return "textformat"
@@ -43,31 +45,44 @@ class OllamaModelStoreViewModel: ObservableObject {
             }
         }
     }
-    
+
+    @ObservationIgnored private var isObserving = true
+
     init() {
         setupBindings()
         refresh()
     }
-    
+
+    deinit {
+        isObserving = false
+    }
+
     private func setupBindings() {
-        // Handle Filtering & Sorting
-        Publishers.CombineLatest3(
-            service.$localModels,
-            $searchText,
-            $sortOption
-        )
-        .receive(on: RunLoop.main)
-        .sink { [weak self] localModels, query, sort in
-            self?.applyFilterAndSort(models: localModels, query: query, sort: sort)
+        observeOllamaServiceChanges()
+    }
+
+    /// Bridges OllamaService (@Observable) state via withObservationTracking.
+    private func observeOllamaServiceChanges() {
+        guard isObserving else { return }
+        withObservationTracking {
+            _ = service.localModels
+            _ = service.isLoadingModels
+            _ = service.isPullingModel
+            _ = service.pullProgress
+            _ = service.modelToPull
+            _ = service.modelPullError
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self, self.isObserving else { return }
+                self.applyFilterAndSort(models: self.service.localModels, query: self.searchText, sort: self.sortOption)
+                self.isLoading = self.service.isLoadingModels
+                self.isDownloading = self.service.isPullingModel
+                self.downloadProgress = self.service.pullProgress
+                self.currentDownloadName = self.service.modelToPull
+                self.downloadErrorMessage = self.service.modelPullError
+                self.observeOllamaServiceChanges()
+            }
         }
-        .store(in: &cancellables)
-        
-        // Mirror Service State
-        service.$isLoadingModels.assign(to: &$isLoading)
-        service.$isPullingModel.assign(to: &$isDownloading)
-        service.$pullProgress.assign(to: &$downloadProgress)
-        service.$modelToPull.assign(to: &$currentDownloadName)
-        service.$modelPullError.assign(to: &$downloadErrorMessage)
     }
     
     private func applyFilterAndSort(models: [LocalModel], query: String, sort: SortOption) {
@@ -81,10 +96,12 @@ class OllamaModelStoreViewModel: ObservableObject {
         case .name:
             filtered.sort { $0.name < $1.name }
         case .size:
-            // LocalModel doesn't explicitly store size in the current struct, 
-            // but we could parse it from details if available in the future.
-            // For now, keep alphabetical if size is unavailable.
-            filtered.sort { $0.name < $1.name }
+            filtered.sort {
+                let lhs = $0.details?.parameterSizeValue ?? 0
+                let rhs = $1.details?.parameterSizeValue ?? 0
+                if lhs != rhs { return lhs > rhs }
+                return $0.name < $1.name  // tie-break alphabetically
+            }
         }
         
         self.displayedModels = filtered

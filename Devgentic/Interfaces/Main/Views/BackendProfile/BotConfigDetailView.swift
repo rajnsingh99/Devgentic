@@ -30,19 +30,11 @@ struct BotConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
     @Environment(BackendProfileService.self) var profileService
-    @EnvironmentObject private var toastManager: ToastManager
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
-    // Local state for editing advanced configurations
-    @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
-    @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
-    @State private var localAnthropicConfig: AnthropicAdvancedConfig = .default()
-    @State private var localOpenAIConfig: OpenAIAdvancedConfig = .default()
-    @State private var localMlxConfig: MLXAdvancedConfig = .default()
-
-    // Guard flag: prevents onChange(of: localOllamaConfig/localGeminiConfig) from writing
-    // back to providerConfig during initial load.
-    @State private var isLoadingAdvancedConfig = false
+    // Shared advanced config manager (replaces 5 @State config vars + isLoading flag)
+    @State private var configManager = ProviderAdvancedConfigManager()
 
     // Deletion State
     @State private var showingDeleteAlert = false
@@ -131,26 +123,26 @@ struct BotConfigDetailView: View {
                 VStack(spacing: 32) {
 
                     // 1. Identity Header
-                HStack(alignment: .center, spacing: 16) {
-                    Image(systemName: "cpu.fill")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                        .foregroundColor(.blue) // Bot specific color
+                    HStack(alignment: .center, spacing: 16) {
+                        Image(systemName: ProfileType.bot.iconNameFilled)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 48, height: 48)
+                            .foregroundColor(.blue) // Bot specific color
 
-                    VStack(alignment: .leading) {
-                        TextField("Bot Name", text: profile.displayName)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(theme.primaryText)
+                        VStack(alignment: .leading) {
+                            TextField("Bot Name", text: profile.displayName)
+                                .font(theme.fontTitle2)
+                                .fontWeight(.bold)
+                                .textFieldStyle(.plain)
+                                .foregroundColor(theme.primaryText)
 
-                        Text("A straightforward LLM interface without agentic capabilities.")
-                            .font(.subheadline)
-                            .foregroundColor(theme.secondaryText)
+                            Text("A straightforward LLM interface without agentic capabilities.")
+                                .font(theme.fontSubheadline)
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        Spacer()
                     }
-                    Spacer()
-                }
                 .padding(.bottom, 8)
 
                 // 2. Inference Engine (Provider)
@@ -166,7 +158,6 @@ struct BotConfigDetailView: View {
                             }
                         )
                     }
-                    .padding(16)
                 }
 
                 // 3. Persona & Behavior
@@ -174,7 +165,7 @@ struct BotConfigDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("System Instructions")
-                                .font(.subheadline)
+                                .font(theme.fontSubheadline)
                                 .fontWeight(.medium)
                                 .foregroundColor(theme.secondaryText)
 
@@ -189,25 +180,25 @@ struct BotConfigDetailView: View {
                             } label: {
                                 Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
                             }
-                            .font(.caption)
+                            .font(theme.fontCaption)
                             .buttonStyle(.link)
                         }
 
                         ZStack(alignment: .topLeading) {
                             TextEditor(text: instructionsBinding)
-                                .font(.system(.body, design: .monospaced))
+                                .font(theme.fontCode)
                                 .disableAutocorrection(true)
                                 .frame(minHeight: 120)
                                 .padding(8)
                                 .scrollContentBackground(.hidden)
                                 .background(theme.textBackground)
                                 .foregroundColor(theme.primaryText)
-                                .cornerRadius(8)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
 
                             if instructionsBinding.wrappedValue.isEmpty {
                                 Text("Enter system instructions for your bot here...")
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(theme.fontCode)
                                     .foregroundColor(theme.secondaryText.opacity(0.5))
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 16)
@@ -218,120 +209,27 @@ struct BotConfigDetailView: View {
                         let charCount = instructionsBinding.wrappedValue.count
                         let charLimit = ProfileValidationLimits.maxInstructionsLength
                         Text("\(charCount) characters · ~\(charCount / 4) tokens")
-                            .font(.caption2)
+                            .font(theme.fontCaption2)
                             .foregroundColor(
-                                charCount > charLimit ? .red :
+                                charCount > charLimit ? theme.errorColor :
                                 charCount > Int(Double(charLimit) * 0.9) ? .orange :
                                 theme.secondaryText
                             )
                     }
-                    .padding(16)
                 }
 
-                // 4. File Handling
-                SettingsCard(title: "File Handling", icon: "doc.on.doc.fill", theme: theme) {
-                  VStack(alignment: .leading, spacing: 16) {
-                    FileContextStrategyPicker(
-                        strategy: $editBuffer.draft.fileContextStrategy,
-                        profileType: .bot
-                    )
-
-                    Divider()
-
-                    // Knowledge Base
-                    HStack(alignment: .center) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Knowledge Base")
-                                .fontWeight(.medium)
-                            Text("Pre-configured reference documents")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-
-                        Spacer(minLength: 16)
-
-                        Button {
-                            showingKnowledgeImporter = true
-                        } label: {
-                            Label("Add File", systemImage: "plus")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .fileImporter(
-                            isPresented: $showingKnowledgeImporter,
-                            allowedContentTypes: [.item],
-                            allowsMultipleSelection: true
-                        ) { result in
-                            if case let .success(urls) = result {
-                                for url in urls {
-                                    let source = KnowledgeSource(type: .file, location: url.path)
-                                    if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
-                                        knowledgeSourcesBinding.wrappedValue.append(source)
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if !knowledgeSourcesBinding.wrappedValue.isEmpty {
-                        VStack(spacing: 8) {
-                            ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                                HStack {
-                                    Image(systemName: "doc.text.fill")
-                                        .foregroundColor(source.exists ? .orange : .red)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(source.fileName)
-                                            .font(.callout)
-                                            .lineLimit(1)
-                                        if !source.exists {
-                                            Text("File not found")
-                                                .font(.caption2)
-                                                .foregroundColor(.red)
-                                        } else {
-                                            Text(source.location)
-                                                .font(.caption2)
-                                                .foregroundColor(theme.secondaryText)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
-                                        }
-                                    }
-                                    Spacer()
-                                    Button {
-                                        knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(theme.secondaryText)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                .padding(10)
-                                .background(theme.secondaryBackground.opacity(0.5))
-                                .cornerRadius(8)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-                                    source.exists ? theme.dividerColor : Color.red.opacity(0.3), lineWidth: 1
-                                ))
-                            }
-                        }
-                    } else {
-                        Text("No reference documents added.")
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                            .italic()
-                    }
-                  }
-                  .padding(16)
-                }
+                // 4. File Handling Strategy & Knowledge
+                fileHandlingSection
 
                 // 5. Advanced Configuration
                 SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
                     VStack(alignment: .leading, spacing: 16) {
                         advancedSettingsView
                     }
-                    .padding(16)
                 }
             }
-            .padding(24)
-            .padding(.bottom, 24)
+            .padding(ViewLayout.containerPadding)
+            .padding(.bottom, ViewLayout.containerPadding)
             .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity)
         }
@@ -355,45 +253,12 @@ struct BotConfigDetailView: View {
                 editBuffer.draft.details = .bot(config)
                 editBuffer.load(editBuffer.draft)
             }
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfigs()
-            isLoadingAdvancedConfig = false
+            configManager.load(from: providerConfig.wrappedValue, using: profileService)
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfigs()
-            isLoadingAdvancedConfig = false
+            configManager.load(from: providerConfig.wrappedValue, using: profileService)
         }
-        .onChange(of: localOllamaConfig) { _, _ in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .ollama {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
-            }
-        }
-        .onChange(of: localGeminiConfig) { _, _ in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .google {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
-            }
-        }
-        .onChange(of: localAnthropicConfig) { _, _ in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .anthropic {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localAnthropicConfig)
-            }
-        }
-        .onChange(of: localOpenAIConfig) { _, _ in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .openAI {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOpenAIConfig)
-            }
-        }
-        .onChange(of: localMlxConfig) { _, _ in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .mlx {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localMlxConfig)
-            }
-        }
+        .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
         .onChange(of: providerConfig.wrappedValue.modelName) { _, _ in
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 detectAndApplyOllamaBotPreset(for: providerConfig.wrappedValue.modelName)
@@ -408,12 +273,10 @@ struct BotConfigDetailView: View {
             if editBuffer.isDirty {
                 Button {
                     editBuffer.revert()
-                    isLoadingAdvancedConfig = true
-                    loadAdvancedConfigs()
-                    isLoadingAdvancedConfig = false
+                    configManager.load(from: providerConfig.wrappedValue, using: profileService)
                 } label: {
                     Text("Revert")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(theme.fontCaption.weight(.medium))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
@@ -433,7 +296,7 @@ struct BotConfigDetailView: View {
                     }
                 } label: {
                     Text("Save")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(theme.fontCaption.weight(.semibold))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
@@ -448,12 +311,12 @@ struct BotConfigDetailView: View {
                 showingDeleteAlert = true
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(isDeleteHovered ? .white : .red.opacity(0.8))
+                    .font(theme.fontCaption.weight(.medium))
+                    .foregroundColor(isDeleteHovered ? .white : theme.errorColor.opacity(0.8))
                     .frame(width: 28, height: 28)
                     .background(
                         Circle()
-                            .fill(isDeleteHovered ? Color.red : Color.red.opacity(0.1))
+                            .fill(isDeleteHovered ? theme.errorColor : theme.errorColor.opacity(0.1))
                     )
             }
             .buttonStyle(.plain)
@@ -465,19 +328,120 @@ struct BotConfigDetailView: View {
 
 
     @ViewBuilder
-    private var advancedSettingsView: some View {
-        switch providerConfig.wrappedValue.apiProvider {
-        case .ollama:
-            OllamaSettingsView(config: $localOllamaConfig)
-        case .google:
-            GeminiSettingsView(config: $localGeminiConfig)
-        case .anthropic:
-            AnthropicSettingsView(config: $localAnthropicConfig)
-        case .openAI:
-            OpenAISettingsView(config: $localOpenAIConfig)
-        case .mlx:
-            MLXSettingsView(config: $localMlxConfig)
+    private var fileHandlingSection: some View {
+        SettingsCard(title: "Knowledge", icon: "book.closed.fill", theme: theme) {
+            VStack(alignment: .leading, spacing: 16) {
+                // Reference Documents
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Reference Documents")
+                                .font(theme.fontBody.weight(.semibold))
+                            Text("Add external documents the bot can use as context")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    Spacer(minLength: 16)
+
+                    Button {
+                        showingKnowledgeImporter = true
+                    } label: {
+                        Label("Add File", systemImage: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .fileImporter(
+                        isPresented: $showingKnowledgeImporter,
+                        allowedContentTypes: [.item],
+                        allowsMultipleSelection: true
+                    ) { result in
+                        if case let .success(urls) = result {
+                            for url in urls {
+                                let source = KnowledgeSource(type: .file, location: url.path)
+                                if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
+                                    knowledgeSourcesBinding.wrappedValue.append(source)
+                                }
+                            }
+                        }
+                    }
+                    }
+
+                    if !knowledgeSourcesBinding.wrappedValue.isEmpty {
+                    VStack(spacing: 8) {
+                        ForEach(knowledgeSourcesBinding.wrappedValue) { source in
+                            HStack {
+                                Image(systemName: "doc.text.fill")
+                                    .foregroundColor(source.exists ? .orange : theme.errorColor)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(source.fileName)
+                                        .font(theme.fontCallout)
+                                        .lineLimit(1)
+                                    if !source.exists {
+                                        Text("File not found")
+                                            .font(theme.fontCaption2)
+                                            .foregroundColor(theme.errorColor)
+                                    } else {
+                                        Text(source.location)
+                                            .font(theme.fontCaption2)
+                                            .foregroundColor(theme.secondaryText)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                }
+                                Spacer()
+                                Button {
+                                    knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(theme.secondaryText)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Remove \(source.fileName)")
+                            }
+                            .padding(10)
+                            .background(theme.secondaryBackground.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(
+                                source.exists ? theme.dividerColor : theme.errorColor.opacity(0.3), lineWidth: 1
+                            ))
+                        }
+                    }
+                    .padding(.leading, 12)
+                } else {
+                    Text("No reference documents added.")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                            .italic()
+                            .padding(.leading, 12)
+                    }
+                }
+
+                Divider()
+
+                // File Handling Strategy
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("File Handling")
+                            .font(theme.fontBody.weight(.semibold))
+                        Text("How attached files and knowledge sources are processed")
+                            .font(theme.fontCaption)
+                            .foregroundColor(theme.secondaryText)
+                    }
+
+                    FileContextStrategyPicker(
+                        strategy: $editBuffer.draft.fileContextStrategy,
+                        profileType: .bot
+                    )
+                    .padding(.leading, 12)
+                }
+            }
         }
+    }
+
+    @ViewBuilder
+    private var advancedSettingsView: some View {
+        ProviderAdvancedSettingsView(configManager: configManager, provider: providerConfig.wrappedValue.apiProvider)
     }
 
     private func detectAndApplyOllamaBotPreset(for modelName: String) {
@@ -493,42 +457,7 @@ struct BotConfigDetailView: View {
         }
 
         if let tier = tier {
-            localOllamaConfig = OllamaAdvancedConfig.botPreset(for: tier)
-        }
-    }
-
-    private func loadAdvancedConfigs() {
-        switch providerConfig.wrappedValue.apiProvider {
-        case .ollama:
-            self.localOllamaConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: OllamaAdvancedConfig.self
-            ) ?? .default()
-        case .google:
-            self.localGeminiConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: GeminiAdvancedConfig.self
-            ) ?? .default()
-        case .anthropic:
-            self.localAnthropicConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: AnthropicAdvancedConfig.self
-            ) ?? .default()
-        case .openAI:
-            self.localOpenAIConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: OpenAIAdvancedConfig.self
-            ) ?? .default()
-        case .mlx:
-            self.localMlxConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: MLXAdvancedConfig.self
-            ) ?? {
-                if let metadata = providerConfig.wrappedValue.modelMetadata {
-                    return .recommended(for: metadata)
-                }
-                return .default()
-            }()
+            configManager.localOllamaConfig = OllamaAdvancedConfig.botPreset(for: tier)
         }
     }
 }

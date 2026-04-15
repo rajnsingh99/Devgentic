@@ -24,23 +24,26 @@ enum AgentStreamEvent: Sendable {
     
     /// The agent is reasoning. Use this to update a "Thinking..." UI component.
     /// Wrapped with a stable ID to fix SwiftUI ForEach layout jumps.
-    case thought(_ message: String, id: UUID = UUID())
-    
+    /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this thought.
+    case thought(_ message: String, id: UUID = UUID(), sourceNodeID: UUID? = nil)
+
     /// The agent is about to execute a tool.
     /// - name: The tool name (e.g., "list_directory")
     /// - params: The raw JSON parameters being passed (for debugging/visibility)
-    case toolCall(name: String, params: String)
+    /// - sourceNodeID: When emitted from a workflow node, identifies which node invoked this tool.
+    case toolCall(name: String, params: String, sourceNodeID: UUID? = nil)
     
     /// [HITL] Phase 3: Explicit Permission Request
     /// The agent pauses and asks the user for permission to proceed.
     /// - toolName: The name of the sensitive tool (e.g. "delete_file")
     /// - params: The parameters needed for the tool (e.g. path)
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID())
+    case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
     
     /// The tool has finished. Use this to render "Glass Box" artifacts (tables, lists, JSON).
     /// This is the "Observation" phase.
-    case toolOutput(ToolOutput)
+    /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this output.
+    case toolOutput(ToolOutput, sourceNodeID: UUID? = nil)
     
     /// A chunk of the final text response (streaming token).
     /// This is what populates the main chat bubble.
@@ -49,7 +52,7 @@ enum AgentStreamEvent: Sendable {
     /// The agent needs clarification from the user before it can proceed.
     /// - question: The question to display to the user
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestClarification(question: String, operationID: UUID = UUID())
+    case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
 
     /// A non-fatal warning or error message to display in the trace/debug log.
     case error(String)
@@ -71,6 +74,9 @@ enum AgentStreamEvent: Sendable {
 
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
+
+    /// A loop node has completed one iteration of its body workflow.
+    case workflowLoopIteration(nodeID: UUID, profileName: String, iteration: Int, maxIterations: Int)
 
     // MARK: - Capability Events (Planning, Self-Reflection, Delegation)
 
@@ -95,11 +101,11 @@ enum AgentStreamEvent: Sendable {
     /// Self-Reflection capability: trial accepted, execution complete.
     case reflectionAccepted(trial: Int)
 
-    /// Agent Delegation: a sub-agent has started working on a delegated task.
-    case delegationStarted(subAgentName: String, task: String)
+    /// Agent Delegation: a spawned agent has started working on a delegated task.
+    case delegationStarted(task: String)
 
-    /// Agent Delegation: a sub-agent has completed its task.
-    case delegationCompleted(subAgentName: String, summary: String)
+    /// Agent Delegation: a spawned agent has completed its task.
+    case delegationCompleted(summary: String)
 
     // MARK: - Multimodal Events
 
@@ -109,6 +115,12 @@ enum AgentStreamEvent: Sendable {
     /// A completed media artifact ready for UI rendering.
     case artifactProduced(MediaArtifact)
 
+    // MARK: - Token Usage
+
+    /// Accumulated token usage for the current generation cycle.
+    /// Emitted by executors after LLM calls complete.
+    case tokenUsage(TokenUsage)
+
     // MARK: - Plan Review HITL
 
     /// Planning capability: the generated plan is ready for user review/edit before execution.
@@ -116,21 +128,51 @@ enum AgentStreamEvent: Sendable {
     /// - subtasks: The generated subtask plan (user may edit before approving)
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
     case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID())
+
+    // MARK: - History Compaction
+
+    /// IC-powered history compaction has started. Emitted before the IC summarization call.
+    /// - turnsToCompact: Number of conversation turns being summarized.
+    /// - checkpointNumber: Sequential checkpoint number (1-based).
+    case compactionStarted(turnsToCompact: Int, checkpointNumber: Int)
+
+    /// IC-powered history compaction completed successfully.
+    /// - turnsCompacted: Number of turns that were summarized into the checkpoint.
+    /// - summaryPreview: First ~120 chars of the checkpoint summary for UI display.
+    case compactionCompleted(turnsCompacted: Int, summaryPreview: String)
 }
 
 /// Structured output from a tool execution.
 /// Used to render "Artifacts" in the UI (e.g., a file list card).
-struct ToolOutput: Sendable, Identifiable, Codable, Equatable {
+struct ToolOutput: Sendable, Identifiable, Equatable {
     let id: UUID
     let toolName: String
+    let params: String
     let output: String
     let isSuccess: Bool
-    
-    init(id: UUID = UUID(), toolName: String, output: String, isSuccess: Bool) {
+
+    init(id: UUID = UUID(), toolName: String, params: String = "", output: String, isSuccess: Bool) {
         self.id = id
         self.toolName = toolName
+        self.params = params
         self.output = output
         self.isSuccess = isSuccess
+    }
+}
+
+// Backward-compatible Codable: legacy persisted data may lack the `params` field.
+extension ToolOutput: Codable {
+    enum CodingKeys: String, CodingKey {
+        case id, toolName, params, output, isSuccess
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        toolName = try c.decode(String.self, forKey: .toolName)
+        params = try c.decodeIfPresent(String.self, forKey: .params) ?? ""
+        output = try c.decode(String.self, forKey: .output)
+        isSuccess = try c.decode(Bool.self, forKey: .isSuccess)
     }
 }
 

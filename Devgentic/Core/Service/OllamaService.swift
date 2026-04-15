@@ -1,6 +1,5 @@
 // Services/OllamaService.swift
 import SwiftUI
-import Combine
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaService")
@@ -77,31 +76,32 @@ struct LocalModel: Identifiable, Hashable {
 
 
 @MainActor // Ensure the entire class runs on the MainActor by default
-class OllamaService: ObservableObject {
+@Observable
+class OllamaService {
 
     // MARK: - Singleton Pattern
     /// The shared singleton instance of the OllamaService.
     static let shared = OllamaService()
 
     // MARK: - Published Properties (for Ollama State)
-    @Published var serverStatus: OllamaServerStatus = .unknown
-    @Published var localModels: [LocalModel] = []
-    @Published var isLoadingModels: Bool = false
-    @Published var modelLoadingError: String? = nil
+    var serverStatus: OllamaServerStatus = .unknown
+    var localModels: [LocalModel] = []
+    var isLoadingModels: Bool = false
+    var modelLoadingError: String? = nil
 
-    @Published var modelToPull: String = "" // For UI binding
-    @Published var isPullingModel: Bool = false
-    @Published var pullStatusMessage: String = ""
-    @Published var modelPullError: String? = nil
-    @Published var pullProgress: Double = 0.0
-    @Published var pullStage: String = "" // e.g., "downloading", "verifying"
-    @Published var pullTotalBytes: Int64? = nil
-    @Published var pullCompletedBytes: Int64? = nil
-    @Published var pullErrorRequiresUpdate: Bool = false
+    var modelToPull: String = "" // For UI binding
+    var isPullingModel: Bool = false
+    var pullStatusMessage: String = ""
+    var modelPullError: String? = nil
+    var pullProgress: Double = 0.0
+    var pullStage: String = "" // e.g., "downloading", "verifying"
+    var pullTotalBytes: Int64? = nil
+    var pullCompletedBytes: Int64? = nil
+    var pullErrorRequiresUpdate: Bool = false
 
-    @Published var isRemovingModel: Bool = false
-    @Published var removingModelName: String? = nil // To indicate which model is being removed
-    @Published var modelRemoveError: String? = nil
+    var isRemovingModel: Bool = false
+    var removingModelName: String? = nil // To indicate which model is being removed
+    var modelRemoveError: String? = nil
     
     // MARK: - Task Management
     private var pullTask: Task<Void, Error>?
@@ -113,8 +113,8 @@ class OllamaService: ObservableObject {
 
     // MARK: - Configuration Properties
     /// These properties are now set by a central authority (like MainApplicationViewModel) based on the active profile.
-    @Published var llmModelName: String = "gemma:2b" // Default, but will be overridden by profile
-    @Published var ollamaBaseURL: String = ProviderDefaults.ollamaBaseURL.absoluteString // Default, but will be overridden by profile
+    var llmModelName: String = "gemma:2b" // Default, but will be overridden by profile
+    var ollamaBaseURL: String = ProviderDefaults.ollamaBaseURL.absoluteString // Default, but will be overridden by profile
 
     /// The initializer is private to enforce the use of the `shared` singleton instance.
     private init() {

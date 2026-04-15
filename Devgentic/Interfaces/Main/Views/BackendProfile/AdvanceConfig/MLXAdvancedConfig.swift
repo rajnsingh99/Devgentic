@@ -115,113 +115,103 @@ struct MLXSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             
             // Temperature
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Temperature")
-                        .fontWeight(.medium)
-                    Spacer()
-                    Text(String(format: "%.2f", config.temperature))
-                        .monospacedDigit()
-                        .foregroundColor(theme.secondaryText)
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Temperature").fontWeight(.medium)
+                    Text("Controls randomness. Lower values (0.0 - 0.2) are strongly recommended for structured Agent outputs.").font(.caption).foregroundColor(theme.secondaryText)
                 }
-                Slider(value: $config.temperature, in: 0.0...2.0, step: 0.05)
-                    .tint(theme.accentColor)
-                Text("Controls randomness. Lower values (0.0 - 0.2) are strongly recommended for structured Agent outputs.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.temperature, in: 0.0...2.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.temperature, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
             }
             
             Divider()
             
             // Top P
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Top P (Nucleus Sampling)")
-                        .fontWeight(.medium)
-                    Spacer()
-                    Text(String(format: "%.2f", config.topP))
-                        .monospacedDigit()
-                        .foregroundColor(theme.secondaryText)
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Top P").fontWeight(.medium)
+                    Text("Limits token selection to the highest probability mass.").font(.caption).foregroundColor(theme.secondaryText)
                 }
-                Slider(value: $config.topP, in: 0.0...1.0, step: 0.05)
-                    .tint(theme.accentColor)
-                Text("Limits token selection to the highest probability mass.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.topP, in: 0.0...1.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.topP, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
             }
             
             Divider()
             
             // Repetition Penalty
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Repetition Penalty")
-                        .fontWeight(.medium)
-                    Spacer()
-                    Text(String(format: "%.2f", config.repetitionPenalty))
-                        .monospacedDigit()
-                        .foregroundColor(theme.secondaryText)
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Repetition Penalty").fontWeight(.medium)
+                    Text("Penalizes repeating the same tokens. Helps prevent local models from getting stuck in infinite thought loops.").font(.caption).foregroundColor(theme.secondaryText)
                 }
-                Slider(value: $config.repetitionPenalty, in: 1.0...2.0, step: 0.05)
-                    .tint(theme.accentColor)
-                Text("Penalizes repeating the same tokens. Helps prevent local models from getting stuck in infinite thought loops.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
+                Spacer(minLength: 16)
+                HStack {
+                    Slider(value: $config.repetitionPenalty, in: 1.0...2.0, step: 0.05)
+                        .frame(width: 150)
+                    Text("\(config.repetitionPenalty, specifier: "%.2f")")
+                        .monospacedDigit()
+                        .frame(width: 40, alignment: .trailing)
+                }
             }
 
             Divider()
 
             // Repetition Context Size
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Repetition Context Size")
-                        .fontWeight(.medium)
-                    Spacer()
-                    Text("\(config.repetitionContextSize)")
-                        .monospacedDigit()
-                        .foregroundColor(theme.secondaryText)
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Repetition Context Size").fontWeight(.medium)
+                    Text("Number of recent tokens the repetition penalty considers. Larger values catch longer repetition loops.").font(.caption).foregroundColor(theme.secondaryText)
                 }
-                Slider(value: Binding(get: {
-                    Double(config.repetitionContextSize)
-                }, set: {
-                    config.repetitionContextSize = Int($0)
-                }), in: 10...60, step: 5)
-                .tint(theme.accentColor)
-                Text("Number of recent tokens the repetition penalty considers. Larger values catch longer repetition loops.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.repetitionContextSize)").monospacedDigit()
+                    Stepper("", value: $config.repetitionContextSize, in: 10...60, step: 5).labelsHidden()
+                }
             }
 
             Divider()
             
             // Max Tokens
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Max Tokens")
-                        .fontWeight(.medium)
-                    Spacer()
-                    Text("\(config.maxTokens)")
-                        .monospacedDigit()
-                        .foregroundColor(theme.secondaryText)
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Max Tokens").fontWeight(.medium)
+                    Text("Maximum length of the generated response. Agents need higher limits to accommodate long internal monologues before returning an action.").font(.caption).foregroundColor(theme.secondaryText)
                 }
-                Slider(value: Binding(get: {
-                    Double(config.maxTokens)
-                }, set: {
-                    config.maxTokens = Int($0)
-                }), in: 256...8192, step: 256)
-                .tint(theme.accentColor)
-                Text("Maximum length of the generated response. Agents need higher limits to accommodate long internal monologues before returning an action.")
-                    .font(.caption)
-                    .foregroundColor(theme.secondaryText)
+                Spacer(minLength: 16)
+                HStack {
+                    Text("\(config.maxTokens)").monospacedDigit()
+                    Stepper("", value: $config.maxTokens, in: 256...8192, step: 256).labelsHidden()
+                }
             }
             
-            Button("Reset to Agent Defaults") {
-                withAnimation {
-                    config = .default()
+            HStack {
+                Spacer()
+                Button {
+                    withAnimation {
+                        config = .default()
+                    }
+                } label: {
+                    Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(theme.accentColor.opacity(0.1))
+                        .foregroundColor(theme.accentColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+                .buttonStyle(.plain)
             }
-            .font(.caption)
-            .buttonStyle(.link)
             .padding(.top, 8)
         }
     }

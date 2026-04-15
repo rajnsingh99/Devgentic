@@ -1,0 +1,100 @@
+//
+//  XMLNativeStructuredGenerator.swift
+//  Devgentic
+//
+//  Parallel-capable cognitive strategy for Mistral-family models on MLX.
+//  These models are fine-tuned to output tool calls in XML boundaries
+//  (<tool_call>...</tool_call>) and struggle when forced into JSON prompting.
+//  Unlike Ollama (whose API abstracts the format), MLX generates raw text
+//  with no intermediary — so we must speak the model's native XML dialect.
+//
+//  Created by Raj Singh on 15/04/26.
+//
+
+import Foundation
+import OSLog
+
+private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
+
+/// A parallel-capable cognitive strategy for Mistral-family MLX models that
+/// produce tool calls in pseudo-XML format (`<tool_call>...</tool_call>`).
+///
+/// Mirrors `MLXNativeStructuredGenerator` in structure but uses XML dialect rules
+/// and routes parsing through the `MistralXMLParser` (via `.mistralXML` pipeline).
+struct XMLNativeStructuredGenerator: CognitiveGenerator {
+    let toolAdapter: ToolSchemaAdapter
+
+    let dialectRules: String? = """
+    RESPONSE FORMAT:
+    You MUST respond using XML tool_call blocks.
+    <tool_call>
+      <content>Your reasoning about what to do next</content>
+      <tool_name>exact_tool_name</tool_name>
+      <arguments>{"key": "value"}</arguments>
+    </tool_call>
+
+    RULES:
+    1. <content> is REQUIRED inside each block and should contain your logical reasoning.
+    2. You can output MULTIPLE <tool_call> blocks if the tools are independent.
+    3. The JSON inside <arguments> must be valid and strictly use double quotes.
+    4. If the task is complete or you need to respond to the user, output your response in plain text WITHOUT any <tool_call> block.
+    5. NEVER invent tool names. Use only tools from the TOOLS list.
+    """
+
+    /// Markdown wrapping avoids conflicts between XML prompt sections and XML tool output.
+    var promptWrapping: PromptWrapping { .markdown }
+
+    init(toolAdapter: ToolSchemaAdapter = PromptedMarkdownAdapter()) {
+        self.toolAdapter = toolAdapter
+    }
+
+    func compileMessages(from context: SemanticContext) -> [[String: String]] {
+        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: false, wrapping: .markdown)
+    }
+
+    func promptTrigger(for iteration: Int) -> String {
+        let base = iteration == 1
+            ? "Analyze the task and working memory, then decide your next action."
+            : "New observations have been recorded in working memory. Decide your next action."
+        return base + " Respond with <tool_call> blocks for any tools needed."
+    }
+
+    func generateCognitiveStep(
+        model: any LLMProvider,
+        context: SemanticContext,
+        iteration: Int
+    ) async throws -> ModernCognitiveStep {
+        let reqId = UUID().uuidString.prefix(8)
+        logLLMOps.info("⚡️ [XMLNative:\(reqId)] Start Generation - Iteration: \(iteration)")
+
+        var executionMessages = compileMessages(from: context)
+
+        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
+
+        logLLMOps.debug("📤 [XMLNative:\(reqId)] Sending request...")
+        let startTime = Date()
+
+        let responseText = try await model.generate(
+            messages: executionMessages,
+            tools: nil,
+            responseSchema: nil
+        )
+
+        let duration = Date().timeIntervalSince(startTime)
+        logLLMOps.info("✅ [XMLNative:\(reqId)] Response received in \(String(format: "%.4f", duration))s")
+        logLLMOps.debug("📄 [XMLNative:\(reqId)] Raw:\n\(responseText)")
+
+        guard !responseText.isEmpty else {
+            logLLMOps.error("❌ [XMLNative:\(reqId)] Empty response from model.")
+            throw NSError(domain: "XMLNativeGenerator", code: 422,
+                          userInfo: [NSLocalizedDescriptionKey: "Empty response from model."])
+        }
+
+        let pipeline = CognitiveParsePipeline(
+            expectedDialect: .mistralXML,
+            modelId: model.modelName,
+            iteration: iteration
+        )
+        return pipeline.parse(raw: responseText)
+    }
+}

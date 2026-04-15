@@ -18,21 +18,21 @@ import os
 /// 3. Feeds all context to `IntelligenceCoreService` in a single call.
 /// 4. Parses structured per-conversation insights from the AI response.
 /// 5. Returns a `MorningBrief` ready for display.
-@MainActor
-final class MorningBriefService: ObservableObject {
+@Observable @MainActor
+final class MorningBriefService {
 
     static let shared = MorningBriefService()
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MorningBriefService")
+    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MorningBriefService")
 
     /// Registry of all available brief sources. Add new sources here.
-    private(set) var sourceRegistry: [any MorningBriefSource] = []
+    @ObservationIgnored private(set) var sourceRegistry: [any MorningBriefSource] = []
 
     /// The most recently generated brief, cached for re-display.
-    @Published var currentBrief: MorningBrief?
+    var currentBrief: MorningBrief?
 
     /// Whether the brief is currently being generated.
-    @Published var isGenerating: Bool = false
+    var isGenerating: Bool = false
 
     /// Minimum time gap between briefs (4 hours).
     private let minimumBriefGap: TimeInterval = 4 * 60 * 60

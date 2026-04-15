@@ -75,17 +75,17 @@ private struct SettingsCategoryRow: View {
 
             HStack(spacing: 12) {
                 Image(systemName: category.iconName)
-                    .font(.system(size: 16))
+                    .font(.system(.body))
                     .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
                     .frame(width: 24)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(category.rawValue)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(theme.fontSubheadline.weight(.medium))
                         .foregroundColor(theme.primaryText)
 
                     Text(category.subtitle)
-                        .font(.system(size: 10))
+                        .font(.system(.caption2))
                         .foregroundColor(theme.tertiaryText)
                         .lineLimit(1)
                 }
@@ -93,7 +93,7 @@ private struct SettingsCategoryRow: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(

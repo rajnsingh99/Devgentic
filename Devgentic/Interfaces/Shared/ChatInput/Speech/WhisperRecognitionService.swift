@@ -8,7 +8,6 @@
 import Foundation
 import AVFoundation
 import WhisperKit
-import Combine
 import os
 
 // MARK: - Error Types
@@ -56,10 +55,25 @@ struct StreamingTranscriptionState {
 /// A service to manage audio transcription using WhisperKit with on-demand model downloading,
 /// real-time streaming via AudioStreamTranscriber, multi-language support, and VAD auto-stop.
 @MainActor
-class WhisperRecognitionService: ObservableObject {
+@Observable
+class WhisperRecognitionService {
+
+    // MARK: - Shared Singleton
+    /// Single app-wide instance. Prevents WhisperKit model from being loaded
+    /// multiple times when SwiftUI recreates ChatInputViewModel instances.
+    static let shared: WhisperRecognitionService = {
+        let savedModel = UserDefaults.standard.string(forKey: AppSettings.speechModelKey) ?? "base.en"
+        let savedLanguage = UserDefaults.standard.string(forKey: AppSettings.speechLanguageKey)
+        let savedAutoStop = (UserDefaults.standard.object(forKey: AppSettings.speechAutoStopOnSilenceKey) as? Bool) ?? true
+        return WhisperRecognitionService(
+            modelName: savedModel,
+            language: savedLanguage,
+            autoStop: savedAutoStop
+        )
+    }()
 
     // MARK: - Published State
-    @Published private(set) var loadingState: ModelLoadingState = .idle
+    private(set) var loadingState: ModelLoadingState = .idle
 
     // MARK: - Private State
     private var whisperKit: WhisperKit?
@@ -68,7 +82,7 @@ class WhisperRecognitionService: ObservableObject {
     private var _currentLanguage: String?
     private var _isAutoStopEnabled: Bool
     private var onStateChangeCallback: ((StreamingTranscriptionState) -> Void)?
-    private var notificationObservers: [Any] = []
+    nonisolated(unsafe) private var notificationObservers: [Any] = []
 
     // Silence tracking for auto-stop
     private var consecutiveSilenceCount: Int = 0
@@ -85,6 +99,8 @@ class WhisperRecognitionService: ObservableObject {
 
     // MARK: - Initialization
 
+    /// Use `WhisperRecognitionService.shared` instead of creating new instances.
+    /// Kept internal for test injection via `RecognitionServiceProtocol`.
     init(modelName: String = "base.en", language: String? = nil, autoStop: Bool = true) {
         self.currentModelName = modelName
         self._currentLanguage = language
@@ -92,8 +108,15 @@ class WhisperRecognitionService: ObservableObject {
 
         setupSettingsObservers()
 
-        Task {
-            await loadModel(named: modelName)
+        // Only auto-load if the model is already downloaded (no surprise downloads)
+        let downloadService = WhisperModelDownloadService.shared
+        if downloadService.isModelDownloaded(modelName) {
+            Task {
+                await loadModel(named: modelName)
+            }
+        } else {
+            logger.log("Model '\(modelName)' not downloaded — staying idle.")
+            loadingState = .idle
         }
     }
 
@@ -349,15 +372,39 @@ class WhisperRecognitionService: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - Model Teardown
+
+    /// Tears down the currently-loaded model and returns to idle.
+    /// Called by `WhisperModelDownloadService` before deleting model files on disk,
+    /// so we don't hold stale references to deleted CoreML bundles.
+    func unloadCurrentModel() async {
+        if streamTranscriber != nil {
+            let _ = await stopStreaming()
+        }
+        whisperKit = nil
+        loadingState = .idle
+        logger.log("Model '\(self.currentModelName)' unloaded.")
+    }
+
     // MARK: - Model Switching
 
     /// Switches to a different Whisper model. Stops any active streaming first.
+    /// Only loads if the model is already downloaded; otherwise stays idle.
     func switchModel(to modelName: String) async throws {
-        guard modelName != currentModelName else { return }
+        guard modelName != currentModelName || loadingState == .idle else { return }
         logger.log("Switching model from '\(self.currentModelName)' to '\(modelName)'.")
 
         if streamTranscriber != nil {
             let _ = await stopStreaming()
+        }
+
+        // Only load if already downloaded — download lifecycle is managed by WhisperModelDownloadService
+        guard WhisperModelDownloadService.shared.isModelDownloaded(modelName) else {
+            logger.log("Model '\(modelName)' not downloaded — staying idle.")
+            whisperKit = nil  // Release old model memory
+            self.currentModelName = modelName
+            loadingState = .idle
+            return
         }
 
         await loadModel(named: modelName)

@@ -130,6 +130,8 @@ struct Conversation: Identifiable, Codable, Equatable {
             return "Error: \(details)"
         case .mediaArtifact(let artifact):
             return artifact.label ?? artifact.kind.rawValue
+        case .checkpoint:
+            return "History checkpoint"
         }
     }
 

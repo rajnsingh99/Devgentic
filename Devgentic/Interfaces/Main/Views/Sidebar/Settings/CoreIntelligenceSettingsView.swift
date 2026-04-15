@@ -24,11 +24,13 @@ struct CoreIntelligenceSettingsView: View {
     @AppStorage(AppSettings.ciFeatureSuggestionKey) private var suggestionEnabled: Bool = false
     @AppStorage(AppSettings.ciFeatureMorningBriefKey) private var morningBriefEnabled: Bool = false
     @AppStorage(AppSettings.ciFeatureUserPersonalKey) private var userPersonalEnabled: Bool = false
+    @AppStorage(AppSettings.ciFeatureResponseSynthesisKey) private var responseSynthesisEnabled: Bool = true
+    @AppStorage(AppSettings.ciFeatureHistoryCompactionKey) private var historyCompactionEnabled: Bool = true
 
     // Custom prompt
     @AppStorage(AppSettings.ciCustomPromptKey) private var customPrompt: String = ""
 
-    @ObservedObject private var modelService = MLXModelService.shared
+    private var modelService = MLXModelService.shared
     @State private var currentFitAssessment: ModelFitAssessment?
 
     // Debug test state
@@ -61,12 +63,12 @@ struct CoreIntelligenceSettingsView: View {
                             HStack {
                                 Image(systemName: "info.circle.fill")
                                     .foregroundColor(theme.accentColor)
+                                    .accessibilityHidden(true)
                                 Text("Select a model below to activate Intelligence Core features.")
-                                    .font(.system(size: 11))
+                                    .font(.system(.caption))
                                     .foregroundColor(theme.secondaryText)
                                 Spacer()
                             }
-                            .padding(16)
                         }
 
                         Divider().background(theme.dividerColor)
@@ -102,7 +104,6 @@ struct CoreIntelligenceSettingsView: View {
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
-                            .padding(16)
                         }
                     }
                 }
@@ -112,22 +113,31 @@ struct CoreIntelligenceSettingsView: View {
 
                     SettingsCard(title: "Features", icon: "slider.horizontal.3", theme: theme) {
                         FeatureToggleRow(
-                            title: "RAG — Contextual Query Rewriting",
-                            description: "Rewrites ambiguous follow-up queries into self-contained searches for better knowledge retrieval. Active by default.",
-                            icon: "magnifyingglass",
-                            isOn: $ragRewritingEnabled,
+                            title: "History Compaction",
+                            description: "Automatically summarizes older conversation turns into checkpoints using Intelligence Core. Enables longer conversations without context overflow. Batch size adapts to your IC model's capacity.",
+                            icon: "archivebox",
+                            isOn: $historyCompactionEnabled,
                             theme: theme
                         )
 
                         Divider().background(theme.dividerColor)
 
                         FeatureToggleRow(
-                            title: "Context-Aware Suggestions",
-                            description: "Proactively suggests next actions based on your conversation history and recent tool usage.",
-                            icon: "lightbulb.fill",
-                            isOn: $suggestionEnabled,
-                            theme: theme,
-                            comingSoon: true
+                            title: "Response Synthesis",
+                            description: "Uses Intelligence Core to compose polished final responses from agent execution results. Particularly effective for local models.",
+                            icon: "sparkles",
+                            isOn: $responseSynthesisEnabled,
+                            theme: theme
+                        )
+
+                        Divider().background(theme.dividerColor)
+
+                        FeatureToggleRow(
+                            title: "RAG — Contextual Query Rewriting",
+                            description: "Rewrites ambiguous follow-up queries into self-contained searches for better knowledge retrieval. Active by default.",
+                            icon: "magnifyingglass",
+                            isOn: $ragRewritingEnabled,
+                            theme: theme
                         )
 
                         Divider().background(theme.dividerColor)
@@ -150,6 +160,17 @@ struct CoreIntelligenceSettingsView: View {
                             theme: theme
                         )
 
+                        Divider().background(theme.dividerColor)
+
+                        FeatureToggleRow(
+                            title: "Context-Aware Suggestions",
+                            description: "Proactively suggests next actions based on your conversation history and recent tool usage.",
+                            icon: "lightbulb.fill",
+                            isOn: $suggestionEnabled,
+                            theme: theme,
+                            comingSoon: true
+                        )
+
                         // View Profile button (shown when User Personal is enabled)
                         if userPersonalEnabled {
                             HStack {
@@ -167,7 +188,7 @@ struct CoreIntelligenceSettingsView: View {
 
                                 if let lastUpdated = UserPersonalService.shared.lastUpdated {
                                     Text("Updated \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
-                                        .font(.system(size: 10))
+                                        .font(.system(.caption2))
                                         .foregroundColor(theme.tertiaryText)
                                 }
 
@@ -183,7 +204,7 @@ struct CoreIntelligenceSettingsView: View {
                     SettingsCard(title: "Debug — Test Intelligence Core", icon: "ant.fill", theme: theme) {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Simulate a Morning Brief generation to verify IC load/generate/unload lifecycle and memory tracking in Console logs.")
-                                .font(.system(size: 12))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                                 .lineSpacing(2)
 
@@ -248,7 +269,7 @@ struct CoreIntelligenceSettingsView: View {
                                         testLog.removeAll()
                                     }
                                     .buttonStyle(.plain)
-                                    .font(.system(size: 11))
+                                    .font(.system(.caption))
                                     .foregroundColor(theme.accentColor)
                                 }
                             }
@@ -258,7 +279,7 @@ struct CoreIntelligenceSettingsView: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         ForEach(Array(testLog.enumerated()), id: \.offset) { _, line in
                                             Text(line)
-                                                .font(.system(size: 11, design: .monospaced))
+                                                .font(.system(size: 11, design: .monospaced)) // Fixed size: monospaced tool output
                                                 .foregroundColor(logColor(for: line))
                                                 .textSelection(.enabled)
                                         }
@@ -268,14 +289,13 @@ struct CoreIntelligenceSettingsView: View {
                                 .frame(maxHeight: 200)
                                 .padding(10)
                                 .background(theme.secondaryBackground)
-                                .cornerRadius(8)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
                                         .stroke(theme.dividerColor, lineWidth: 1)
                                 )
                             }
                         }
-                        .padding(16)
                     }
                     #endif
 
@@ -283,27 +303,26 @@ struct CoreIntelligenceSettingsView: View {
                     SettingsCard(title: "Custom Behavior", icon: "text.quote", theme: theme) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Custom Prompt")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(theme.fontBody.weight(.medium))
                                 .foregroundColor(theme.primaryText)
 
                             Text("Add a custom instruction that shapes how the Intelligence Core behaves across all features. For example: \"Be concise\" or \"Always respond in Spanish\".")
-                                .font(.system(size: 12))
+                                .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                                 .lineSpacing(2)
 
                             TextEditor(text: $customPrompt)
-                                .font(.system(size: 13, design: .monospaced))
+                                .font(.system(size: 13, design: .monospaced)) // Fixed size: monospaced input
                                 .frame(minHeight: 80, maxHeight: 120)
                                 .scrollContentBackground(.hidden)
                                 .padding(8)
                                 .background(theme.secondaryBackground)
-                                .cornerRadius(8)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
                                         .stroke(theme.dividerColor, lineWidth: 1)
                                 )
                         }
-                        .padding(16)
                     }
                 }
             }
@@ -512,7 +531,7 @@ struct CoreIntelligenceSettingsView: View {
             currentFitAssessment = nil
             return
         }
-        let profile = MLXTokenizerAnalyzer.detectCognitiveProfile(for: model.localPath, modelName: model.displayName)
+        let profile = modelService.cachedCognitiveProfile(for: model)
         currentFitAssessment = ModelFitAdvisor.assess(metadata: profile.metadata)
     }
 }
@@ -521,40 +540,42 @@ struct CoreIntelligenceSettingsView: View {
 
 /// A specialized settings row for Intelligence Core feature toggles.
 private struct FeatureToggleRow: View {
-    let title: String
-    let description: String
+    let title: LocalizedStringKey
+    let description: LocalizedStringKey
     let icon: String
     @Binding var isOn: Bool
     let theme: any Theme
     var comingSoon: Bool = false
+    @ScaledMetric private var rowPadding: CGFloat = 16
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
             Image(systemName: icon)
-                .font(.system(size: 16))
+                .font(.system(.body)) // scales with Dynamic Type; ~16pt
                 .foregroundColor(isOn && !comingSoon ? theme.accentColor : theme.secondaryText)
                 .frame(width: 24)
                 .padding(.top, 2)
+                .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(theme.fontBody.weight(.medium))
                         .foregroundColor(theme.primaryText)
 
                     if comingSoon {
                         Text("Coming Soon")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge text)
                             .foregroundColor(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(theme.secondaryText.opacity(0.6))
-                            .cornerRadius(4)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
                     }
                 }
 
                 Text(description)
-                    .font(.system(size: 12))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineSpacing(2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -568,7 +589,7 @@ private struct FeatureToggleRow: View {
                 .tint(theme.accentColor)
                 .disabled(comingSoon)
         }
-        .padding(16)
+        .padding(rowPadding)
         .opacity(comingSoon ? 0.6 : 1.0)
     }
 }

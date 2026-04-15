@@ -10,8 +10,8 @@ import os
 
 /// A background worker service responsible for asynchronously processing
 /// chat messages and files into semantic vector embeddings for RAG.
-class RAGIndexingService {
-    
+final class RAGIndexingService: @unchecked Sendable {
+
     // MARK: - Singleton
     static let shared = RAGIndexingService()
     

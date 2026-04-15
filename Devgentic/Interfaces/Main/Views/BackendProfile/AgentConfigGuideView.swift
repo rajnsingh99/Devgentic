@@ -22,17 +22,17 @@ struct AgentConfigGuideView: View {
                     .frame(width: 48, height: 48)
                     .overlay(
                         Image(systemName: "book.pages")
-                            .font(.system(size: 20))
+                            .font(.system(.title3))
                             .foregroundColor(.accentColor)
                     )
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Agent Configuration Guide")
-                        .font(.title2)
+                        .font(theme.fontTitle2)
                         .fontWeight(.bold)
                         .foregroundColor(theme.primaryText)
                     Text("Understand each setting and how to configure for optimal results.")
-                        .font(.subheadline)
+                        .font(theme.fontSubheadline)
                         .foregroundColor(theme.secondaryText)
                 }
 
@@ -40,11 +40,12 @@ struct AgentConfigGuideView: View {
 
                 Button(action: { dismiss() }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
+                        .font(theme.fontTitle2)
                         .foregroundColor(theme.tertiaryText)
                 }
                 .buttonStyle(.plain)
                 .help("Close guide")
+                .accessibilityLabel("Close guide")
             }
             .padding(20)
 
@@ -187,12 +188,11 @@ struct AgentConfigGuideView: View {
     // MARK: - Guide Components
 
     @ViewBuilder
-    private func guideCard(title: String, icon: String, @ViewBuilder content: () -> some View) -> some View {
+    private func guideCard(title: LocalizedStringKey, icon: String, @ViewBuilder content: () -> some View) -> some View {
         SettingsCard(title: title, icon: icon, theme: theme) {
             VStack(alignment: .leading, spacing: 12) {
                 content()
             }
-            .padding(16)
         }
     }
 
@@ -201,10 +201,10 @@ struct AgentConfigGuideView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(theme.fontBody.weight(.semibold))
                     .foregroundColor(color)
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(.title3, weight: .semibold))
                     .foregroundColor(theme.primaryText)
             }
             content()
@@ -214,7 +214,7 @@ struct AgentConfigGuideView: View {
     @ViewBuilder
     private func guideParagraph(_ text: String) -> some View {
         Text(LocalizedStringKey(text))
-            .font(.system(size: 13))
+            .font(theme.fontSubheadline)
             .foregroundColor(theme.secondaryText)
             .lineSpacing(3)
             .fixedSize(horizontal: false, vertical: true)
@@ -224,10 +224,10 @@ struct AgentConfigGuideView: View {
     private func guideSettingRow(_ title: String, _ description: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(theme.fontSubheadline.weight(.semibold))
                 .foregroundColor(theme.primaryText)
             Text(LocalizedStringKey(description))
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.secondaryText)
                 .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
@@ -238,11 +238,11 @@ struct AgentConfigGuideView: View {
     private func guideTip(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "lightbulb.fill")
-                .font(.caption)
+                .font(theme.fontCaption)
                 .foregroundColor(.yellow)
                 .padding(.top, 2)
             Text(text)
-                .font(.system(size: 12))
+                .font(.system(.caption))
                 .foregroundColor(theme.secondaryText)
                 .italic()
                 .fixedSize(horizontal: false, vertical: true)
@@ -261,7 +261,7 @@ struct AgentConfigGuideView: View {
     @ViewBuilder
     private func guideDiagram(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .font(theme.fontCode)
             .foregroundColor(theme.accentColor)
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -276,10 +276,10 @@ struct AgentConfigGuideView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(theme.fontSubheadline.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                 Text(description)
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
             }
 
@@ -287,10 +287,10 @@ struct AgentConfigGuideView: View {
 
             VStack(alignment: .trailing, spacing: 2) {
                 Text(capabilities)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.accentColor)
                 Text("\(iterations) iters")
-                    .font(.system(size: 11))
+                    .font(.system(.caption))
                     .foregroundColor(theme.tertiaryText)
             }
         }

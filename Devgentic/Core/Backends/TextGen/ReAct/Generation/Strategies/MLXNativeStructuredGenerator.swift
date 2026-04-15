@@ -16,8 +16,8 @@ private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.d
 /// to handle parallel tool calls reliably.
 struct MLXNativeStructuredGenerator: CognitiveGenerator {
     let toolAdapter: ToolSchemaAdapter
-    
-    private let dialectRules = """
+
+    let dialectRules: String? = """
     RESPONSE FORMAT:
     You MUST respond using the following structured JSON format:
     {
@@ -35,12 +35,21 @@ struct MLXNativeStructuredGenerator: CognitiveGenerator {
     5. Use exact tool names from the TOOLS list.
     """
     
+    var promptWrapping: PromptWrapping { .markdown }
+
     init(toolAdapter: ToolSchemaAdapter = PromptedMarkdownAdapter()) {
         self.toolAdapter = toolAdapter
     }
-    
+
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: false)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: false, wrapping: .markdown)
+    }
+
+    func promptTrigger(for iteration: Int) -> String {
+        let base = iteration == 1
+            ? "Analyze the task and working memory, then decide your next action."
+            : "New observations have been recorded in working memory. Decide your next action."
+        return base + " Respond as a JSON object with your reasoning in 'content' and any tool calls in 'tool_calls'."
     }
     
     func generateCognitiveStep(model: any LLMProvider, context: SemanticContext, iteration: Int) async throws -> ModernCognitiveStep {
@@ -49,11 +58,7 @@ struct MLXNativeStructuredGenerator: CognitiveGenerator {
 
         var executionMessages = compileMessages(from: context)
         
-        let promptTrigger = (iteration == 1)
-            ? "Begin ReAct loop. Analyze Active Memory. Respond with Thought + tool_calls JSON."
-            : "Review OBSERVATION. Decide next step. Respond with Thought + tool_calls JSON."
-
-        executionMessages.append(["role": "user", "content": promptTrigger])
+        executionMessages.append(["role": "user", "content": promptTrigger(for: iteration)])
 
         logLLMOps.debug("📤 [MLXModern:\(reqId)] Sending request...")
         let startTime = Date()

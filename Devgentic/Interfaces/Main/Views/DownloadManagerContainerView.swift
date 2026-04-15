@@ -13,7 +13,7 @@ import SwiftUI
 
 struct DownloadManagerContainerView: View {
 
-    @ObservedObject private var manager = DownloadManager.shared
+    var manager = DownloadManager.shared
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -21,10 +21,10 @@ struct DownloadManagerContainerView: View {
             DynamicIslandBar {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.accentColor)
                     Text("Download Manager")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(theme.fontSubheadline.weight(.semibold))
                         .foregroundColor(theme.primaryText)
                 }
             } trailing: {
@@ -33,7 +33,7 @@ struct DownloadManagerContainerView: View {
                         withAnimation { manager.clearCompleted() }
                     } label: {
                         Text("Clear History")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(.caption, weight: .medium))
                             .foregroundColor(theme.accentColor)
                     }
                     .buttonStyle(.plain)
@@ -64,11 +64,12 @@ struct DownloadManagerContainerView: View {
                         }
                     }
                     .padding(24)
+                    .frame(maxWidth: 1000)
+                    .frame(maxWidth: .infinity)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(theme.primaryBackground)
     }
 
     // MARK: - Helpers
@@ -81,14 +82,14 @@ struct DownloadManagerContainerView: View {
                     .fill(theme.secondaryText.opacity(0.08))
                     .frame(width: 80, height: 80)
                 Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 36))
+                    .font(.system(size: 36)) // Fixed size: intentional (icon)
                     .foregroundColor(theme.secondaryText.opacity(0.5))
             }
             Text("No Downloads")
                 .font(.title3)
                 .fontWeight(.medium)
                 .foregroundColor(theme.primaryText)
-            Text("Model downloads from the Ollama and MLX stores will appear here.")
+            Text("Model downloads from Ollama, MLX, and Whisper will appear here.")
                 .font(.callout)
                 .foregroundColor(theme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -101,7 +102,7 @@ struct DownloadManagerContainerView: View {
     private func sectionView<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(.system(size: 13, weight: .bold))
+                .font(theme.fontSubheadline.weight(.bold))
                 .foregroundColor(theme.primaryText)
                 .textCase(.uppercase)
                 .tracking(0.5)
@@ -116,7 +117,7 @@ struct DownloadManagerContainerView: View {
 private struct ActiveDownloadCardView: View {
 
     let entry: DownloadEntry
-    @ObservedObject private var manager = DownloadManager.shared
+    var manager = DownloadManager.shared
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -142,7 +143,7 @@ private struct ActiveDownloadCardView: View {
                     Spacer()
 
                     Text("\(Int(entry.progress * 100))%")
-                        .font(.system(size: 14, weight: .bold).monospacedDigit())
+                        .font(theme.fontBody.weight(.bold).monospacedDigit())
                         .foregroundColor(entry.backend.tintColor)
                 }
 
@@ -170,7 +171,7 @@ private struct ActiveDownloadCardView: View {
         }
         .padding(16)
         .background(theme.secondaryBackground)
-        .cornerRadius(12)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(theme.dividerColor, lineWidth: 1)
@@ -183,7 +184,7 @@ private struct ActiveDownloadCardView: View {
 private struct CompletedDownloadCardView: View {
 
     let entry: DownloadEntry
-    @ObservedObject private var manager = DownloadManager.shared
+    var manager = DownloadManager.shared
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -221,7 +222,7 @@ private struct CompletedDownloadCardView: View {
                 withAnimation { manager.removeCompleted(entry) }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(.caption2, weight: .bold))
                     .foregroundColor(theme.secondaryText)
                     .padding(6)
                     .background(Circle().fill(theme.surfaceOverlay))
@@ -231,7 +232,7 @@ private struct CompletedDownloadCardView: View {
         }
         .padding(16)
         .background(theme.secondaryBackground)
-        .cornerRadius(12)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(theme.dividerColor, lineWidth: 1)

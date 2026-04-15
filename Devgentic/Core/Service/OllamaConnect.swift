@@ -53,10 +53,18 @@ struct OllamaShowResponse: Codable {
 
         // Separate check: XML-style tool markers used by some Mistral variants in Ollama
         let hasMistralXMLMarker = templateStr.contains("<tool_call>") ||
-                                  templateStr.contains("[tool_calls]")
+                                  templateStr.contains("[tool_calls]") ||
+                                  templateStr.contains("<function_call>")
 
         // [available_tools] is a ReAct-style injection marker
         let hasReActMarker = templateStr.contains("[available_tools]")
+
+        // Secondary dialect signals: chat-format structure that reveals the model's
+        // trained output dialect even when explicit tool injection points are absent.
+        // Used as tiebreakers for singleAction models that only have modelfile hints.
+        let hasMistralChatStructure = templateStr.contains("[inst]") || templateStr.contains("[/inst]")
+        let hasReActStructureHints  = (templateStr.contains("thought:") && templateStr.contains("action:")) ||
+                                      (modelfileStr.contains("thought:") && modelfileStr.contains("action:"))
 
         // 2. High Signal: Known Capable Architecture Families
         let knownParallelFamilies = ["llama3.1", "llama3.2", "qwen2", "qwen2.5", "mistral", "hermes", "command-r"]
@@ -78,12 +86,16 @@ struct OllamaShowResponse: Codable {
         }
 
         // --- DIALECT DETECTION ---
+        //
+        // Primary signals (tool markers) are consumed by capability detection above,
+        // so for singleAction models they are guaranteed false. Secondary signals
+        // (chat-format structure) provide dialect inference for that tier.
 
         let dialect: ModelDialect
         if capability == .none {
             dialect = .heuristicJson
         } else if hasMistralXMLMarker {
-            // Template uses <tool_call> XML-style wrapping
+            // Template uses <tool_call> / <function_call> XML-style wrapping
             dialect = .mistralXML
         } else if hasReActMarker {
             // Template uses [available_tools] ReAct-style injection
@@ -91,8 +103,15 @@ struct OllamaShowResponse: Codable {
         } else if hasNativeTemplateTools || isCapableFamily {
             // Modern {{ .Tools }} Go template: OpenAI-compatible native JSON arrays
             dialect = .nativeJSON
+        } else if hasMistralChatStructure {
+            // No explicit tool markers, but [INST]/[/INST] chat format reveals Mistral
+            // lineage — these models were fine-tuned with XML-style tool output.
+            dialect = .mistralXML
+        } else if hasReActStructureHints {
+            // Thought/Action markers in template or modelfile indicate ReAct prompting.
+            dialect = .reactMarkdown
         } else {
-            // Modelfile hint only: fall back to prompted flat JSON
+            // No structural dialect hints: fall back to prompted flat JSON
             dialect = .heuristicJson
         }
 
@@ -139,6 +158,15 @@ struct OllamaModelDetails: Codable, Hashable {
     
     // Note: supportsToolUse was relocated to OllamaShowResponse because
     // it requires access to the model 'template' property to accurately evaluate.
+
+    /// Parses `parameterSize` (e.g. "7B", "70B", "1.5B", "400M") into a sortable numeric value in billions.
+    var parameterSizeValue: Double {
+        guard let raw = parameterSize?.uppercased() else { return 0 }
+        let numeric = raw.filter { $0.isNumber || $0 == "." }
+        guard let value = Double(numeric) else { return 0 }
+        if raw.hasSuffix("M") { return value / 1000 }
+        return value
+    }
 
     enum CodingKeys: String, CodingKey {
         case format, family, families

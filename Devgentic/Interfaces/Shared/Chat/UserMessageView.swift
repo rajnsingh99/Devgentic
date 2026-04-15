@@ -17,7 +17,7 @@ struct UserMessageView: View {
     @State private var isExpanded = false
     @State private var isTruncatable = false
 
-    @EnvironmentObject private var themeManager: ThemeManager
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -31,7 +31,7 @@ struct UserMessageView: View {
                         }
                     }) {
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(.caption, weight: .bold))
                             .foregroundColor(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 180 : 0))
                             .padding(6)
@@ -40,6 +40,7 @@ struct UserMessageView: View {
                     }
                     .buttonStyle(.plain)
                     .help(isExpanded ? "Collapse" : "Expand")
+                    .accessibilityLabel(isExpanded ? "Collapse message" : "Expand message")
                 }
             }
 
@@ -90,7 +91,7 @@ struct UserMessageView: View {
         }
 
         let highlightColor = Color.yellow.opacity(0.4)
-        let activeHighlightColor = Color.orange.opacity(0.6)
+        let activeHighlightColor = theme.warningColor.opacity(0.6)
 
         for (index, range) in matchRanges.enumerated().reversed() {
             let startOffset = text.distance(from: text.startIndex, to: range.lowerBound)
@@ -106,7 +107,24 @@ struct UserMessageView: View {
         return attrString
     }
     
+    /// Cached width for which truncation was last computed — avoids re-creating
+    /// expensive NSHostingViews on every GeometryReader callback.
+    @State private var lastMeasuredWidth: CGFloat = 0
+
     private func determineTruncation(availableWidth: CGFloat) {
+        // Skip re-computation if the width hasn't changed meaningfully (±2pt tolerance).
+        guard abs(availableWidth - lastMeasuredWidth) > 2 else { return }
+        lastMeasuredWidth = availableWidth
+
+        // Heuristic fast-path: short messages are never truncatable.
+        // Average line at typical chat width holds ~80 chars; if text is shorter
+        // than lineLimitCollapsed * 80 chars, skip the expensive hosting views.
+        let estimatedCharsPerLine = max(40, Int(availableWidth / 7))
+        if text.count < lineLimitCollapsed * estimatedCharsPerLine {
+            isTruncatable = false
+            return
+        }
+
         let fullTextView = Text(text)
             .font(themeManager.chatFont)
             .frame(width: availableWidth, alignment: .leading)
@@ -115,13 +133,11 @@ struct UserMessageView: View {
             .font(themeManager.chatFont)
             .lineLimit(lineLimitCollapsed)
             .frame(width: availableWidth, alignment: .leading)
-            
+
         let fullSize = NSHostingView(rootView: fullTextView).fittingSize
         let truncatedSize = NSHostingView(rootView: truncatedTextView).fittingSize
-        
-        if fullSize.height > truncatedSize.height + 2 {
-            self.isTruncatable = true
-        }
+
+        isTruncatable = fullSize.height > truncatedSize.height + 2
     }
 }
 
@@ -186,25 +202,28 @@ struct UserBubbleModifier: ViewModifier {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .foregroundColor(.primary) // Auto-adapts to light/dark
-            .background(
-                UserBubbleShape()
-                    .fill(.ultraThinMaterial) // Native glass effect
-                    .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2) // Floating depth
-            )
-            .overlay(
-                UserBubbleShape()
-                    .stroke(
-                        LinearGradient(
-                            gradient: Gradient(colors: [
-                                Color.white.opacity(0.3),
-                                Color.white.opacity(0.05)
-                            ]),
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
+            // MARK: Liquid Glass
+            .glassEffect(.regular, in: .rect(cornerRadius: 16))
+            // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+            // .background(
+            //     UserBubbleShape()
+            //         .fill(.ultraThinMaterial) // Native glass effect
+            //         .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2) // Floating depth
+            // )
+            // .overlay(
+            //     UserBubbleShape()
+            //         .stroke(
+            //             LinearGradient(
+            //                 gradient: Gradient(colors: [
+            //                     Color.white.opacity(0.3),
+            //                     Color.white.opacity(0.05)
+            //                 ]),
+            //                 startPoint: .topLeading,
+            //                 endPoint: .bottomTrailing
+            //             ),
+            //             lineWidth: 1
+            //         )
+            // )
     }
 }
 

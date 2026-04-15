@@ -166,7 +166,7 @@ final class LocalToolManager {
         return Array(toolRegistry.values)
     }
     
-    func execute(name: String, arguments: [String: Any]) async -> String {
+    func execute(name: String, arguments: sending [String: Any]) async -> String {
         logger.info("--- executing local tool (native) ---")
         logger.info("Tool: '\(name)'")
         logger.info("Arguments: \(String(describing: arguments))")

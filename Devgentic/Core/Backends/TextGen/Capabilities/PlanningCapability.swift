@@ -4,7 +4,7 @@
 //
 //  Planning capability: decomposes a task into subtasks via LLM, then executes each
 //  subtask using the wrapped inner executor. Supports parallel subtask execution
-//  (via dependsOn) and per-subtask tool filtering (via toolHint).
+//  (via dependsOn) and per-subtask tool filtering (via toolHints).
 //
 //  Extracted from PlanExecuteExecutor.swift during the Agent Capabilities Migration.
 //
@@ -31,11 +31,17 @@ struct PlanningCapability: ExecutorCapability, Sendable {
 
 actor PlanningExecutorWrapper: Executor {
 
-    nonisolated let architecture: AgentArchitecture = .planAndExecute
+    nonisolated let executorLabel: String = "Planning → ReAct"
     nonisolated private let innerExecutor: any Executor
     nonisolated private let config: PlanningCapabilityConfig
 
     init(innerExecutor: any Executor, config: PlanningCapabilityConfig) {
+        // PlanningCapability seeds dependency results into workingMemory.
+        // This only works with executors that consume AgentInput.workingMemory
+        // (e.g., ReActAgentExecutor). If wired to a non-consuming executor,
+        // seeded context is silently discarded.
+        assert(innerExecutor is ReActAgentExecutor,
+               "PlanningCapability requires an inner executor that consumes workingMemory (e.g., ReActAgentExecutor).")
         self.innerExecutor = innerExecutor
         self.config = config
     }
@@ -49,8 +55,12 @@ actor PlanningExecutorWrapper: Executor {
         return AsyncThrowingStream(AgentStreamEvent.self) { continuation in
             let task = Task {
 
-                var sessionState: SessionGraph = input.activeState
-                    ?? SessionGraphStore.shared.getActiveState(for: input.conversationID)
+                var sessionState: SessionGraph
+                if let activeState = input.activeState {
+                    sessionState = activeState
+                } else {
+                    sessionState = await SessionGraphStore.shared.getActiveState(for: input.conversationID)
+                }
 
                 do {
                     logger.info("Planning capability initiated.")
@@ -61,7 +71,7 @@ actor PlanningExecutorWrapper: Executor {
                     // --- Start Episode ---
                     sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
                     sessionState.workingMemory.removeValue(forKey: "current_focus")
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     // =====================================================================
                     // PHASE 1: PLANNING
@@ -78,7 +88,7 @@ actor PlanningExecutorWrapper: Executor {
                         content: "Decomposing task into subtasks..."
                     ))
 
-                    await GlobalRateLimiter.shared.wait(for: input.rateLimitCategory)
+                    await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
 
                     let envFacts = EnvironmentFacts(
                         osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
@@ -87,10 +97,16 @@ actor PlanningExecutorWrapper: Executor {
                         currentDate: Date().formatted(date: .numeric, time: .shortened)
                     )
 
-                    // Read User Personal profile for planning context
-                    let userProfile: String? = await MainActor.run {
-                        guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
-                        return UserPersonalService.shared.getProfileForInjection()
+                    // Read User Personal profile for planning context.
+                    // Suppressed in workflow mode — workflow nodes operate on task+input, not personal context.
+                    let userProfile: String?
+                    if input.workflowContext == nil {
+                        userProfile = await MainActor.run {
+                            guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
+                            return UserPersonalService.shared.getProfileForInjection()
+                        }
+                    } else {
+                        userProfile = nil
                     }
 
                     let planContext = SemanticContext(
@@ -98,6 +114,7 @@ actor PlanningExecutorWrapper: Executor {
                         environmentFacts: envFacts,
                         longTermMemory: input.longTermMemory,
                         recentHistory: input.recentHistory,
+                        nativeHistoryTurns: input.nativeHistoryTurns,
                         originalQuery: input.userInput,
                         currentIteration: 0,
                         compiledScratchpad: "",
@@ -105,10 +122,12 @@ actor PlanningExecutorWrapper: Executor {
                         negativeConstraints: Set(sessionState.negativeConstraints),
                         hallucinatedTools: [],
                         availableTools: input.tools,
-                        userProfile: userProfile
+                        userProfile: userProfile,
+                        skillManifests: input.skillManifests,
+                        taskDescription: nil
                     )
 
-                    let planGenerator = PlanGeneratorStrategy()
+                    let planGenerator = PlanGeneratorStrategy(planningConfig: config)
                     var subtasks: [SubTask]
 
                     do {
@@ -144,7 +163,7 @@ actor PlanningExecutorWrapper: Executor {
                             logger.info("Plan rejected by user.")
                             continuation.yield(.content("Plan was cancelled. Let me know if you'd like a different approach."))
                             sessionState.closeActiveEpisode(status: "CANCELLED", outcome: "Plan rejected by user")
-                            SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                            await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                             continuation.finish()
                             return
                         }
@@ -160,6 +179,7 @@ actor PlanningExecutorWrapper: Executor {
 
                     let levels = Self.computeExecutionLevels(subtasks: subtasks)
                     var subtaskResults: [String: String] = [:]
+                    var allToolResults: [ToolOutput] = []  // [G4] Aggregate across subtasks
 
                     for (levelIndex, levelIDs) in levels.enumerated() {
                         try Task.checkCancellation()
@@ -171,29 +191,37 @@ actor PlanningExecutorWrapper: Executor {
                         if config.parallelSubtasks && levelSubtasks.count > 1 {
                             // Parallel execution — catch per-subtask errors so one failure
                             // doesn't discard results from siblings that completed successfully.
-                            await withTaskGroup(of: (String, String?).self) { group in
+                            // Snapshot results from prior levels for dependency seeding.
+                            // Parallel siblings at the same level won't see each other's
+                            // results (correct — they're independent by definition).
+                            let priorResults = subtaskResults
+
+                            await withTaskGroup(of: (String, String?, [ToolOutput]).self) { group in
                                 for subtask in levelSubtasks {
                                     group.addTask {
                                         do {
                                             let result = try await self.executeSubtask(
                                                 subtask: subtask,
+                                                allSubtasks: subtasks,
+                                                priorResults: priorResults,
                                                 input: input,
                                                 model: model,
                                                 continuation: continuation,
                                                 onTraceUpdate: onTraceUpdate
                                             )
-                                            return (subtask.id, result)
+                                            return (subtask.id, result.output, result.toolResults)
                                         } catch is CancellationError {
-                                            return (subtask.id, nil)
+                                            return (subtask.id, nil, [])
                                         } catch {
                                             logger.error("Subtask '\(subtask.id)' failed: \(error.localizedDescription)")
                                             continuation.yield(.thought("  [\(subtask.id)] Failed: \(error.localizedDescription)"))
-                                            return (subtask.id, "Error: \(error.localizedDescription)")
+                                            return (subtask.id, "Error: \(error.localizedDescription)", [])
                                         }
                                     }
                                 }
-                                for await (id, result) in group {
+                                for await (id, result, tools) in group {
                                     if let result { subtaskResults[id] = result }
+                                    allToolResults.append(contentsOf: tools)
                                 }
                             }
                             try Task.checkCancellation()
@@ -204,12 +232,15 @@ actor PlanningExecutorWrapper: Executor {
                                 do {
                                     let result = try await self.executeSubtask(
                                         subtask: subtask,
+                                        allSubtasks: subtasks,
+                                        priorResults: subtaskResults,
                                         input: input,
                                         model: model,
                                         continuation: continuation,
                                         onTraceUpdate: onTraceUpdate
                                     )
-                                    subtaskResults[subtask.id] = result
+                                    subtaskResults[subtask.id] = result.output
+                                    allToolResults.append(contentsOf: result.toolResults)
                                 } catch is CancellationError {
                                     throw CancellationError()
                                 } catch {
@@ -231,18 +262,28 @@ actor PlanningExecutorWrapper: Executor {
 
                     var synthesisSummary = ExecutionSummary(originalGoal: input.userInput)
                     synthesisSummary.finalAgentThought = combinedResults.isEmpty ? nil : combinedResults
+                    // [G4] Aggregate subtask tool results so ResponseSynthesizer has full context.
+                    for tool in allToolResults {
+                        synthesisSummary.record(
+                            toolCallId: tool.id.uuidString,
+                            toolName: tool.toolName,
+                            params: tool.params,
+                            output: tool.output,
+                            isSuccess: tool.isSuccess
+                        )
+                    }
                     synthesisSummary.markComplete()
 
                     let response = await ResponseSynthesizer.synthesize(
                         summary: synthesisSummary,
-                        model: model,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
-                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator
+                        isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
+                        forceSynthesis: input.responseSynthesisEnabled
                     )
 
                     sessionState.closeActiveEpisode(status: "COMPLETED", outcome: response)
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     continuation.yield(.content(response))
                     continuation.finish()
@@ -251,7 +292,7 @@ actor PlanningExecutorWrapper: Executor {
                     logger.notice("Planning capability cancelled.")
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
                     sessionState.cancelActiveEpisode()
-                    SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
                     continuation.finish()
                 } catch {
@@ -267,31 +308,56 @@ actor PlanningExecutorWrapper: Executor {
 
     // MARK: - Subtask Execution via Inner Executor
 
+    /// - Parameters:
+    ///   - subtask: The subtask to execute.
+    ///   - allSubtasks: The full plan (used to look up dependency descriptions).
+    ///   - priorResults: Results from already-completed subtasks (keyed by subtask ID).
+    ///     For parallel execution this is a snapshot from prior levels; for sequential
+    ///     execution it includes all results accumulated so far.
     private func executeSubtask(
         subtask: SubTask,
+        allSubtasks: [SubTask],
+        priorResults: [String: String],
         input: AgentInput,
         model: any LLMProvider,
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
-    ) async throws -> String {
+    ) async throws -> (output: String, toolResults: [ToolOutput]) {
 
         continuation.yield(.thought("Subtask: \(subtask.description)"))
 
-        // Optionally filter tools based on toolHint
+        // Optionally filter tools based on toolHints
         let filteredTools: [AgentTool]
-        if config.subtaskToolFiltering, let hint = subtask.toolHint, !hint.isEmpty {
-            let hintLower = hint.lowercased()
+        if config.subtaskToolFiltering, let hints = subtask.toolHints, !hints.isEmpty {
+            let hintSet = Set(hints.map { $0.lowercased() })
             let matched = input.tools.filter { tool in
-                tool.name.lowercased().contains(hintLower) ||
-                tool.description.lowercased().contains(hintLower)
+                hintSet.contains(tool.name.lowercased())
             }
             // If filter matches nothing, fall back to all tools
             if matched.isEmpty {
-                logger.warning("Tool hint '\(hint)' for subtask '\(subtask.id)' matched no tools. Falling back to all \(input.tools.count) tools.")
+                logger.warning("Tool hints \(hints) for subtask '\(subtask.id)' matched no tools. Falling back to all \(input.tools.count) tools.")
             }
             filteredTools = matched.isEmpty ? input.tools : matched
         } else {
             filteredTools = input.tools
+        }
+
+        // Seed working memory with dependency results so dependent subtasks
+        // have context from prior steps (e.g., file paths discovered earlier).
+        var seededMemory = input.workingMemory
+        if let deps = subtask.dependsOn, !deps.isEmpty {
+            for depID in deps {
+                guard let depResult = priorResults[depID] else { continue }
+                let depDescription = allSubtasks.first(where: { $0.id == depID })?.description ?? depID
+                seededMemory.recordObservation(
+                    stepId: 0,
+                    toolCallId: "dep_\(depID)",
+                    toolName: "prior_subtask",
+                    result: "[\(depDescription)]: \(depResult)",
+                    artifacts: []
+                )
+            }
+            logger.info("Seeded \(deps.count) dependency result(s) into working memory for subtask '\(subtask.id)'.")
         }
 
         // Build subtask-scoped input
@@ -304,11 +370,17 @@ actor PlanningExecutorWrapper: Executor {
             activeState: input.activeState,
             recentHistory: input.recentHistory,
             generatorStrategy: input.generatorStrategy,
-            workingMemory: input.workingMemory,
+            workingMemory: seededMemory,
+            rateLimitKey: input.rateLimitKey,
             rateLimitCategory: input.rateLimitCategory,
             instructions: input.instructions,
+            skillManifests: input.skillManifests,
+            skillFolderPath: input.skillFolderPath,
             retryPolicy: input.retryPolicy,
             errorRecovery: input.errorRecovery,
+            responseSynthesisEnabled: input.responseSynthesisEnabled,
+            nativeHistoryTurns: input.nativeHistoryTurns,
+            suppressEpisodeManagement: true,
             traceContext: input.traceContext.newSpan()
         )
 
@@ -316,20 +388,38 @@ actor PlanningExecutorWrapper: Executor {
         let stream = innerExecutor.execute(model: model, input: subtaskInput, onTraceUpdate: onTraceUpdate)
 
         var output = ""
+        var toolResults: [ToolOutput] = []
         for try await event in stream {
             switch event {
             case .content(let text):
                 output += text
-            case .thought(let thought):
+            case .thought(let thought, _, _):
                 continuation.yield(.thought("  [\(subtask.id)] \(thought)"))
+            case .toolCall(let name, let params, _):
+                // [G11] Forward tool invocation events so UI shows tool activity during subtasks.
+                continuation.yield(.toolCall(name: name, params: params))
+            case .toolOutput(let toolOutput, _):
+                // [G4] Capture subtask tool results for synthesis aggregation.
+                toolResults.append(toolOutput)
+                continuation.yield(.toolOutput(toolOutput))
+            case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
+                // [G9] Forward HITL permission requests — user must see these during subtasks.
+                continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
+            case .requestClarification(let question, let operationID, let sourceNodeID):
+                // [G9] Forward HITL clarification requests.
+                continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID))
+            case .error(let msg):
+                continuation.yield(.error(msg))
             case .artifactProduced(let artifact):
                 continuation.yield(.artifactProduced(artifact))
+            case .tokenUsage(let usage):
+                continuation.yield(.tokenUsage(usage))
             default:
                 break
             }
         }
 
-        return output
+        return (output, toolResults)
     }
 
     // MARK: - Dependency Sanitization

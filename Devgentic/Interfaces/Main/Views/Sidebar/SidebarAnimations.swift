@@ -62,6 +62,7 @@ struct StreamingPulseIndicator: View {
 /// A small icon button that reveals on hover, used for inline row actions.
 struct HoverActionButton: View {
     let icon: String
+    var label: LocalizedStringKey = ""
     var tint: Color = .secondary
     let action: () -> Void
     @State private var isHovering = false
@@ -70,7 +71,7 @@ struct HoverActionButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(.caption, weight: .medium))
                 .foregroundColor(isHovering ? tint : theme.tertiaryText)
                 .frame(width: 22, height: 22)
                 .background(
@@ -80,5 +81,6 @@ struct HoverActionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
+        .accessibilityLabel(label)
     }
 }

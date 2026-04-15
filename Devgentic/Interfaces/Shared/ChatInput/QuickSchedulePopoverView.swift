@@ -26,7 +26,7 @@ struct QuickSchedulePopoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Quick Schedule")
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(.caption, weight: .bold))
                 .foregroundColor(theme.primaryText)
                 .padding(.horizontal, 12)
                 .padding(.top, 10)
@@ -38,11 +38,11 @@ struct QuickSchedulePopoverView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: preset.icon)
-                            .font(.system(size: 12))
+                            .font(.system(.caption))
                             .foregroundColor(theme.accentColor)
                             .frame(width: 16)
                         Text(preset.label)
-                            .font(.system(size: 13))
+                            .font(theme.fontSubheadline)
                             .foregroundColor(theme.primaryText)
                         Spacer()
                     }
@@ -66,11 +66,11 @@ struct QuickSchedulePopoverView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 12))
+                        .font(.system(.caption))
                         .foregroundColor(theme.secondaryText)
                         .frame(width: 16)
                     Text("Custom...")
-                        .font(.system(size: 13))
+                        .font(theme.fontSubheadline)
                         .foregroundColor(theme.secondaryText)
                     Spacer()
                 }

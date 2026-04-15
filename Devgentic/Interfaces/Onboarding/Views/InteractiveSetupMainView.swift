@@ -8,7 +8,7 @@
 //import SwiftUI
 //
 //struct InteractiveSetupMainView: View {
-//    @ObservedObject var viewModel: AgentOnboardingViewModel
+//    var viewModel: AgentOnboardingViewModel
 //
 //    var body: some View {
 //        HSplitView { // Or HStack if HSplitView is not desired/available directly in vanilla SwiftUI for macOS target

@@ -30,7 +30,7 @@ struct CodeDiffView: View {
                             Text(formatLineNumber(result.modifiedLineNumber))
                                 .foregroundColor(lineNumberColor(for: result.type))
                         }
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 11, design: .monospaced)) // Fixed size: monospaced
                         .frame(width: 70, alignment: .trailing)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
@@ -43,14 +43,14 @@ struct CodeDiffView: View {
 
                         // Marker (+/-)
                         Text(prefix(for: result.type))
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .font(.system(size: 11, weight: .bold, design: .monospaced)) // Fixed size: monospaced
                             .foregroundColor(contentColor(for: result.type))
                             .frame(width: 20, alignment: .center)
                             .padding(.vertical, 3)
 
                         // Code Content
                         Text(result.line)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: 12, design: .monospaced)) // Fixed size: monospaced
                             .foregroundColor(contentColor(for: result.type))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.vertical, 3)

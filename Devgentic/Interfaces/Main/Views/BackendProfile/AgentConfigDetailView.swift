@@ -24,24 +24,16 @@ struct AgentConfigDetailView: View {
     var onDelete: ((UUID) -> Void)? = nil
     @Environment(BackendProfileService.self) var profileService
     @Environment(MainViewRouter.self) private var router
-    @EnvironmentObject private var toastManager: ToastManager
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
-    // Local state for editing advanced configurations
-    @State private var localOllamaConfig: OllamaAdvancedConfig = .default()
-    @State private var localGeminiConfig: GeminiAdvancedConfig = .default()
-    @State private var localMlxConfig: MLXAdvancedConfig = .default()
-    @State private var localAnthropicConfig: AnthropicAdvancedConfig = .default()
-    @State private var localOpenAIConfig: OpenAIAdvancedConfig = .default()
-
-    // Guard flag: prevents onChange(of: localOllamaConfig/localGeminiConfig/localMlxConfig) from writing
-    // back to providerConfig during initial load.
-    @State private var isLoadingAdvancedConfig = false
+    // Shared advanced config manager (replaces 5 @State config vars + isLoading flag)
+    @State private var configManager = ProviderAdvancedConfigManager()
 
     // Tool Library (now navigated via router)
 
     // Prompt Library for the inline editor
-    @StateObject private var promptLibraryVM = PromptLibraryViewModel()
+    @State private var promptLibraryVM = PromptLibraryViewModel()
 
     // Deletion State
     @State private var showingDeleteAlert = false
@@ -54,8 +46,6 @@ struct AgentConfigDetailView: View {
 
     // Button Hover States
     @State private var isDeleteHovered = false
-    @State private var isRevertHovered = false
-    @State private var isSaveHovered = false
 
     // [PHASE 1 REFACTOR]: Enriched Default Persona
     private let defaultSystemPersona = """
@@ -179,16 +169,17 @@ struct AgentConfigDetailView: View {
         )
     }
 
-    private var descriptionBinding: Binding<String> {
-        Binding<String>(
+    private var historyStrategyBinding: Binding<HistoryStrategy> {
+        Binding<HistoryStrategy>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.description ?? "" }
-                return ""
+                if case .agent(let config) = editBuffer.draft.details {
+                    return config.historyStrategy ?? .recentHistory
+                }
+                return .recentHistory
             },
             set: { newValue in
-                let val = String(newValue.prefix(250))
                 if case .agent(var config) = editBuffer.draft.details {
-                    config.description = val.isEmpty ? nil : val
+                    config.historyStrategy = newValue
                     editBuffer.draft.details = .agent(config)
                 }
             }
@@ -240,6 +231,21 @@ struct AgentConfigDetailView: View {
         )
     }
 
+    private var skillConfigBinding: Binding<SkillFolderConfig?> {
+        Binding<SkillFolderConfig?>(
+            get: {
+                if case .agent(let config) = editBuffer.draft.details { return config.skillConfig }
+                return nil
+            },
+            set: { newValue in
+                if case .agent(var config) = editBuffer.draft.details {
+                    config.skillConfig = newValue
+                    editBuffer.draft.details = .agent(config)
+                }
+            }
+        )
+    }
+
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
@@ -250,94 +256,184 @@ struct AgentConfigDetailView: View {
             ScrollView {
                 VStack(spacing: 32) {
 
-                    // 1. Identity Header
-                HStack(alignment: .center, spacing: 16) {
-                    Image(systemName: "person.crop.square.fill.and.at.rectangle")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                        .foregroundColor(.accentColor)
+                        // 1. Identity Header
+                    HStack(alignment: .center, spacing: 16) {
+                        Image(systemName: ProfileType.agent.iconNameFilled)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 48, height: 48)
+                            .foregroundColor(.accentColor)
 
-                    VStack(alignment: .leading) {
-                        TextField("Agent Name", text: profile.displayName)
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .textFieldStyle(.plain)
-                            .foregroundColor(theme.primaryText)
+                        VStack(alignment: .leading) {
+                            TextField("Agent Name", text: profile.displayName)
+                                .font(theme.fontTitle2)
+                                .fontWeight(.bold)
+                                .textFieldStyle(.plain)
+                                .foregroundColor(theme.primaryText)
 
-                        Text("Define your agent's personality, logic, and tools.")
-                            .font(.subheadline)
-                            .foregroundColor(theme.secondaryText)
+                            Text("Define your agent's personality, logic, and tools.")
+                                .font(theme.fontSubheadline)
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        Spacer()
+
+                        Button(action: { showingAgentGuide = true }) {
+                            Image(systemName: "questionmark.circle")
+                                .font(theme.fontTitle3)
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Agent configuration guide")
+                        .accessibilityLabel("Agent configuration guide")
                     }
-                    Spacer()
-
-                    Button(action: { showingAgentGuide = true }) {
-                        Image(systemName: "questionmark.circle")
-                            .font(.title3)
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Agent configuration guide")
-                }
                 .padding(.bottom, 8)
                 .sheet(isPresented: $showingAgentGuide) {
                     AgentConfigGuideView()
                 }
 
-                // 2. Agent Capabilities (composable toggles)
-                SettingsCard(title: "Agent Capabilities", icon: "brain.head.profile", theme: theme) {
-                    AgentCapabilitiesSection(capabilities: capabilitiesBinding)
-                        .padding(16)
-                }
-
-                // 3. Execution Limits & Error Recovery
-                SettingsCard(title: "Execution Limits", icon: "gauge.with.dots.needle.33percent", theme: theme) {
-                    ExecutionLimitsSection(
-                        maxIterations: maxIterationsBinding,
-                        executionTimeout: executionTimeoutBinding
-                    )
-                    .padding(16)
-                }
-
-                SettingsCard(title: "Error Recovery", icon: "arrow.counterclockwise", theme: theme) {
-                    ErrorRecoverySection(
-                        retryPolicy: retryPolicyBinding,
-                        errorRecovery: errorRecoveryBinding
-                    )
-                    .padding(16)
-                }
-
-                // 4. System Instructions & Identity
-                SettingsCard(title: "System Instructions", icon: "text.quote", theme: theme) {
-                  VStack(alignment: .leading, spacing: 16) {
-                    // Instructions Editor
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Spacer()
-
-                            Button {
-                                AdvancedPromptWindowManager.shared.showEditor(
-                                    text: instructionsBinding,
-                                    agentName: editBuffer.draft.displayName,
-                                    configuredTools: toolsBinding,
-                                    theme: theme
-                                )
-                            } label: {
-                                Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
+                // 2. Inference Engine (Provider)
+                SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ProviderConfigSection(
+                            providerConfig: providerConfig,
+                            profileID: editBuffer.draft.id,
+                            profileType: .agent,
+                            onProviderChanged: { _, newProvider in
+                                providerConfig.wrappedValue.cognitiveCapability =
+                                    ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
                             }
-                            .font(.caption)
-                            .buttonStyle(.link)
+                        )
 
-                            Text("|").foregroundColor(theme.secondaryText).font(.caption)
+                        Divider()
 
-                            Button("Use Default Persona") {
-                                instructionsBinding.wrappedValue = defaultSystemPersona
+                        // Capability Status Badge (Agent-specific)
+                        HStack(alignment: .center) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Inference Capability")
+                                    .fontWeight(.medium)
+                                Text("Detected architectural support for complex structured reasoning.")
+                                    .font(theme.fontCaption)
+                                    .foregroundColor(theme.secondaryText)
                             }
-                            .font(.caption)
-                            .buttonStyle(.link)
+
+                            Spacer(minLength: 16)
+
+                            HStack(spacing: 6) {
+                                let capability = providerConfig.wrappedValue.cognitiveCapability
+                                Image(systemName: capabilityIcon(for: capability))
+                                Text(capability.rawValue)
+                                    .font(theme.fontCaption)
+                                    .fontWeight(.semibold)
+                            }
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 10)
+                            .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
+                            .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
                         }
+                    }
+                }
 
-                        ZStack(alignment: .topLeading) {
+                // 3. Agent Capabilities (composable toggles + tools)
+                SettingsCard(title: "Capabilities", icon: "brain.head.profile", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        AgentCapabilitiesSection(capabilities: capabilitiesBinding)
+
+                        Divider()
+
+                        // Tools
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .center) {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "hammer.fill")
+                                        .font(theme.fontBody)
+                                        .foregroundColor(theme.secondaryText)
+                                        .frame(width: 24, alignment: .center)
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Tools")
+                                            .font(theme.fontBody.weight(.medium))
+                                            .foregroundColor(theme.primaryText)
+                                        let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
+                                        Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
+                                            .font(theme.fontCaption)
+                                            .foregroundColor(theme.secondaryText)
+                                    }
+                                }
+
+                                Spacer(minLength: 16)
+
+                                Button("Manage Library...") {
+                                    router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+
+                            if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack {
+                                        ForEach(toolsBinding.wrappedValue.filter { $0.isEnabled }) { tool in
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "wrench.fill")
+                                                    .font(theme.fontCaption2)
+                                                Text(tool.name)
+                                                    .font(theme.fontCaption)
+                                                    .fontWeight(.medium)
+                                            }
+                                            .padding(.vertical, 6)
+                                            .padding(.horizontal, 10)
+                                            .background(theme.accentColor.opacity(0.1))
+                                            .foregroundColor(theme.accentColor)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.accentColor.opacity(0.2), lineWidth: 1))
+                                        }
+                                    }
+                                }
+                                .padding(.leading, 34)
+                            } else {
+                                Text("Enable tools to give your agent agency.")
+                                    .font(theme.fontCaption)
+                                    .italic()
+                                    .foregroundColor(theme.secondaryText)
+                                    .padding(.leading, 34)
+                            }
+                        }
+                    }
+                }
+
+                // 3. System Instructions & Identity
+                SettingsCard(title: "System Instructions", icon: "text.quote", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Instructions Editor
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Spacer()
+
+                                Button {
+                                    AdvancedPromptWindowManager.shared.showEditor(
+                                        text: instructionsBinding,
+                                        agentName: editBuffer.draft.displayName,
+                                        configuredTools: toolsBinding,
+                                        theme: theme
+                                    )
+                                } label: {
+                                    Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
+                                }
+                                .font(theme.fontCaption)
+                                .buttonStyle(.link)
+
+                                Text("|").foregroundColor(theme.secondaryText).font(theme.fontCaption)
+
+                                Button("Use Default Persona") {
+                                    instructionsBinding.wrappedValue = defaultSystemPersona
+                                }
+                                .font(theme.fontCaption)
+                                .buttonStyle(.link)
+                            }
+
+                            ZStack(alignment: .topLeading) {
                             TokenizingTextEditor(
                                 text: instructionsBinding,
                                 configuredTools: toolsBinding,
@@ -348,12 +444,12 @@ struct AgentConfigDetailView: View {
                             .padding(8)
                             .scrollContentBackground(.hidden)
                             .background(theme.textBackground)
-                            .cornerRadius(8)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
 
                             if instructionsBinding.wrappedValue.isEmpty {
                                 Text("Define persona, reasoning strategy, and tool guidelines...")
-                                    .font(.system(.body, design: .monospaced))
+                                    .font(theme.fontCode)
                                     .foregroundColor(theme.secondaryText.opacity(0.5))
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 16)
@@ -364,241 +460,248 @@ struct AgentConfigDetailView: View {
                         let instrCount = instructionsBinding.wrappedValue.count
                         let instrLimit = ProfileValidationLimits.maxInstructionsLength
                         Text("\(instrCount) characters · ~\(instrCount / 4) tokens")
-                            .font(.caption2)
+                            .font(theme.fontCaption2)
                             .foregroundColor(
                                 instrCount > instrLimit ? .red :
                                 instrCount > Int(Double(instrLimit) * 0.9) ? .orange :
                                 theme.secondaryText
                             )
-                    }
+                        }
 
-                    // Description
-                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Internal Description", systemImage: "info.circle")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundColor(theme.secondaryText)
-
-                        TextField("Brief description of this agent's purpose...", text: descriptionBinding)
-                            .textFieldStyle(.roundedBorder)
-                            .foregroundColor(theme.primaryText)
                     }
-                  }
-                  .padding(16)
                 }
 
-                // 5. Inference Engine (Provider)
-                SettingsCard(title: "Inference Engine", icon: "cpu", theme: theme) {
-                  VStack(alignment: .leading, spacing: 16) {
-                    ProviderConfigSection(
-                        providerConfig: providerConfig,
-                        profileID: editBuffer.draft.id,
-                        profileType: .agent,
-                        onProviderChanged: { _, newProvider in
-                            providerConfig.wrappedValue.cognitiveCapability =
-                                ProfileCapabilityFilter.defaultCognitiveCapability(for: .agent, provider: newProvider)
-                        }
-                    )
+                // 4. Skills
+                AgentSkillsSection(
+                    skillConfig: skillConfigBinding,
+                    tools: toolsBinding,
+                    currentModelTier: currentModelTier,
+                    theme: theme
+                )
 
-                    Divider()
-                        .padding(.vertical, 4)
+                // 5. Knowledge
+                SettingsCard(title: "Knowledge", icon: "book.closed.fill", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
 
-                    // Capability Status Badge (Agent-specific)
-                    HStack(alignment: .center) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Inference Capability")
-                                .fontWeight(.medium)
-                            Text("Detected architectural support for complex structured reasoning.")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-
-                        Spacer(minLength: 16)
-
-                        HStack(spacing: 6) {
-                            let capability = providerConfig.wrappedValue.cognitiveCapability
-                            Image(systemName: capabilityIcon(for: capability))
-                            Text(capability.rawValue)
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                        }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 10)
-                        .background(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.1))
-                        .foregroundColor(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability))
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
-                    }
-                  }
-                  .padding(16)
-                }
-
-                // 6. Tools & Knowledge
-                SettingsCard(title: "Capabilities", icon: "hammer.fill", theme: theme) {
-                  VStack(alignment: .leading, spacing: 16) {
-
-                    // Tools Header
-                    HStack(alignment: .center) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Tools")
-                                .fontWeight(.medium)
-                            let count = toolsBinding.wrappedValue.filter { $0.isEnabled }.count
-                            Text(count == 0 ? "No tools enabled" : "\(count) tool(s) active")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-
-                        Spacer(minLength: 16)
-
-                        Button("Manage Library...") {
-                            router.navigate(to: .toolLibrary(profileID: editBuffer.draft.id))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-
-                    // Tool Chips
-                    if !toolsBinding.wrappedValue.filter({ $0.isEnabled }).isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack {
-                                ForEach(toolsBinding.wrappedValue.filter { $0.isEnabled }) { tool in
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "wrench.fill")
-                                            .font(.caption2)
-                                        Text(tool.name)
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                    }
-                                    .padding(.vertical, 6)
-                                    .padding(.horizontal, 10)
-                                    .background(Color.blue.opacity(0.1))
-                                    .foregroundColor(.blue)
-                                    .cornerRadius(8)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2), lineWidth: 1))
-                                }
+                        // Reference Documents
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .center) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Reference Documents")
+                                        .font(theme.fontBody.weight(.semibold))
+                                    Text("Add external documents the agent can use as context")
+                                    .font(theme.fontCaption)
+                                    .foregroundColor(theme.secondaryText)
                             }
-                        }
-                        .padding(.top, 4)
-                    } else {
-                        Text("Enable tools to give your agent agency.")
-                            .font(.caption)
-                            .italic()
-                            .foregroundColor(theme.secondaryText)
-                    }
 
-                    Divider()
+                            Spacer(minLength: 16)
 
-                    // File Handling Strategy
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("File Handling")
-                            .fontWeight(.medium)
-                        Text("How attached files and knowledge sources are processed")
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                    }
-
-                    FileContextStrategyPicker(
-                        strategy: $editBuffer.draft.fileContextStrategy,
-                        profileType: .agent
-                    )
-
-                    Divider()
-
-                    // Knowledge Header
-                    HStack(alignment: .center) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Knowledge Base")
-                                .fontWeight(.medium)
-                            Text("Pre-configured reference documents")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                        }
-
-                        Spacer(minLength: 16)
-
-                        Button {
-                            showingKnowledgeImporter = true
-                        } label: {
-                            Label("Add File", systemImage: "plus")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .fileImporter(
-                            isPresented: $showingKnowledgeImporter,
-                            allowedContentTypes: [.item],
-                            allowsMultipleSelection: true
-                        ) { result in
-                            if case let .success(urls) = result {
-                                for url in urls {
-                                    let source = KnowledgeSource(type: .file, location: url.path)
-                                    if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
-                                        knowledgeSourcesBinding.wrappedValue.append(source)
-                                    }
-                                }
+                            Button {
+                                showingKnowledgeImporter = true
+                            } label: {
+                                Label("Add File", systemImage: "plus")
                             }
-                        }
-                    }
-
-                    // Knowledge List
-                    if !knowledgeSourcesBinding.wrappedValue.isEmpty {
-                        VStack(spacing: 8) {
-                            ForEach(knowledgeSourcesBinding.wrappedValue) { source in
-                                HStack {
-                                    Image(systemName: "doc.text.fill")
-                                        .foregroundColor(source.exists ? .orange : .red)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(source.fileName)
-                                            .font(.callout)
-                                            .lineLimit(1)
-                                        if !source.exists {
-                                            Text("File not found")
-                                                .font(.caption2)
-                                                .foregroundColor(.red)
-                                        } else {
-                                            Text(source.location)
-                                                .font(.caption2)
-                                                .foregroundColor(theme.secondaryText)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .fileImporter(
+                                isPresented: $showingKnowledgeImporter,
+                                allowedContentTypes: [.item],
+                                allowsMultipleSelection: true
+                            ) { result in
+                                if case let .success(urls) = result {
+                                    for url in urls {
+                                        let source = KnowledgeSource(type: .file, location: url.path)
+                                        if !knowledgeSourcesBinding.wrappedValue.contains(where: { $0.location == source.location }) {
+                                            knowledgeSourcesBinding.wrappedValue.append(source)
                                         }
                                     }
-                                    Spacer()
+                                }
+                            }
+                            }
+
+                            if !knowledgeSourcesBinding.wrappedValue.isEmpty {
+                            VStack(spacing: 8) {
+                                ForEach(knowledgeSourcesBinding.wrappedValue) { source in
+                                    HStack {
+                                        Image(systemName: "doc.text.fill")
+                                            .foregroundColor(source.exists ? theme.warningColor : theme.errorColor)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(source.fileName)
+                                                .font(theme.fontCallout)
+                                                .lineLimit(1)
+                                            if !source.exists {
+                                                Text("File not found")
+                                                    .font(theme.fontCaption2)
+                                                    .foregroundColor(theme.errorColor)
+                                            } else {
+                                                Text(source.location)
+                                                    .font(theme.fontCaption2)
+                                                    .foregroundColor(theme.secondaryText)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                            }
+                                        }
+                                        Spacer()
+                                        Button {
+                                            knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .foregroundColor(theme.secondaryText)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel("Remove \(source.fileName)")
+                                    }
+                                    .padding(10)
+                                    .background(theme.secondaryBackground.opacity(0.5))
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(
+                                        source.exists ? theme.dividerColor : theme.errorColor.opacity(0.3), lineWidth: 1
+                                    ))
+                                }
+                            }
+                            .padding(.leading, 12)
+                        } else {
+                             Text("No reference documents added.")
+                                .font(theme.fontCaption)
+                                .foregroundColor(theme.secondaryText)
+                                .italic()
+                                .padding(.leading, 12)
+                        }
+                    }
+
+                    Divider()
+
+                        // File Handling Strategy
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("File Handling")
+                                    .font(theme.fontBody.weight(.semibold))
+                                Text("How attached files and knowledge sources are processed")
+                                    .font(theme.fontCaption)
+                                    .foregroundColor(theme.secondaryText)
+                            }
+
+                            FileContextStrategyPicker(
+                                strategy: $editBuffer.draft.fileContextStrategy,
+                                profileType: .agent
+                            )
+                            .padding(.leading, 12)
+                        }
+                    }
+                }
+
+                // 7. Execution
+                SettingsCard(title: "Execution", icon: "bolt.fill", theme: theme) {
+                    VStack(alignment: .leading, spacing: 16) {
+
+                        // Limits
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Limits")
+                                .font(theme.fontBody.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+
+                            ExecutionLimitsSection(
+                                maxIterations: maxIterationsBinding,
+                                executionTimeout: executionTimeoutBinding
+                            )
+                            .padding(.leading, 12)
+                        }
+
+                        Divider()
+
+                        // Error Recovery
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Error Recovery")
+                                .font(theme.fontBody.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+
+                            ErrorRecoverySection(
+                                retryPolicy: retryPolicyBinding,
+                                errorRecovery: errorRecoveryBinding
+                            )
+                            .padding(.leading, 12)
+                        }
+
+                        Divider()
+
+                        // Conversation Memory
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Conversation Memory")
+                                .font(theme.fontBody.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+                                .padding(.bottom, 2)
+
+                            VStack(spacing: 8) {
+                                ForEach(HistoryStrategy.allCases) { strategy in
+                                    let isSelected = historyStrategyBinding.wrappedValue == strategy
+
                                     Button {
-                                        knowledgeSourcesBinding.wrappedValue.removeAll { $0.id == source.id }
+                                        historyStrategyBinding.wrappedValue = strategy
                                     } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(theme.secondaryText)
+                                        HStack(alignment: .top, spacing: 12) {
+                                            Image(systemName: strategy.icon)
+                                                .font(theme.fontBody)
+                                                .foregroundColor(isSelected ? .accentColor : theme.secondaryText)
+                                                .frame(width: 22, alignment: .center)
+                                                .padding(.top, 2)
+
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(strategy.displayName)
+                                                    .font(theme.fontSubheadline.weight(.medium))
+                                                    .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+                                                Text(strategy.strategyDescription)
+                                                    .font(theme.fontCaption)
+                                                    .foregroundColor(theme.tertiaryText)
+                                                    .lineSpacing(2)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                            }
+
+                                            Spacer(minLength: 8)
+
+                                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                                .foregroundColor(isSelected ? .accentColor : theme.surfaceOverlayStrong)
+                                                .font(theme.fontTitle3)
+                                                .padding(.top, 2)
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .fill(isSelected ? Color.accentColor.opacity(0.08) : Color.clear)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                .stroke(isSelected ? Color.accentColor.opacity(0.3) : theme.surfaceOverlayStrong.opacity(0.3), lineWidth: 1)
+                                        )
                                     }
                                     .buttonStyle(.plain)
                                 }
-                                .padding(10)
-                                .background(theme.secondaryBackground.opacity(0.5))
-                                .cornerRadius(8)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-                                    source.exists ? theme.dividerColor : Color.red.opacity(0.3), lineWidth: 1
-                                ))
                             }
+                            .padding(.leading, 12)
                         }
-                    } else {
-                         Text("No reference documents added.")
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                            .italic()
                     }
-                  }
-                  .padding(16)
                 }
 
-                // 7. Advanced Configuration
+                // 9. Advanced Configuration
                 SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
                     VStack(alignment: .leading, spacing: 16) {
                         advancedSettingsView
                     }
-                    .padding(16)
                 }
+
+                // Profile applicability note
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(theme.fontCaption2)
+                    Text("This profile's settings apply when running standalone or as a node in a workflow.")
+                        .font(theme.fontCaption2)
+                }
+                .foregroundColor(theme.tertiaryText)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 8)
             }
-            .padding(24)
-            .padding(.bottom, 24)
+            .padding(ViewLayout.containerPadding)
+            .padding(.bottom, ViewLayout.containerPadding)
             .frame(maxWidth: 1000)
             .frame(maxWidth: .infinity)
         }
@@ -625,50 +728,17 @@ struct AgentConfigDetailView: View {
                 editBuffer.load(editBuffer.draft)
             }
 
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfigs()
-            isLoadingAdvancedConfig = false
+            configManager.load(from: providerConfig.wrappedValue, using: profileService)
         }
         .onDisappear {
             // Cleanup: Close the floating window if the user leaves the panel entirely
             AdvancedPromptWindowManager.shared.closeWindow()
         }
-        .onChange(of: providerConfig.wrappedValue.apiProvider) { oldValue, newValue in
-            isLoadingAdvancedConfig = true
-            loadAdvancedConfigs()
-            isLoadingAdvancedConfig = false
+        .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
+            configManager.load(from: providerConfig.wrappedValue, using: profileService)
         }
-        .onChange(of: localOllamaConfig) { oldValue, newValue in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .ollama {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOllamaConfig)
-            }
-        }
-        .onChange(of: localGeminiConfig) { oldValue, newValue in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .google {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localGeminiConfig)
-            }
-        }
-        .onChange(of: localMlxConfig) { oldValue, newValue in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .mlx {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localMlxConfig)
-            }
-        }
-        .onChange(of: localAnthropicConfig) { oldValue, newValue in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .anthropic {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localAnthropicConfig)
-            }
-        }
-        .onChange(of: localOpenAIConfig) { oldValue, newValue in
-            guard !isLoadingAdvancedConfig else { return }
-            if providerConfig.wrappedValue.apiProvider == .openAI {
-                providerConfig.wrappedValue.advancedConfiguration = profileService.encodeConfig(from: localOpenAIConfig)
-            }
-        }
-        .onChange(of: providerConfig.wrappedValue.modelName) { oldValue, newValue in
+        .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
+        .onChange(of: providerConfig.wrappedValue.modelName) { _, newValue in
             if providerConfig.wrappedValue.apiProvider == .ollama {
                 detectAndApplyOllamaPreset(for: newValue)
             }
@@ -688,9 +758,17 @@ struct AgentConfigDetailView: View {
         }
 
         if let tier = tier {
-            localOllamaConfig = OllamaAdvancedConfig.preset(for: tier)
-            // The onChange(of: localOllamaConfig) will update providerConfig.wrappedValue.advancedConfiguration
+            configManager.localOllamaConfig = OllamaAdvancedConfig.preset(for: tier)
+            // The onChange(of: configManager.localOllamaConfig) will update providerConfig.wrappedValue.advancedConfiguration
         }
+    }
+
+    /// The model tier for the currently selected provider/model — used for skill warnings.
+    private var currentModelTier: ModelTier? {
+        if case .agent(let config) = editBuffer.draft.details {
+            return config.llmConfig.cognitiveProfile.metadata?.tier
+        }
+        return nil
     }
 
     // MARK: - Subviews & Helpers
@@ -700,12 +778,10 @@ struct AgentConfigDetailView: View {
             if editBuffer.isDirty {
                 Button {
                     editBuffer.revert()
-                    isLoadingAdvancedConfig = true
-                    loadAdvancedConfigs()
-                    isLoadingAdvancedConfig = false
+                    configManager.load(from: providerConfig.wrappedValue, using: profileService)
                 } label: {
                     Text("Revert")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(theme.fontCaption.weight(.medium))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
@@ -714,7 +790,6 @@ struct AgentConfigDetailView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(Capsule().fill(theme.surfaceOverlay))
-                .onHover { isRevertHovered = $0 }
 
                 Button {
                     do {
@@ -726,7 +801,7 @@ struct AgentConfigDetailView: View {
                     }
                 } label: {
                     Text("Save")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(theme.fontCaption.weight(.semibold))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
@@ -741,12 +816,12 @@ struct AgentConfigDetailView: View {
                 showingDeleteAlert = true
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(isDeleteHovered ? .white : .red.opacity(0.8))
+                    .font(theme.fontCaption.weight(.medium))
+                    .foregroundColor(isDeleteHovered ? .white : theme.errorColor.opacity(0.8))
                     .frame(width: 28, height: 28)
                     .background(
                         Circle()
-                            .fill(isDeleteHovered ? Color.red : Color.red.opacity(0.1))
+                            .fill(isDeleteHovered ? theme.errorColor : theme.errorColor.opacity(0.1))
                     )
             }
             .buttonStyle(.plain)
@@ -759,53 +834,7 @@ struct AgentConfigDetailView: View {
 
     @ViewBuilder
     private var advancedSettingsView: some View {
-        switch providerConfig.wrappedValue.apiProvider {
-        case .ollama:
-            OllamaSettingsView(config: $localOllamaConfig)
-        case .google:
-            GeminiSettingsView(config: $localGeminiConfig)
-        case .mlx:
-            MLXSettingsView(config: $localMlxConfig)
-        case .anthropic:
-            AnthropicSettingsView(config: $localAnthropicConfig)
-        case .openAI:
-            OpenAISettingsView(config: $localOpenAIConfig)
-        }
-    }
-
-    private func loadAdvancedConfigs() {
-        switch providerConfig.wrappedValue.apiProvider {
-        case .ollama:
-            self.localOllamaConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: OllamaAdvancedConfig.self
-            ) ?? .default()
-        case .google:
-            self.localGeminiConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: GeminiAdvancedConfig.self
-            ) ?? .default()
-        case .mlx:
-            self.localMlxConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: MLXAdvancedConfig.self
-            ) ?? {
-                if let metadata = providerConfig.wrappedValue.modelMetadata {
-                    return .recommended(for: metadata)
-                }
-                return .default()
-            }()
-        case .anthropic:
-            self.localAnthropicConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: AnthropicAdvancedConfig.self
-            ) ?? .default()
-        case .openAI:
-            self.localOpenAIConfig = profileService.decodeConfig(
-                from: providerConfig.wrappedValue.advancedConfiguration,
-                as: OpenAIAdvancedConfig.self
-            ) ?? .default()
-        }
+        ProviderAdvancedSettingsView(configManager: configManager, provider: providerConfig.wrappedValue.apiProvider)
     }
 
     private func capabilityIcon(for capability: ModelCognitiveCapability) -> String {
@@ -822,5 +851,103 @@ struct AgentConfigDetailView: View {
         case .singleAction: return .orange
         case .parallelActions: return .green
         }
+    }
+}
+
+// MARK: - Skill Manifest Row
+
+struct SkillManifestRow: View {
+    let manifest: SkillManifest
+    let theme: any Theme
+    var onToggleEnabled: (() -> Void)? = nil
+    @State private var isExpanded: Bool = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            // Enable/disable checkbox — Button prevents gesture conflict with row tap
+            Button { onToggleEnabled?() } label: {
+                Image(systemName: manifest.isEnabled ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(manifest.isEnabled ? .accentColor : theme.secondaryText)
+                    .font(theme.fontBody)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(manifest.name)
+                    .font(theme.fontBody.weight(.medium))
+                    .foregroundColor(manifest.isEnabled ? theme.primaryText : theme.secondaryText)
+                Text(manifest.description)
+                    .font(theme.fontCaption)
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(isExpanded ? nil : 2)
+                if let compat = manifest.compatibility {
+                    Text(compat)
+                        .font(theme.fontCaption2)
+                        .foregroundColor(.orange)
+                }
+            }
+            .opacity(manifest.isEnabled ? 1.0 : 0.6)
+            .contentShape(Rectangle())
+            .onTapGesture { isExpanded.toggle() }
+            Spacer()
+            if manifest.resourceCount > 0 {
+                Label("\(manifest.resourceCount)", systemImage: "doc.on.doc")
+                    .font(theme.fontCaption2)
+                    .foregroundColor(theme.secondaryText)
+            }
+            Text("~\(manifest.discoveryTokenCost) tok")
+                .font(theme.fontCaption2)
+                .foregroundColor(theme.secondaryText)
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Skill Action Button (with hover)
+
+struct SkillActionButton: View {
+    let label: String
+    let icon: String
+    var isDestructive: Bool = false
+    let theme: any Theme
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @FocusState private var isFocused: Bool
+
+    private var isHighlighted: Bool { isHovered || isFocused }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(theme.fontCaption2)
+                Text(label)
+                    .font(theme.fontCaption2.weight(.medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .foregroundColor(isHighlighted
+                ? (isDestructive ? .white : .accentColor)
+                : (isDestructive ? theme.errorColor : theme.secondaryText)
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isHighlighted
+                        ? (isDestructive ? theme.errorColor : Color.accentColor.opacity(0.1))
+                        : Color.clear
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isFocused ? Color.accentColor : Color.clear, lineWidth: 1.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .focusable()
+        .focused($isFocused)
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isHighlighted)
+        .accessibilityLabel(label)
     }
 }

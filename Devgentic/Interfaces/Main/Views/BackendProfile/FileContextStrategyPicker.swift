@@ -19,7 +19,7 @@ struct FileContextStrategyPicker: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: theme.spacingMedium) {
             ForEach(FileContextStrategy.allCases, id: \.self) { option in
                 FileContextStrategyCard(
                     strategy: option,
@@ -40,9 +40,10 @@ struct FileContextStrategyPicker: View {
             if strategy != nil {
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle")
+                        .accessibilityHidden(true)
                     Text("Custom override. Default for \(profileType.rawValue) is \(FileContextStrategy.defaultStrategy(for: profileType).displayName).")
                 }
-                .font(.caption)
+                .font(theme.fontCaption)
                 .foregroundColor(theme.secondaryText)
             }
         }
@@ -62,29 +63,29 @@ private struct FileContextStrategyCard: View {
         Button(action: onTap) {
             HStack(spacing: 12) {
                 Image(systemName: strategy.iconName)
-                    .font(.title3)
+                    .font(theme.fontTitle3)
                     .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
                     .frame(width: 28)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(strategy.displayName)
-                            .font(.subheadline.weight(.medium))
+                            .font(theme.fontSubheadline.weight(.medium))
                             .foregroundColor(theme.primaryText)
 
                         if isDefault {
                             Text("Default")
-                                .font(.caption2)
+                                .font(theme.fontCaption2)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(theme.accentColor.opacity(0.15))
                                 .foregroundColor(theme.accentColor)
-                                .cornerRadius(4)
+                                .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadiusSmall))
                         }
                     }
 
                     Text(strategy.description)
-                        .font(.caption)
+                        .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                         .lineLimit(2)
                 }
@@ -96,13 +97,13 @@ private struct FileContextStrategyCard: View {
                         .foregroundColor(theme.accentColor)
                 }
             }
-            .padding(10)
+            .padding(theme.spacingMedium)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
                     .fill(isSelected ? theme.accentColor.opacity(0.08) : Color.clear)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: theme.cornerRadiusMedium)
                     .stroke(isSelected ? theme.accentColor.opacity(0.3) : theme.dividerColor, lineWidth: 1)
             )
         }

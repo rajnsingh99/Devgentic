@@ -39,7 +39,7 @@ struct HomeButton: View {
             }
 
             viewModel.deselectConversationAndShowWelcome()
-            logger.debug("Triggered deselect conversation via Home button.")
+            logger.debug("Home button: deselected conversation (mode: \(viewModel.interfaceMode.rawValue)).")
 
             if isSidebarVisible {
                 isSidebarVisible = false
@@ -48,7 +48,7 @@ struct HomeButton: View {
             selectedTab = nil // Deselect any active tab
         } label: {
             Image(systemName: "house.fill")
-                .font(.system(size: 20))
+                .font(.system(.title3))
                 .frame(width: 38, height: 38)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -75,7 +75,7 @@ struct ActivityBarButton: View {
     @Binding var isSidebarVisible: Bool
 
     @Environment(MainApplicationViewModel.self) var viewModel
-    @ObservedObject private var downloadManager = DownloadManager.shared
+    var downloadManager = DownloadManager.shared
     @Environment(\.appTheme) private var theme
 
     @State private var isHovering = false
@@ -94,7 +94,7 @@ struct ActivityBarButton: View {
             handleButtonTap()
         } label: {
             Image(systemName: tab.iconName)
-                .font(.system(size: 18))
+                .font(.system(.title3))
                 .frame(width: 38, height: 38)
                 .contentShape(Rectangle())
         }

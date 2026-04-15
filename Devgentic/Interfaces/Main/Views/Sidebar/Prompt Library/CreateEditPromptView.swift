@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct CreateEditPromptView: View {
-    @EnvironmentObject var viewModel: PromptLibraryViewModel
+    @Environment(PromptLibraryViewModel.self) var viewModel
     @Environment(\.dismiss) var dismiss // To close the sheet
 
     // Available categories - can be dynamic later
@@ -18,6 +18,7 @@ struct CreateEditPromptView: View {
     @FocusState private var isTitleFocused: Bool
 
     var body: some View {
+        @Bindable var viewModel = viewModel
         VStack(spacing: 0) {
             // MARK: - Header
             Text(viewModel.promptToEdit == nil ? "Create New Prompt" : "Edit Prompt")
@@ -137,12 +138,12 @@ struct CreateEditPromptView_Previews: PreviewProvider {
     static var previews: some View {
         Group {
             CreateEditPromptView()
-                .environmentObject(configuredViewModel(isEditing: false))
+                .environment(configuredViewModel(isEditing: false))
                 .previewDisplayName("Create New Prompt")
                 .frame(width: 550, height: 500)
 
             CreateEditPromptView()
-                .environmentObject(configuredViewModel(isEditing: true))
+                .environment(configuredViewModel(isEditing: true))
                 .previewDisplayName("Edit Prompt")
                 .frame(width: 550, height: 500)
         }

@@ -34,17 +34,17 @@ struct AccountSettingsView: View {
                                     .frame(width: 60, height: 60)
                                     .overlay(
                                         Text(String(userName.prefix(1)).uppercased())
-                                            .font(.system(size: 24, weight: .bold))
+                                            .font(.system(size: 24, weight: .bold)) // Fixed size: intentional (avatar)
                                             .foregroundColor(theme.accentColor)
                                     )
 
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(userName)
-                                        .font(.system(size: 16, weight: .semibold))
+                                        .font(.system(.title3, weight: .semibold))
                                         .foregroundColor(theme.primaryText)
-                                    
+
                                     Text(userEmail)
-                                        .font(.system(size: 13))
+                                        .font(theme.fontSubheadline)
                                         .foregroundColor(theme.secondaryText)
                                 }
                                 
@@ -56,7 +56,7 @@ struct AccountSettingsView: View {
                                     }
                                 }) {
                                     Text("Sign Out")
-                                        .font(.system(size: 13, weight: .medium))
+                                        .font(theme.fontSubheadline.weight(.medium))
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 8)
                                         .background(theme.surfaceOverlayStrong)
@@ -85,12 +85,13 @@ struct AccountSettingsView: View {
                         VStack(alignment: .center, spacing: 20) {
                             
                             Image(systemName: "person.crop.circle.badge.exclamationmark")
-                                .font(.system(size: 48))
+                                .font(.system(size: 48)) // Fixed size: intentional (icon)
                                 .foregroundColor(theme.secondaryText)
                                 .padding(.top, 20)
+                                .accessibilityHidden(true)
                             
                             Text("Sign in with your Google account to sync your workflow, manage backend profiles across devices, and unlock full Devgentic capabilities.")
-                                .font(.system(size: 14))
+                                .font(theme.fontBody)
                                 .foregroundColor(theme.secondaryText)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 24)
@@ -102,9 +103,10 @@ struct AccountSettingsView: View {
                             }) {
                                 HStack(spacing: 12) {
                                     Image(systemName: "g.circle.fill")
-                                        .font(.system(size: 18))
+                                        .font(.system(.title3)) // scales with Dynamic Type; ~18pt
+                                        .accessibilityHidden(true)
                                     Text("Sign in with Google")
-                                        .font(.system(size: 14, weight: .semibold))
+                                        .font(theme.fontBody.weight(.semibold))
                                 }
                                 .padding(.horizontal, 24)
                                 .padding(.vertical, 12)

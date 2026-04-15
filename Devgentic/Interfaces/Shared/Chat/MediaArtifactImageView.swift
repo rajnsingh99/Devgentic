@@ -27,7 +27,7 @@ struct MediaArtifactImageView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: 512, maxHeight: 512)
-                        .cornerRadius(12)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                         .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
@@ -129,18 +129,21 @@ struct MediaArtifactImageView: View {
         HStack(spacing: 8) {
             if let model = artifact.metadata["model"]?.stringValue {
                 Text(model)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(.caption2, weight: .medium))
             }
             if let provider = artifact.metadata["provider"]?.stringValue {
                 Text(provider)
-                    .font(.system(size: 10))
+                    .font(.system(.caption2))
             }
         }
         .foregroundColor(.white)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(.ultraThinMaterial)
-        .cornerRadius(6)
+        // MARK: Liquid Glass
+        .glassEffect(.regular, in: .rect(cornerRadius: 6))
+        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
+        // .background(.ultraThinMaterial)
+        // .clipShape(RoundedRectangle(cornerRadius: 6))
         .padding(8)
     }
 

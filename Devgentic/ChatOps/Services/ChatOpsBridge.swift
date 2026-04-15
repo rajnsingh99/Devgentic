@@ -17,8 +17,8 @@ import os
 /// Uses the single-path architecture: remote messages flow through
 /// `MainApplicationViewModel.submitRemoteMessage()` — the same path as the Mac UI.
 /// The `RemoteMirrorService` handles mirroring events back to the transport.
-@MainActor
-final class ChatOpsBridge: ObservableObject {
+@Observable @MainActor
+final class ChatOpsBridge {
 
     private let logger = Logger(subsystem: "com.devgentic", category: "ChatOpsBridge")
 
@@ -36,7 +36,7 @@ final class ChatOpsBridge: ObservableObject {
     // MARK: - State
 
     private var listeningTask: Task<Void, Never>?
-    @Published private(set) var isRunning: Bool = false
+    private(set) var isRunning: Bool = false
 
     init(viewModel: MainApplicationViewModel) {
         self.viewModel = viewModel

@@ -39,31 +39,33 @@ struct ResponseSynthesizer {
     ///
     /// - Parameters:
     ///   - summary: The clean record of what happened during execution.
-    ///   - model: The LLM provider used for complex runs (fast-path skips this).
     ///   - personaInstructions: Injected instructions to ensure the synthesis doesn't degrade base persona behavior.
     ///   - originalQuery: The user's original query to ensure contextual grounding.
-    ///   - isNativeFlow: A flag indicating if the agent used Native tool calling (bypasses LLM synthesis).
+    ///   - isNativeFlow: A flag indicating if the agent used Native tool calling (bypasses IC synthesis when `forceSynthesis` is false).
+    ///   - forceSynthesis: When true, IC synthesis is always attempted even for native flows (user opted in for cloud models).
     /// - Returns: A non-empty user-facing string. Never throws.
+    ///
+    /// LLM synthesis is powered exclusively by IntelligenceCoreService.
     static func synthesize(
         summary: ExecutionSummary,
-        model: any LLMProvider,
         personaInstructions: String? = nil,
         originalQuery: String,
-        isNativeFlow: Bool = false
+        isNativeFlow: Bool = false,
+        forceSynthesis: Bool = false
     ) async -> String {
 
         // =====================================================================
         // PATH A: NATIVE API FLOW (Modern Models)
         // =====================================================================
         // Native models output conversational answers naturally when they finish.
-        // We trust them 100% and NEVER trigger a secondary LLM synthesis.
-        if isNativeFlow {
+        // We trust them 100% UNLESS the user has opted into IC synthesis.
+        if isNativeFlow && !forceSynthesis {
             if let rawAnswer = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines), !rawAnswer.isEmpty {
                 logger.info("🏎️ [Synthesizer] Native API flow detected. Returning agent's natural response directly.")
                 let finalAnswer = OutputSanitizer.stripThinkBlocksAndTokens(rawAnswer)
                 return finalAnswer.isEmpty ? rawAnswer : finalAnswer
             }
-            
+
             // If the native loop crashed or stalled abruptly without generating a final thought:
             logger.info("⚠️ [Synthesizer] Native API flow ended without a final thought. Using deterministic fallback.")
             return buildDeterministicFallback(summary: summary)
@@ -107,16 +109,26 @@ struct ResponseSynthesizer {
         ]
 
         do {
-            let response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
-            // Strip think blocks and special tokens that the synthesis model may emit.
+            defer {
+                Task { await IntelligenceCoreService.shared.unload(caller: .responseSynthesis) }
+            }
+
+            let response = try await IntelligenceCoreService.shared.generate(
+                messages: messages,
+                maxTokens: 1024,
+                temperature: 0.6,
+                caller: .responseSynthesis
+            )
+
+            // Strip think blocks and special tokens that the IC model may emit.
             // Uses the scoped sanitizer — does NOT strip code fences or wrapper tags
             // which could destroy legitimate markdown in the response.
             let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(response)
             guard !cleaned.isEmpty else { throw SynthesizerError.emptyResponse }
-            logger.info("✅ [Synthesizer] LLM synthesis succeeded.")
+            logger.info("✅ [Synthesizer] IC synthesis succeeded.")
             return cleaned
         } catch {
-            logger.error("❌ [Synthesizer] LLM synthesis failed (\(error.localizedDescription)). Using deterministic fallback.")
+            logger.error("❌ [Synthesizer] IC synthesis failed (\(error.localizedDescription)). Using deterministic fallback.")
             return buildDeterministicFallback(summary: summary)
         }
     }
@@ -155,12 +167,14 @@ struct ResponseSynthesizer {
         } else {
             for result in summary.toolResults {
                 let statusStr = result.isSuccess ? "Success" : "Failed"
+                let toolName = String(describing: result.toolName)
+                let rawOutput = String(describing: result.output)
                 // Cap output at 800 chars to stay well within context budget.
-                let truncated = result.output.count > 800
-                    ? String(result.output.prefix(800)) + "… [truncated]"
-                    : result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                lines.append("Tool: \(result.toolName) → Output: \(truncated) (\(statusStr))")
+                let truncated = rawOutput.count > 800
+                    ? String(rawOutput.prefix(800)) + "… [truncated]"
+                    : rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                lines.append("Tool: " + toolName + " → Output: " + truncated + " (" + statusStr + ")")
             }
         }
 
@@ -210,18 +224,23 @@ struct ResponseSynthesizer {
 
         case .success, .partialSuccess:
             let successes = summary.toolResults.filter(\.isSuccess)
-            let outputs = successes.map { r in
-                let truncated = r.output.count > 200
-                    ? String(r.output.prefix(200)) + "…"
-                    : r.output
-                return "• \(r.toolName): \(truncated)"
+            let outputs = successes.map { r -> String in
+                let toolName = String(describing: r.toolName)
+                let output = String(describing: r.output)
+                let truncated = output.count > 200
+                    ? String(output.prefix(200)) + "…"
+                    : output
+                // Explicit String concatenation avoids any risk of GRDB's SQL
+                // StringInterpolation capturing values as SQL expressions when
+                // the GRDB module is linked in the same target.
+                return "• " + toolName + ": " + truncated
             }.joined(separator: "\n")
-            return "Here's what I found:\n\(outputs)"
+            return "Here's what I found:\n" + outputs
 
         case .failed:
-            let tools = summary.toolResults.map(\.toolName).joined(separator: ", ")
+            let tools = summary.toolResults.map { String(describing: $0.toolName) }.joined(separator: ", ")
             return "I encountered errors while trying to complete your request. " +
-                   "The following tools were attempted but did not succeed: \(tools). " +
+                   "The following tools were attempted but did not succeed: " + tools + ". " +
                    "Please check that the required capabilities are enabled, or try rephrasing your request."
 
         case .stalled:

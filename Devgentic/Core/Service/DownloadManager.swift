@@ -5,24 +5,25 @@
 //  Created by Raj Singh on 19/03/26.
 //
 //  Central aggregation layer for tracking model downloads across
-//  all backends (Ollama, MLX). Observes each service's @Published
-//  download state via Combine and synthesizes unified DownloadEntry
-//  objects for the sidebar and store views to consume.
+//  all backends (Ollama, MLX). Observes each service's download
+//  state and synthesizes unified DownloadEntry objects for the
+//  sidebar and store views to consume.
 //
 
 import SwiftUI
-import Combine
 
 // MARK: - Models
 
 enum ModelBackendType: String, Equatable, Hashable {
     case ollama = "Ollama"
     case mlx = "MLX"
+    case whisper = "Whisper"
 
     var icon: String {
         switch self {
         case .ollama: return "server.rack"
         case .mlx: return "apple.logo"
+        case .whisper: return "waveform"
         }
     }
 
@@ -30,6 +31,7 @@ enum ModelBackendType: String, Equatable, Hashable {
         switch self {
         case .ollama: return .blue
         case .mlx: return .purple
+        case .whisper: return .green
         }
     }
 }
@@ -58,25 +60,26 @@ struct DownloadEntry: Identifiable, Equatable {
 
 // MARK: - Download Manager
 
-@MainActor
-final class DownloadManager: ObservableObject {
+@Observable @MainActor
+final class DownloadManager {
     static let shared = DownloadManager()
 
-    @Published var activeDownloads: [DownloadEntry] = []
-    @Published var completedDownloads: [DownloadEntry] = []
+    var activeDownloads: [DownloadEntry] = []
+    var completedDownloads: [DownloadEntry] = []
 
     var hasActiveDownloads: Bool { !activeDownloads.isEmpty }
     var activeCount: Int { activeDownloads.count }
 
-    private var cancellables = Set<AnyCancellable>()
 
     // Track current active entry IDs per backend to detect transitions
-    private var ollamaActiveID: UUID?
-    private var mlxActiveID: UUID?
+    @ObservationIgnored private var ollamaActiveID: UUID?
+    @ObservationIgnored private var mlxActiveID: UUID?
+    @ObservationIgnored private var whisperActiveID: UUID?
 
     private init() {
         bindOllama()
         bindMLX()
+        bindWhisper()
     }
 
     // MARK: - Actions
@@ -87,6 +90,8 @@ final class DownloadManager: ObservableObject {
             OllamaService.shared.cancelPullModel()
         case .mlx:
             MLXModelService.shared.cancelDownload()
+        case .whisper:
+            Task { await WhisperModelDownloadService.shared.cancelDownload() }
         }
     }
 
@@ -101,25 +106,30 @@ final class DownloadManager: ObservableObject {
     // MARK: - Ollama Binding
 
     private func bindOllama() {
-        let service = OllamaService.shared
+        observeOllamaServiceChanges()
+    }
 
-        Publishers.CombineLatest3(
-            service.$isPullingModel,
-            service.$pullProgress,
-            service.$modelToPull
-        )
-        .combineLatest(service.$modelPullError)
-        .receive(on: RunLoop.main)
-        .sink { [weak self] combined, errorMessage in
-            let (isPulling, progress, name) = combined
-            self?.reconcileOllamaState(
-                isPulling: isPulling,
-                progress: progress,
-                name: name,
-                errorMessage: errorMessage
-            )
+    /// Bridges OllamaService (@Observable) download state via withObservationTracking.
+    private func observeOllamaServiceChanges() {
+        let service = OllamaService.shared
+        withObservationTracking {
+            _ = service.isPullingModel
+            _ = service.pullProgress
+            _ = service.modelToPull
+            _ = service.modelPullError
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let svc = OllamaService.shared
+                self.reconcileOllamaState(
+                    isPulling: svc.isPullingModel,
+                    progress: svc.pullProgress,
+                    name: svc.modelToPull,
+                    errorMessage: svc.modelPullError
+                )
+                self.observeOllamaServiceChanges()
+            }
         }
-        .store(in: &cancellables)
     }
 
     private func reconcileOllamaState(isPulling: Bool, progress: Double, name: String, errorMessage: String?) {
@@ -161,25 +171,31 @@ final class DownloadManager: ObservableObject {
     // MARK: - MLX Binding
 
     private func bindMLX() {
-        let service = MLXModelService.shared
+        // Bridge MLXModelService (@Observable) changes via withObservationTracking.
+        observeMLXServiceChanges()
+    }
 
-        Publishers.CombineLatest3(
-            service.$isDownloading,
-            service.$downloadProgress,
-            service.$currentDownloadName
-        )
-        .combineLatest(service.$errorMessage)
-        .receive(on: RunLoop.main)
-        .sink { [weak self] combined, errorMessage in
-            let (isDownloading, progress, name) = combined
-            self?.reconcileMLXState(
-                isDownloading: isDownloading,
-                progress: progress,
-                name: name,
-                errorMessage: errorMessage
-            )
+    /// Bridges MLXModelService (@Observable) download state via withObservationTracking.
+    private func observeMLXServiceChanges() {
+        let service = MLXModelService.shared
+        withObservationTracking {
+            _ = service.isDownloading
+            _ = service.downloadProgress
+            _ = service.currentDownloadName
+            _ = service.errorMessage
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let svc = MLXModelService.shared
+                self.reconcileMLXState(
+                    isDownloading: svc.isDownloading,
+                    progress: svc.downloadProgress,
+                    name: svc.currentDownloadName,
+                    errorMessage: svc.errorMessage
+                )
+                self.observeMLXServiceChanges()
+            }
         }
-        .store(in: &cancellables)
     }
 
     private func reconcileMLXState(isDownloading: Bool, progress: Double, name: String, errorMessage: String?) {
@@ -215,6 +231,67 @@ final class DownloadManager: ObservableObject {
                 completedDownloads.insert(entry, at: 0)
             }
             mlxActiveID = nil
+        }
+    }
+
+    // MARK: - Whisper Binding
+
+    private func bindWhisper() {
+        observeWhisperServiceChanges()
+    }
+
+    private func observeWhisperServiceChanges() {
+        let service = WhisperModelDownloadService.shared
+        withObservationTracking {
+            _ = service.isDownloading
+            _ = service.downloadProgress
+            _ = service.downloadingModelId
+            _ = service.downloadError
+        } onChange: {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let svc = WhisperModelDownloadService.shared
+                self.reconcileWhisperState(
+                    isDownloading: svc.isDownloading,
+                    progress: svc.downloadProgress,
+                    name: svc.downloadingModelId ?? "",
+                    errorMessage: svc.downloadError
+                )
+                self.observeWhisperServiceChanges()
+            }
+        }
+    }
+
+    private func reconcileWhisperState(isDownloading: Bool, progress: Double, name: String, errorMessage: String?) {
+        if isDownloading && !name.isEmpty {
+            if let existingIndex = activeDownloads.firstIndex(where: { $0.id == whisperActiveID }) {
+                activeDownloads[existingIndex].progress = progress
+            } else {
+                let entry = DownloadEntry(
+                    id: UUID(),
+                    backend: .whisper,
+                    modelName: name,
+                    startedAt: Date(),
+                    progress: progress,
+                    status: .downloading
+                )
+                whisperActiveID = entry.id
+                activeDownloads.append(entry)
+            }
+        } else if let activeID = whisperActiveID {
+            if let index = activeDownloads.firstIndex(where: { $0.id == activeID }) {
+                var entry = activeDownloads.remove(at: index)
+                if let error = errorMessage, !error.isEmpty {
+                    entry.status = .failed(message: error)
+                } else if entry.progress < 0.99 {
+                    entry.status = .cancelled
+                } else {
+                    entry.status = .completed
+                    entry.progress = 1.0
+                }
+                completedDownloads.insert(entry, at: 0)
+            }
+            whisperActiveID = nil
         }
     }
 }

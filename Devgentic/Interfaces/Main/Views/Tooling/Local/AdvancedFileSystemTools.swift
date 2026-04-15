@@ -117,7 +117,7 @@ class HybridSearchService {
         guard !rawQuery.isEmpty else { return [] }
 
         return await withCheckedContinuation { continuation in
-            let query = NSMetadataQuery()
+            nonisolated(unsafe) let query = NSMetadataQuery()
             query.sortDescriptors = [
                 NSSortDescriptor(key: NSMetadataItemLastUsedDateKey, ascending: false),
                 NSSortDescriptor(key: NSMetadataItemDisplayNameKey, ascending: true)
@@ -131,10 +131,10 @@ class HybridSearchService {
             query.predicate = predicate
             query.searchScopes = scopes
 
-            var observer: NSObjectProtocol?
-            var hasResumed = false
+            nonisolated(unsafe) var observer: NSObjectProtocol?
+            nonisolated(unsafe) var hasResumed = false
 
-            func finish(_ results: [String]) {
+            @Sendable func finish(_ results: [String]) {
                 guard !hasResumed else { return }
                 hasResumed = true
                 if let obs = observer { NotificationCenter.default.removeObserver(obs) }
@@ -142,7 +142,7 @@ class HybridSearchService {
                 continuation.resume(returning: Array(results.prefix(limit)))
             }
 
-            observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { _ in
+            observer = NotificationCenter.default.addObserver(forName: .NSMetadataQueryDidFinishGathering, object: query, queue: .main) { @Sendable _ in
                 query.disableUpdates()
                 let paths = (query.results as? [NSMetadataItem] ?? []).compactMap {
                     $0.value(forAttribute: NSMetadataItemPathKey) as? String
@@ -495,7 +495,7 @@ struct OrganizeBatchTool: DevgenticTool {
         return ToolParameters(type: "object", properties: props, required: ["sourcePaths", "destinationFolder"])
     }
     
-    private let fileManager = FileManager.default
+    private var fileManager: FileManager { .default }
     
     func call(arguments: Arguments) async throws -> String {
         let isDryRun = arguments.dryRun ?? false
@@ -553,7 +553,7 @@ struct OrganizeBatchTool: DevgenticTool {
 
 // MARK: - FS Watch Folder
 
-class WatcherService {
+class WatcherService: @unchecked Sendable {
     static let shared = WatcherService()
     private var activeMonitors: [UUID: (source: DispatchSourceFileSystemObject, path: String)] = [:]
 

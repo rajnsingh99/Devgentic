@@ -101,7 +101,7 @@ struct MCPIconView: View {
                     .frame(width: size, height: size)
             } else {
                 Image(systemName: fallbackSymbol)
-                    .font(.system(size: size * 0.6))
+                    .font(.system(size: size * 0.6)) // Fixed size: proportional to caller-specified frame
                     .frame(width: size, height: size)
             }
         }
