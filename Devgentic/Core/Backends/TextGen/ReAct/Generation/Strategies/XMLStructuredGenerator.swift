@@ -42,7 +42,7 @@ struct XMLStructuredGenerator: CognitiveGenerator {
     }
 
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, layerConfig: context.promptLayerConfig)
     }
 
     func generateCognitiveStep(

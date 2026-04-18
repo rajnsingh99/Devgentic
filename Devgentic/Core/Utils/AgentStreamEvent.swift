@@ -40,10 +40,17 @@ enum AgentStreamEvent: Sendable {
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
     case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
     
-    /// The tool has finished. Use this to render "Glass Box" artifacts (tables, lists, JSON).
-    /// This is the "Observation" phase.
+    /// The tool executed successfully. Carries the observation payload for the LLM + UI.
+    /// - durationMs: optional wall-clock execution time (from dispatch to completion)
     /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this output.
-    case toolOutput(ToolOutput, sourceNodeID: UUID? = nil)
+    case toolSucceeded(ToolOutput, durationMs: Int? = nil, sourceNodeID: UUID? = nil)
+
+    /// The tool failed. Category drives negativeConstraints policy, episodic-memory retrieval
+    /// weighting, and UI affordance. Replaces the boolean `ToolOutput.isSuccess == false` signal
+    /// with a structured classification.
+    /// - category: machine-readable cause (userDenied / permissionRejected / executionThrew / timeout / invalidArgs / notFound / cancelled)
+    /// - suggestion: optional human-readable remediation hint (surface in UI)
+    case toolFailed(ToolOutput, category: ToolFailureCategory, suggestion: String? = nil, sourceNodeID: UUID? = nil)
     
     /// A chunk of the final text response (streaming token).
     /// This is what populates the main chat bubble.
@@ -56,6 +63,13 @@ enum AgentStreamEvent: Sendable {
 
     /// A non-fatal warning or error message to display in the trace/debug log.
     case error(String)
+
+    /// A structured system-level warning — recoverable issue the agent hit during execution.
+    /// Distinct from `.thought` (model reasoning) and `.error` (terminal failure).
+    /// - category: machine-readable classification for negativeConstraints, episodic memory, and UI affordance
+    /// - message: human-readable description
+    /// - relatedPath: optional tool name, iteration id, or context identifier the warning pertains to
+    case warning(category: WarningCategory, message: String, relatedPath: String? = nil, sourceNodeID: UUID? = nil)
 
     // MARK: - Workflow Orchestration Events
 
@@ -140,6 +154,149 @@ enum AgentStreamEvent: Sendable {
     /// - turnsCompacted: Number of turns that were summarized into the checkpoint.
     /// - summaryPreview: First ~120 chars of the checkpoint summary for UI display.
     case compactionCompleted(turnsCompacted: Int, summaryPreview: String)
+
+    // MARK: - Terminal Outcome
+
+    /// Signals the executor has finished with a known outcome. Emitted as the last
+    /// meaningful event before `continuation.finish()`. Drives the final-status
+    /// indicator in the agent bubble so users can distinguish a successful answer
+    /// from a best-effort synthesis produced after the agent aborted (circuit breaker,
+    /// iteration exhaustion) or was cancelled.
+    case executionFinished(outcome: ExecutionOutcome, reason: String? = nil)
+}
+
+/// Classification for `.warning` events — drives UI affordance, negativeConstraints,
+/// and episodic memory retrieval. Codable so timeline warnings persist with category intact.
+enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
+    case retry             // transient network / backend blip — retry in progress
+    case throttle          // rate limit hit — backing off
+    case memoryPressure    // scratchpad budget utilization high
+    case parseFailure      // malformed JSON / XML from model
+    case formatCorrection  // model described tool in prose instead of structured call
+    case contextPressure   // nearing iteration / compaction threshold
+    case circuitBreaker    // repetitive-action / loop safeguard tripping (imminent or already aborted)
+
+    var displayName: String {
+        switch self {
+        case .retry:            return "Retry"
+        case .throttle:         return "Throttled"
+        case .memoryPressure:   return "Memory"
+        case .parseFailure:     return "Parse"
+        case .formatCorrection: return "Format"
+        case .contextPressure:  return "Context"
+        case .circuitBreaker:   return "Loop Guard"
+        }
+    }
+
+    /// SF Symbol name for rendering in the timeline.
+    var icon: String {
+        switch self {
+        case .retry:            return "arrow.clockwise"
+        case .throttle:         return "hourglass"
+        case .memoryPressure:   return "memorychip"
+        case .parseFailure:     return "exclamationmark.bubble"
+        case .formatCorrection: return "text.badge.xmark"
+        case .contextPressure:  return "gauge.with.dots.needle.67percent"
+        case .circuitBreaker:   return "arrow.triangle.2.circlepath.circle"
+        }
+    }
+
+    /// When `true`, a warning of this category that fires inside a workflow node should
+    /// also bubble up to the workflow-level bubble (not only the per-node timeline).
+    /// Reserved for categories that indicate the **whole run** is at risk — users need
+    /// to see these at the surface even if they haven't drilled into the node.
+    /// Transient, node-local signals (retries, throttling, memory pressure) stay scoped
+    /// to the node timeline.
+    var bubblesToWorkflowLevel: Bool {
+        switch self {
+        case .circuitBreaker, .contextPressure:
+            return true
+        case .retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection:
+            return false
+        }
+    }
+}
+
+/// Terminal outcome of an agent execution — tells the UI whether to treat the final
+/// content as an authoritative response (`.completed`), a best-effort synthesis after
+/// the agent gave up (`.failed`), or the stream stopping mid-flight (`.cancelled`).
+/// Emitted as the last event in the stream via `.executionFinished`.
+enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
+    case completed
+    case failed
+    case cancelled
+
+    var displayName: String {
+        switch self {
+        case .completed: return "Completed"
+        case .failed:    return "Failed"
+        case .cancelled: return "Cancelled"
+        }
+    }
+}
+
+/// Classification for `.toolFailed` events — drives negativeConstraints policy,
+/// episodic-memory retrieval weight, and UI affordance. Codable so timeline tool events
+/// persist with category intact and survive session re-opens.
+enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
+    case userDenied          // Ghost Protocol — user explicitly rejected the call
+    case permissionRejected  // sandbox / OS-level permission missing
+    case executionThrew      // tool's run closure threw (or returned semantic error)
+    case timeout             // per-tool timeout deadline exceeded
+    case invalidArgs         // preflight argument validation rejected the call
+    case notFound            // tool name hallucinated / not in registry
+    case cancelled           // user skipped ask_user or task was cancelled mid-flight
+
+    var displayName: String {
+        switch self {
+        case .userDenied:         return "Denied"
+        case .permissionRejected: return "Permission"
+        case .executionThrew:     return "Error"
+        case .timeout:            return "Timeout"
+        case .invalidArgs:        return "Invalid Args"
+        case .notFound:           return "Not Found"
+        case .cancelled:          return "Cancelled"
+        }
+    }
+
+    /// SF Symbol name for rendering in the timeline.
+    var icon: String {
+        switch self {
+        case .userDenied:         return "hand.raised.fill"
+        case .permissionRejected: return "lock.shield"
+        case .executionThrew:     return "exclamationmark.triangle.fill"
+        case .timeout:            return "clock.badge.exclamationmark"
+        case .invalidArgs:        return "text.badge.xmark"
+        case .notFound:           return "questionmark.circle"
+        case .cancelled:          return "xmark.circle"
+        }
+    }
+
+    /// Whether failures of this category should produce a hard `negativeConstraint` (Ghost Protocol ban
+    /// on the tool name). Soft failures are transient and the agent may retry with different args.
+    var producesHardConstraint: Bool {
+        switch self {
+        case .userDenied, .permissionRejected, .notFound:
+            return true
+        case .executionThrew, .timeout, .invalidArgs, .cancelled:
+            return false
+        }
+    }
+
+    /// Episode-memory status tag consumed by `EpisodicHistoryFormatter` and surfaced
+    /// inside the `<episodic_memory>` XML block injected into prompts. Shorter than
+    /// `displayName` and chosen to be unambiguous when the LLM reads prior failures.
+    var episodeStatusTag: String {
+        switch self {
+        case .userDenied:         return "DENIED"
+        case .permissionRejected: return "PERMISSION_DENIED"
+        case .executionThrew:     return "FAILED"
+        case .timeout:            return "TIMEOUT"
+        case .invalidArgs:        return "INVALID_ARGS"
+        case .notFound:           return "NOT_FOUND"
+        case .cancelled:          return "CANCELLED"
+        }
+    }
 }
 
 /// Structured output from a tool execution.

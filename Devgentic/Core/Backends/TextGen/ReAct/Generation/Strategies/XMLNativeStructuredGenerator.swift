@@ -49,7 +49,7 @@ struct XMLNativeStructuredGenerator: CognitiveGenerator {
     }
 
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: false, wrapping: .markdown)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: false, layerConfig: context.promptLayerConfig, wrapping: .markdown)
     }
 
     func promptTrigger(for iteration: Int) -> String {

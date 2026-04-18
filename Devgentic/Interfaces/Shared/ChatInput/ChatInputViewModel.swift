@@ -633,6 +633,13 @@ final class ChatInputViewModel {
             self.voiceInputState = .permissionsDeniedMic
         } else {
             logger.info("Microphone permission granted.")
+            // Restore state based on model loading — don't leave it stuck
+            // on .requestingPermissions, which disables the mic button.
+            if let service = recognitionService as? WhisperRecognitionService {
+                handleModelLoadingState(service.loadingState)
+            } else {
+                self.voiceInputState = .idle
+            }
         }
     }
 

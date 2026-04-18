@@ -173,6 +173,8 @@ struct ReadFileTool: DevgenticTool {
         let url = URL(fileURLWithPath: resolvedPath)
 
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
+            // Bare error; `ToolExecutionMediator` enriches this via `ToolRecoveryHints`
+            // using only tools that are actually available in the current request.
             return "Error: File not found at '\(resolvedPath)'"
         }
 

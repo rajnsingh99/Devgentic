@@ -147,6 +147,7 @@ struct OllamaModelPickerView: View {
     @Binding var cognitiveCapability: ModelCognitiveCapability
     @Binding var modelDialect: ModelDialect
     @Binding var modelMetadata: ModelMetadata?
+    @Binding var thinkingEnabled: Bool
 
     let baseURL: String
     let profileID: UUID
@@ -330,6 +331,7 @@ struct OllamaModelPickerView: View {
             self.cognitiveCapability = matchedModel.cognitiveCapability
             self.modelDialect = matchedModel.modelDialect
             self.modelMetadata = matchedModel.cognitiveProfile.metadata
+            self.thinkingEnabled = matchedModel.supportsThinking
             self.currentFitAssessment = ModelFitAdvisor.assess(metadata: matchedModel.cognitiveProfile.metadata)
         }
     }

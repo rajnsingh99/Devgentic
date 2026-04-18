@@ -33,11 +33,12 @@ struct BackendProfilePanelView: View {
     @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
 
-    /// Profiles filtered by search text (name or type).
+    /// Profiles filtered by search text (name or type). Code profiles are hidden — managed by CodeSessionManager.
     private var filteredProfiles: [BackendProfileModel] {
-        if searchText.isEmpty { return profileService.profiles }
+        let base = profileService.profiles.filter { $0.profileType != .code }
+        if searchText.isEmpty { return base }
         let query = searchText.lowercased()
-        return profileService.profiles.filter {
+        return base.filter {
             $0.displayName.lowercased().contains(query) ||
             $0.profileType.rawValue.lowercased().contains(query)
         }
@@ -293,6 +294,12 @@ struct BackendProfileDetailView: View {
                 WorkflowCanvasView(profile: $editBuffer.draft, onDelete: onDelete)
             case .imageGen:
                 ImageGenConfigDetailView(editBuffer: editBuffer, onDelete: onDelete)
+            case .code:
+                // Code mode uses the dedicated Code interface, not profile-based config.
+                // This case should not be reachable, but handle gracefully.
+                Text("Code sessions are configured via the Code interface.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -399,6 +406,7 @@ struct ProfileRowView: View {
         case .agent: return .green
         case .workflow: return .purple
         case .imageGen: return .orange
+        case .code: return .cyan
         }
     }
 }

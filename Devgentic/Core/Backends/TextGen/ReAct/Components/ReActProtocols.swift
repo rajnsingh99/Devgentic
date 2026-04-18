@@ -12,6 +12,10 @@ import Foundation
 /// The resulting action the executor must take based on safety evaluations.
 enum CircuitBreakerAction: Equatable, Sendable {
     case proceed
+    /// Continue execution but surface a visible warning — the next identical evaluation
+    /// will trigger an abort. Lets the caller emit a structured `.warning(.circuitBreaker)`
+    /// so users aren't blindsided by the imminent termination.
+    case proceedWithWarning(message: String)
     case intervene(systemMessage: String)
     case abort(reason: String)
 }

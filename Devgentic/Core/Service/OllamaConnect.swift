@@ -37,6 +37,39 @@ struct OllamaShowResponse: Codable {
         cognitiveProfile.capability
     }
 
+    /// Detects whether the model supports Ollama's `think` parameter on /api/chat.
+    /// Sending `think: true` to a model that doesn't support it returns HTTP 400,
+    /// so this is used at model-selection time to seed `ProviderConfig.thinkingEnabled`.
+    var supportsThinking: Bool {
+        let templateStr = template?.lowercased() ?? ""
+        let familyStr = details?.family?.lowercased() ?? ""
+        let familiesArr = details?.families?.map { $0.lowercased() } ?? []
+        let modelfileStr = modelfile?.lowercased() ?? ""
+
+        // Strong signal: explicit thinking tokens in chat template
+        if templateStr.contains("<think>") ||
+           templateStr.contains("<|thinking|>") ||
+           templateStr.contains("<|start_thinking|>") ||
+           templateStr.contains("{{ .thinking }}") ||
+           templateStr.contains("{{.thinking}}") {
+            return true
+        }
+
+        // Known reasoning families (as of Ollama 2026-04)
+        let thinkingFamilies = ["deepseek-r1", "qwq", "qwen3", "magistral", "gpt-oss"]
+        if thinkingFamilies.contains(where: { familyStr.contains($0) }) ||
+           familiesArr.contains(where: { fam in thinkingFamilies.contains(where: { fam.contains($0) }) }) {
+            return true
+        }
+
+        // Modelfile declaration hint (weaker signal, but still useful)
+        if modelfileStr.contains("<think>") || modelfileStr.contains("reasoning_content") {
+            return true
+        }
+
+        return false
+    }
+
     /// Returns the full CognitiveProfile (capability + dialect) by inspecting the Ollama Go template.
     var cognitiveProfile: CognitiveProfile {
         let templateStr = template?.lowercased() ?? ""
@@ -119,19 +152,13 @@ struct OllamaShowResponse: Codable {
         var metadata = ModelMetadata(tier: .small) // Default
 
         if let detailObj = details {
-            // 1. Detect Tier from parameter size
-            if let size = detailObj.parameterSize {
-                let s = size.lowercased()
-                if s.contains("b") {
-                    let numPart = s.replacingOccurrences(of: "b", with: "").trimmingCharacters(in: .whitespaces)
-                    if let val = Double(numPart) {
-                        if val < 4 { metadata.tier = .tiny }
-                        else if val < 15 { metadata.tier = .small }
-                        else if val < 45 { metadata.tier = .medium }
-                        else if val < 100 { metadata.tier = .large }
-                        else { metadata.tier = .ultra }
-                    }
-                }
+            // 1. Detect Tier from parameter size — use ModelFitAdvisor's parser for consistent handling
+            if let billions = ModelFitAdvisor.parseParameterCount(detailObj.parameterSize) {
+                if billions < 4 { metadata.tier = .tiny }
+                else if billions < 15 { metadata.tier = .small }
+                else if billions < 45 { metadata.tier = .medium }
+                else if billions < 100 { metadata.tier = .large }
+                else { metadata.tier = .ultra }
             }
 
             metadata.quantization = detailObj.quantizationLevel

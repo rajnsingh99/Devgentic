@@ -4,6 +4,7 @@
 //
 //  Extracted from ChatInputAreaView.swift — groups the left-side toolbar
 //  buttons (attach, tools, schedule) into a single reusable view.
+//  Mode-aware: shows/hides buttons based on interfaceMode.
 //
 
 import SwiftUI
@@ -15,9 +16,11 @@ struct InputToolbarView: View {
     let selectedProfile: BackendProfileModel?
     let selectedProfileID: UUID?
     let promptText: String
+    let interfaceMode: MainApplicationViewModel.InterfaceMode
 
     let onOpenFilePicker: () -> Void
     let onNavigateToToolLibrary: (UUID) -> Void
+    var onSelectFolder: (() -> Void)?
 
     @Binding var showingSchedulePopover: Bool
     @Binding var showingFullScheduleCreator: Bool
@@ -27,12 +30,18 @@ struct InputToolbarView: View {
     @State private var isPlusButtonHovering = false
     @State private var isToolsHovering = false
     @State private var isScheduleButtonHovering = false
+    @State private var isFolderButtonHovering = false
 
     var body: some View {
         HStack(spacing: 12) {
             filePickerButton
-            toolManagerButton
-            scheduleButton
+
+            if interfaceMode == .code {
+                folderSelectorButton
+            } else {
+                toolManagerButton
+                scheduleButton
+            }
         }
     }
 
@@ -50,7 +59,7 @@ struct InputToolbarView: View {
         .opacity(isInputEnabled ? 1.0 : 0.5)
     }
 
-    // MARK: - Tool Manager (Agent only)
+    // MARK: - Tool Manager (Agent only, non-code modes)
 
     @ViewBuilder
     private var toolManagerButton: some View {
@@ -67,7 +76,7 @@ struct InputToolbarView: View {
         }
     }
 
-    // MARK: - Schedule
+    // MARK: - Schedule (non-code modes)
 
     private var scheduleButton: some View {
         Button(action: { showingSchedulePopover = true }) {
@@ -88,6 +97,23 @@ struct InputToolbarView: View {
                     showingFullScheduleCreator = true
                 }
             )
+        }
+    }
+
+    // MARK: - Folder Selector (Code mode only)
+
+    @ViewBuilder
+    private var folderSelectorButton: some View {
+        if let onSelectFolder {
+            Button(action: onSelectFolder) {
+                toolbarIcon(systemName: "folder.badge.gearshape", isHovering: isFolderButtonHovering)
+            }
+            .buttonStyle(.plain)
+            .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isFolderButtonHovering = hover } }
+            .help("Select project folder")
+            .accessibilityLabel("Select project folder")
+            .disabled(!isInputEnabled)
+            .opacity(isInputEnabled ? 1.0 : 0.5)
         }
     }
 

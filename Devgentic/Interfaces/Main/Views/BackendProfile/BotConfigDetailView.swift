@@ -60,6 +60,7 @@ struct BotConfigDetailView: View {
                 switch editBuffer.draft.details {
                 case .bot(let config): return config.llmConfig
                 case .agent(let config): return config.llmConfig
+                case .code(let config): return config.llmConfig
                 case .imageGen(let config): return config.llmConfig
                 case .workflow: return ProviderConfig(apiProvider: .ollama, modelName: "")
                 }
@@ -72,6 +73,9 @@ struct BotConfigDetailView: View {
                 case .agent(var config):
                     config.llmConfig = newConfig
                     editBuffer.draft.details = .agent(config)
+                case .code(var config):
+                    config.llmConfig = newConfig
+                    editBuffer.draft.details = .code(config)
                 case .imageGen(var config):
                     config.llmConfig = newConfig
                     editBuffer.draft.details = .imageGen(config)
@@ -441,7 +445,14 @@ struct BotConfigDetailView: View {
 
     @ViewBuilder
     private var advancedSettingsView: some View {
-        ProviderAdvancedSettingsView(configManager: configManager, provider: providerConfig.wrappedValue.apiProvider)
+        ProviderAdvancedSettingsView(
+            configManager: configManager,
+            provider: providerConfig.wrappedValue.apiProvider,
+            thinkingEnabled: Binding(
+                get: { providerConfig.wrappedValue.thinkingEnabled },
+                set: { providerConfig.wrappedValue.thinkingEnabled = $0 }
+            )
+        )
     }
 
     private func detectAndApplyOllamaBotPreset(for modelName: String) {

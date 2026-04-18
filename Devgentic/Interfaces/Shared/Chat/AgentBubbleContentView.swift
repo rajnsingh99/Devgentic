@@ -23,14 +23,23 @@ struct AgentBubbleContentView: View {
 
     @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
+    /// Code mode always uses the timeline — its ReAct loops produce many tool calls
+    /// that render better as grouped actions than a dynamic island.
+    private var effectiveVariant: AgentViewVariant {
+        message.profileType == .code ? .timeline : agentViewVariant
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingMedium) {
 
             // 1. INDICATORS
             if isAgentic {
                 // Agent: full ThinkingDynamicIsland with reasoning steps, tool calls, etc.
-                if message.isStreaming || !message.thoughts.isEmpty {
-                    if agentViewVariant == .timeline {
+                // Gate on `timelineEvents` — covers tool calls, warnings, capability milestones,
+                // and media, not just text thoughts. A tool-heavy response with no narration
+                // should still show its timeline after streaming ends.
+                if message.isStreaming || !message.timelineEvents.isEmpty {
+                    if effectiveVariant == .timeline {
                         AgentTimelineView(message: message)
                             .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                     } else {
@@ -50,7 +59,7 @@ struct AgentBubbleContentView: View {
             }
 
             // 2. ARTIFACTS
-            if !message.artifacts.isEmpty && agentViewVariant == .dynamicIsland {
+            if !message.artifacts.isEmpty && effectiveVariant == .dynamicIsland {
                 ToolArtifactsRow(artifacts: message.artifacts)
                     .padding(.bottom, 8)
                     .accessibilityElement(children: .combine)
@@ -80,7 +89,18 @@ struct AgentBubbleContentView: View {
             // 4. CONTENT
             contentView
 
-            // 5. ACTIONS
+            // 5. TERMINAL OUTCOME INDICATOR
+            // Surfaces a subtle chip when the run ended in a non-success state
+            // (circuit-breaker abort, iteration exhaustion, cancellation). Keeps
+            // the bubble honest — user shouldn't mistake best-effort synthesis
+            // for an authoritative answer.
+            if !message.isStreaming,
+               let outcome = message.terminalOutcome,
+               outcome != .completed {
+                TerminalOutcomeChip(outcome: outcome, reason: message.terminalReason)
+            }
+
+            // 6. ACTIONS
             if !message.isStreaming && contentToDisplay.textContent != nil {
                 AgentMessageActionsView(message: message, mainAppViewModel: mainAppViewModel)
                     .environment(chatHistoryViewModel)
@@ -276,5 +296,82 @@ struct AgentBubbleContentView: View {
             return "Agent response: \(String(text.prefix(200)))"
         }
         return "Agent response"
+    }
+}
+
+// MARK: - Terminal Outcome Chip
+
+/// Compact banner shown under the final response when the agent run didn't complete
+/// cleanly. Distinguishes best-effort synthesis (`.failed` — circuit breaker / iteration
+/// exhaustion) from a user stop (`.cancelled`). Deliberately subdued styling so it
+/// informs without alarming — honesty about completion state, not a loud error banner.
+struct TerminalOutcomeChip: View {
+    let outcome: ExecutionOutcome
+    let reason: String?
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(.caption, weight: .semibold))
+                .foregroundColor(tint)
+                .frame(width: 16, alignment: .center)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(headline)
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundColor(tint.opacity(0.95))
+
+                if let reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.system(.caption2))
+                        .foregroundColor(theme.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(tint.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(tint.opacity(0.22), lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var icon: String {
+        switch outcome {
+        case .failed:    return "exclamationmark.triangle.fill"
+        case .cancelled: return "stop.circle"
+        case .completed: return "checkmark.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch outcome {
+        case .failed:    return .orange
+        case .cancelled: return .gray
+        case .completed: return .green
+        }
+    }
+
+    private var headline: String {
+        switch outcome {
+        case .failed:    return "Response may be incomplete — the agent didn't finish cleanly."
+        case .cancelled: return "Run stopped by user."
+        case .completed: return "Completed."
+        }
+    }
+
+    private var accessibilityLabel: String {
+        reason.map { "\(headline) \($0)" } ?? headline
     }
 }

@@ -219,6 +219,7 @@ struct WorkflowNodeView: View {
             case .agent:    return .green
             case .workflow: return .purple
             case .imageGen: return .orange
+            case .code:     return .cyan
             }
         case .condition:  return .yellow
         case .loop:       return .orange

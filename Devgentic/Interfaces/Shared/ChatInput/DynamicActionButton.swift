@@ -38,7 +38,7 @@ struct DynamicActionButton: View {
     let editorTextView: CustomTextEditor.CustomNSTextView?
     let backendProfileSelected: Bool
 
-    var inputViewModel: ChatInputViewModel
+    @Bindable var inputViewModel: ChatInputViewModel
 
     let onSend: (NSAttributedString, [NSAttributedString.Key: Any]) -> Void
     let onToggleVoice: () -> Void
@@ -66,9 +66,9 @@ struct DynamicActionButton: View {
         .disabled(isDisabled)
         .help(helpText)
         .accessibilityLabel(helpText)
-        .popover(isPresented: popoverBinding, arrowEdge: .top) {
+        .popover(isPresented: $inputViewModel.showModelSelectorPopover, arrowEdge: .top) {
             WhisperModelSelectorPopover(
-                isPresented: popoverBinding,
+                isPresented: $inputViewModel.showModelSelectorPopover,
                 currentModelName: inputViewModel.currentSpeechModelName,
                 downloadedModelIds: WhisperModelDownloadService.shared.downloadedModelIds,
                 onSelectModel: { modelName in
@@ -84,7 +84,7 @@ struct DynamicActionButton: View {
         }
         .alert(
             whisperAlertTitle,
-            isPresented: Bindable(inputViewModel).showWhisperAlert
+            isPresented: $inputViewModel.showWhisperAlert
         ) {
             if inputViewModel.activeWhisperAlert == .delete {
                 Button("Delete", role: .destructive) { inputViewModel.confirmWhisperAlert() }
@@ -252,11 +252,6 @@ struct DynamicActionButton: View {
     }
 
     // MARK: - Whisper Alert Helpers
-
-    /// Single Bindable wrapper reused for both popover presenter and popover content (#13).
-    private var popoverBinding: Binding<Bool> {
-        Bindable(inputViewModel).showModelSelectorPopover
-    }
 
     private var whisperAlertTitle: String {
         switch inputViewModel.activeWhisperAlert {

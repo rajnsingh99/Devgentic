@@ -26,7 +26,9 @@ struct ChatBubbleView: View {
     /// Uses the persisted profileType (tagged at creation) instead of runtime profile store lookups.
     /// Falls back to checking thoughts for legacy messages without profileType.
     private var isAgentic: Bool {
-        message.profileType == .agent || (!message.thoughts.isEmpty && message.profileType == nil)
+        message.profileType == .agent
+            || message.profileType == .code
+            || (!message.thoughts.isEmpty && message.profileType == nil)
     }
 
     private var contentToDisplay: MessageContent {

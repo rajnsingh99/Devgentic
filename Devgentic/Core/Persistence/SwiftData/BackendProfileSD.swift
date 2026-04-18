@@ -82,6 +82,7 @@ final class BackendProfile {
             case .agent:     profileTypeRaw = ProfileType.agent.rawValue
             case .workflow:  profileTypeRaw = ProfileType.workflow.rawValue
             case .imageGen:  profileTypeRaw = ProfileType.imageGen.rawValue
+            case .code:      profileTypeRaw = ProfileType.code.rawValue
             }
             let (provider, model) = Self.extractProviderAndModel(from: newValue)
             providerRaw = provider
@@ -109,6 +110,7 @@ final class BackendProfile {
         case .agent:     self.profileTypeRaw = ProfileType.agent.rawValue
         case .workflow:  self.profileTypeRaw = ProfileType.workflow.rawValue
         case .imageGen:  self.profileTypeRaw = ProfileType.imageGen.rawValue
+        case .code:      self.profileTypeRaw = ProfileType.code.rawValue
         }
 
         let (provider, model) = Self.extractProviderAndModel(from: details)
@@ -127,6 +129,7 @@ final class BackendProfile {
         case .bot(let config):      return (config.llmConfig.apiProvider.rawValue, config.llmConfig.modelName)
         case .agent(let config):    return (config.llmConfig.apiProvider.rawValue, config.llmConfig.modelName)
         case .imageGen(let config): return (config.llmConfig.apiProvider.rawValue, config.llmConfig.modelName)
+        case .code(let config):     return (config.llmConfig.apiProvider.rawValue, config.llmConfig.modelName)
         case .workflow:             return ("", "")
         }
     }
@@ -203,6 +206,7 @@ struct BackendProfileSnapshot: Codable, Identifiable, Hashable, Sendable {
         case .agent:     return .agent
         case .workflow:  return .workflow
         case .imageGen:  return .imageGen
+        case .code:      return .code
         }
     }
 

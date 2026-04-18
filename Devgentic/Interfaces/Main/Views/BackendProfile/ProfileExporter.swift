@@ -192,6 +192,9 @@ struct ProfileExporter {
         case .imageGen(var config):
             config.llmConfig.apiKey = nil
             return .imageGen(config)
+        case .code(var config):
+            config.llmConfig.apiKey = nil
+            return .code(config)
         case .workflow:
             return details
         }

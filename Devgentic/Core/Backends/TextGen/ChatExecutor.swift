@@ -217,7 +217,8 @@ actor ChatExecutor: Executor {
             availableTools: [],
             userProfile: nil,
             skillManifests: nil,
-            taskDescription: taskDescription
+            taskDescription: taskDescription,
+            promptLayerConfig: taskDescription != nil ? .workflow : .bot
         )
     }
 }

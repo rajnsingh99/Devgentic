@@ -129,6 +129,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                             content: "Starting trial \(trial)/\(self.config.maxTrials)"
                         ))
 
+                        continuation.yield(.reflectionTrialStarted(trial: trial, maxTrials: self.config.maxTrials))
                         if trial > 1 {
                             continuation.yield(.thought("Starting trial \(trial)/\(self.config.maxTrials) with reflection feedback..."))
                         }
@@ -204,16 +205,25 @@ actor SelfReflectionExecutorWrapper: Executor {
                                 case .toolCall(let name, let params, _):
                                     // [G11] Forward tool invocation events so UI shows tool activity during trials.
                                     continuation.yield(.toolCall(name: name, params: params))
-                                case .toolOutput(let output, _):
+                                case .toolSucceeded(let output, let durationMs, _):
                                     // [G1] Capture tool results so ReflectionEvaluator has full context.
                                     trialSummary.record(
                                         toolCallId: output.id.uuidString,
                                         toolName: output.toolName,
                                         params: output.params,
                                         output: output.output,
-                                        isSuccess: output.isSuccess
+                                        isSuccess: true
                                     )
-                                    continuation.yield(.toolOutput(output))
+                                    continuation.yield(.toolSucceeded(output, durationMs: durationMs))
+                                case .toolFailed(let output, let category, let suggestion, _):
+                                    trialSummary.record(
+                                        toolCallId: output.id.uuidString,
+                                        toolName: output.toolName,
+                                        params: output.params,
+                                        output: output.output,
+                                        isSuccess: false
+                                    )
+                                    continuation.yield(.toolFailed(output, category: category, suggestion: suggestion))
                                 case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
                                     // [G8] Forward HITL permission requests — user must see these during trials.
                                     continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
@@ -222,6 +232,9 @@ actor SelfReflectionExecutorWrapper: Executor {
                                     continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID))
                                 case .error(let msg):
                                     continuation.yield(.error(msg))
+                                case .warning(let cat, let msg, let relatedPath, _):
+                                    // [G8] Forward warnings so UI surfaces memory-pressure / retry / parse-failure signals during trials.
+                                    continuation.yield(.warning(category: cat, message: "[Trial \(trial)] \(msg)", relatedPath: relatedPath))
                                 case .artifactProduced(let artifact):
                                     continuation.yield(.artifactProduced(artifact))
                                 case .tokenUsage(let usage):
@@ -237,8 +250,14 @@ actor SelfReflectionExecutorWrapper: Executor {
                         } catch {
                             // [G10] Trial-level error recovery: log failure, mark summary,
                             // and continue to next trial instead of aborting the entire loop.
+                            // Structured warning so the UI marks the trial failure distinctly
+                            // from narrative thoughts and downstream consumers see a category.
                             logger.error("Trial \(trial) stream error: \(error.localizedDescription)")
-                            continuation.yield(.thought("[Trial \(trial)] Error: \(error.localizedDescription)"))
+                            continuation.yield(.warning(
+                                category: .retry,
+                                message: "Trial \(trial) failed: \(error.localizedDescription)",
+                                relatedPath: "trial_\(trial)"
+                            ))
                             trialSummary.finalAgentThought = trialOutput
                             trialSummary.markComplete(failureReason: error.localizedDescription)
                         }
@@ -253,6 +272,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                         // Skip reflection on the last trial
                         guard trial < self.config.maxTrials else { break }
 
+                        continuation.yield(.reflectionEvaluating(trial: trial))
                         continuation.yield(.thought("Reflecting on trial \(trial) outcome..."))
 
                         await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
@@ -267,12 +287,14 @@ actor SelfReflectionExecutorWrapper: Executor {
 
                         if reflection.isAcceptable {
                             logger.info("Trial \(trial) accepted by reflection evaluator.")
+                            continuation.yield(.reflectionAccepted(trial: trial))
                             continuation.yield(.thought("Reflection: Trial \(trial) outcome is acceptable."))
                             break
                         }
 
                         // Not acceptable -- prepare for next trial
                         logger.info("Trial \(trial) rejected. Critique: \(reflection.critique)")
+                        continuation.yield(.reflectionRetrying(trial: trial, critique: reflection.critique))
                         continuation.yield(.thought("Reflection: \(reflection.critique)"))
 
                         reflexionMemory.addReflection(
@@ -307,6 +329,14 @@ actor SelfReflectionExecutorWrapper: Executor {
                     ))
 
                     continuation.yield(.content(bestOutput))
+                    // Terminal outcome: empty best output after exhausting all trials means
+                    // the reflection loop never produced acceptable content. Treat that as
+                    // .failed so the UI marks the bubble honestly.
+                    let terminalOutcome: ExecutionOutcome = bestOutput.isEmpty ? .failed : .completed
+                    let terminalReason: String? = bestOutput.isEmpty
+                        ? "All \(self.config.maxTrials) trials rejected by reflection evaluator"
+                        : nil
+                    continuation.yield(.executionFinished(outcome: terminalOutcome, reason: terminalReason))
                     continuation.finish()
 
                 } catch is CancellationError {
@@ -315,10 +345,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
+                    continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
                     logger.error("Self-reflection fatal error: \(error.localizedDescription)")
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
             }

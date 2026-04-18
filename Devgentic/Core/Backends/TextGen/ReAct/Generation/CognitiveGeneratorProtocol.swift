@@ -52,6 +52,7 @@ struct PromptLayerConfig: Sendable {
     static let agent = PromptLayerConfig(includeRAG: true, includeEpisodicMemory: true, includeUserProfile: true)
     static let workflow = PromptLayerConfig(includeRAG: false, includeEpisodicMemory: false, includeUserProfile: false)
     static let bot = PromptLayerConfig(includeRAG: true, includeEpisodicMemory: true, includeUserProfile: false)
+    static let code = PromptLayerConfig(includeRAG: false, includeEpisodicMemory: true, includeUserProfile: false)
 }
 
 // MARK: - Cognitive Generator Protocol

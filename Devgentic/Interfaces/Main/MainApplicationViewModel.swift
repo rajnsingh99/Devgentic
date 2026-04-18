@@ -36,6 +36,9 @@ final class MainApplicationViewModel {
 
     @ObservationIgnored private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
 
+    // Code mode — used to build ephemeral profiles on each send
+    @ObservationIgnored private(set) var codeSessionManager: CodeSessionManager?
+
     // MARK: - ChatOps
     @ObservationIgnored private(set) var chatOpsBridge: ChatOpsBridge?
     @ObservationIgnored private(set) var discordChatOpsBridge: DiscordChatOpsBridge?
@@ -71,11 +74,13 @@ final class MainApplicationViewModel {
     enum InterfaceMode: String, CaseIterable {
         case chat = "Chat"
         case workflow = "Workflow"
+        case code = "Code"
 
         var icon: String {
             switch self {
             case .chat: return "bubble.left.and.text.bubble.right"
             case .workflow: return "point.3.connected.trianglepath.dotted"
+            case .code: return "chevron.left.forwardslash.chevron.right"
             }
         }
 
@@ -84,6 +89,7 @@ final class MainApplicationViewModel {
             switch self {
             case .chat: return [.bot, .agent, .imageGen]
             case .workflow: return [.workflow]
+            case .code: return [.code]
             }
         }
     }
@@ -179,6 +185,25 @@ final class MainApplicationViewModel {
 
         // Start ChatOps bridge if enabled
         setupChatOps()
+    }
+
+    // MARK: - Code Session
+
+    /// Late-injected by DevgenticApp after init (avoids init-order dependency).
+    func configureCodeSession(_ manager: CodeSessionManager) {
+        self.codeSessionManager = manager
+    }
+
+    /// Refreshes the code profile's instructions and sets it as the selected profile for send.
+    /// Called before each send when `interfaceMode == .code`.
+    private func prepareCodeProfileForSend() {
+        guard let csm = codeSessionManager, csm.isConfigured else {
+            logger.warning("[CODE] prepareCodeProfileForSend: CodeSessionManager not configured")
+            return
+        }
+        csm.refreshInstructionsOnProfile()
+        backendConfiguration.selectedProfileID = csm.codeProfileID
+        logger.info("[CODE] Code profile prepared for send (profile ID: \(csm.codeProfileID?.uuidString ?? "nil"))")
     }
 
     // MARK: - ChatOps Setup
@@ -420,13 +445,29 @@ final class MainApplicationViewModel {
         guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
             return
         }
+
+        // Code mode: refresh instructions (picks up context.md changes) and set selectedProfileID.
+        if interfaceMode == .code {
+            logger.info("[CODE] ────────── Code mode send initiated ──────────")
+            logger.info("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))")
+            prepareCodeProfileForSend()
+        }
+
         guard let config = backendConfiguration.getRequestConfig() else {
-            logger.error("[sendMessage] CRITICAL: Could not get backend request config. Is a profile selected?")
+            logger.error("[sendMessage] CRITICAL: Could not get backend request config. Is a profile selected? (interfaceMode: \(self.interfaceMode.rawValue), selectedProfileID: \(self.backendConfiguration.selectedProfileID?.uuidString ?? "nil"))")
             return
         }
 
         chatHistoryViewModel.isSending = true
-        logger.info("Beginning message send process with profile: \(config.profile.displayName)")
+        let profileType: String
+        switch config.profile.details {
+        case .bot: profileType = "bot"
+        case .agent: profileType = "agent"
+        case .workflow: profileType = "workflow"
+        case .imageGen: profileType = "imageGen"
+        case .code: profileType = "code"
+        }
+        logger.info("[sendMessage] Profile: \(config.profile.displayName) (type: \(profileType), id: \(config.profile.id.uuidString.prefix(8)))")
 
         // Add to query history
         if !plainUserQueryFromEditor.isEmpty, queryHistory.last != plainUserQueryFromEditor {
@@ -438,6 +479,11 @@ final class MainApplicationViewModel {
 
         // Persist the selected profile to the conversation at send time.
         updateBackendForCurrentConversation(conversationID: conversationIDToUse, profileID: backendConfiguration.selectedProfileID)
+
+        // Tag Code mode conversations with profileTypeRaw for sidebar filtering
+        if interfaceMode == .code {
+            persistenceService.updateProfileType(for: conversationIDToUse, profileTypeRaw: ProfileType.code.rawValue)
+        }
 
         // Auto-title if empty
         if let conversationSD = persistenceService.getConversation(withId: conversationIDToUse) {
@@ -477,6 +523,8 @@ final class MainApplicationViewModel {
                 workflowExecutionStates[conversationIDToUse] = state
                 return state
             }()
+
+            logger.info("[sendMessage] Handing off to ActiveStreamManager — conversationID: \(conversationIDToUse.uuidString.prefix(8)), messageID: \(userMessage.id.uuidString.prefix(8)), historyCount: \(self.chatHistoryViewModel.currentChatMessages.count), files: \(filesForBackend.count)")
 
             let agentMessage = activeStreamManager.startMessageStream(
                 withConfig: config,
@@ -798,7 +846,13 @@ final class MainApplicationViewModel {
         clearAttachedFiles()
         selectedConversationID = nil
         backendConfiguration.selectedProfileID = nil
+        chatHistoryViewModel.currentChatMessages = []
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
+
+        if interfaceMode == .code {
+            codeSessionManager?.resetSession()
+        }
+
         logger.info("Deselected conversation, returning to welcome screen.")
     }
 
@@ -808,6 +862,7 @@ final class MainApplicationViewModel {
         // Reuse an existing empty conversation if one exists — prevents duplicate empties.
         if let emptyConvID = findReusableEmptyConversation() {
             logger.info("[NewChat] Reusing existing empty conversation \(emptyConvID.uuidString).")
+            tagConversationWithCurrentMode(emptyConvID)
             chatHistoryViewModel.currentChatMessages = []
             selectedConversationID = emptyConvID
             chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
@@ -822,11 +877,28 @@ final class MainApplicationViewModel {
             backendEntityId: nil
         )
         persistenceService.addConversation(from: newConversation)
+        tagConversationWithCurrentMode(newConversation.id)
         chatHistoryViewModel.currentChatMessages = []
         selectedConversationID = newConversation.id
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
 
         return newConversation.id
+    }
+
+    /// Tags a freshly-created or freshly-reused conversation with the current mode's
+    /// profile type so it appears in the matching sidebar immediately. Chat mode is
+    /// intentionally left untagged — chat hosts multiple profile types (bot/agent/imageGen)
+    /// and the exact one isn't resolved until send time. This eliminates the "new code
+    /// conversation invisible in sidebar until first message" edge case.
+    private func tagConversationWithCurrentMode(_ conversationID: UUID) {
+        switch interfaceMode {
+        case .code:
+            persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.code.rawValue)
+        case .workflow:
+            persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.workflow.rawValue)
+        case .chat:
+            break
+        }
     }
 
     /// Finds the most recent empty conversation (zero messages) that can be reused.
@@ -868,6 +940,8 @@ final class MainApplicationViewModel {
             case .workflow:
                 legacyBackendType = .none
             case .imageGen:
+                legacyBackendType = .none
+            case .code:
                 legacyBackendType = .none
             }
         }

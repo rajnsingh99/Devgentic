@@ -167,29 +167,37 @@ struct EpisodicHistoryFormatter {
                 var usedTools: [String] = []
                 var userCorrection: String? = nil
 
-                // Extract tool executions from timeline events
+                // Extract tool executions from timeline events.
+                // Ghost Protocol: `data.failureCategory` drives constraint policy directly —
+                // no more string-matching on output text. Only hard-failure categories
+                // (userDenied / permissionRejected / notFound) add the tool name to
+                // `negativeConstraints`; soft failures (timeout / executionThrew / invalidArgs / cancelled)
+                // are recorded in the episode for retrieval but do not ban the tool outright.
                 for event in message.timelineEvents {
                     if case .toolExecution(let data) = event, !data.isExecuting {
 
                         usedTools.append(data.name)
                         let success = data.isSuccess ?? false
 
-                        // Ghost Protocol: track failed tools
-                        if !success {
-                            negativeConstraints.insert(data.name)
-                        }
-
-                        // Determine status and error reason
+                        // Determine status + error reason from the structured category.
                         let status: String
                         var errorReason: String? = nil
 
                         if success {
                             status = "SUCCESS"
-                        } else if let out = data.output, out.contains("denied") || out.contains("User explicitly") {
-                            status = "DENIED"
-                            errorReason = truncate(out, maxLength: 150)
-                            userCorrection = "User denied: \(data.name)"
+                        } else if let category = data.failureCategory {
+                            status = category.episodeStatusTag
+                            errorReason = data.output.map { truncate($0, maxLength: 150) }
+
+                            if category.producesHardConstraint {
+                                negativeConstraints.insert(data.name)
+                            }
+                            if category == .userDenied {
+                                userCorrection = "User denied: \(data.name)"
+                            }
                         } else {
+                            // Legacy persisted data without a category — conservative fallback:
+                            // treat as a generic failure, record detail, but do NOT ban the tool.
                             status = "FAILED"
                             errorReason = data.output.map { truncate($0, maxLength: 150) }
                         }

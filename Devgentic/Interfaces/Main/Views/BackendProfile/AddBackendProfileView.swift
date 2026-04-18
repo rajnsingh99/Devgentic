@@ -168,6 +168,9 @@ struct AddBackendProfileView: View {
                 llmConfig: imageGenConfig,
                 defaultAspectRatio: .square
             ))
+        case .code:
+            // Code profiles are created via the dedicated Code interface, not here.
+            details = .agent(AgentConfig(llmConfig: defaultLLMConfig, tools: []))
         }
         
         return BackendProfileModel(displayName: displayName, details: details)
@@ -296,6 +299,7 @@ struct ProfileTypeCard: View {
         case .agent: return .green
         case .workflow: return .purple
         case .imageGen: return .orange
+        case .code: return .teal
         }
     }
 
@@ -309,6 +313,8 @@ struct ProfileTypeCard: View {
             return "Orchestrate multiple agents in a defined sequence to solve multi-step problems."
         case .imageGen:
             return "AI-powered image generation. Text-to-Image and Image-to-Image via OpenAI, Gemini, or local MLX models."
+        case .code:
+            return "Code interface for direct coding tasks with integrated tool support."
         }
     }
 }

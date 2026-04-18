@@ -24,6 +24,7 @@ protocol ChatPersistenceProtocol: Sendable {
     func updateOpenAIThreadID(for conversationId: UUID, with threadId: String)
     func deleteConversation(with id: UUID)
     func updateBackendForConversation(id: UUID, backendType: BackendType?, backendEntityId: UUID?)
+    func updateProfileType(for conversationId: UUID, profileTypeRaw: String)
     func togglePinStatus(for conversationId: UUID)
 }
 
@@ -193,6 +194,16 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
         conversation.backendEntityId = backendEntityId
         saveContext()
         logger.info("Updated conversation \(id.uuidString) with backend type: \(backendType?.rawValue ?? "none").")
+    }
+
+    func updateProfileType(for conversationId: UUID, profileTypeRaw: String) {
+        guard let conversation = getConversation(withId: conversationId) else {
+            logger.warning("Attempted to update profileType for non-existent conversation: \(conversationId.uuidString)")
+            return
+        }
+        conversation.profileTypeRaw = profileTypeRaw
+        saveContext()
+        logger.info("Updated conversation \(conversationId.uuidString) with profileType: \(profileTypeRaw).")
     }
 
     func togglePinStatus(for conversationId: UUID) {

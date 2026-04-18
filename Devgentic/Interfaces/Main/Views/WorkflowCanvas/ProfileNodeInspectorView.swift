@@ -230,6 +230,7 @@ struct ProfileNodeInspectorView: View {
         case .agent: return "cpu"
         case .workflow: return "arrow.triangle.branch"
         case .imageGen: return "photo"
+        case .code: return "chevron.left.forwardslash.chevron.right"
         }
     }
 

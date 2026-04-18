@@ -22,7 +22,7 @@ struct ProfileCapabilityFilter {
         case .imageGen:
             // Anthropic has no image generation API
             return [.openAI, .google, .mlx, .ollama]
-        case .bot, .agent, .workflow:
+        case .bot, .agent, .workflow, .code:
             return ApiProvider.allCases.map { $0 }
         }
     }
@@ -34,7 +34,7 @@ struct ProfileCapabilityFilter {
     static func filterForTools(for profileType: ProfileType) -> Bool {
         switch profileType {
         case .agent:    return true
-        case .bot, .imageGen, .workflow: return false
+        case .bot, .imageGen, .workflow, .code: return false
         }
     }
 

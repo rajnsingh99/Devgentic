@@ -175,7 +175,10 @@ final class ActiveStreamManager {
             do {
                 let traceContext = TraceContext(profile: config.profile, messageID: agentMessage.id)
                 agentMessage.traceID = traceContext.traceID
-                
+
+                let profileType = config.profile.profileType.rawValue
+                logger.info("[TRACE_INIT] traceID: \(traceContext.traceID), spanID: \(traceContext.spanID), profileType: \(profileType), messageID: \(agentMessage.id.uuidString.prefix(8)), conversationID: \(conversationID.uuidString.prefix(8))")
+
                 Task {
                     await TraceRecorder.shared.beginTrace(
                         context: traceContext,
@@ -184,7 +187,9 @@ final class ActiveStreamManager {
                         modelName: nil
                     )
                 }
-                
+
+                logger.info("[STREAM_HANDOFF] Passing to BackendOrchestrationService — traceID: \(traceContext.traceID), query: \(String(userQuery.prefix(80))), history: \(history.count) msgs, files: \(files.count)")
+
                 let stream = self.backendOrchestrationService.streamMessage(
                     withConfig: config,
                     conversationID: conversationID,
@@ -194,8 +199,8 @@ final class ActiveStreamManager {
                     context: traceContext,
                     onTraceUpdate: { _ in } // Trace logs are handled by events now
                 )
-                
-                logger.info("👂 [STREAM_LISTEN] Now listening for events for message \(agentMessage.id.uuidString)...")
+
+                logger.info("[STREAM_LISTEN] Awaiting events — traceID: \(traceContext.traceID), messageID: \(agentMessage.id.uuidString.prefix(8))")
                 
                 var tokenBuffer = ""
                 var lastUpdateTime = Date()
@@ -287,55 +292,36 @@ final class ActiveStreamManager {
                             )
                         }
 
-                    case .toolOutput(let output, let sourceNodeID):
-                        // 2. Handle Artifacts (File lists, etc.)
+                    case .toolSucceeded(let output, let durationMs, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
                         agentMessage.thinkingHeadline = "Processed \(output.toolName)"
+                        Self.completeToolTimelineEvent(
+                            output: output,
+                            failureCategory: nil,
+                            durationMs: durationMs,
+                            sourceNodeID: sourceNodeID,
+                            agentMessage: agentMessage,
+                            workflowExecutionState: workflowExecutionState
+                        )
+                        Self.clearMatchingPendingInteraction(toolName: output.toolName, agentMessage: agentMessage)
 
-                        // Route tool output completion to per-node timeline or message timeline
-                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
-                            // Update the matching executing event in the node timeline
-                            if let idx = wfState.nodeTimelines[nodeID]?.lastIndex(where: {
-                                if case .toolExecution(let data) = $0 {
-                                    return data.name == output.toolName && data.isExecuting
-                                }
-                                return false
-                            }) {
-                                if case .toolExecution(var data) = wfState.nodeTimelines[nodeID]![idx] {
-                                    data.output = output.output
-                                    data.isSuccess = output.isSuccess
-                                    data.isExecuting = false
-                                    wfState.nodeTimelines[nodeID]![idx] = .toolExecution(data)
-                                    logger.debug("[WF_ROUTE] ToolOutput '\(output.toolName)' → node [\(nodeID)] success=\(output.isSuccess)")
-                                }
-                            }
-                        } else
-                        // Update timeline event
-                        if let index = agentMessage.timelineEvents.lastIndex(where: {
-                            if case .toolExecution(let data) = $0 {
-                                return data.name == output.toolName && data.isExecuting
-                            }
-                            return false
-                        }) {
-                            if case .toolExecution(var data) = agentMessage.timelineEvents[index] {
-                                data.output = output.output
-                                data.isSuccess = output.isSuccess
-                                data.isExecuting = false
-                                agentMessage.timelineEvents[index] = .toolExecution(data)
-                            }
+                    case .toolFailed(let output, let category, let suggestion, let sourceNodeID):
+                        agentMessage.agentState = .thinking(.reflecting)
+                        agentMessage.thinkingHeadline = "\(category.displayName): \(output.toolName)"
+                        Self.completeToolTimelineEvent(
+                            output: output,
+                            failureCategory: category,
+                            durationMs: nil,
+                            sourceNodeID: sourceNodeID,
+                            agentMessage: agentMessage,
+                            workflowExecutionState: workflowExecutionState
+                        )
+                        Self.clearMatchingPendingInteraction(toolName: output.toolName, agentMessage: agentMessage)
+                        if let s = suggestion {
+                            logger.debug("[TOOL_FAILED] \(output.toolName) [\(category.rawValue)] suggestion: \(s)")
                         }
 
-                        // Clear only the specific pending interaction that matches this tool output.
-                        // Blanket clearing caused a deadlock when interactive tools ran sequentially.
-                        switch agentMessage.pendingInteraction {
-                        case .clarification where output.toolName == "ask_user":
-                            agentMessage.pendingInteraction = nil
-                        case .toolConfirmation(let pending) where pending.toolName == output.toolName:
-                            agentMessage.pendingInteraction = nil
-                        default:
-                            break
-                        }
-                        
+
                     case .content(let textChunk):
                         // 3. Handle Final Text (Buffered)
                         if agentMessage.agentState != .thinking(.finalizing) {
@@ -371,6 +357,17 @@ final class ActiveStreamManager {
                         
                     case .error(let errorMsg):
                         logger.error("Stream Error Event: \(errorMsg)")
+
+                    case .warning(let category, let message, _, let sourceNodeID):
+                        agentMessage.thinkingHeadline = "⚠️ \(message)"
+                        let warningEvent = TimelineEvent.warning(id: UUID(), category: category, text: message)
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            wfState.appendNodeTimelineEvent(warningEvent, for: nodeID)
+                            logger.debug("[WF_ROUTE] Warning[\(category.rawValue)] → node timeline [\(nodeID)]")
+                        } else {
+                            agentMessage.appendTimelineEvent(warningEvent)
+                        }
+                        logger.warning("Stream Warning [\(category.rawValue)]: \(message)")
 
                     // MARK: Workflow Orchestration Events
                     case .workflowNodeStarted(let nodeID, let profileName, let idx, let total):
@@ -512,6 +509,12 @@ final class ActiveStreamManager {
                     // MARK: Token Usage
                     case .tokenUsage(let usage):
                         agentMessage.tokenUsage = usage
+
+                    // MARK: Terminal Outcome
+                    case .executionFinished(let outcome, let reason):
+                        agentMessage.terminalOutcome = outcome
+                        agentMessage.terminalReason = reason
+                        logger.info("[STREAM_TERMINAL] outcome=\(outcome.rawValue), reason=\(reason ?? "nil")")
                     }
                 }
                 
@@ -520,7 +523,7 @@ final class ActiveStreamManager {
                     self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
                 }
                 
-                logger.info("🏁 [STREAM_LOOP_END] Finished processing stream for message \(agentMessage.id.uuidString).")
+                logger.info("[STREAM_LOOP_END] Finished — traceID: \(traceContext.traceID), messageID: \(agentMessage.id.uuidString.prefix(8)), profileType: \(profileType)")
 
                 // Forward final output to workflow execution state
                 if let wfState = workflowExecutionState {
@@ -533,11 +536,11 @@ final class ActiveStreamManager {
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
 
             } catch is CancellationError {
-                logger.info("🛑 [STREAM_CANCELLED] Stream for message \(agentMessage.id.uuidString) was cancelled.")
+                logger.info("[STREAM_CANCELLED] traceID: \(agentMessage.traceID ?? "?"), messageID: \(agentMessage.id.uuidString.prefix(8))")
                 workflowExecutionState?.handleError("Cancelled")
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
             } catch {
-                logger.error("❌ [STREAM_ERROR] Streaming failed for message \(agentMessage.id.uuidString): \(error.localizedDescription)")
+                logger.error("[STREAM_ERROR] traceID: \(agentMessage.traceID ?? "?"), messageID: \(agentMessage.id.uuidString.prefix(8)), error: \(error.localizedDescription)")
                 workflowExecutionState?.handleError(error.localizedDescription)
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: error)
             }
@@ -551,6 +554,67 @@ final class ActiveStreamManager {
         return agentMessage
     }
     
+    /// Mutates the matching executing `.toolExecution` timeline event into its completed state.
+    /// Routes to the workflow node's per-node timeline when `sourceNodeID` is present,
+    /// else falls back to the message's root timeline. `failureCategory == nil` means success.
+    private static func completeToolTimelineEvent(
+        output: ToolOutput,
+        failureCategory: ToolFailureCategory?,
+        durationMs: Int?,
+        sourceNodeID: UUID?,
+        agentMessage: ChatMessage,
+        workflowExecutionState: WorkflowExecutionState?
+    ) {
+        let updater: (inout ToolExecutionData) -> Void = { data in
+            data.output = output.output
+            data.isSuccess = output.isSuccess
+            data.failureCategory = failureCategory
+            data.durationMs = durationMs
+            data.isExecuting = false
+        }
+
+        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+            if let idx = wfState.nodeTimelines[nodeID]?.lastIndex(where: {
+                if case .toolExecution(let data) = $0 {
+                    return data.name == output.toolName && data.isExecuting
+                }
+                return false
+            }) {
+                if case .toolExecution(var data) = wfState.nodeTimelines[nodeID]![idx] {
+                    updater(&data)
+                    wfState.nodeTimelines[nodeID]![idx] = .toolExecution(data)
+                    logger.debug("[WF_ROUTE] Tool '\(output.toolName)' completed → node [\(nodeID)] success=\(output.isSuccess) category=\(failureCategory?.rawValue ?? "nil")")
+                }
+            }
+            return
+        }
+
+        if let index = agentMessage.timelineEvents.lastIndex(where: {
+            if case .toolExecution(let data) = $0 {
+                return data.name == output.toolName && data.isExecuting
+            }
+            return false
+        }) {
+            if case .toolExecution(var data) = agentMessage.timelineEvents[index] {
+                updater(&data)
+                agentMessage.timelineEvents[index] = .toolExecution(data)
+            }
+        }
+    }
+
+    /// Clears a pending HITL interaction iff it matches the tool that just completed.
+    /// Blanket clearing would deadlock sequential interactive tools.
+    private static func clearMatchingPendingInteraction(toolName: String, agentMessage: ChatMessage) {
+        switch agentMessage.pendingInteraction {
+        case .clarification where toolName == "ask_user":
+            agentMessage.pendingInteraction = nil
+        case .toolConfirmation(let pending) where pending.toolName == toolName:
+            agentMessage.pendingInteraction = nil
+        default:
+            break
+        }
+    }
+
     private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
         if isRegeneration {
             guard let agentResponse = agentMessage.agentResponse,
@@ -593,9 +657,22 @@ final class ActiveStreamManager {
         message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
         message.pendingInteraction = nil
-        
+
+        // Terminal-outcome safety net: if no executor emitted `.executionFinished`
+        // (legacy code path, early `continuation.finish()` in a catch block, or a
+        // third-party executor), infer the outcome from whether an error reached us.
+        // Without this, the UI would silently show a polished-looking bubble for what
+        // was actually a failed run — exactly the trust-breaking mismatch we're fixing.
+        if message.terminalOutcome == nil {
+            message.terminalOutcome = (error != nil) ? .failed : .completed
+            if message.terminalReason == nil, let err = error {
+                message.terminalReason = err.localizedDescription
+            }
+        }
+
         if let traceID = message.traceID {
             let traceStatus: TraceStatus = error != nil ? .error : .completed
+            logger.info("[TRACE_END] traceID: \(traceID), status: \(traceStatus == .completed ? "completed" : "error"), messageID: \(message.id.uuidString.prefix(8))")
             await TraceRecorder.shared.endTrace(traceID: traceID, status: traceStatus, error: error?.localizedDescription)
         }
         

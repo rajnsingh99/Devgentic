@@ -88,16 +88,22 @@ final class WhisperModelDownloadService {
         }
 
         // Model variant folders follow the pattern: openai_whisper-<variant>/
-        // e.g. openai_whisper-base.en, openai_whisper-large-v3
+        // e.g. openai_whisper-base, openai_whisper-large-v3
+        // NOTE: WhisperKit uses the SAME folder for both "base" and "base.en" —
+        // the ".en" suffix is a runtime decoding option, not a separate download.
         for url in contents {
             guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
             let folderName = url.lastPathComponent
 
             for model in WhisperModelCatalog.availableModels {
-                // Fix #10: Use suffix matching anchored to the separator to prevent
-                // "base" from matching "openai_whisper-base.en" or "base-v3".
-                // Pattern: folder must end with "-<modelId>" or equal "<modelId>".
-                guard folderName.hasSuffix("-\(model.id)") || folderName == model.id else { continue }
+                // Strip ".en" suffix for matching: "base.en" → "base", "medium.en" → "medium"
+                // because WhisperKit stores both variants in the same folder (e.g. openai_whisper-base).
+                let baseName = model.id.hasSuffix(".en")
+                    ? String(model.id.dropLast(3))
+                    : model.id
+
+                // Anchored suffix match: folder must end with "-<baseName>"
+                guard folderName.hasSuffix("-\(baseName)") || folderName == baseName else { continue }
 
                 // Fix #7: Verify the folder has enough model files to be usable
                 // (not a partial download). WhisperKit needs at minimum:
@@ -256,10 +262,11 @@ final class WhisperModelDownloadService {
         }
 
         var didDelete = false
+        let baseName = modelId.hasSuffix(".en") ? String(modelId.dropLast(3)) : modelId
         for url in contents {
             guard (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
             let folderName = url.lastPathComponent
-            guard folderName.hasSuffix("-\(modelId)") || folderName == modelId else { continue }
+            guard folderName.hasSuffix("-\(baseName)") || folderName == baseName else { continue }
 
             do {
                 try fm.removeItem(at: url)

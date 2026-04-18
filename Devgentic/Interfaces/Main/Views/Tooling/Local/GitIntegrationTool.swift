@@ -83,15 +83,21 @@ struct GitTool: DevgenticTool {
         return SchemaBuilder.object(
             properties: [
                 ("action", "string", "Git action: 'status', 'log', 'diff', 'branch', 'stash_list', 'blame', 'show'"),
-                ("path", "string", "Repository path (default: current directory)"),
+                ("path", "string", "Repository path. Required — pass the project root."),
                 ("args", "string", "Additional arguments (e.g., '-n 5' for log, filename for blame)")
             ],
-            required: ["action"]
+            required: ["action", "path"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let repoPath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
+        guard let rawPath = arguments.path, !rawPath.isEmpty else {
+            return "Error: 'path' is required. Pass the project root (repository path)."
+        }
+        let repoPath = (rawPath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: repoPath) else {
+            return "Error: path '\(repoPath)' does not exist."
+        }
         let extraArgs = arguments.args ?? ""
 
         let resolution = GitCommandBuilder.resolve(action: arguments.action, repoPath: repoPath, extraArgs: extraArgs)

@@ -198,7 +198,7 @@ struct CodeSearchTool: DevgenticTool {
         return SchemaBuilder.object(
             properties: [
                 ("pattern", "string", "Regex or literal string pattern to search for (e.g. 'function\\s+\\w+', 'TODO', 'import.*React')."),
-                ("path", "string", "Directory or file path to search within. Defaults to current working directory."),
+                ("path", "string", "Directory or file path to search within. Required — pass the project root or a specific subpath."),
                 ("glob", "string", "File pattern filter (e.g. '*.swift', '*.ts', '!*.test.js'). Narrows search scope."),
                 ("context_lines", "integer", "Number of context lines before and after each match (default 2, max 10)."),
                 ("max_results", "integer", "Maximum number of matches to return (default 50). Prevents context overflow."),
@@ -206,11 +206,19 @@ struct CodeSearchTool: DevgenticTool {
                 ("whole_word", "boolean", "Match whole words only (default false)."),
                 ("files_only", "boolean", "Return only matching file paths without line content (default false).")
             ],
-            required: ["pattern"]
+            required: ["pattern", "path"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
+        guard let rawPath = arguments.path, !rawPath.isEmpty else {
+            return "Error: 'path' is required. Pass the project root or a specific subpath."
+        }
+        let resolvedPath = (rawPath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: resolvedPath) else {
+            return "Error: path '\(resolvedPath)' does not exist."
+        }
+
         var args: [String] = ["-n", "--no-heading", "--color=never"]
 
         let contextLines = min(arguments.context_lines ?? 2, 10)
@@ -234,10 +242,7 @@ struct CodeSearchTool: DevgenticTool {
         }
 
         args.append(arguments.pattern)
-
-        if let path = arguments.path {
-            args.append((path as NSString).expandingTildeInPath)
-        }
+        args.append(resolvedPath)
 
         // Check if rg (ripgrep) is available, fallback to grep
         let rgPath = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/rg") ? "/opt/homebrew/bin/rg"
@@ -263,11 +268,7 @@ struct CodeSearchTool: DevgenticTool {
                 grepArgs += ["--include", glob]
             }
             grepArgs.append(arguments.pattern)
-            if let path = arguments.path {
-                grepArgs.append((path as NSString).expandingTildeInPath)
-            } else {
-                grepArgs.append(".")
-            }
+            grepArgs.append(resolvedPath)
             process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
             process.arguments = grepArgs
         }
@@ -351,15 +352,21 @@ struct GlobFilesTool: DevgenticTool {
         return SchemaBuilder.object(
             properties: [
                 ("pattern", "string", "Glob pattern to match files (e.g. '**/*.swift', 'src/**/*.ts', '*.json', 'Tests/**/*Test.swift')."),
-                ("path", "string", "Root directory to search from. Defaults to current working directory."),
+                ("path", "string", "Root directory to search from. Required — pass the project root or a specific subpath."),
                 ("max_results", "integer", "Maximum files to return (default 100).")
             ],
-            required: ["pattern"]
+            required: ["pattern", "path"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let basePath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
+        guard let rawPath = arguments.path, !rawPath.isEmpty else {
+            return "Error: 'path' is required. Pass the project root or a specific subpath."
+        }
+        let basePath = (rawPath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: basePath) else {
+            return "Error: path '\(basePath)' does not exist."
+        }
         let maxResults = arguments.max_results ?? 100
 
         // Use find + shell glob for pattern matching
@@ -443,14 +450,20 @@ struct FindDefinitionTool: DevgenticTool {
             properties: [
                 ("symbol", "string", "The symbol name to find the definition of (function, class, struct, protocol, variable name)."),
                 ("language", "string", "Programming language hint: 'swift', 'python', 'typescript', 'javascript', 'rust', 'go', 'java', 'ruby', 'cpp'. Auto-detected if omitted."),
-                ("path", "string", "Directory to search in. Defaults to current working directory.")
+                ("path", "string", "Directory to search in. Required — pass the project root or a specific subpath.")
             ],
-            required: ["symbol"]
+            required: ["symbol", "path"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let basePath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
+        guard let rawPath = arguments.path, !rawPath.isEmpty else {
+            return "Error: 'path' is required. Pass the project root or a specific subpath."
+        }
+        let basePath = (rawPath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: basePath) else {
+            return "Error: path '\(basePath)' does not exist."
+        }
         let symbol = arguments.symbol
 
         // Build language-specific definition patterns
@@ -595,11 +608,11 @@ struct BatchCommandTool: DevgenticTool {
         return SchemaBuilder.object(
             properties: [
                 ("command", "string", "The shell command to execute."),
-                ("working_directory", "string", "Working directory for command execution. Defaults to current directory."),
+                ("working_directory", "string", "Working directory for command execution. Required — pass the project root or a specific subpath."),
                 ("timeout_seconds", "integer", "Maximum execution time in seconds (default 30, max 300). Process is killed on timeout."),
                 ("background", "boolean", "Run in background and return immediately with a job ID (default false).")
             ],
-            required: ["command"]
+            required: ["command", "working_directory"]
         )
     }
 
@@ -647,6 +660,14 @@ struct BatchCommandTool: DevgenticTool {
             return "Error: Command blocked by safety filter. Destructive system commands are not permitted."
         }
 
+        guard let rawWD = arguments.working_directory, !rawWD.isEmpty else {
+            return "Error: 'working_directory' is required. Pass the project root or a specific subpath."
+        }
+        let expandedWD = (rawWD as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expandedWD) else {
+            return "Error: working_directory '\(expandedWD)' does not exist."
+        }
+
         let timeout = min(arguments.timeout_seconds ?? 30, 300)
 
         let process = Process()
@@ -656,11 +677,7 @@ struct BatchCommandTool: DevgenticTool {
         process.arguments = ["-c", arguments.command]
         process.standardOutput = outPipe
         process.standardError = errPipe
-
-        if let wd = arguments.working_directory {
-            let expandedWD = (wd as NSString).expandingTildeInPath
-            process.currentDirectoryURL = URL(fileURLWithPath: expandedWD)
-        }
+        process.currentDirectoryURL = URL(fileURLWithPath: expandedWD)
 
         if arguments.background ?? false {
             do {
@@ -945,12 +962,10 @@ struct FileOverviewTool: DevgenticTool {
 struct CodebaseMapTool: DevgenticTool {
     let name = "codebase_map"
     let category = "Coding Assistant"
-    let description = "Generates a high-level map of the repository structure showing directories, file counts, and key files. Helps the agent build a spatial understanding of the codebase."
+    let description = "Generates a full map of the repository tree — every directory and file, recursively. Use on unfamiliar codebases to learn the layout and exact filenames before reading, searching, or editing. If the output is too large, re-call with a narrower `path`."
 
     struct Arguments: Decodable, Sendable {
         let path: String?
-        let max_depth: Int?
-        let show_files: Bool?
 
         private struct DynamicKey: CodingKey {
             var stringValue: String
@@ -962,36 +977,40 @@ struct CodebaseMapTool: DevgenticTool {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: DynamicKey.self)
             self.path = try? container.decodeIfPresent(String.self, forKey: DynamicKey(stringValue: "path")!)
-            self.max_depth = try? container.decodeIfPresent(Int.self, forKey: DynamicKey(stringValue: "max_depth")!)
-            self.show_files = try? container.decodeIfPresent(Bool.self, forKey: DynamicKey(stringValue: "show_files")!)
+            // `max_depth` and `show_files` were removed from the schema. Any legacy
+            // argument the model still emits is silently ignored by Decodable.
         }
     }
 
     var parameterSchema: ToolParameters {
         return SchemaBuilder.object(
             properties: [
-                ("path", "string", "Root directory of the repository. Defaults to current working directory."),
-                ("max_depth", "integer", "Maximum directory depth to traverse (default 3, max 5)."),
-                ("show_files", "boolean", "Show individual files in the tree (default false, shows directories with file counts).")
+                ("path", "string", "Root directory to map. Required — pass the project root, or a subpath to limit scope on large repositories.")
             ],
-            required: []
+            required: ["path"]
         )
     }
 
     func call(arguments: Arguments) async throws -> String {
-        let basePath = (arguments.path as NSString?)?.expandingTildeInPath ?? FileManager.default.currentDirectoryPath
-        let maxDepth = min(arguments.max_depth ?? 3, 5)
-        let showFiles = arguments.show_files ?? false
+        guard let rawPath = arguments.path, !rawPath.isEmpty else {
+            return "Error: 'path' is required. Pass the project root or a specific subpath."
+        }
+        let basePath = (rawPath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: basePath) else {
+            return "Error: path '\(basePath)' does not exist."
+        }
 
         let ignoreDirs: Set<String> = [".git", "node_modules", ".build", "DerivedData", "__pycache__",
                                         ".venv", "venv", ".next", "dist", "build", ".cache",
                                         "Pods", ".svn", ".hg", "target"]
+        // Per-file noise filter: macOS sprinkles `.DS_Store` into every directory and
+        // Windows leaves `Thumbs.db` / `desktop.ini`. These are never useful to the
+        // agent and would otherwise eat the 8000-char output budget on deep trees.
+        let ignoreFiles: Set<String> = [".DS_Store", "Thumbs.db", "desktop.ini"]
 
         var output = "Repository: \(basePath)\n"
 
-        func traverse(path: String, depth: Int, prefix: String) {
-            guard depth <= maxDepth else { return }
-
+        func traverse(path: String, prefix: String) {
             let fm = FileManager.default
             guard let contents = try? fm.contentsOfDirectory(atPath: path) else { return }
 
@@ -1000,7 +1019,6 @@ struct CodebaseMapTool: DevgenticTool {
             var files: [String] = []
 
             for item in sorted {
-                if item.hasPrefix(".") && !showFiles { continue }
                 let fullPath = (path as NSString).appendingPathComponent(item)
                 var isDir: ObjCBool = false
                 fm.fileExists(atPath: fullPath, isDirectory: &isDir)
@@ -1010,47 +1028,35 @@ struct CodebaseMapTool: DevgenticTool {
                         dirs.append((item, fullPath))
                     }
                 } else {
-                    files.append(item)
+                    if !ignoreFiles.contains(item) {
+                        files.append(item)
+                    }
                 }
             }
 
+            // Directories first, then files — stable tree ordering.
             for (idx, (dirName, dirPath)) in dirs.enumerated() {
-                let isLast = idx == dirs.count - 1 && (showFiles ? files.isEmpty : true)
+                let isLast = idx == dirs.count - 1 && files.isEmpty
                 let connector = isLast ? "└── " : "├── "
                 let childPrefix = isLast ? "    " : "│   "
-
-                if showFiles {
-                    output += "\(prefix)\(connector)\(dirName)/\n"
-                } else {
-                    // Count files in this directory
-                    let fileCount: Int = {
-                        guard let items = try? fm.contentsOfDirectory(atPath: dirPath) else { return 0 }
-                        return items.filter { item in
-                            var d: ObjCBool = false
-                            let p = (dirPath as NSString).appendingPathComponent(item)
-                            return !(fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue)
-                        }.count
-                    }()
-                    output += "\(prefix)\(connector)\(dirName)/ (\(fileCount) files)\n"
-                }
-
-                traverse(path: dirPath, depth: depth + 1, prefix: prefix + childPrefix)
+                output += "\(prefix)\(connector)\(dirName)/\n"
+                traverse(path: dirPath, prefix: prefix + childPrefix)
             }
 
-            if showFiles {
-                for (idx, file) in files.enumerated() {
-                    let isLast = idx == files.count - 1
-                    let connector = isLast ? "└── " : "├── "
-                    output += "\(prefix)\(connector)\(file)\n"
-                }
+            for (idx, file) in files.enumerated() {
+                let isLast = idx == files.count - 1
+                let connector = isLast ? "└── " : "├── "
+                output += "\(prefix)\(connector)\(file)\n"
             }
         }
 
-        traverse(path: basePath, depth: 0, prefix: "")
+        traverse(path: basePath, prefix: "")
 
+        // Safety cap so an exceptionally large tree doesn't blow the model's context
+        // window. Full recursion is the default; truncation hints the model to narrow.
         let maxOutput = 8000
         if output.count > maxOutput {
-            output = String(output.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars. Use smaller max_depth or specific path.]"
+            output = String(output.prefix(maxOutput)) + "\n...[Truncated at \(maxOutput) chars. Re-call with a narrower `path` to map a specific subtree, or use `glob_files` / `list_directory` for targeted queries.]"
         }
 
         return output

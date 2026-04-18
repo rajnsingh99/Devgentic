@@ -126,8 +126,9 @@ struct GeminiSettingsView: View {
 
 struct OllamaSettingsView: View {
     @Binding var config: OllamaAdvancedConfig
+    @Binding var thinkingEnabled: Bool
     @Environment(\.appTheme) private var theme
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             
@@ -228,7 +229,22 @@ struct OllamaSettingsView: View {
             }
             
             Divider()
-            
+
+            // Extended Thinking
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Extended Thinking").fontWeight(.medium)
+                    Text("Enable reasoning traces before the response. Only works on reasoning models (deepseek-r1, qwq, qwen3, etc.). If the model rejects this, it will be disabled automatically.")
+                        .font(.caption).foregroundColor(theme.secondaryText).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Toggle("", isOn: $thinkingEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+
+            Divider()
+
             // Apply Optimal Button
             HStack {
                 Spacer()

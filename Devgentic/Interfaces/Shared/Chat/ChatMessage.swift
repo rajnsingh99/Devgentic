@@ -29,15 +29,39 @@ struct AgentResponse: Codable, Equatable {
 }
 
 /// Data model for a tool execution event in the agent timeline.
-/// Mutable fields (`output`, `isSuccess`, `isExecuting`) are updated when
-/// the tool completes — the struct is replaced in-place in the timeline array.
-struct ToolExecutionData: Codable, Equatable, Identifiable, Sendable {
+/// Mutable fields (`output`, `isSuccess`, `failureCategory`, `durationMs`, `isExecuting`)
+/// are updated when the tool completes — the struct is replaced in-place in the timeline array.
+/// `failureCategory` is nil on success; on failure it carries the structured cause so
+/// EpisodicHistoryFormatter can build constraints without string-matching the output.
+struct ToolExecutionData: Equatable, Identifiable, Sendable {
     let id: UUID
     let name: String
     let params: String
     var output: String?
     var isSuccess: Bool?
+    var failureCategory: ToolFailureCategory? = nil
+    var durationMs: Int? = nil
     var isExecuting: Bool
+}
+
+// Backward-compatible Codable: persisted history from prior builds lacks
+// `failureCategory` and `durationMs` — decode them as optional and default to nil.
+extension ToolExecutionData: Codable {
+    enum CodingKeys: String, CodingKey {
+        case id, name, params, output, isSuccess, failureCategory, durationMs, isExecuting
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        params = try c.decode(String.self, forKey: .params)
+        output = try c.decodeIfPresent(String.self, forKey: .output)
+        isSuccess = try c.decodeIfPresent(Bool.self, forKey: .isSuccess)
+        failureCategory = try c.decodeIfPresent(ToolFailureCategory.self, forKey: .failureCategory)
+        durationMs = try c.decodeIfPresent(Int.self, forKey: .durationMs)
+        isExecuting = try c.decode(Bool.self, forKey: .isExecuting)
+    }
 }
 
 enum TimelineEvent: Codable, Equatable, Identifiable {
@@ -48,12 +72,16 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     // Capability milestones
     case capabilityMilestone(id: UUID, kind: CapabilityMilestoneKind, detail: String)
 
+    // System-level recoverable warnings (rate limits, memory pressure, parse retries, etc.)
+    case warning(id: UUID, category: WarningCategory, text: String)
+
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
         case .toolExecution(let data): return data.id
         case .mediaGeneration(let id, _, _, _): return id
         case .capabilityMilestone(let id, _, _): return id
+        case .warning(let id, _, _): return id
         }
     }
 }
@@ -139,6 +167,16 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     var content: MessageContent
     var agentResponse: AgentResponse?
     var isStreaming: Bool = false
+
+    /// Terminal outcome of the agent run that produced this message. `nil` while streaming
+    /// or for legacy rows that predate this field. Set by `ActiveStreamManager` when it
+    /// receives an `.executionFinished` stream event. Drives the "response may be incomplete"
+    /// indicator in the bubble so users can distinguish a proper answer from a best-effort
+    /// synthesis produced after circuit-breaker abort / iteration exhaustion / cancellation.
+    var terminalOutcome: ExecutionOutcome? = nil
+
+    /// Optional human-readable reason accompanying `terminalOutcome`. Same nil semantics.
+    var terminalReason: String? = nil
     
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
@@ -376,6 +414,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         case id, conversationId, timestamp, sender, content
         case agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
         case timelineEvents, traceID, profileType, tokenUsage
+        case terminalOutcome, terminalReason
     }
 
     /// Legacy keys only used for v1 migration — never encoded.
@@ -399,6 +438,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.traceID = try container.decodeIfPresent(String.self, forKey: .traceID)
         self.profileType = try container.decodeIfPresent(ProfileType.self, forKey: .profileType)
         self.tokenUsage = try container.decodeIfPresent(TokenUsage.self, forKey: .tokenUsage)
+        self.terminalOutcome = try container.decodeIfPresent(ExecutionOutcome.self, forKey: .terminalOutcome)
+        self.terminalReason = try container.decodeIfPresent(String.self, forKey: .terminalReason)
 
         if version == 1 {
             self.timelineEvents = try Self.migrateV1Timeline(from: decoder)
@@ -431,6 +472,8 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         try container.encodeIfPresent(profileType, forKey: .profileType)
         try container.encode(timelineEvents, forKey: .timelineEvents)
         try container.encodeIfPresent(tokenUsage, forKey: .tokenUsage)
+        try container.encodeIfPresent(terminalOutcome, forKey: .terminalOutcome)
+        try container.encodeIfPresent(terminalReason, forKey: .terminalReason)
         // agentState, thoughts, artifacts are NOT encoded (transient / computed)
     }
 

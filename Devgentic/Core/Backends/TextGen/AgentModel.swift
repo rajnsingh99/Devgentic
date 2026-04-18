@@ -325,6 +325,38 @@ enum ToolExecutionResult: Sendable, Equatable {
         if case .success = self { return true }
         return false
     }
+
+    /// Maps the result to a structured `ToolFailureCategory` for `.toolFailed` events,
+    /// `EpisodicHistoryFormatter` constraint policy, and episodic-memory retrieval weights.
+    /// Returns `nil` for `.success` — callers should emit `.toolSucceeded` in that case.
+    ///
+    /// `.semanticFailure` is ambiguous at the call site (it covers both preflight argument
+    /// validation errors and tool-side semantic failures like empty output); we distinguish
+    /// via the error string prefix produced by `ToolExecutionMediator.validateRequiredArguments`.
+    /// `.systemError` is similarly split between permission-preflight failures and generic throws.
+    var failureCategory: ToolFailureCategory? {
+        switch self {
+        case .success:
+            return nil
+        case .userDenied:
+            return .userDenied
+        case .hallucinated:
+            return .notFound
+        case .timedOut:
+            return .timeout
+        case .semanticFailure(_, let output):
+            let validationMarkers = [
+                "is required but was not provided",
+                "cannot be empty",
+                "cannot be null",
+                "cannot be an empty array",
+                "cannot be an empty object"
+            ]
+            return validationMarkers.contains(where: { output.contains($0) }) ? .invalidArgs : .executionThrew
+        case .systemError(let reason):
+            return reason.contains("Missing required macOS permissions") ? .permissionRejected : .executionThrew
+        }
+    }
 }
 
 // MARK: - Tool Argument Error (Phase 10)
@@ -499,6 +531,9 @@ struct SemanticContext: Sendable {
 
     // 8. Workflow — per-node task description (nil for normal chat)
     let taskDescription: String?
+
+    // 9. Prompt layer configuration — controls which optional layers are included
+    let promptLayerConfig: PromptLayerConfig
 }
 
 // MARK: - Agent Failure Reasons

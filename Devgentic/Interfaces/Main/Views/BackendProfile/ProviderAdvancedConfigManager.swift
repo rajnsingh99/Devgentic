@@ -133,11 +133,12 @@ extension View {
 struct ProviderAdvancedSettingsView: View {
     @Bindable var configManager: ProviderAdvancedConfigManager
     let provider: ApiProvider
+    @Binding var thinkingEnabled: Bool
 
     var body: some View {
         switch provider {
         case .ollama:
-            OllamaSettingsView(config: $configManager.localOllamaConfig)
+            OllamaSettingsView(config: $configManager.localOllamaConfig, thinkingEnabled: $thinkingEnabled)
         case .google:
             GeminiSettingsView(config: $configManager.localGeminiConfig)
         case .anthropic:

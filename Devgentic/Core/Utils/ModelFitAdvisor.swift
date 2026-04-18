@@ -61,7 +61,13 @@ struct ModelFitAdvisor {
     // MARK: - Primary API
 
     /// Assess a model's fit using its `ModelMetadata` (available from both MLX and Ollama pipelines).
-    static func assess(metadata: ModelMetadata?, diskSizeString: String? = nil) -> ModelFitAssessment {
+    ///
+    /// Each model is assessed in isolation — if parsing fails or any step returns an unexpected value,
+    /// the method degrades gracefully (returns a neutral assessment) and logs the raw inputs so we
+    /// can add explicit support for new formats later. One bad model never crashes the caller.
+    /// - Parameter modelName: Optional model identifier (e.g. "kimi-k2.5:cloud") included in
+    ///   diagnostic logs so we can identify which model produced an unusual format.
+    static func assess(metadata: ModelMetadata?, diskSizeString: String? = nil, modelName: String? = nil) -> ModelFitAssessment {
         let profile = SystemHardwareProfiler.shared.profile
 
         // Extract parameter count in billions
@@ -69,6 +75,9 @@ struct ModelFitAdvisor {
 
         // Extract quantization bits
         let quantBits = parseQuantizationBits(metadata?.quantization)
+
+        // Emit diagnostic logs for any inputs we couldn't parse — used to add support for new formats later.
+        logUnusualInputs(metadata: metadata, parsedBillions: paramBillions, modelName: modelName)
 
         // If we have parameter count, use the formula
         if let params = paramBillions {
@@ -90,7 +99,8 @@ struct ModelFitAdvisor {
             return assessFromTier(tier: tier, profile: profile)
         }
 
-        // Cannot assess — return a neutral result
+        // Cannot assess — return a neutral result (graceful degradation)
+        logger.notice("ModelFitAdvisor: unable to assess\(modelName.map { " [model: \($0)]" } ?? "") — no parameter count, disk size, or tier available.")
         return ModelFitAssessment(
             verdict: .comfortable,
             estimatedRuntimeRAM: 0,
@@ -161,7 +171,7 @@ struct ModelFitAdvisor {
 
         if let diskSize = diskSizeString, let diskBytes = parseDiskSize(diskSize) {
             // Runtime ≈ 1.2x disk size (weights + KV cache + overhead)
-            return UInt64(Double(diskBytes) * 1.2)
+            return safeUInt64(Double(diskBytes) * 1.2)
         }
 
         if let tier = metadata?.tier {
@@ -176,12 +186,12 @@ struct ModelFitAdvisor {
     /// Core estimation: paramCount × bitsPerWeight / 8 + KV cache + overhead.
     private static func calculateRuntimeRAM(paramBillions: Double, quantBits: Int, contextWindow: Int?) -> UInt64 {
         // Weight memory: params × bits / 8
-        let weightBytes = UInt64(paramBillions * 1_000_000_000 * Double(quantBits) / 8.0)
+        let weightBytes = safeUInt64(paramBillions * 1_000_000_000 * Double(quantBits) / 8.0)
 
         // KV cache estimate (conservative, assumes active context of 4K tokens for local use)
         // Formula: 2 × numLayers × hiddenSize × contextTokens × 2 bytes (fp16 KV)
         // Simplified heuristic: ~0.5 GB per 7B params at 4K context
-        let kvCacheBytes: UInt64 = UInt64(paramBillions / 7.0 * 500 * 1024 * 1024)
+        let kvCacheBytes = safeUInt64(paramBillions / 7.0 * 500 * 1024 * 1024)
 
         // Runtime overhead (MLX framework, tokenizer, buffers)
         let overheadBytes: UInt64 = 300 * 1024 * 1024 // ~300 MB
@@ -232,7 +242,7 @@ struct ModelFitAdvisor {
 
     private static func assessFromDiskSize(diskBytes: UInt64, profile: SystemHardwareProfile) -> ModelFitAssessment {
         // Runtime ≈ 1.2x disk (weights already quantized, add KV + overhead)
-        let estimatedRAM = UInt64(Double(diskBytes) * 1.2)
+        let estimatedRAM = safeUInt64(Double(diskBytes) * 1.2)
         let budget = profile.effectiveBudget
         let headroom = Int64(budget) - Int64(estimatedRAM)
         let ratio = Double(estimatedRAM) / Double(budget)
@@ -279,33 +289,44 @@ struct ModelFitAdvisor {
 
     // MARK: - Parsing Helpers
 
-    /// Parses parameter count strings like "7.2B", "3B", "70B" into billions.
+    /// Parses parameter count strings like "7.2B", "3B", "70B", "751.63M", or raw counts like "1042000000000" into billions.
     static func parseParameterCount(_ str: String?) -> Double? {
-        guard let str = str else { return nil }
+        guard let str = str, !str.isEmpty else { return nil }
         let cleaned = str.trimmingCharacters(in: .whitespaces).lowercased()
 
-        // Remove trailing "b" and parse
-        let numberPart: String
         if cleaned.hasSuffix("b") {
-            numberPart = String(cleaned.dropLast())
-        } else {
-            numberPart = cleaned
+            return Double(String(cleaned.dropLast()))
         }
 
-        return Double(numberPart)
+        if cleaned.hasSuffix("m") {
+            // "751.63M" → 0.75163 billion
+            if let millions = Double(String(cleaned.dropLast())) {
+                return millions / 1000.0
+            }
+            return nil
+        }
+
+        // Plain number — could be billions (e.g. "7") or a raw parameter count (e.g. "1042000000000")
+        guard let value = Double(cleaned) else { return nil }
+        if value > 1000 {
+            // Raw parameter count — convert to billions
+            return value / 1_000_000_000
+        }
+        return value
     }
 
-    /// Parses quantization strings like "Q4_K_M", "Q8_0", "4bit", "8bit" into bits per weight.
+    /// Parses quantization strings like "Q4_K_M", "Q8_0", "4bit", "INT4", "MXFP4", "BF16" into bits per weight.
+    /// Unknown strings fall back to 4-bit; `isRecognizedQuantization` can be used to detect this case.
     static func parseQuantizationBits(_ str: String?) -> Int {
         guard let str = str else { return 4 } // Default assumption: 4-bit
         let cleaned = str.lowercased()
 
-        if cleaned.contains("q2") || cleaned.contains("2bit") || cleaned.contains("2-bit") { return 2 }
-        if cleaned.contains("q3") || cleaned.contains("3bit") || cleaned.contains("3-bit") { return 3 }
-        if cleaned.contains("q4") || cleaned.contains("4bit") || cleaned.contains("4-bit") { return 4 }
+        if cleaned.contains("q2") || cleaned.contains("2bit") || cleaned.contains("2-bit") || cleaned.contains("int2") { return 2 }
+        if cleaned.contains("q3") || cleaned.contains("3bit") || cleaned.contains("3-bit") || cleaned.contains("int3") { return 3 }
+        if cleaned.contains("q4") || cleaned.contains("4bit") || cleaned.contains("4-bit") || cleaned.contains("int4") || cleaned.contains("mxfp4") { return 4 }
         if cleaned.contains("q5") || cleaned.contains("5bit") || cleaned.contains("5-bit") { return 5 }
         if cleaned.contains("q6") || cleaned.contains("6bit") || cleaned.contains("6-bit") { return 6 }
-        if cleaned.contains("q8") || cleaned.contains("8bit") || cleaned.contains("8-bit") { return 8 }
+        if cleaned.contains("q8") || cleaned.contains("8bit") || cleaned.contains("8-bit") || cleaned.contains("int8") { return 8 }
         if cleaned.contains("fp16") || cleaned.contains("f16") || cleaned.contains("bf16") { return 16 }
         if cleaned.contains("fp32") || cleaned.contains("f32") { return 32 }
 
@@ -319,15 +340,61 @@ struct ModelFitAdvisor {
         guard let value = Double(numberString), value > 0 else { return nil }
 
         if cleaned.contains("GB") {
-            return UInt64(value * 1024 * 1024 * 1024)
+            return safeUInt64(value * 1024 * 1024 * 1024)
         } else if cleaned.contains("MB") {
-            return UInt64(value * 1024 * 1024)
+            return safeUInt64(value * 1024 * 1024)
         } else if cleaned.contains("KB") {
-            return UInt64(value * 1024)
+            return safeUInt64(value * 1024)
         }
 
         // Assume MB if no unit
-        return UInt64(value * 1024 * 1024)
+        return safeUInt64(value * 1024 * 1024)
+    }
+
+    // MARK: - Safe Conversion
+
+    /// Converts a Double to UInt64, clamping to 0 / UInt64.max for out-of-range or non-finite values.
+    private static func safeUInt64(_ value: Double) -> UInt64 {
+        guard value.isFinite, value > 0 else { return 0 }
+        guard value < Double(UInt64.max) else { return UInt64.max }
+        return UInt64(value)
+    }
+
+    // MARK: - Diagnostic Logging
+
+    /// Known quantization string fragments recognized by `parseQuantizationBits`.
+    /// Kept in one place so `isRecognizedQuantization` and the parser can't drift apart.
+    private static let recognizedQuantizationPatterns: [String] = [
+        "q2", "2bit", "2-bit", "int2",
+        "q3", "3bit", "3-bit", "int3",
+        "q4", "4bit", "4-bit", "int4", "mxfp4",
+        "q5", "5bit", "5-bit",
+        "q6", "6bit", "6-bit",
+        "q8", "8bit", "8-bit", "int8",
+        "fp16", "f16", "bf16",
+        "fp32", "f32"
+    ]
+
+    /// Returns true if the quantization string matches any known pattern.
+    /// Used to decide whether to log a "please add support" diagnostic.
+    static func isRecognizedQuantization(_ str: String) -> Bool {
+        let cleaned = str.lowercased()
+        return recognizedQuantizationPatterns.contains { cleaned.contains($0) }
+    }
+
+    /// Logs raw inputs that couldn't be parsed so we can prioritize adding support for them.
+    /// Only logs non-empty values that we had to fall back on — avoids noise from missing metadata.
+    private static func logUnusualInputs(metadata: ModelMetadata?, parsedBillions: Double?, modelName: String?) {
+        guard let metadata = metadata else { return }
+        let context = modelName.map { " [model: \($0)]" } ?? ""
+
+        if let raw = metadata.parameterCount, !raw.isEmpty, parsedBillions == nil {
+            logger.warning("ModelFitAdvisor\(context): unparseable parameterCount '\(raw)' — falling back to tier/disk estimation. Add explicit handling in parseParameterCount if this format becomes common.")
+        }
+
+        if let rawQuant = metadata.quantization, !rawQuant.isEmpty, !isRecognizedQuantization(rawQuant) {
+            logger.warning("ModelFitAdvisor\(context): unrecognized quantization '\(rawQuant)' — defaulting to 4-bit. Add explicit handling in parseQuantizationBits if this format becomes common.")
+        }
     }
 
     // MARK: - Verdict Logic

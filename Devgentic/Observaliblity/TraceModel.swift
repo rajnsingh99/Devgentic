@@ -40,6 +40,8 @@ struct ProfileInfo {
             self.provider = nil
         case .imageGen(let config):
             self.provider = config.llmConfig.apiProvider
+        case .code(let config):
+            self.provider = config.llmConfig.apiProvider
         }
     }
 }

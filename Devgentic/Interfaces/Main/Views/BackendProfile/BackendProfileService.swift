@@ -132,6 +132,8 @@ final class BackendProfileService {
             providerConfig = config.llmConfig
         case .imageGen(let config):
             providerConfig = config.llmConfig
+        case .code(let config):
+            providerConfig = config.llmConfig
         case .workflow:
             // Workflows do not have a single provider config.
             providerConfig = nil
@@ -258,6 +260,12 @@ final class BackendProfileService {
             logOutput += formatLLMConfig(config.llmConfig)
             logOutput += "Negative Prompt: \(config.negativePrompt ?? "None")\n"
             logOutput += "Default Aspect Ratio: \(config.defaultAspectRatio?.rawValue ?? "Not set")\n"
+
+        case .code(let config):
+            logOutput += "[CODE SESSION CONFIGURATION]\n"
+            logOutput += formatLLMConfig(config.llmConfig)
+            logOutput += "Tools: \(config.tools.filter({ $0.isEnabled }).count) active\n"
+            logOutput += "Max Iterations: \(config.maxIterations ?? 20)\n"
         }
 
         logOutput += "==================================================\n\n"

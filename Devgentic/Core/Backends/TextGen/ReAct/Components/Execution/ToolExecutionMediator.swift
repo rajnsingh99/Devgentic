@@ -138,7 +138,16 @@ struct ToolExecutionMediator: ToolDispatching {
                 let isSemanticFailure = Self.isSemanticFailure(toolResult.output)
 
                 if isSemanticFailure {
-                    result = .semanticFailure(toolName: toolName, output: toolResult.output)
+                    // Enrich with recovery hints ONLY for errors that match a registered
+                    // (toolName, error-pattern) row AND whose suggested tools are enabled
+                    // in the current request. Unmatched errors and MCP tools pass through
+                    // unchanged — see `ToolRecoveryHints.enrich` for the safety guarantees.
+                    let enrichedOutput = ToolRecoveryHints.enrich(
+                        toolName: toolName,
+                        originalError: toolResult.output,
+                        availableToolNames: Set(availableTools.map(\.name))
+                    )
+                    result = .semanticFailure(toolName: toolName, output: enrichedOutput)
                     errorDescriptionForMetrics = toolResult.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Empty tool response" : toolResult.output
                 } else {
                     result = .success(output: toolResult.output, artifacts: toolResult.artifacts)
@@ -155,7 +164,16 @@ struct ToolExecutionMediator: ToolDispatching {
 
             } catch {
                 logToolExecution.error("❌ Tool '\(toolName)' threw system error:\n\(error.localizedDescription)")
-                result = .systemError(reason: error.localizedDescription)
+                // Some tools throw Apple `NSError`s containing strings like "File not found"
+                // (e.g., an underlying file-system throw that bypassed the tool's own guard).
+                // Running the recovery enricher here catches those paths too — if no registry
+                // pattern matches, the original reason is returned unchanged.
+                let enrichedReason = ToolRecoveryHints.enrich(
+                    toolName: toolName,
+                    originalError: error.localizedDescription,
+                    availableToolNames: Set(availableTools.map(\.name))
+                )
+                result = .systemError(reason: enrichedReason)
                 errorDescriptionForMetrics = error.localizedDescription
             }
         } else {

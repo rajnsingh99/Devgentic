@@ -80,13 +80,19 @@ struct LLMProviderConfig: Sendable {
     /// Profiles sharing the same API key share the same bucket.
     let rateLimitKey: String
 
-    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0, options: [String: JSONValue]? = nil, rateLimitKey: String = "default") {
+    /// Whether to request extended thinking traces from the model.
+    /// Seeded from `ProviderConfig.thinkingEnabled` at provider-construction time.
+    /// Currently used by Ollama (maps to `think: true` on /api/chat).
+    let thinkingEnabled: Bool
+
+    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0, options: [String: JSONValue]? = nil, rateLimitKey: String = "default", thinkingEnabled: Bool = false) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.modelName = modelName
         self.timeout = timeout
         self.options = options
         self.rateLimitKey = rateLimitKey
+        self.thinkingEnabled = thinkingEnabled
     }
 }
 
@@ -97,6 +103,9 @@ enum LLMProviderError: LocalizedError {
     case httpError(Int, String)
     case invalidResponse(String)
     case unsupportedProvider(String)
+    /// Thrown when an Ollama model rejects `think: true` with HTTP 400.
+    /// Caught by `BackendOrchestrationService` to auto-disable + retry transparently.
+    case thinkingUnsupported(modelName: String)
 
     var errorDescription: String? {
         switch self {
@@ -106,6 +115,8 @@ enum LLMProviderError: LocalizedError {
             return "Invalid response: \(detail)"
         case .unsupportedProvider(let name):
             return "Unsupported provider: \(name)"
+        case .thinkingUnsupported(let modelName):
+            return "'\(modelName)' does not support extended thinking."
         }
     }
     

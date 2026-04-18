@@ -182,6 +182,8 @@ private struct ItemCell: View {
             return "Workflow" // Placeholder
         case .imageGen(let config):
             return config.llmConfig.modelName
+        case .code(let config):
+            return config.llmConfig.modelName
         }
     }
 

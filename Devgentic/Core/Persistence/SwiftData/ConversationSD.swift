@@ -18,13 +18,15 @@ final class ConversationSD {
     var openAIThreadID: String?
     var backendType: String?
     var backendEntityId: UUID?
+    var profileTypeRaw: String?
 
     @Relationship(deleteRule: .cascade, inverse: \ChatMessageSD.conversation)
     var messages: [ChatMessageSD] = []
 
     init(id: UUID = UUID(), timestamp: Date = Date(), userDefinedTitle: String? = nil,
          isPinned: Bool = false, openAIThreadID: String? = nil,
-         backendType: String? = nil, backendEntityId: UUID? = nil) {
+         backendType: String? = nil, backendEntityId: UUID? = nil,
+         profileTypeRaw: String? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.userDefinedTitle = userDefinedTitle
@@ -32,6 +34,7 @@ final class ConversationSD {
         self.openAIThreadID = openAIThreadID
         self.backendType = backendType
         self.backendEntityId = backendEntityId
+        self.profileTypeRaw = profileTypeRaw
     }
 
     func toStruct() -> Conversation {

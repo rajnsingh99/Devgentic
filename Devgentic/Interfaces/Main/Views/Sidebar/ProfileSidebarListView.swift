@@ -29,10 +29,11 @@ struct ProfileSidebarListView: View {
     @State private var pendingProfileID: UUID? = nil
     @State private var showingDiscardAlert = false
 
-    private let typeFilters = ["All"] + ProfileType.allCases.map(\.rawValue)
+    private let typeFilters = ["All"] + ProfileType.allCases.filter { $0 != .code }.map(\.rawValue)
 
+    /// Code profiles are hidden from the sidebar — managed by CodeSessionManager.
     private var filteredProfiles: [BackendProfileModel] {
-        var result = profileService.profiles
+        var result = profileService.profiles.filter { $0.profileType != .code }
 
         // Type filter
         if selectedTypeFilter != "All" {

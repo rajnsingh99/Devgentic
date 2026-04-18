@@ -271,8 +271,10 @@ struct OllamaModelCardView: View {
     @Environment(\.appTheme) private var theme
 
     /// Fit assessment using the model's cognitive profile metadata.
+    /// Isolated per card: any unparseable metadata degrades gracefully to a neutral assessment
+    /// and logs raw inputs (see ModelFitAdvisor) so we can add support for new formats.
     private var fitAssessment: ModelFitAssessment {
-        ModelFitAdvisor.assess(metadata: model.cognitiveProfile.metadata)
+        ModelFitAdvisor.assess(metadata: model.cognitiveProfile.metadata, modelName: model.name)
     }
 
     var body: some View {

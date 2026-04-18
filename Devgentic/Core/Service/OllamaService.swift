@@ -24,6 +24,9 @@ struct LocalModel: Identifiable, Hashable {
     /// The full cognitive profile (capability + dialect) as detected from the Ollama response.
     let cognitiveProfile: CognitiveProfile
 
+    /// Whether this model supports Ollama's `think` parameter (detected via Option A).
+    let supportsThinking: Bool
+
     /// Convenience accessor for the capability tier (backward compat).
     var cognitiveCapability: ModelCognitiveCapability { cognitiveProfile.capability }
 
@@ -34,6 +37,7 @@ struct LocalModel: Identifiable, Hashable {
         self.name = name
         self.details = response.details
         self.cognitiveProfile = response.cognitiveProfile
+        self.supportsThinking = response.supportsThinking
         self.tags = Self.generateTags(from: response)
     }
 

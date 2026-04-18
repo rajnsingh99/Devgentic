@@ -78,6 +78,9 @@ struct MainApplicationView: View {
                 if viewModel.interfaceMode == .workflow {
                     viewModel.deselectConversationAndShowWelcome()
                     logger.debug("Triggered new workflow (deselect) via Cmd+N.")
+                } else if viewModel.interfaceMode == .code {
+                    viewModel.deselectConversationAndShowWelcome()
+                    logger.debug("Triggered new code session via Cmd+N.")
                 } else {
                     viewModel.startNewConversation()
                     logger.debug("Triggered new conversation via Cmd+N.")
@@ -191,12 +194,19 @@ struct MainApplicationView: View {
                             WelcomeView()
                         }
                     }
+
+            case .code:
+                CodeDedicatedView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.bottom, 115)
             }
 
             // Input area container
             VStack(spacing: 0) {
-                // HITL banner — only for chat mode (workflow uses WorkflowInteractionPanel)
-                if viewModel.interfaceMode == .chat, let streamingMsg = viewModel.streamingMessage {
+                // HITL banner — mounted for every mode EXCEPT workflow (which has its own
+                // WorkflowInteractionPanel rendered inside the workflow canvas). Any future
+                // non-workflow surface inherits HITL automatically without updating this gate.
+                if viewModel.interfaceMode != .workflow, let streamingMsg = viewModel.streamingMessage {
                     StreamingMessageBannerWrapper(message: streamingMsg)
                         .environment(viewModel)
                 }

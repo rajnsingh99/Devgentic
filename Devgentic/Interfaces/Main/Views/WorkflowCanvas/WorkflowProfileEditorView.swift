@@ -63,6 +63,10 @@ struct WorkflowProfileEditorView: View {
             case .imageGen:
                 ImageGenConfigDetailView(editBuffer: localBuffer)
                     .environment(profileService)
+            case .code:
+                Text("Code sessions are configured via the Code interface.")
+                    .foregroundColor(theme.secondaryText)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(width: 800, height: 750)

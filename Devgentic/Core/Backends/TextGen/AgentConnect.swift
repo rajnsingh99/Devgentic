@@ -93,6 +93,16 @@ class AgentConnect: @unchecked Sendable {
                         continuation.yield(.error("ImageGen profiles should not be routed through AgentConnect. Use BackendOrchestrationService instead."))
                         continuation.finish()
                         return
+
+                    case .code(let config):
+                        // Code mode uses the agent pipeline with pre-configured coding tools.
+                        llmConfig = config.llmConfig
+                        instructions = config.instructions
+                        rawTools = config.tools
+                        isBotFlow = false
+                        skillManifests = nil
+                        skillFolderPath = nil
+                        logger.info("[CODE] AgentConnect extracted Code config — provider: \(config.llmConfig.apiProvider.rawValue), model: \(config.llmConfig.modelName), tools: \(config.tools.count), projectPath: \(config.projectPath ?? "nil"), traceID: \(traceContext.traceID)")
                     }
 
                     // 2. Select Cognitive Strategy & Rate Limit Boundary
@@ -171,6 +181,14 @@ class AgentConnect: @unchecked Sendable {
                         parentProvider: llmConfig.apiProvider,
                         skillManifests: skillManifests
                     )
+
+                    // 5.5 Code mode: inject project context tool (needs projectPath from AgentConfig)
+                    if case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath {
+                        let contextTool = UpdateProjectContextTool(projectPath: projectPath)
+                        activeTools.append(self.wrapTool(contextTool, requiresConfirmation: false))
+                        let toolNames = activeTools.map(\.name).joined(separator: ", ")
+                        logger.info("[CODE] Tool resolution complete — \(activeTools.count) tools (incl. update_project_context): [\(toolNames)]")
+                    }
 
                     // 6. Initialize Evaluation Session (Metrics)
                     let evalSessionID = UUID()
@@ -391,6 +409,10 @@ class AgentConnect: @unchecked Sendable {
                         executionTimeout = nil
                     }
 
+                    if case .code = profile.details {
+                        logger.info("[CODE] Executor handoff — executor: \(executor.executorLabel), traceID: \(traceContext.traceID), spanID: \(traceContext.spanID), conversationID: \(conversationID.uuidString.prefix(8))")
+                    }
+
                     let stream = executor.execute(model: model, input: input, onTraceUpdate: traceHandler)
 
                     let finalOutputAccumulator: String
@@ -435,10 +457,9 @@ class AgentConnect: @unchecked Sendable {
                         finalOutputAccumulator = accumulated
                     }
                     
-                    logger.info("--- 🏁 TEXTGEN RESPONSE COMPLETE 🏁 ---")
-                    logger.info("Model: \(llmConfig.modelName)")
-                    logger.info("Final Output: \(finalOutputAccumulator)")
-                    logger.info("---------------------------------------")
+                    let outputPreview = String(finalOutputAccumulator.prefix(200))
+                    logger.info("--- TEXTGEN RESPONSE COMPLETE --- traceID: \(traceContext.traceID), model: \(llmConfig.modelName), outputLen: \(finalOutputAccumulator.count)")
+                    logger.debug("Output preview: \(outputPreview)")
                     
                     continuation.finish()
                     
@@ -498,6 +519,14 @@ class AgentConnect: @unchecked Sendable {
                         isBotFlow = false
                         skillManifests = config.skillConfig?.manifests.filter(\.isEnabled)
                         skillFolderPath = config.skillConfig?.folderURL.path
+
+                    case .code(let config):
+                        llmConfig = config.llmConfig
+                        instructions = config.instructions
+                        rawTools = config.tools
+                        isBotFlow = false
+                        skillManifests = nil
+                        skillFolderPath = nil
 
                     case .workflow, .imageGen:
                         continuation.yield(.error("Unsupported profile type for workflow node: \(profile.profileType.rawValue)"))
@@ -740,7 +769,7 @@ class AgentConnect: @unchecked Sendable {
                 options = advConfig
             }
             
-            let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
+            let config = LLMProviderConfig(baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey, thinkingEnabled: llmConfig.thinkingEnabled)
             return OllamaLLMProvider(config: config)
             
         case .openAI:

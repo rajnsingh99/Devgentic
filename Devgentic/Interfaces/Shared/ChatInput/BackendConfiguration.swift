@@ -19,10 +19,11 @@ struct BackendRequestConfig {
 final class BackendConfiguration {
     var selectedProfileID: UUID?
 
-    // Helper to get an immutable snapshot for requests
+    // Helper to get an immutable snapshot for requests.
+    // All interface modes (chat, workflow, code) use selectedProfileID uniformly.
     func getRequestConfig() -> BackendRequestConfig? {
         guard let profileID = selectedProfileID,
-              let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == profileID }) else {
+              let profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID) else {
             logger.warning("Could not create request config: Profile ID is nil or profile not found in store.")
             return nil
         }

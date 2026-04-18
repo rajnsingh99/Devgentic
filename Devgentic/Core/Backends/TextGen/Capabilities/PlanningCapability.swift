@@ -124,7 +124,8 @@ actor PlanningExecutorWrapper: Executor {
                         availableTools: input.tools,
                         userProfile: userProfile,
                         skillManifests: input.skillManifests,
-                        taskDescription: nil
+                        taskDescription: nil,
+                        promptLayerConfig: .agent
                     )
 
                     let planGenerator = PlanGeneratorStrategy(planningConfig: config)
@@ -144,6 +145,7 @@ actor PlanningExecutorWrapper: Executor {
                     let planSummary = subtasks.enumerated()
                         .map { "  \($0.offset + 1). \($0.element.description)" }
                         .joined(separator: "\n")
+                    continuation.yield(.planGenerated(subtaskCount: subtasks.count))
                     continuation.yield(.thought("Plan generated with \(subtasks.count) steps:\n\(planSummary)"))
                     logger.info("Plan generated: \(subtasks.count) subtasks.")
 
@@ -164,6 +166,7 @@ actor PlanningExecutorWrapper: Executor {
                             continuation.yield(.content("Plan was cancelled. Let me know if you'd like a different approach."))
                             sessionState.closeActiveEpisode(status: "CANCELLED", outcome: "Plan rejected by user")
                             await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                            continuation.yield(.executionFinished(outcome: .cancelled, reason: "Plan rejected by user"))
                             continuation.finish()
                             return
                         }
@@ -214,7 +217,15 @@ actor PlanningExecutorWrapper: Executor {
                                             return (subtask.id, nil, [])
                                         } catch {
                                             logger.error("Subtask '\(subtask.id)' failed: \(error.localizedDescription)")
-                                            continuation.yield(.thought("  [\(subtask.id)] Failed: \(error.localizedDescription)"))
+                                            // Structured warning — this is a system signal (subtask threw)
+                                            // not model reasoning. UI renders it distinctly from thoughts and
+                                            // downstream consumers (negativeConstraints, episodic memory) see
+                                            // a machine-readable category.
+                                            continuation.yield(.warning(
+                                                category: .retry,
+                                                message: "Subtask '\(subtask.id)' failed: \(error.localizedDescription)",
+                                                relatedPath: subtask.id
+                                            ))
                                             return (subtask.id, "Error: \(error.localizedDescription)", [])
                                         }
                                     }
@@ -245,7 +256,11 @@ actor PlanningExecutorWrapper: Executor {
                                     throw CancellationError()
                                 } catch {
                                     logger.error("Subtask '\(subtask.id)' failed: \(error.localizedDescription)")
-                                    continuation.yield(.thought("  [\(subtask.id)] Failed: \(error.localizedDescription)"))
+                                    continuation.yield(.warning(
+                                        category: .retry,
+                                        message: "Subtask '\(subtask.id)' failed: \(error.localizedDescription)",
+                                        relatedPath: subtask.id
+                                    ))
                                     subtaskResults[subtask.id] = "Error: \(error.localizedDescription)"
                                 }
                             }
@@ -282,10 +297,23 @@ actor PlanningExecutorWrapper: Executor {
                         forceSynthesis: input.responseSynthesisEnabled
                     )
 
-                    sessionState.closeActiveEpisode(status: "COMPLETED", outcome: response)
+                    // Partial-failure detection: if all subtasks errored, treat as .failed
+                    // even though we still produced a synthesized response (honesty over polish).
+                    // Errors are marked by the "Error: " prefix written at subtask catch sites above.
+                    let totalSubtasks = subtasks.count
+                    let failedSubtasks = subtaskResults.values.filter { $0.hasPrefix("Error:") }.count
+                    let allFailed = totalSubtasks > 0 && failedSubtasks == totalSubtasks
+                    let terminalOutcome: ExecutionOutcome = allFailed ? .failed : .completed
+                    let terminalReason: String? = failedSubtasks > 0
+                        ? "\(failedSubtasks) of \(totalSubtasks) subtasks failed"
+                        : nil
+                    let episodeStatus = allFailed ? "FAILED" : "COMPLETED"
+
+                    sessionState.closeActiveEpisode(status: episodeStatus, outcome: response)
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     continuation.yield(.content(response))
+                    continuation.yield(.executionFinished(outcome: terminalOutcome, reason: terminalReason))
                     continuation.finish()
 
                 } catch is CancellationError {
@@ -294,10 +322,12 @@ actor PlanningExecutorWrapper: Executor {
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
+                    continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
                     logger.error("Planning capability fatal error: \(error.localizedDescription)")
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
             }
@@ -324,6 +354,8 @@ actor PlanningExecutorWrapper: Executor {
         onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
     ) async throws -> (output: String, toolResults: [ToolOutput]) {
 
+        let subtaskIndex = (allSubtasks.firstIndex(where: { $0.id == subtask.id }) ?? 0) + 1
+        continuation.yield(.subtaskStarted(index: subtaskIndex, total: allSubtasks.count, description: subtask.description))
         continuation.yield(.thought("Subtask: \(subtask.description)"))
 
         // Optionally filter tools based on toolHints
@@ -398,10 +430,13 @@ actor PlanningExecutorWrapper: Executor {
             case .toolCall(let name, let params, _):
                 // [G11] Forward tool invocation events so UI shows tool activity during subtasks.
                 continuation.yield(.toolCall(name: name, params: params))
-            case .toolOutput(let toolOutput, _):
+            case .toolSucceeded(let toolOutput, let durationMs, _):
                 // [G4] Capture subtask tool results for synthesis aggregation.
                 toolResults.append(toolOutput)
-                continuation.yield(.toolOutput(toolOutput))
+                continuation.yield(.toolSucceeded(toolOutput, durationMs: durationMs))
+            case .toolFailed(let toolOutput, let category, let suggestion, _):
+                toolResults.append(toolOutput)
+                continuation.yield(.toolFailed(toolOutput, category: category, suggestion: suggestion))
             case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
                 // [G9] Forward HITL permission requests — user must see these during subtasks.
                 continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
@@ -410,6 +445,9 @@ actor PlanningExecutorWrapper: Executor {
                 continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID))
             case .error(let msg):
                 continuation.yield(.error(msg))
+            case .warning(let cat, let msg, let relatedPath, _):
+                // [G11] Forward warnings so UI surfaces memory-pressure / retry / parse-failure signals during subtasks.
+                continuation.yield(.warning(category: cat, message: "[\(subtask.id)] \(msg)", relatedPath: relatedPath))
             case .artifactProduced(let artifact):
                 continuation.yield(.artifactProduced(artifact))
             case .tokenUsage(let usage):
@@ -418,6 +456,11 @@ actor PlanningExecutorWrapper: Executor {
                 break
             }
         }
+
+        let summary = output.isEmpty
+            ? "Completed (\(toolResults.count) tool call\(toolResults.count == 1 ? "" : "s"))"
+            : String(output.prefix(150))
+        continuation.yield(.subtaskCompleted(index: subtaskIndex, total: allSubtasks.count, summary: summary))
 
         return (output, toolResults)
     }

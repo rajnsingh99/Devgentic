@@ -142,6 +142,10 @@ struct ProviderConfigSection: View {
                         get: { providerConfig.modelMetadata },
                         set: { providerConfig.modelMetadata = $0 }
                     ),
+                    thinkingEnabled: Binding(
+                        get: { providerConfig.thinkingEnabled },
+                        set: { providerConfig.thinkingEnabled = $0 }
+                    ),
                     baseURL: providerConfig.baseURL ?? Self.defaultBaseURL(for: .ollama),
                     profileID: profileID,
                     filterForTools: ProfileCapabilityFilter.filterForTools(for: profileType)

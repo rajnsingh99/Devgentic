@@ -52,6 +52,9 @@ struct AgentConfig: Codable, Hashable, Sendable {
     // Skills
     var skillConfig: SkillFolderConfig?
 
+    // Code mode metadata (not persisted for agent profiles — only set on ephemeral Code profiles)
+    var projectPath: String?
+
     init(llmConfig: ProviderConfig,
          tools: [Tool] = [],
          description: String? = nil,
@@ -63,7 +66,8 @@ struct AgentConfig: Codable, Hashable, Sendable {
          errorRecovery: ErrorRecovery? = nil,
          capabilities: AgentCapabilities = AgentCapabilities(),
          historyStrategy: HistoryStrategy? = nil,
-         skillConfig: SkillFolderConfig? = nil) {
+         skillConfig: SkillFolderConfig? = nil,
+         projectPath: String? = nil) {
         self.llmConfig = llmConfig
         self.tools = tools
         self.description = description
@@ -76,6 +80,7 @@ struct AgentConfig: Codable, Hashable, Sendable {
         self.capabilities = capabilities
         self.historyStrategy = historyStrategy
         self.skillConfig = skillConfig
+        self.projectPath = projectPath
     }
 }
 
@@ -523,6 +528,8 @@ enum ProfileDetails: Codable, Hashable, Sendable {
     case agent(AgentConfig)
     case workflow(WorkflowConfig)
     case imageGen(ImageGenConfig)
+    /// Code mode reuses AgentConfig internally. Ephemeral — never persisted to profile store.
+    case code(AgentConfig)
 
     // MARK: - Manual Codable Implementation
 
@@ -543,6 +550,8 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         case maxNestingDepth
         // ImageGen-specific
         case negativePrompt, defaultAspectRatio, advancedSettings
+        // Code-specific — folder root scoping for code tools (list_directory, glob_files, etc.)
+        case projectPath
     }
 
     init(from decoder: Decoder) throws {
@@ -624,6 +633,27 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 defaultAspectRatio: defaultAspectRatio,
                 advancedSettings: advancedSettings
             ))
+
+        case .code:
+            // Code mode reuses AgentConfig — decode identically to .agent plus projectPath.
+            let llmConfig = try container.decode(ProviderConfig.self, forKey: .llmConfig)
+            let tools = (try? container.decode([Tool].self, forKey: .tools)) ?? []
+            let instructions = try container.decodeIfPresent(String.self, forKey: .instructions)
+            let maxIterations = try container.decodeIfPresent(Int.self, forKey: .maxIterations)
+            let executionTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .executionTimeout)
+            let capabilities = (try? container.decode(AgentCapabilities.self, forKey: .capabilities)) ?? AgentCapabilities()
+            let historyStrategy = try container.decodeIfPresent(HistoryStrategy.self, forKey: .historyStrategy)
+            let projectPath = try container.decodeIfPresent(String.self, forKey: .projectPath)
+            self = .code(AgentConfig(
+                llmConfig: llmConfig,
+                tools: tools,
+                instructions: instructions,
+                maxIterations: maxIterations,
+                executionTimeout: executionTimeout,
+                capabilities: capabilities,
+                historyStrategy: historyStrategy,
+                projectPath: projectPath
+            ))
         }
     }
 
@@ -671,6 +701,17 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encodeIfPresent(config.negativePrompt, forKey: .negativePrompt)
             try container.encodeIfPresent(config.defaultAspectRatio, forKey: .defaultAspectRatio)
             try container.encodeIfPresent(config.advancedSettings, forKey: .advancedSettings)
+
+        case .code(let config):
+            try container.encode(ProfileType.code, forKey: .profileType)
+            try container.encode(config.llmConfig, forKey: .llmConfig)
+            try container.encode(config.tools, forKey: .tools)
+            try container.encodeIfPresent(config.instructions, forKey: .instructions)
+            try container.encodeIfPresent(config.maxIterations, forKey: .maxIterations)
+            try container.encodeIfPresent(config.executionTimeout, forKey: .executionTimeout)
+            try container.encode(config.capabilities, forKey: .capabilities)
+            try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
+            try container.encodeIfPresent(config.projectPath, forKey: .projectPath)
         }
     }
 }
@@ -683,6 +724,7 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
     case agent = "Agent"
     case workflow = "Workflow"
     case imageGen = "Image Generator"
+    case code = "Code"
 
     var id: String { self.rawValue }
 
@@ -693,6 +735,7 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .agent:    return "brain.head.profile"
         case .workflow:  return "point.3.connected.trianglepath.dotted"
         case .imageGen: return "wand.and.sparkles"
+        case .code:     return "chevron.left.forwardslash.chevron.right"
         }
     }
 
@@ -703,6 +746,7 @@ enum ProfileType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .agent:    return "brain.head.profile.fill"
         case .workflow:  return "point.3.filled.connected.trianglepath.dotted"
         case .imageGen: return "wand.and.sparkles"
+        case .code:     return "chevron.left.forwardslash.chevron.right"
         }
     }
 }
@@ -847,6 +891,12 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// Custom stop sequences extracted from the model's tokenizer configuration.
     var stopSequences: [String] = []
 
+    /// Whether extended thinking is active for this model.
+    /// Seeded by Option A (detection) at model-selection time.
+    /// Auto-disabled by Option B when runtime 400 "does not support thinking" fires.
+    /// User-toggleable in advanced config.
+    var thinkingEnabled: Bool = false
+
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
     var cognitiveProfile: CognitiveProfile {
         CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
@@ -862,7 +912,8 @@ struct ProviderConfig: Codable, Hashable, Sendable {
          modelDialect: ModelDialect = .nativeJSON,
          modelMetadata: ModelMetadata? = nil,
          chatTemplateSource: ChatTemplateSource = .embedded,
-         stopSequences: [String] = []) {
+         stopSequences: [String] = [],
+         thinkingEnabled: Bool = false) {
         self.apiProvider = apiProvider
         self.modelName = modelName
         self.apiKey = apiKey
@@ -873,12 +924,13 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.modelMetadata = modelMetadata
         self.chatTemplateSource = chatTemplateSource
         self.stopSequences = stopSequences
+        self.thinkingEnabled = thinkingEnabled
     }
 
     // MARK: - Codable Conformance
 
     enum CodingKeys: String, CodingKey {
-        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -902,6 +954,7 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.modelMetadata = try container.decodeIfPresent(ModelMetadata.self, forKey: .modelMetadata)
         self.chatTemplateSource = try container.decodeIfPresent(ChatTemplateSource.self, forKey: .chatTemplateSource) ?? .embedded
         self.stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences) ?? []
+        self.thinkingEnabled = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -918,5 +971,6 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         if !stopSequences.isEmpty {
             try container.encode(stopSequences, forKey: .stopSequences)
         }
+        try container.encode(thinkingEnabled, forKey: .thinkingEnabled)
     }
 }

@@ -162,13 +162,18 @@ private func executeSingleTool(
         let didAnswer = userResponse != nil
         let answerText = userResponse ?? "System: The user skipped or did not respond."
 
-        // Resolve the timeline chip: send = success, skip/timeout = failure
-        continuation.yield(.toolOutput(ToolOutput(
+        // Resolve the timeline chip: send = success, skip/timeout = cancelled (soft failure, no constraint).
+        let askOutput = ToolOutput(
             toolName: toolName,
             params: paramsString,
             output: didAnswer ? "User answered: \(answerText)" : "Skipped by user.",
             isSuccess: didAnswer
-        )))
+        )
+        if didAnswer {
+            continuation.yield(.toolSucceeded(askOutput))
+        } else {
+            continuation.yield(.toolFailed(askOutput, category: .cancelled))
+        }
 
         return ToolObservation(
             stepId: currentIteration,
@@ -198,7 +203,8 @@ private func executeSingleTool(
         let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID)
         if !approved {
             let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
-            continuation.yield(.toolOutput(ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)))
+            let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)
+            continuation.yield(.toolFailed(denialOutput, category: .userDenied))
             return ToolObservation(
                 stepId: currentIteration,
                 toolCallId: toolCallId,
@@ -215,15 +221,37 @@ private func executeSingleTool(
         break
     }
 
+    // Delegation lifecycle: wrap call_agent dispatch with structured events so the
+    // UI surfaces "spawned an agent" / "agent returned" distinct from a normal tool call.
+    let isDelegation = toolName == "call_agent"
+    if isDelegation {
+        let task = arguments["task"]?.stringValue ?? "unknown task"
+        continuation.yield(.delegationStarted(task: task))
+    }
+
+    let dispatchStart = Date()
     let result = await toolMediator.executePreparedTool(
         toolName: toolName,
         arguments: arguments,
         availableTools: availableTools,
         parentContext: iterationSpan
     )
+    let durationMs = Int(Date().timeIntervalSince(dispatchStart) * 1000)
 
-    // Emit UI Output
-    continuation.yield(.toolOutput(ToolOutput(toolName: toolName, params: paramsString, output: result.llmObservation, isSuccess: result.isSuccess)))
+    if isDelegation {
+        let summary = result.isSuccess
+            ? String(result.llmObservation.prefix(150))
+            : "Delegation failed: \(String(result.llmObservation.prefix(120)))"
+        continuation.yield(.delegationCompleted(summary: summary))
+    }
+
+    // Emit structured success/failure — category drives negativeConstraints policy and UI affordance.
+    let output = ToolOutput(toolName: toolName, params: paramsString, output: result.llmObservation, isSuccess: result.isSuccess)
+    if let category = result.failureCategory {
+        continuation.yield(.toolFailed(output, category: category))
+    } else {
+        continuation.yield(.toolSucceeded(output, durationMs: durationMs))
+    }
 
     // Emit media artifacts if produced
     for artifact in result.artifacts {

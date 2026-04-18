@@ -186,15 +186,20 @@ class BackendOrchestrationService {
                     continuation.finish(throwing: CancellationError())
                     return
                 }
-                
+
+                // Mutable config wrapper so we can swap in an updated profile after Option B auto-heal.
+                var currentConfig = config
+                var thinkingRetryDone = false
+
+                dispatchLoop: while true {
                 do {
-                    switch config.profile.profileType {
+                    switch currentConfig.profile.profileType {
                         
                     case .bot:
-                        logger.info("Routing BOT profile '\(config.profile.displayName)' to Unified Pipeline.")
-                        
+                        logger.info("Routing BOT profile '\(currentConfig.profile.displayName)' to Unified Pipeline.")
+
                         let stream = agentConnect.streamAgentResponse(
-                            for: config.profile,
+                            for: currentConfig.profile,
                             userInput: queryForRequest,
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
@@ -202,15 +207,15 @@ class BackendOrchestrationService {
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
                         )
-                        
+
                         for try await event in stream {
                             // Yield events as they come
                             continuation.yield(event)
                         }
                         continuation.finish()
-                        
+
                     case .agent:
-                        logger.info("Routing AGENT profile '\(config.profile.displayName)' to AgentConnect. Trace: \(context.traceID)")
+                        logger.info("Routing AGENT profile '\(currentConfig.profile.displayName)' to AgentConnect. Trace: \(context.traceID)")
                         
                         // Direct routing to the Generalist Agent.
                         // Signals a "New User Request" to the downstream AgentConnect logic.
@@ -223,7 +228,7 @@ class BackendOrchestrationService {
                         
                         // AgentConnect handles the "New Request" flag internally for stream start
                         let stream = agentConnect.streamAgentResponse(
-                            for: config.profile,
+                            for: currentConfig.profile,
                             userInput: queryForRequest,
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
@@ -241,7 +246,7 @@ class BackendOrchestrationService {
                             case .thought(_, let message, _):
                                 logger.debug("[THOUGHT] \(message)")
                                 continuation.yield(event)
-                            case .toolOutput(let output, _):
+                            case .toolSucceeded(let output, _, _), .toolFailed(let output, _, _, _):
                                 logger.debug("[ARTIFACT] \(output.toolName) - \(output.output.prefix(50))...")
                                 continuation.yield(event)
                             case .toolCall(let name, let params, _):
@@ -255,6 +260,10 @@ class BackendOrchestrationService {
                                 continuation.yield(event)
                             case .error(let err):
                                 logger.debug("[ERROR] \(err)")
+                                continuation.yield(event)
+
+                            case .warning(let cat, let msg, _, _):
+                                logger.debug("[WARNING] [\(cat.rawValue)] \(msg)")
                                 continuation.yield(event)
 
                             // Workflow orchestration events (not emitted by agent profiles, but needed for exhaustive switch)
@@ -273,7 +282,8 @@ class BackendOrchestrationService {
                                  .reflectionTrialStarted, .reflectionEvaluating, .reflectionRetrying, .reflectionAccepted,
                                  .delegationStarted, .delegationCompleted,
                                  .compactionStarted, .compactionCompleted,
-                                 .tokenUsage:
+                                 .tokenUsage,
+                                 .executionFinished:
                                 continuation.yield(event)
                             }
                         }
@@ -285,10 +295,10 @@ class BackendOrchestrationService {
                         continuation.finish()
                         
                     case .workflow:
-                        logger.info("Routing WORKFLOW profile '\(config.profile.displayName)' to AgentConnect.")
+                        logger.info("Routing WORKFLOW profile '\(currentConfig.profile.displayName)' to AgentConnect.")
 
                         let stream = agentConnect.streamAgentResponse(
-                            for: config.profile,
+                            for: currentConfig.profile,
                             userInput: queryForRequest,
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
@@ -303,9 +313,9 @@ class BackendOrchestrationService {
                         continuation.finish()
 
                     case .imageGen:
-                        logger.info("Routing IMAGE GENERATOR profile '\(config.profile.displayName)' to ImageGenExecutor.")
+                        logger.info("Routing IMAGE GENERATOR profile '\(currentConfig.profile.displayName)' to ImageGenExecutor.")
 
-                        guard case .imageGen(let imgConfig) = config.profile.details else {
+                        guard case .imageGen(let imgConfig) = currentConfig.profile.details else {
                             continuation.yield(.error("Invalid ImageGen profile configuration."))
                             continuation.finish()
                             return
@@ -365,7 +375,7 @@ class BackendOrchestrationService {
                                 intent: intent,
                                 provider: provider,
                                 capability: capability,
-                                profile: config.profile,
+                                profile: currentConfig.profile,
                                 conversationID: conversationID,
                                 options: options
                             )
@@ -380,14 +390,58 @@ class BackendOrchestrationService {
                             continuation.yield(.error(error.localizedDescription))
                             continuation.finish()
                         }
+
+                    case .code:
+                        // Code mode routes through the agent pipeline using an ephemeral profile.
+                        // The ephemeral profile is built with .agent profileType internally,
+                        // so this case handles the rare scenario where profileType is explicitly .code.
+                        let codeProjectPath: String
+                        if case .code(let codeConfig) = currentConfig.profile.details {
+                            codeProjectPath = codeConfig.projectPath ?? "unknown"
+                        } else {
+                            codeProjectPath = "unknown"
+                        }
+                        logger.info("[CODE] Routing to AgentConnect (agent pipeline) — traceID: \(context.traceID), project: \(codeProjectPath), RAG: \(ragContextString != nil), history: \(conversationHistory.count) msgs")
+
+                        let stream = agentConnect.streamAgentResponse(
+                            for: currentConfig.profile,
+                            userInput: queryForRequest,
+                            chatHistory: conversationHistory,
+                            conversationID: conversationID,
+                            ragContext: ragContextString,
+                            traceContext: context,
+                            onTraceUpdate: aggregatedTraceUpdate
+                        )
+
+                        for try await event in stream {
+                            continuation.yield(event)
+                        }
+                        logger.info("[CODE] AgentConnect stream completed — traceID: \(context.traceID)")
+                        continuation.finish()
                     }
+                    break dispatchLoop  // success — exit retry loop
                 } catch is CancellationError {
                     logger.warning("Orchestration Stream Cancelled.")
                     continuation.finish()
+                    break dispatchLoop
+                } catch LLMProviderError.thinkingUnsupported(let modelName) where !thinkingRetryDone {
+                    // Option B: auto-heal — disable thinking on the profile and retry once.
+                    thinkingRetryDone = true
+                    logger.warning("[THINKING_AUTO_HEAL] Model '\(modelName)' rejected `think: true`. Disabling and retrying.")
+
+                    if let updatedProfile = self.disableThinkingOnProfile(currentConfig.profile) {
+                        currentConfig = BackendRequestConfig(profile: updatedProfile)
+                    }
+
+                    continuation.yield(.error("Extended thinking disabled — '\(modelName)' reported it isn't supported. Retrying without it…"))
+                    // Loop back to retry dispatch with the updated config.
+                    continue dispatchLoop
                 } catch {
                     logger.error("AGENT_CONNECT_ERROR: \(error.localizedDescription) (Trace: \(context.traceID))")
                     continuation.finish(throwing: error)
+                    break dispatchLoop
                 }
+                } // end dispatchLoop
             }
             
             // [CRITICAL FIX] Hook up cancellation
@@ -399,11 +453,43 @@ class BackendOrchestrationService {
     
     // MARK: - Helper Methods
     
+    /// Option B auto-heal: disables `thinkingEnabled` on the profile's llmConfig and persists.
+    /// Called when a provider throws `LLMProviderError.thinkingUnsupported` at runtime.
+    /// Returns the updated snapshot (or nil if the profile doesn't have an llmConfig with a thinking flag).
+    private func disableThinkingOnProfile(_ profile: BackendProfileModel) -> BackendProfileModel? {
+        var updated = profile
+
+        switch updated.details {
+        case .bot(var config):
+            config.llmConfig.thinkingEnabled = false
+            updated.details = .bot(config)
+        case .agent(var config):
+            config.llmConfig.thinkingEnabled = false
+            updated.details = .agent(config)
+        case .code(var config):
+            config.llmConfig.thinkingEnabled = false
+            updated.details = .code(config)
+        case .imageGen, .workflow:
+            // These types don't use Ollama's think parameter.
+            return nil
+        }
+
+        do {
+            try BackendProfileStore.shared.saveProfile(updated)
+            logger.info("[THINKING_AUTO_HEAL] Profile '\(updated.displayName)' (\(updated.id.uuidString)) updated: thinkingEnabled=false")
+            return updated
+        } catch {
+            logger.error("[THINKING_AUTO_HEAL] Failed to persist thinkingEnabled=false for profile \(updated.id.uuidString): \(error.localizedDescription)")
+            return updated  // return the in-memory updated copy so retry still proceeds
+        }
+    }
+
     private func isMLXProfile(_ profile: BackendProfileModel) -> Bool {
         switch profile.details {
         case .bot(let config): return config.llmConfig.apiProvider == .mlx
         case .agent(let config): return config.llmConfig.apiProvider == .mlx
         case .imageGen(let config): return config.llmConfig.apiProvider == .mlx
+        case .code(let config): return config.llmConfig.apiProvider == .mlx
         case .workflow: return false
         }
     }

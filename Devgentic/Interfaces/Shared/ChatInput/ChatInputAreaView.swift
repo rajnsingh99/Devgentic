@@ -31,6 +31,7 @@ struct ChatInputAreaView: View {
 
     @Environment(ExplorerViewModel.self) private var explorerViewModel
     @Environment(MainApplicationViewModel.self) private var mainViewModel // retained only for delegate wiring & APIKeyInputPopup sheet
+    @Environment(CodeSessionManager.self) private var codeSessionManager
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
@@ -74,6 +75,7 @@ struct ChatInputAreaView: View {
         case .agent: return .green
         case .workflow: return .purple
         case .imageGen: return .orange
+        case .code: return .cyan
         }
     }
 
@@ -219,7 +221,25 @@ struct ChatInputAreaView: View {
             CustomTextEditor(
                 text: $inputViewModel.userInput,
                 onCommit: { attributedString in
-                    if isInputEnabled, let config = backendConfiguration.getRequestConfig() {
+                    guard isInputEnabled else { return }
+                    // Code mode: intercept if model or folder not configured,
+                    // then point selectedProfileID at the code profile so getRequestConfig resolves.
+                    if mainViewModel.interfaceMode == .code {
+                        if codeSessionManager.modelName.isEmpty {
+                            logger.info("[CODE] Send intercepted — model not selected, opening model picker")
+                            codeSessionManager.showModelPicker = true
+                            return
+                        }
+                        if codeSessionManager.projectPath == nil {
+                            logger.info("[CODE] Send intercepted — folder not selected, opening folder picker")
+                            openCodeFolderPicker()
+                            return
+                        }
+                        if let codeID = codeSessionManager.codeProfileID {
+                            backendConfiguration.selectedProfileID = codeID
+                        }
+                    }
+                    if let config = backendConfiguration.getRequestConfig() {
                         self.onSendMessage(attributedString, config)
                         self.inputViewModel.userInput = ""
                     } else {
@@ -289,7 +309,8 @@ struct ChatInputAreaView: View {
     }
 
     private var placeholderText: String {
-        if backendConfiguration.selectedProfileID == nil { return "Select a backend..." }
+        // Code mode uses its own profile via CodeSessionManager — skip the "Select a backend" check.
+        if mainViewModel.interfaceMode != .code && backendConfiguration.selectedProfileID == nil { return "Select a backend..." }
         if !inputViewModel.attachedFiles.isEmpty { return "Ask about context..." }
         if inputViewModel.userInput.isEmpty {
             switch inputViewModel.voiceInputState {
@@ -298,9 +319,11 @@ struct ChatInputAreaView: View {
                 case .finalizingSilence: return "Finalizing..."
                 case .error: return "Voice error..."
                 default:
-                    return mainViewModel.interfaceMode == .workflow
-                        ? "Enter workflow input..."
-                        : "Type a message..."
+                    switch mainViewModel.interfaceMode {
+                    case .workflow: return "Enter workflow input..."
+                    case .code:     return "Ask about your code..."
+                    case .chat:     return "Type a message..."
+                    }
             }
         }
         return ""
@@ -313,25 +336,33 @@ struct ChatInputAreaView: View {
                 selectedProfile: selectedProfile,
                 selectedProfileID: backendConfiguration.selectedProfileID,
                 promptText: inputViewModel.userInput,
+                interfaceMode: mainViewModel.interfaceMode,
                 onOpenFilePicker: openFilePicker,
                 onNavigateToToolLibrary: { profileID in
                     router.navigate(to: .toolLibrary(profileID: profileID))
                 },
+                onSelectFolder: mainViewModel.interfaceMode == .code ? { openCodeFolderPicker() } : nil,
                 showingSchedulePopover: $showingSchedulePopover,
                 showingFullScheduleCreator: $showingFullScheduleCreator
             )
 
             Spacer()
 
-            BackendPickerButton(
-                profileThemeColor: profileThemeColor,
-                profileButtonText: profileButtonText,
-                backendConfiguration: backendConfiguration,
-                allowedProfileTypes: mainViewModel.interfaceMode.allowedProfileTypes,
-                showingPopup: $showingBackendSelectorPopup
-            )
-            .disabled(!isInputEnabled)
-            .opacity(isInputEnabled ? 1.0 : 0.5)
+            if mainViewModel.interfaceMode == .code {
+                CodeModelPickerButton()
+                    .disabled(!isInputEnabled)
+                    .opacity(isInputEnabled ? 1.0 : 0.5)
+            } else {
+                BackendPickerButton(
+                    profileThemeColor: profileThemeColor,
+                    profileButtonText: profileButtonText,
+                    backendConfiguration: backendConfiguration,
+                    allowedProfileTypes: mainViewModel.interfaceMode.allowedProfileTypes,
+                    showingPopup: $showingBackendSelectorPopup
+                )
+                .disabled(!isInputEnabled)
+                .opacity(isInputEnabled ? 1.0 : 0.5)
+            }
 
             DynamicActionButton(
                 mode: currentDynamicButtonMode,
@@ -341,9 +372,28 @@ struct ChatInputAreaView: View {
                 voiceInputState: inputViewModel.voiceInputState,
                 defaultTypingAttributes: defaultTypingAttributes,
                 editorTextView: editorTextView,
-                backendProfileSelected: backendConfiguration.selectedProfileID != nil,
+                backendProfileSelected: mainViewModel.interfaceMode == .code
+                    ? codeSessionManager.isConfigured
+                    : backendConfiguration.selectedProfileID != nil,
                 inputViewModel: inputViewModel,
                 onSend: { attributedString, _ in
+                    // Code mode: intercept if model or folder not configured,
+                    // then point selectedProfileID at the code profile so getRequestConfig resolves.
+                    if mainViewModel.interfaceMode == .code {
+                        if codeSessionManager.modelName.isEmpty {
+                            logger.info("[CODE] Send button intercepted — model not selected, opening model picker")
+                            codeSessionManager.showModelPicker = true
+                            return
+                        }
+                        if codeSessionManager.projectPath == nil {
+                            logger.info("[CODE] Send button intercepted — folder not selected, opening folder picker")
+                            openCodeFolderPicker()
+                            return
+                        }
+                        if let codeID = codeSessionManager.codeProfileID {
+                            backendConfiguration.selectedProfileID = codeID
+                        }
+                    }
                     guard let config = backendConfiguration.getRequestConfig() else {
                         logger.error("Send button: Could not get backend config."); return
                     }
@@ -425,6 +475,28 @@ struct ChatInputAreaView: View {
         }
     }
     
+    private func openCodeFolderPicker() {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseFiles = false
+        openPanel.canChooseDirectories = true
+        openPanel.allowsMultipleSelection = false
+        openPanel.prompt = "Select Project Folder"
+        openPanel.message = "Choose a folder for your Code session."
+
+        let csm = codeSessionManager
+        openPanel.begin { [weak explorerViewModel] response in
+            if response == .OK, let url = openPanel.url {
+                Task { @MainActor in
+                    // Update the Explorer sidebar to show this folder
+                    explorerViewModel?.selectedRootURL = url
+                    explorerViewModel?.loadDirectoryContents(for: url)
+                    // Update Code session config (triggers context.md bootstrap)
+                    csm.updateProjectPath(url)
+                }
+            }
+        }
+    }
+
     private func confirmSuggestionSelection() {
         if inputViewModel.fileSuggestionState.isShowing {
             let multiSelected = inputViewModel.fileSuggestionState.multiSelectedIDs

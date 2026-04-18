@@ -398,14 +398,28 @@ actor WorkflowExecutor: Executor {
                     let totalDuration = executionLog.reduce(0.0) { $0 + $1.duration }
                     logger.notice("Workflow execution summary: \(executionLog.count) nodes processed in \(String(format: "%.1f", totalDuration))s")
 
+                    // Workflow-level terminal outcome. Per-node terminals emitted by inner
+                    // executors are swallowed by the forwarder (they're node-scoped); the
+                    // workflow as a whole reports its own outcome here so the bubble's
+                    // TerminalOutcomeChip reflects workflow-level success vs partial-failure.
+                    if successfulTerminals.isEmpty {
+                        continuation.yield(.executionFinished(
+                            outcome: .failed,
+                            reason: "All \(terminalOutputs.count) terminal node\(terminalOutputs.count == 1 ? "" : "s") failed"
+                        ))
+                    } else {
+                        continuation.yield(.executionFinished(outcome: .completed, reason: nil))
+                    }
                     continuation.finish()
 
                 } catch is CancellationError {
                     logger.notice("Workflow cancelled for conversation: \(conversationID)")
                     await ExecutionSuspensionService.shared.cancel(for: conversationID)
+                    continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the workflow"))
                     continuation.finish()
                 } catch {
                     logger.error("Workflow fatal error: \(error.localizedDescription)")
+                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
                 } // end WorkflowDepth.withValue
@@ -541,9 +555,13 @@ actor WorkflowExecutor: Executor {
                         case .content(let text):
                             output += text
 
-                        case .toolOutput(let toolOut, _):
+                        case .toolSucceeded(let toolOut, let durationMs, _):
                             tools.append(toolOut)
-                            continuation.yield(.toolOutput(toolOut, sourceNodeID: nodeID))
+                            continuation.yield(.toolSucceeded(toolOut, durationMs: durationMs, sourceNodeID: nodeID))
+
+                        case .toolFailed(let toolOut, let category, let suggestion, _):
+                            tools.append(toolOut)
+                            continuation.yield(.toolFailed(toolOut, category: category, suggestion: suggestion, sourceNodeID: nodeID))
 
                         case .thought(let msg, let id, _):
                             continuation.yield(.thought("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
@@ -559,6 +577,18 @@ actor WorkflowExecutor: Executor {
 
                         case .error(let errMsg):
                             continuation.yield(.error("[\(displayName)] \(errMsg)"))
+
+                        case .warning(let cat, let msg, let relatedPath, _):
+                            // Always route to the node's own timeline — detail visibility when
+                            // the user drills into the node.
+                            continuation.yield(.warning(category: cat, message: "[\(displayName)] \(msg)", relatedPath: relatedPath, sourceNodeID: nodeID))
+                            // Additionally surface run-threatening categories at the workflow
+                            // level (sourceNodeID = nil). Circuit-breaker / context-pressure
+                            // indicate the whole workflow may abort; the user shouldn't need
+                            // to drill into a specific node to learn that.
+                            if cat.bubblesToWorkflowLevel {
+                                continuation.yield(.warning(category: cat, message: "[\(displayName)] \(msg)", relatedPath: relatedPath, sourceNodeID: nil))
+                            }
 
                         case .workflowNodeStarted, .workflowNodeCompleted, .workflowNodeFailed, .workflowProgress, .workflowLoopIteration:
                             break // Ignore nested workflow events
@@ -579,6 +609,13 @@ actor WorkflowExecutor: Executor {
                              .compactionStarted, .compactionCompleted,
                              .tokenUsage:
                             continuation.yield(event)
+
+                        case .executionFinished:
+                            // Inner executor finishing is per-node — the workflow as a whole
+                            // emits its own completion via workflowNodeCompleted/Failed. Swallow
+                            // the nested terminal signal so the chat bubble reflects the
+                            // outer workflow outcome, not an individual node's.
+                            break
                         }
                     }
                     return (output, tools, media)

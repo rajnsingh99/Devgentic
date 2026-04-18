@@ -67,6 +67,7 @@ enum FileContextStrategy: String, Codable, CaseIterable, Sendable, Hashable {
         case .agent:    return .directInjection
         case .workflow:  return .directInjection
         case .imageGen: return .stateless
+        case .code:     return .stateless
         }
     }
 }

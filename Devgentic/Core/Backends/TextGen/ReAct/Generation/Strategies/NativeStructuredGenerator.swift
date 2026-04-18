@@ -25,7 +25,7 @@ struct NativeStructuredGenerator: CognitiveGenerator {
     }
 
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: true)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, isNativeFlow: true, layerConfig: context.promptLayerConfig)
     }
 
     func promptTrigger(for iteration: Int) -> String {

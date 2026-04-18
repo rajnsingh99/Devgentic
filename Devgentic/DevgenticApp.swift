@@ -56,6 +56,7 @@ struct DevgenticApp: App {
     @State private var mainViewRouter = MainViewRouter()
     @State private var backendProfileService = BackendProfileService()
     @State private var toastManager = ToastManager()
+    @State private var codeSessionManager = CodeSessionManager()
 
     init() {
         let persistence = ChatPersistenceStore.shared
@@ -80,6 +81,10 @@ struct DevgenticApp: App {
 
         self._chatHistoryViewModel = State(wrappedValue: chatHistoryVM)
         self._mainApplicationViewModel = State(wrappedValue: mainVM)
+
+        // Late-inject CodeSessionManager so the VM can build ephemeral profiles on send.
+        let csm = self._codeSessionManager.wrappedValue
+        mainVM.configureCodeSession(csm)
 
         // MARK: - Notification system bootstrap
         // Register the local delivery channel with the dispatcher so tasks can
@@ -113,6 +118,7 @@ struct DevgenticApp: App {
                 .environment(mainViewRouter)
                 .environment(backendProfileService)
                 .environment(toastManager)
+                .environment(codeSessionManager)
                 .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

@@ -77,9 +77,15 @@ struct OllamaLLMProvider: LLMProvider {
         var body: [String: Any] = [
             "model": config.modelName,
             "messages": messages,
-            "stream": false,
-            "think": true // Enable native thinking traces if supported by the model/version
+            "stream": false
         ]
+
+        // Extended thinking — driven by ProviderConfig.thinkingEnabled (seeded by detection).
+        // If enabled but the model doesn't actually support it, Ollama returns HTTP 400
+        // which we translate to `LLMProviderError.thinkingUnsupported` below for auto-heal.
+        if config.thinkingEnabled {
+            body["think"] = true
+        }
 
         if let options = config.options {
             body["options"] = mapToOllamaOptions(options)
@@ -95,9 +101,15 @@ struct OllamaLLMProvider: LLMProvider {
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? "Unknown error"
+            let bodyStr = String(data: data, encoding: .utf8) ?? "Unknown error"
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw LLMProviderError.httpError(status, body)
+
+            // Detect the specific "does not support thinking" 400 so the caller can auto-heal.
+            if status == 400 && bodyStr.lowercased().contains("does not support thinking") {
+                throw LLMProviderError.thinkingUnsupported(modelName: config.modelName)
+            }
+
+            throw LLMProviderError.httpError(status, bodyStr)
         }
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]

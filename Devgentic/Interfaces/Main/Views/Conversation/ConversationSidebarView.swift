@@ -306,6 +306,22 @@ struct ConversationSidebarView: View {
         viewModel.interfaceMode == .workflow ? "point.3.connected.trianglepath.dotted" : "bubble.left.and.text.bubble.right"
     }
 
+    private var emptyStateActionTitle: LocalizedStringKey {
+        switch viewModel.interfaceMode {
+        case .workflow: return "Select a Workflow"
+        case .code:     return "Start a Code Session"
+        case .chat:     return "Start a Conversation"
+        }
+    }
+
+    private var pinnedEmptyTitle: LocalizedStringKey {
+        switch viewModel.interfaceMode {
+        case .workflow: return "No Pinned Workflows"
+        case .code:     return "No Pinned Code Sessions"
+        case .chat:     return "No Pinned Chats"
+        }
+    }
+
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
@@ -316,7 +332,9 @@ struct ConversationSidebarView: View {
                 systemImage: "plus",
                 shortcut: "⌘N",
                 onAction: {
-                    if viewModel.interfaceMode == .workflow {
+                    // Workflow + Code both need full reset (deselect clears profile + code session).
+                    // Chat just creates a new empty conversation.
+                    if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
                         viewModel.deselectConversationAndShowWelcome()
                     } else {
                         viewModel.startNewConversation()
@@ -357,10 +375,10 @@ struct ConversationSidebarView: View {
                 SidebarEmptyStateView(
                     title: emptyStateTitle,
                     subtitle: emptyStateSubtitle,
-                    buttonTitle: viewModel.interfaceMode == .workflow ? "Select a Workflow" : "Start a Conversation",
+                    buttonTitle: emptyStateActionTitle,
                     systemImage: emptyStateIcon,
                     onAction: {
-                        if viewModel.interfaceMode == .workflow {
+                        if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
                             viewModel.deselectConversationAndShowWelcome()
                         } else {
                             viewModel.startNewConversation()
@@ -400,12 +418,12 @@ struct ConversationSidebarView: View {
                     // Pinned-only flat list
                     if data.pinned.isEmpty {
                         SidebarEmptyStateView(
-                            title: viewModel.interfaceMode == .workflow ? "No Pinned Workflows" : "No Pinned Chats",
+                            title: pinnedEmptyTitle,
                             subtitle: "Right-click a conversation to pin it",
                             buttonTitle: newButtonTitle,
                             systemImage: "pin",
                             onAction: {
-                                if viewModel.interfaceMode == .workflow {
+                                if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
                                     viewModel.deselectConversationAndShowWelcome()
                                 } else {
                                     viewModel.startNewConversation()
@@ -514,14 +532,26 @@ struct ConversationSidebarView: View {
         var earlier: [ConversationSD] = []
 
         for conversation in conversations {
-            // Mode filter: match conversation's linked profile type to current mode.
-            if let profileID = conversation.backendEntityId,
-               let profileType = typeMap[profileID] {
-                // Conversation has a known profile — check if it belongs to the current mode.
-                if !allowedTypes.contains(profileType) { continue }
+            // Mode filter: prefer denormalized profileTypeRaw (covers Code mode + ephemeral profiles),
+            // then fall back to store-based profile lookup for legacy conversations.
+            let resolvedProfileType: ProfileType?
+            if let raw = conversation.profileTypeRaw, let pt = ProfileType(rawValue: raw) {
+                resolvedProfileType = pt
+            } else if let profileID = conversation.backendEntityId, let pt = typeMap[profileID] {
+                resolvedProfileType = pt
             } else {
-                // No profile or deleted profile — show only in chat mode (these are new/empty conversations).
-                if viewModel.interfaceMode != .chat { continue }
+                resolvedProfileType = nil
+            }
+
+            if let pt = resolvedProfileType {
+                if !allowedTypes.contains(pt) { continue }
+            } else {
+                // No profile type resolved — always show in chat mode. Hide from workflow
+                // (workflows always have a profile bound). Code conversations are now tagged
+                // at creation time via `tagConversationWithCurrentMode`, so an untagged entry
+                // reaching code mode implies a legacy/migrated row — show it there too so it's
+                // discoverable rather than silently excluded.
+                if viewModel.interfaceMode == .workflow { continue }
             }
 
             // Search text filter.

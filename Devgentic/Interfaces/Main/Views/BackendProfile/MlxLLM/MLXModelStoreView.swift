@@ -293,8 +293,10 @@ struct ModelCardView: View {
     }
 
     /// Lazily computed fit assessment based on available model metadata.
+    /// Isolated per card: any unparseable metadata degrades gracefully to a neutral assessment
+    /// and logs raw inputs (see ModelFitAdvisor) so we can add support for new formats.
     private var fitAssessment: ModelFitAssessment {
-        ModelFitAdvisor.assess(metadata: nil, diskSizeString: model.size)
+        ModelFitAdvisor.assess(metadata: nil, diskSizeString: model.size, modelName: model.id)
     }
 
     var body: some View {

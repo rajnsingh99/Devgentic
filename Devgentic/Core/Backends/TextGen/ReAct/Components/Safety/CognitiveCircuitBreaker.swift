@@ -146,6 +146,9 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         if current == limit - 1 {
             let toolNames = observations.map(\.toolName).joined(separator: ", ")
             logger.info("⚠️ Repetitive action warning: [\(toolNames)] repeated \(current) times. One more will trigger abort.")
+            return .proceedWithWarning(
+                message: "Repetitive pattern: [\(toolNames)] ran \(current) times with identical args + outputs. One more will abort this run."
+            )
         }
 
         // --- Check 2: Per-tool global frequency (catches alternating combos) ---

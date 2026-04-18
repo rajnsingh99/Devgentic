@@ -156,7 +156,8 @@ actor ReActAgentExecutor: Executor {
                             availableTools: input.tools,
                             userProfile: userProfile,
                             skillManifests: input.skillManifests,
-                            taskDescription: input.workflowContext?.taskDescription
+                            taskDescription: input.workflowContext?.taskDescription,
+                            promptLayerConfig: input.workflowContext != nil ? .workflow : .agent
                         )
                         
                         try Task.checkCancellation()
@@ -169,7 +170,7 @@ actor ReActAgentExecutor: Executor {
                                 ? "Memory pressure: \(pct)% of scratchpad budget used — older observations are being evicted."
                                 : "Memory pressure: \(pct)% of scratchpad budget used."
                             logger.warning("⚠️ \(message)")
-                            continuation.yield(.thought("⚠️ \(message)"))
+                            continuation.yield(.warning(category: .memoryPressure, message: message))
 
                             // Proactive throttling: when budget is fully exhausted, nudge the
                             // model toward synthesis rather than continued exploration.
@@ -221,27 +222,28 @@ actor ReActAgentExecutor: Executor {
                             switch action {
                             case .throttle(let seconds, let message):
                                 await GlobalRateLimiter.shared.drainAndPenalize(key: input.rateLimitKey, category: input.rateLimitCategory, penaltySeconds: seconds)
-                                continuation.yield(.thought(message))
+                                continuation.yield(.warning(category: .throttle, message: message))
                                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                                 currentIteration -= 1
                                 continue cognitiveLoop
-                                
+
                             case .networkRetry(let message):
-                                continuation.yield(.thought(message))
+                                continuation.yield(.warning(category: .retry, message: message))
                                 currentIteration -= 1
                                 continue cognitiveLoop
-                                
+
                             case .parseRetry(let systemAlert, let attemptCount, let maxAttempts):
                                 memoryStrategy.recordSystemAlert(msg: systemAlert)
-                                continuation.yield(.thought("⚠️ Error: Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
+                                continuation.yield(.warning(category: .parseFailure, message: "Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
                                 await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                                 continue cognitiveLoop
 
                             case .modelReload(let message):
-                                continuation.yield(.thought(message))
+                                continuation.yield(.warning(category: .retry, message: message))
                                 let reloaded = await MLXService.shared.reloadCurrentModel()
                                 if !reloaded {
                                     continuation.yield(.content("The model was unloaded and could not be reloaded automatically. Please try again."))
+                                    continuation.yield(.executionFinished(outcome: .failed, reason: "Model reload failed"))
                                     continuation.finish()
                                     return
                                 }
@@ -255,6 +257,7 @@ actor ReActAgentExecutor: Executor {
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED")
                                 }
                                 continuation.yield(.content(reason))
+                                continuation.yield(.executionFinished(outcome: .failed, reason: reason))
                                 continuation.finish()
                                 return
                             }
@@ -293,7 +296,7 @@ actor ReActAgentExecutor: Executor {
                             // Inject a corrective system alert and retry the generation.
                             let alert = "CRITICAL: Your last response described tool usage in plain text but did not include a structured tool call. You MUST respond with a valid JSON object containing a `tool_calls` array. Do NOT describe tool calls in prose — actually invoke them."
                             memoryStrategy.recordSystemAlert(msg: alert)
-                            continuation.yield(.thought("⚠️ Format correction: model described tool intent without structured output. Retrying..."))
+                            continuation.yield(.warning(category: .formatCorrection, message: "Format correction: model described tool intent without structured output. Retrying..."))
                             logger.warning("🔄 Suspected format failure. Injecting corrective alert and retrying iteration \(currentIteration).")
                             continue cognitiveLoop
                         case .proceed:
@@ -347,9 +350,16 @@ actor ReActAgentExecutor: Executor {
                         // Check if this iteration's observations are identical to previous ones.
                         // Catches "successful but useless" loops (e.g., same tool with empty args returning same result).
                         let repetitiveAction = circuitBreaker.evaluateRepetitiveActions(observations)
-                        if case .abort(let reason) = repetitiveAction {
+                        switch repetitiveAction {
+                        case .abort(let reason):
                             shouldAbort = true
                             abortReason = reason
+                        case .proceedWithWarning(let message):
+                            // Surface the imminent-abort signal to the UI so the user can
+                            // intervene (cancel, refine prompt) before the next iteration trips.
+                            continuation.yield(.warning(category: .circuitBreaker, message: message))
+                        case .proceed, .intervene:
+                            break
                         }
 
                         if shouldAbort {
@@ -373,7 +383,7 @@ actor ReActAgentExecutor: Executor {
                             case .abort:
                                 // Default behavior: synthesize best-effort response and exit
                                 executionSummary.markComplete(failureReason: abortReason)
-                                continuation.yield(.thought("⚠️ Circuit breaker triggered — recovering…"))
+                                continuation.yield(.warning(category: .circuitBreaker, message: "Aborting: \(abortReason)"))
                                 // Circuit breaker abort: always force synthesis so the user
                                 // gets a coherent explanation, not raw partial reasoning.
                                 let response = await ResponseSynthesizer.synthesize(
@@ -388,6 +398,7 @@ actor ReActAgentExecutor: Executor {
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED")
                                 }
                                 continuation.yield(.content(response))
+                                continuation.yield(.executionFinished(outcome: .failed, reason: abortReason))
                                 continuation.finish()
                                 return
                             }
@@ -432,6 +443,7 @@ actor ReActAgentExecutor: Executor {
                                 logState.info("💾 Auto-Patched Active Episode to: FAILED (failHard)")
                             }
                             continuation.yield(.error(failureMsg))
+                            continuation.yield(.executionFinished(outcome: .failed, reason: failureMsg))
                             continuation.finish()
                             return
 
@@ -481,6 +493,9 @@ actor ReActAgentExecutor: Executor {
                     }
 
                     continuation.yield(.content(response))
+                    let terminalOutcome: ExecutionOutcome = exitStatus == "COMPLETED" ? .completed : .failed
+                    let terminalReason: String? = exitStatus == "COMPLETED" ? nil : "Reached maximum iterations (\(maxIterations)) without explicit completion"
+                    continuation.yield(.executionFinished(outcome: terminalOutcome, reason: terminalReason))
                     continuation.finish()
 
                 } catch is CancellationError {
@@ -495,10 +510,12 @@ actor ReActAgentExecutor: Executor {
                     // Without this, cancelled messages show an empty bubble with action
                     // buttons as if the agent completed normally.
                     continuation.yield(.content("*Operation stopped by user.*"))
+                    continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
                     logger.error("ReAct Fatal Error: \(error.localizedDescription)")
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
             }

@@ -90,6 +90,9 @@ struct ProfileValidator {
                         message: "Workflow must reference at least one agent profile."
                     ))
                 }
+
+            case .code(let config):
+                errors.append(contentsOf: validateLLMConfig(config.llmConfig))
             }
         } else {
             // Even in lenient mode, validate instructions length if present
@@ -97,6 +100,8 @@ struct ProfileValidator {
             case .bot(let config):
                 errors.append(contentsOf: validateInstructions(config.instructions))
             case .agent(let config):
+                errors.append(contentsOf: validateInstructions(config.instructions))
+            case .code(let config):
                 errors.append(contentsOf: validateInstructions(config.instructions))
             case .imageGen, .workflow:
                 break

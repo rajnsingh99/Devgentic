@@ -42,7 +42,7 @@ struct JsonStructuredGenerator: CognitiveGenerator {
     }
 
     func compileMessages(from context: SemanticContext) -> [[String: String]] {
-        return buildStandardMessages(context: context, dialectRules: dialectRules, wrapping: .markdown)
+        return buildStandardMessages(context: context, dialectRules: dialectRules, layerConfig: context.promptLayerConfig, wrapping: .markdown)
     }
 
     func promptTrigger(for iteration: Int) -> String {
