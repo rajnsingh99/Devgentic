@@ -13,7 +13,7 @@ import os
 final class OllamaCapabilityService: @unchecked Sendable {
 
     static let shared = OllamaCapabilityService()
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaCapabilityService")
+    private let logger = DGLogger(category: "OllamaCapabilityService")
     
     // Known families that define a baseline of support if template inspection fails/is ambiguous
     private let safeFamilies = ["llama3.1", "llama3.2", "llama3.3", "qwen2.5", "mistral-nemo", "nemotron"]

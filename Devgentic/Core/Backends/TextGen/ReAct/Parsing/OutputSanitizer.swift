@@ -12,7 +12,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OutputSanitizer")
+private let logger = DGLogger(category: "OutputSanitizer")
 
 /// Structured result from the OutputSanitizer.
 struct SanitizedOutput: Sendable {

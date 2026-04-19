@@ -9,7 +9,7 @@ import Foundation
 import MCP
 import os.log
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MCPClientService")
+private let logger = DGLogger(category: "MCPClientService")
 
 /// Observable connection lifecycle state for each MCP server.
 enum MCPConnectionState: Equatable {

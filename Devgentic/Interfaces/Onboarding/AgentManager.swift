@@ -13,7 +13,7 @@
 //
 //@MainActor
 //class AgentManager: ObservableObject {
-//    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AgentManager")
+//    private static let logger = DGLogger(category: "AgentManager")
 //
 //    @Published var agentStatus: AgentStatus = .stopped
 //    @Published var agentLog: [String] = [] // For displaying agent's runtime logs if needed

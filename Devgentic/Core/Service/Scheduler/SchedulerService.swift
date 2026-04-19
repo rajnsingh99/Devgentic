@@ -13,7 +13,7 @@ import SwiftData
 import AppKit
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SchedulerService")
+private let logger = DGLogger(category: "SchedulerService")
 
 @MainActor
 @Observable

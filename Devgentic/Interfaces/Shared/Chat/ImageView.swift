@@ -9,7 +9,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ImageView")
+private let logger = DGLogger(category: "ImageView")
 
 struct ImageView: View {
     let imageData: Data

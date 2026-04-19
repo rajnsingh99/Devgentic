@@ -12,7 +12,7 @@ import UserNotifications
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AppDelegate")
+    private static let logger = DGLogger(category: "AppDelegate")
     
     static var shared: AppDelegate {
         return NSApplication.shared.delegate as! AppDelegate
@@ -31,6 +31,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         Self.logger.info("UNUserNotificationCenter delegate set.")
         setupHotkey()
         setupNotificationObserver()
+
+        // 30-day observability purge. Runs in a detached background task so startup
+        // isn't delayed by the SQLite DELETE on large archives. Age-based policy
+        // matches traces/spans retention (set once globally here; other tables
+        // cascade-delete via foreign keys).
+        Task.detached(priority: .background) {
+            guard let store = TraceStore.shared else { return }
+            let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
+            if let purged = try? store.purgeLogEntriesOlderThan(cutoff), purged > 0 {
+                Self.logger.info("Purged \(purged) log entries older than 30 days.")
+            }
+        }
     }
 
     /// Allow banners / sounds to appear even while the app is in the foreground.
@@ -63,16 +75,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate.")
-        
+
         // 1. Terminate any active shell processes to prevent zombies
         ShellSessionManager.shared.cleanup()
-        
-        // Ensure models are unloaded cleanly
+
+        // 2. Flush observability buffers to SQLite before quit. The periodic flush
+        //    runs every 5s so we only lose ≤5s on an abrupt quit; this is best-effort
+        //    cleanup on graceful quit. We use a short DispatchSemaphore wait because
+        //    applicationWillTerminate returns immediately — without it, the flush
+        //    Task would be cancelled before completing.
+        let logFlushSem = DispatchSemaphore(value: 0)
+        Task {
+            await LogRecorder.shared.prepareForTermination()
+            logFlushSem.signal()
+        }
+        _ = logFlushSem.wait(timeout: .now() + .milliseconds(300))
+
+        // 3. Ensure models are unloaded cleanly
         Task {
             // Unload local MLX model from App RAM
             let stats = await MLXService.shared.unloadModel()
             Self.logger.info("Application Termination MLX Cleanup Stats: \(stats)")
-            
+
             // Unload Ollama model from VRAM (daemon)
             await OllamaService.shared.unloadModel()
         }

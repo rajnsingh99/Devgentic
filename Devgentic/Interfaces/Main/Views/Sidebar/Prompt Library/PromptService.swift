@@ -17,7 +17,7 @@ class PromptService {
 
     // Use the new PromptStoreProtocol
     private let promptStore: PromptStoreProtocol
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptService")
+    private let logger = DGLogger(category: "PromptService")
 
     /// The collection of all prompts, published for UI updates.
     var prompts: [DevPrompt] = []

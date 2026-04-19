@@ -9,7 +9,7 @@
 import Foundation
 import OSLog
 
-private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
+private let logLLMOps = DGLogger(category: "LLMOps")
 
 // MARK: - Strategy A: Native Tool Calling Generator (Cloud / Modern)
 

@@ -8,7 +8,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SideBarPaneView")
+private let logger = DGLogger(category: "SideBarPaneView")
 
 enum SidebarTab: CaseIterable, Identifiable {
     case conversations

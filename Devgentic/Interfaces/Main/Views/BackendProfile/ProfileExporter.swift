@@ -13,7 +13,7 @@ import AppKit
 import UniformTypeIdentifiers
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ProfileExporter")
+private let logger = DGLogger(category: "ProfileExporter")
 
 // MARK: - Custom UTType
 

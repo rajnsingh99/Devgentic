@@ -10,7 +10,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CodeModelPicker")
+private let logger = DGLogger(category: "CodeModelPicker")
 
 struct CodeModelPickerButton: View {
 

@@ -10,7 +10,7 @@ import os
 import AppKit
 import UniformTypeIdentifiers
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ChatInputAreaUI_V2")
+private let logger = DGLogger(category: "ChatInputAreaUI_V2")
 
 enum SuggestionNavigationDirection { case up, down }
 

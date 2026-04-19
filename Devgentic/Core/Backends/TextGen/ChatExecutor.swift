@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatExecutor")
+private let logger = DGLogger(category: "ChatExecutor")
 
 /// A lightweight executor for direct "Bot" interactions.
 /// Unlike the ReActAgentExecutor, this does not loop, reason, or use tools.

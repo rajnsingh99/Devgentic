@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CircuitBreaker")
+private let logger = DGLogger(category: "CircuitBreaker")
 
 /// Monitors a token stream for repetitive loops and signals when generation
 /// should be terminated early.

@@ -12,7 +12,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MistralXMLParser")
+private let logger = DGLogger(category: "MistralXMLParser")
 
 struct MistralXMLParser: CognitiveParserProtocol {
 

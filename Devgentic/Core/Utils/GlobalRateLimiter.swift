@@ -84,7 +84,7 @@ actor GlobalRateLimiter {
     // MARK: - Singleton
     static let shared = GlobalRateLimiter()
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "GlobalRateLimiter")
+    private let logger = DGLogger(category: "GlobalRateLimiter")
 
     // MARK: - State
 

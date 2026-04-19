@@ -18,7 +18,7 @@ actor MLXService {
     // MARK: - Singleton
     static let shared = MLXService()
     
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MLXService")
+    private let logger = DGLogger(category: "MLXService")
     
     // MARK: - State
     

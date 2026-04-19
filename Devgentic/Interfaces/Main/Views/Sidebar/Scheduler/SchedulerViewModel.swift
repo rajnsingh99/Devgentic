@@ -9,7 +9,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SchedulerViewModel")
+private let logger = DGLogger(category: "SchedulerViewModel")
 
 enum SchedulerFilter: String, CaseIterable, Identifiable {
     case all = "All"

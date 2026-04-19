@@ -9,7 +9,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OpenAIService")
+private let logger = DGLogger(category: "OpenAIService")
 
 /// Service for interacting with the OpenAI API.
 struct OpenAIService {

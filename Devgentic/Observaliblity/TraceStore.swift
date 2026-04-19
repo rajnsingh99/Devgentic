@@ -12,10 +12,29 @@ import os
 /// A GRDB-backed SQLite store for persistent trace, span, and event data.
 /// Runs in its own `.sqlite` file, fully isolated from the main Core Data store.
 final class TraceStore: Sendable {
-    
+
+    // MARK: - Shared singleton
+
+    /// Process-wide singleton. Multiple observability actors (TraceRecorder,
+    /// LogRecorder, MetricsAggregator) share this single SQLite connection pool
+    /// so migrations run exactly once and WAL concurrency works as expected.
+    /// Returns nil on init failure — callers must handle the nil case gracefully
+    /// (they all do, via `guard let store else { return }`).
+    static let shared: TraceStore? = {
+        do {
+            return try TraceStore()
+        } catch {
+            // Can't use os.Logger directly here — use print as last resort.
+            // A TraceStore init failure is catastrophic for observability but
+            // must never crash the app.
+            print("⚠️ TraceStore.shared init failed: \(error.localizedDescription). Observability disabled.")
+            return nil
+        }
+    }()
+
     private let dbPool: DatabasePool
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "TraceStore")
-    
+
     // MARK: - Initialization
     
     /// Opens (or creates) the trace database at the standard Application Support location.
@@ -114,19 +133,453 @@ final class TraceStore: Sendable {
             try db.create(index: "idx_events_span", on: "span_events", columns: ["spanID"])
             try db.create(index: "idx_events_trace", on: "span_events", columns: ["traceID"])
         }
-        
+
+        // v2: Observability expansion — richer span-event columns for the canonical
+        // error taxonomy. All columns nullable so legacy rows continue to load.
+        // Writes to these columns are dev-mode-gated in TraceRecorder; reads work
+        // regardless. This migration is safe to run on databases already populated
+        // with v1 data.
+        migrator.registerMigration("v2_expand_span_events") { db in
+            try db.alter(table: "span_events") { t in
+                // AgentErrorCategory.rawValue — lets analytics GROUP BY category
+                // without parsing detailJSON blobs.
+                t.add(column: "errorCategory", .text)
+                // UUID shared across every SpanEvent emitted about the same underlying
+                // incident, so propagation chains collapse to a single "root cause"
+                // via GROUP BY. Populated only when a ClassifiedAgentError is being
+                // emitted (other event types pass nil).
+                t.add(column: "errorChainID", .text)
+                // ExecutionPhase.rawValue — redundant with category.phase but indexed
+                // for fast dashboard queries ("show me all .parsing failures").
+                t.add(column: "phase", .text)
+                // ReAct iteration number. Nil for events outside the cognitive loop.
+                t.add(column: "iterationNumber", .integer)
+                // For future causal-chain links — points at the event that triggered this
+                // one. Nullable FK; not enforced to keep propagation ordering flexible.
+                t.add(column: "causedByEventID", .integer)
+                // Intrinsic duration of the event (e.g., LLM response time, tool latency).
+                // Distinct from span.endedAt - span.startedAt (which wraps the operation).
+                t.add(column: "durationMs", .integer)
+            }
+
+            // Indices for the dashboard queries we expect to hammer:
+            //  - "show all errors of category X" (`idx_events_category`)
+            //  - "collapse this trace to N root causes" (`idx_events_chain`)
+            //  - "latency distribution for phase=tooling" (`idx_events_phase`)
+            try db.create(index: "idx_events_category",
+                          on: "span_events",
+                          columns: ["errorCategory"],
+                          condition: Column("errorCategory") != nil)
+            try db.create(index: "idx_events_chain",
+                          on: "span_events",
+                          columns: ["errorChainID"],
+                          condition: Column("errorChainID") != nil)
+            try db.create(index: "idx_events_phase",
+                          on: "span_events",
+                          columns: ["phase"],
+                          condition: Column("phase") != nil)
+        }
+
+        // v3: Per-trace configuration snapshot — one row per trace capturing the full
+        // effective request config (profile, model, tools, capabilities, retry policy,
+        // memory budget, hardware, feature flags). The #1 thing missing for offline
+        // bug reproduction.
+        //
+        // Indexed columns support common dashboard queries (GROUP BY provider, model,
+        // app version). The full TraceConfigSnapshot lives in `snapshotJSON`, so new
+        // non-indexed fields can be added without schema changes.
+        migrator.registerMigration("v3_create_trace_configs") { db in
+            try db.create(table: "trace_configs") { t in
+                t.primaryKey("traceID", .text)
+                    .references("traces", column: "traceID", onDelete: .cascade)
+
+                // Indexed identity / environment columns.
+                t.column("provider", .text).notNull()
+                t.column("modelName", .text).notNull()
+                t.column("profileType", .text).notNull()
+                t.column("appVersion", .text).notNull()
+                t.column("osVersion", .text).notNull()
+
+                // Indexed config-summary columns.
+                t.column("toolsCount", .integer).notNull().defaults(to: 0)
+                t.column("capabilitiesCount", .integer).notNull().defaults(to: 0)
+                t.column("instructionsHash", .text)
+                t.column("memoryBudgetBytes", .integer)
+                t.column("historyStrategy", .text)
+                t.column("thinkingEnabled", .boolean).notNull().defaults(to: false)
+
+                // Full sanitized snapshot. Extensible without schema changes.
+                t.column("snapshotJSON", .text).notNull()
+            }
+
+            try db.create(index: "idx_trace_configs_provider",     on: "trace_configs", columns: ["provider"])
+            try db.create(index: "idx_trace_configs_model",        on: "trace_configs", columns: ["modelName"])
+            try db.create(index: "idx_trace_configs_profile_type", on: "trace_configs", columns: ["profileType"])
+            try db.create(index: "idx_trace_configs_app_version",  on: "trace_configs", columns: ["appVersion"])
+            try db.create(index: "idx_trace_configs_instr_hash",
+                          on: "trace_configs",
+                          columns: ["instructionsHash"],
+                          condition: Column("instructionsHash") != nil)
+        }
+
+        // v4: In-app log ring buffer persistence. DGLogger calls the LogRecorder
+        // actor, which periodically flushes its in-memory buffer into this table.
+        // Enables the "last N hours of logs" panel in diagnostic export bundles —
+        // previously impossible because os.Logger only writes to the system log.
+        //
+        // Indexed on timestamp (for time-range queries), level (for severity
+        // filters), and traceID (for correlating logs to a specific run).
+        migrator.registerMigration("v4_create_log_entries") { db in
+            try db.create(table: "log_entries") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("timestamp", .double).notNull()
+                t.column("level", .text).notNull()
+                t.column("subsystem", .text)
+                t.column("category", .text)
+                t.column("message", .text)
+                t.column("traceID", .text)
+                t.column("spanID", .text)
+                t.column("phase", .text)
+                t.column("metadataJSON", .text)
+            }
+
+            try db.create(index: "idx_logs_timestamp", on: "log_entries", columns: ["timestamp"])
+            try db.create(index: "idx_logs_level",     on: "log_entries", columns: ["level"])
+            try db.create(index: "idx_logs_trace",
+                          on: "log_entries",
+                          columns: ["traceID"],
+                          condition: Column("traceID") != nil)
+        }
+
         return migrator
     }
-    
+
     // MARK: - Write Operations
-    
+
     /// Inserts a new trace record.
     func insertTrace(_ trace: TraceRecord) throws {
         try dbPool.write { db in
             try trace.insert(db)
         }
     }
-    
+
+    /// Inserts or replaces a config snapshot for a trace. One row per trace — if
+    /// `captureConfigSnapshot` is ever called twice with the same traceID (shouldn't
+    /// happen in practice), the second call overwrites. `insert` with
+    /// `.replace` conflict policy isn't available here, so we use `save` which falls
+    /// back to update-on-primary-key-conflict.
+    func saveConfigSnapshot(_ row: TraceConfigRow) throws {
+        try dbPool.write { db in
+            try row.save(db)
+        }
+    }
+
+    /// Fetches the config snapshot for a trace, if one exists. Returns nil for traces
+    /// that predate the v3 migration or where the snapshot capture was skipped (e.g.,
+    /// dev-mode off path that never calls `captureConfigSnapshot`).
+    func fetchConfigSnapshot(traceID: String) throws -> TraceConfigRow? {
+        try dbPool.read { db in
+            try TraceConfigRow.fetchOne(db, key: traceID)
+        }
+    }
+
+    // MARK: - Log Entries (v4)
+
+    /// Batch-inserts log entries in a single transaction. Called from `LogRecorder`
+    /// on threshold and periodic flushes. Using `insertedCopy` so auto-assigned
+    /// IDs can be read back if callers care (we don't, currently — caller drops
+    /// the entries post-insert).
+    func insertLogEntries(_ entries: [LogEntry]) throws {
+        guard !entries.isEmpty else { return }
+        try dbPool.write { db in
+            for entry in entries {
+                var copy = entry
+                try copy.insert(db)
+            }
+        }
+    }
+
+    /// Fetches persisted log entries for a time range. Primarily consumed by the
+    /// diagnostic export bundle and ReportInspector.
+    /// - Parameters:
+    ///   - since: lower-bound timestamp (inclusive)
+    ///   - minLevel: drop entries below this severity (nil = all levels)
+    ///   - limit: row cap (default 10k, tune via `LogRecorder.persistedRecent`)
+    /// - Returns: entries in ascending timestamp order (oldest first).
+    func fetchLogEntries(since: Date, minLevel: LogLevel? = nil, limit: Int = 10_000) throws -> [LogEntry] {
+        try dbPool.read { db in
+            var query = LogEntry.filter(LogEntry.Columns.timestamp >= since)
+            if let minLevel {
+                // Level comparison: include entries whose LogLevel ordinal is >= minLevel.
+                // GRDB can't compare strings by rank natively, so we filter to the set
+                // of levels that satisfy the criterion.
+                let allowed = LogLevel.allCases.filter { $0 >= minLevel }.map(\.rawValue)
+                query = query.filter(allowed.contains(LogEntry.Columns.level))
+            }
+            return try query
+                .order(LogEntry.Columns.timestamp.asc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    /// Purges log entries older than the given date. Called from the 30-day
+    /// purge job on app launch. Returns the number of rows deleted.
+    @discardableResult
+    func purgeLogEntriesOlderThan(_ date: Date) throws -> Int {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM log_entries WHERE timestamp < ?",
+                arguments: [date.timeIntervalSince1970]
+            )
+            return db.changesCount
+        }
+    }
+
+    // MARK: - Metrics Aggregation Queries (Phase E)
+    //
+    // All queries operate on the canonical trace + span_events + trace_configs tables.
+    // No separate pre-aggregation: at single-user scale (30-day retention) live queries
+    // run in single-digit ms against the indexed columns we added in v2/v3/v4.
+    // If profiling ever shows slowdowns, add rolling-counter tables here without
+    // changing the MetricsAggregator / TrendsView API above.
+
+    /// Per-tool reliability stats (success/failure counts, latency percentiles,
+    /// failure-category breakdown). Uses the `toolResult` event type + dev-mode-populated
+    /// `durationMs` / `errorCategory` columns.
+    func toolReliabilityStats(since: Date, until: Date = Date()) throws -> [ToolReliabilityStats] {
+        try dbPool.read { db in
+            // 1. Per-tool aggregate counts + avg duration.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    content AS tool_name,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN severity = 'info' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN severity = 'warning' THEN 1 ELSE 0 END) AS failure_count,
+                    AVG(CASE WHEN durationMs IS NOT NULL THEN durationMs END) AS avg_duration
+                FROM span_events
+                WHERE eventType = 'toolResult'
+                  AND timestamp >= ? AND timestamp <= ?
+                GROUP BY content
+                ORDER BY total DESC
+                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+            var results: [ToolReliabilityStats] = []
+
+            for row in rows {
+                guard let toolName: String = row["tool_name"] else { continue }
+                let total: Int = row["total"] ?? 0
+                let successCount: Int = row["success_count"] ?? 0
+                let failureCount: Int = row["failure_count"] ?? 0
+                let avgDuration: Double? = row["avg_duration"]
+
+                // 2. Percentiles — one extra pass per tool, ordered by duration.
+                // For small windows (<1000 tool calls per tool) this is fast.
+                let durations = try Int.fetchAll(db, sql: """
+                    SELECT durationMs
+                    FROM span_events
+                    WHERE eventType = 'toolResult'
+                      AND content = ?
+                      AND durationMs IS NOT NULL
+                      AND timestamp >= ? AND timestamp <= ?
+                    ORDER BY durationMs ASC
+                    """, arguments: [toolName, since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+                let p50 = percentile(durations, 0.50)
+                let p95 = percentile(durations, 0.95)
+
+                // 3. Failure breakdown — categories assigned by emitToolResult +
+                // any Phase D-migrated sites (permission, timeout, etc.).
+                let breakdownRows = try Row.fetchAll(db, sql: """
+                    SELECT errorCategory, COUNT(*) AS cnt
+                    FROM span_events
+                    WHERE eventType = 'toolResult'
+                      AND content = ?
+                      AND severity = 'warning'
+                      AND errorCategory IS NOT NULL
+                      AND timestamp >= ? AND timestamp <= ?
+                    GROUP BY errorCategory
+                    """, arguments: [toolName, since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+                var breakdown: [AgentErrorCategory: Int] = [:]
+                for br in breakdownRows {
+                    guard let raw: String = br["errorCategory"],
+                          let cat = AgentErrorCategory(rawValue: raw) else { continue }
+                    breakdown[cat] = br["cnt"]
+                }
+
+                results.append(ToolReliabilityStats(
+                    toolName: toolName,
+                    totalCalls: total,
+                    successCount: successCount,
+                    failureCount: failureCount,
+                    avgDurationMs: avgDuration.map { Int($0) },
+                    p50DurationMs: p50,
+                    p95DurationMs: p95,
+                    failureBreakdown: breakdown
+                ))
+            }
+            return results
+        }
+    }
+
+    /// Per-category error/warning frequency. Populated by Phase D sites + Phase 1 warnings.
+    func categoryFrequencyStats(since: Date, until: Date = Date()) throws -> [CategoryFrequencyStats] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT errorCategory, COUNT(*) AS cnt
+                FROM span_events
+                WHERE errorCategory IS NOT NULL
+                  AND timestamp >= ? AND timestamp <= ?
+                GROUP BY errorCategory
+                ORDER BY cnt DESC
+                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+            var results: [CategoryFrequencyStats] = []
+            for row in rows {
+                guard let raw: String = row["errorCategory"],
+                      let cat = AgentErrorCategory(rawValue: raw) else { continue }
+                results.append(CategoryFrequencyStats(category: cat, count: row["cnt"] ?? 0))
+            }
+            return results
+        }
+    }
+
+    /// Per-(provider, model) outcome rates. Joins `traces` to `trace_configs` so we can
+    /// split runs by the model actually used. Outcome classification reads from
+    /// `traces.status` which is set at `endTrace(status:error:)`.
+    func modelReliabilityStats(since: Date, until: Date = Date()) throws -> [ModelReliabilityStats] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    tc.provider AS provider,
+                    tc.modelName AS model_name,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN t.status = 'error' THEN 1 ELSE 0 END) AS failed,
+                    AVG(CASE WHEN t.endedAt IS NOT NULL THEN (t.endedAt - t.startedAt) * 1000 END) AS avg_duration
+                FROM trace_configs tc
+                JOIN traces t ON t.traceID = tc.traceID
+                WHERE t.startedAt >= ? AND t.startedAt <= ?
+                GROUP BY tc.provider, tc.modelName
+                ORDER BY total DESC
+                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+            return rows.compactMap { row in
+                guard let provider: String = row["provider"],
+                      let modelName: String = row["model_name"] else { return nil }
+                let total: Int = row["total"] ?? 0
+                let completed: Int = row["completed"] ?? 0
+                let failed: Int = row["failed"] ?? 0
+                let avgDuration: Double? = row["avg_duration"]
+                return ModelReliabilityStats(
+                    provider: provider,
+                    modelName: modelName,
+                    totalRuns: total,
+                    completedCount: completed,
+                    failedCount: failed,
+                    cancelledCount: total - completed - failed,
+                    avgDurationMs: avgDuration.map { Int($0) }
+                )
+            }
+        }
+    }
+
+    /// Circuit breaker trip summary — which safeguard fires most, which tools
+    /// trigger it most. CB categories are the 5 `.cb*` cases in AgentErrorCategory.
+    func circuitBreakerStatsAggregate(since: Date, until: Date = Date()) throws -> CircuitBreakerStats {
+        try dbPool.read { db in
+            // CB trips by category.
+            let cbCategoryRaws: [String] = AgentErrorCategory.allCases
+                .filter { $0.rawValue.hasPrefix("cb") }
+                .map(\.rawValue)
+
+            // If we ever add non-cb categories starting with "cb", this filter breaks;
+            // hardcode explicit list as defense-in-depth.
+            let explicitCBs = [
+                AgentErrorCategory.cbRepetitiveAction.rawValue,
+                AgentErrorCategory.cbConsecutiveFail.rawValue,
+                AgentErrorCategory.cbToolRetryLimit.rawValue,
+                AgentErrorCategory.cbIdleLimit.rawValue,
+                AgentErrorCategory.cbAskUserLimit.rawValue
+            ]
+            assert(Set(cbCategoryRaws) == Set(explicitCBs), "Phase E: update CB stats query if AgentErrorCategory cb* set changes")
+
+            let categoryRows = try Row.fetchAll(db, sql: """
+                SELECT errorCategory, COUNT(*) AS cnt
+                FROM span_events
+                WHERE errorCategory IN (\(cbCategoryRaws.map { "'\($0)'" }.joined(separator: ", ")))
+                  AND timestamp >= ? AND timestamp <= ?
+                GROUP BY errorCategory
+                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+            var tripsByCategory: [AgentErrorCategory: Int] = [:]
+            var total = 0
+            for row in categoryRows {
+                guard let raw: String = row["errorCategory"],
+                      let cat = AgentErrorCategory(rawValue: raw) else { continue }
+                let cnt: Int = row["cnt"] ?? 0
+                tripsByCategory[cat] = cnt
+                total += cnt
+            }
+
+            // Offending tools — parse `context.tool_name` out of detailJSON. Approximate
+            // (LIKE on JSON substring) but cheap and deterministic enough for a dashboard.
+            let toolRows = try Row.fetchAll(db, sql: """
+                SELECT
+                    SUBSTR(detailJSON, INSTR(detailJSON, '"tool_name":"') + 13, 64) AS raw,
+                    COUNT(*) AS cnt
+                FROM span_events
+                WHERE errorCategory IN (\(cbCategoryRaws.map { "'\($0)'" }.joined(separator: ", ")))
+                  AND detailJSON LIKE '%"tool_name":%'
+                  AND timestamp >= ? AND timestamp <= ?
+                GROUP BY raw
+                ORDER BY cnt DESC
+                LIMIT 5
+                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+
+            let topTools: [(tool: String, count: Int)] = toolRows.compactMap { row in
+                guard let raw: String = row["raw"], let cnt: Int = row["cnt"] else { return nil }
+                // Trim at the first closing quote.
+                let name = raw.split(separator: "\"").first.map(String.init) ?? raw
+                return (tool: name, count: cnt)
+            }
+
+            return CircuitBreakerStats(
+                totalTrips: total,
+                tripsByCategory: tripsByCategory,
+                topOffendingTools: topTools,
+                windowStart: since,
+                windowEnd: until
+            )
+        }
+    }
+
+    /// Number of traces in the window. Cheap count — used as a header sanity signal
+    /// in the dashboard ("X traces analyzed").
+    func traceCount(since: Date, until: Date = Date()) throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*)
+                FROM traces
+                WHERE startedAt >= ? AND startedAt <= ?
+                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970]) ?? 0
+        }
+    }
+
+    /// Linear-interpolation percentile of a sorted integer array. Returns nil for
+    /// empty input. For dashboard presentation — don't use for high-precision analytics.
+    private func percentile(_ sorted: [Int], _ p: Double) -> Int? {
+        guard !sorted.isEmpty else { return nil }
+        if sorted.count == 1 { return sorted[0] }
+        let idx = Double(sorted.count - 1) * p
+        let low = Int(idx.rounded(.down))
+        let high = Int(idx.rounded(.up))
+        if low == high { return sorted[low] }
+        let fraction = idx - Double(low)
+        return Int(Double(sorted[low]) * (1 - fraction) + Double(sorted[high]) * fraction)
+    }
+
     /// Inserts a new span.
     func insertSpan(_ span: Span) throws {
         try dbPool.write { db in
@@ -187,6 +640,18 @@ final class TraceStore: Sendable {
         try dbPool.read { db in
             try TraceRecord
                 .filter(TraceRecord.Columns.conversationID == conversationID)
+                .order(TraceRecord.Columns.startedAt.asc)
+                .fetchAll(db)
+        }
+    }
+
+    /// Fetches all traces whose start time is within the window. Used by the
+    /// diagnostic bundle's `.recent(hours:)` scope to pull a time-bounded slice
+    /// across all conversations.
+    func fetchTracesSince(_ since: Date) throws -> [TraceRecord] {
+        try dbPool.read { db in
+            try TraceRecord
+                .filter(TraceRecord.Columns.startedAt >= since.timeIntervalSince1970)
                 .order(TraceRecord.Columns.startedAt.asc)
                 .fetchAll(db)
         }

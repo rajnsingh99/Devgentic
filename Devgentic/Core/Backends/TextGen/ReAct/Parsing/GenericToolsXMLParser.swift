@@ -27,7 +27,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "GenericToolsXMLParser")
+private let logger = DGLogger(category: "GenericToolsXMLParser")
 
 /// Parses generic `<tools>` / `<tool>` XML-wrapped tool calls.
 /// Extracts reasoning from text before the tags and parses the JSON payload inside.

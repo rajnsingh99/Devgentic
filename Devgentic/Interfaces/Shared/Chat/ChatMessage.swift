@@ -65,7 +65,14 @@ extension ToolExecutionData: Codable {
 }
 
 enum TimelineEvent: Codable, Equatable, Identifiable {
+    /// Generic thinking / narration — extended thinking traces (step.thought), capability
+    /// progress, executor status. The source is typically the system rather than the model's
+    /// own monologue. For the model's visible prose, use `.reasoning`.
     case thought(id: UUID, text: String)
+    /// LLM's visible assistant monologue (step.reasoning). Visually similar to `.thought`
+    /// but semantically distinct so analytics / scratchpad injection / future UI treatment
+    /// can differentiate model-authored prose from system narration.
+    case reasoning(id: UUID, text: String)
     case toolExecution(ToolExecutionData)
     case mediaGeneration(id: UUID, toolName: String, artifact: MediaArtifact?, isComplete: Bool)
 
@@ -78,6 +85,7 @@ enum TimelineEvent: Codable, Equatable, Identifiable {
     var id: UUID {
         switch self {
         case .thought(let id, _): return id
+        case .reasoning(let id, _): return id
         case .toolExecution(let data): return data.id
         case .mediaGeneration(let id, _, _, _): return id
         case .capabilityMilestone(let id, _, _): return id
@@ -181,12 +189,21 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
     // These properties derive chronological reasoning steps and tool outputs from timelineEvents.
+    /// Unified thought stream used by the compact `ThinkingDynamicIsland`. Includes
+    /// both `.thought` (system narration / extended thinking) and `.reasoning` (model
+    /// monologue) so the expanded island shows the full cognitive trail regardless
+    /// of source. Analytics and scratchpad paths can still distinguish the two by
+    /// reading `timelineEvents` directly.
     var thoughts: [AgentThought] {
         timelineEvents.compactMap { event in
-            if case .thought(let id, let text) = event {
+            switch event {
+            case .thought(let id, let text):
                 return AgentThought(id: id, text: text)
+            case .reasoning(let id, let text):
+                return AgentThought(id: id, text: text)
+            default:
+                return nil
             }
-            return nil
         }
     }
     
@@ -208,16 +225,19 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     var timelineEvents: [TimelineEvent] = []
 
     /// Appends a timeline event, evicting the oldest non-tool events if the cap is exceeded.
-    /// Tool execution events are preserved to maintain output correctness; only thoughts are trimmed.
+    /// Tool execution events are preserved to maintain output correctness; narrative events
+    /// (thoughts and reasoning) are trimmed first as they're least valuable historically.
     func appendTimelineEvent(_ event: TimelineEvent) {
         timelineEvents.append(event)
         if timelineEvents.count > Self.maxTimelineEvents {
-            // Evict oldest thought events first to stay under budget
-            if let firstThoughtIndex = timelineEvents.firstIndex(where: {
-                if case .thought = $0 { return true }
-                return false
+            // Evict oldest narrative event (.thought or .reasoning) first to stay under budget.
+            if let firstNarrativeIndex = timelineEvents.firstIndex(where: {
+                switch $0 {
+                case .thought, .reasoning: return true
+                default: return false
+                }
             }) {
-                timelineEvents.remove(at: firstThoughtIndex)
+                timelineEvents.remove(at: firstNarrativeIndex)
             } else {
                 // All events are tool/milestone — drop the oldest one
                 timelineEvents.removeFirst()
@@ -407,7 +427,11 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     /// Current schema version. Increment when adding/removing persisted fields.
     /// - v1: Legacy format with separate `thoughts`/`artifacts` arrays + `agentState` encoded
     /// - v2: Unified `timelineEvents`, removed `thoughts`/`artifacts`/`agentState` from encoding
-    private static let currentSchemaVersion = 2
+    // v3: `TimelineEvent.reasoning` case added alongside `.thought` to split the
+    // LLM's visible monologue from system narration. v2 data decodes unchanged
+    // because Swift's automatic Codable-for-enums handles new cases additively;
+    // bumping the version is hygiene for future migration decisions.
+    private static let currentSchemaVersion = 3
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion

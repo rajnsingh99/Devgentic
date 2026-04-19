@@ -9,9 +9,9 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ReActExecutor")
-private let logState = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "State")
-private let logToolExecution = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecution")
+private let logger = DGLogger(category: "ReActExecutor")
+private let logState = DGLogger(category: "State")
+private let logToolExecution = DGLogger(category: "ToolExecution")
 
 // MARK: - Executor Implementation
 
@@ -51,7 +51,15 @@ actor ReActAgentExecutor: Executor {
                     sessionState = await SessionGraphStore.shared.getActiveState(for: input.conversationID)
                 }
                 let currentConstraints = Set(sessionState.negativeConstraints)
-                
+
+                // Install trace/span context so all DGLogger calls inside the executor
+                // (and downstream components — mediator, parser, circuit breaker) auto-stamp
+                // their LogEntry with the trace IDs for post-hoc correlation.
+                await LogContext.with(
+                    traceID: input.traceContext.traceID,
+                    spanID: input.traceContext.spanID,
+                    phase: .tooling
+                ) {
                 do {
                     logger.info("🚀 ReAct Execution Initiated. Model Instance: \(String(describing: model))")
                     
@@ -64,6 +72,7 @@ actor ReActAgentExecutor: Executor {
                     let executionTrace = input.traceContext
                     
                     var memoryStrategy = input.workingMemory
+                    var previousScratchpadLength = 0
                     var circuitBreaker = CognitiveCircuitBreaker(
                         maxConsecutiveToolFailures: input.retryPolicy.maxRetries,
                         maxRepetitiveActions: input.retryPolicy.maxRetries
@@ -74,7 +83,20 @@ actor ReActAgentExecutor: Executor {
                     )
                     let toolMediator = ToolExecutionMediator()
                     let terminationEvaluator = EpisodeTerminationEvaluator()
-                    
+
+                    // --- G6: Reading-Tool Gate ---
+                    // `update_project_context` is hidden from the tool schema until the agent
+                    // has successfully invoked a content-reading tool twice. Prevents weak
+                    // local models from speculatively writing project memory on turn 2 before
+                    // they've read any actual source. Tools that only scan structure
+                    // (codebase_map, list_directory, glob_files) don't qualify — only tools
+                    // that return real file content do.
+                    var readingToolSuccessCount = 0
+                    let readingToolNames: Set<String> = ["read_file", "find_definition", "code_search", "file_overview"]
+                    let gatedToolNames: Set<String> = ["update_project_context"]
+                    let readingGateThreshold = 2
+                    var readingGateLoggedUnlock = false
+
                     // --- Start Episode ---
                     // [G3/G5] When wrapped by a capability (Planning, Reflexion), the wrapper
                     // owns the episode lifecycle. Skip to avoid N+1 duplicate episodes.
@@ -141,6 +163,16 @@ actor ReActAgentExecutor: Executor {
                             userProfile = nil
                         }
 
+                        // G6: Filter gated tools from the schema until prerequisites are met.
+                        // When the list doesn't contain a gated tool (e.g. non-Code profile),
+                        // this is a zero-cost no-op.
+                        let availableToolsThisIteration: [AgentTool] = {
+                            if readingToolSuccessCount >= readingGateThreshold {
+                                return input.tools
+                            }
+                            return input.tools.filter { !gatedToolNames.contains($0.name) }
+                        }()
+
                         let context = SemanticContext(
                             instructions: input.instructions,
                             environmentFacts: envFacts,
@@ -153,7 +185,7 @@ actor ReActAgentExecutor: Executor {
                             latestClarification: latestClarification,
                             negativeConstraints: currentConstraints,
                             hallucinatedTools: circuitBreaker.hallucinatedTools,
-                            availableTools: input.tools,
+                            availableTools: availableToolsThisIteration,
                             userProfile: userProfile,
                             skillManifests: input.skillManifests,
                             taskDescription: input.workflowContext?.taskDescription,
@@ -196,12 +228,24 @@ actor ReActAgentExecutor: Executor {
 
                             logger.info("📝 Compiled Scratchpad Length: \(context.compiledScratchpad.count) chars. Budget utilization: \(String(format: "%.0f", utilization * 100))%.")
                             
+                            let genStart = Date()
                             step = try await input.generatorStrategy.generateCognitiveStep(
                                 model: spyModel,
                                 context: context,
                                 iteration: currentIteration
                             )
-                            
+                            let genDuration = Date().timeIntervalSince(genStart)
+
+                            // G12 instrumentation: per-iter latency + scratchpad growth delta.
+                            // Before refactor: delta grows each iter and genDuration tracks it.
+                            // After refactor: scratchpad largely unused on native path, genDuration
+                            // should plateau on iter 2+ as KV cache hits the conversation prefix.
+                            let scratchpadLen = context.compiledScratchpad.count
+                            let delta = scratchpadLen - previousScratchpadLength
+                            let deltaSign = delta >= 0 ? "+" : ""
+                            logger.info("⏱️ [ITER \(currentIteration)] gen=\(String(format: "%.2f", genDuration))s | scratchpad=\(scratchpadLen) chars (Δ\(deltaSign)\(delta))")
+                            previousScratchpadLength = scratchpadLen
+
                             // Accumulate token usage from this cognitive step
                             if let usage = step.tokenUsage {
                                 accumulatedTokenUsage.accumulate(usage)
@@ -251,6 +295,23 @@ actor ReActAgentExecutor: Executor {
                                 continue cognitiveLoop
 
                             case .abort(let reason):
+                                // Structured classification for the retry-strategy abort path.
+                                // `.parseExhausted` is the most common abort trigger (consecutive
+                                // parse failures exceed policy); using it as default — the
+                                // retry strategy's own reason string carries finer detail in
+                                // `context`. If we ever split retry-abort into finer subtypes,
+                                // thread the triggering category from RetryAction itself.
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: .parseExhausted,
+                                    origin: "ReActAgentExecutor.retryStrategy.abort",
+                                    message: reason,
+                                    context: ["iteration": "\(currentIteration)"]
+                                )
+                                await TraceRecorder.shared.emitAgentError(
+                                    span: input.traceContext,
+                                    error: classified,
+                                    iteration: currentIteration
+                                )
                                 if !input.suppressEpisodeManagement {
                                     sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
                                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
@@ -274,12 +335,18 @@ actor ReActAgentExecutor: Executor {
                             }
                         }
 
-                        // Yield the assistant monologue/reasoning text
-                        // (Avoid yielding redundant text if thought and reasoning are identical)
+                        // Yield the LLM's visible assistant monologue as a dedicated
+                        // `.reasoning` event (distinct from system narration which uses
+                        // `.thought`) and persist it to working memory so subsequent
+                        // iterations can see the model's prior thought chain — fixes
+                        // the reasoning amnesia where each iteration started with no
+                        // trace of the previous one's monologue.
+                        // Skip if empty or identical to `.thought` content to avoid duplication.
                         if !step.reasoning.isEmpty && step.reasoning != step.thought {
                             let sanitized = OutputSanitizer.sanitizeForUI(step.reasoning)
                             if !sanitized.isEmpty {
-                                continuation.yield(.thought(sanitized))
+                                continuation.yield(.reasoning(sanitized))
+                                memoryStrategy.recordReasoning(stepId: currentIteration, text: sanitized)
                             }
                         }
                         
@@ -306,9 +373,12 @@ actor ReActAgentExecutor: Executor {
                         if step.toolCalls.isEmpty { break cognitiveLoop }
 
                         // 3. ACTING & OBSERVING PHASE (Shared Parallel Execution)
+                        // Pass the same filtered list used in the schema so that a gated tool
+                        // (e.g. update_project_context) dispatched via hallucination fails with
+                        // "tool not found" rather than silently executing.
                         let observations = try await executeToolCalls(
                             toolCalls: step.toolCalls,
-                            availableTools: input.tools,
+                            availableTools: availableToolsThisIteration,
                             conversationID: input.conversationID,
                             currentIteration: currentIteration,
                             iterationSpan: iterationSpan,
@@ -316,7 +386,45 @@ actor ReActAgentExecutor: Executor {
                             continuation: continuation,
                             onTraceUpdate: onTraceUpdate
                         )
-                        
+
+                        // --- G6: Advance Reading-Tool Gate Counter ---
+                        // Count successful reading-tool invocations so `update_project_context`
+                        // becomes available once the agent has actually read some source.
+                        for obs in observations where obs.isSuccess && readingToolNames.contains(obs.toolName) {
+                            readingToolSuccessCount += 1
+                        }
+                        if !readingGateLoggedUnlock && readingToolSuccessCount >= readingGateThreshold {
+                            readingGateLoggedUnlock = true
+                            logger.info("🔓 Reading gate unlocked (\(readingToolSuccessCount)/\(readingGateThreshold) successful reading tools) — gated tools now available: \(gatedToolNames.sorted().joined(separator: ", "))")
+                        }
+
+                        // --- Terminal Signal Fast-Exit (final_answer) ---
+                        // ToolExecutionLoop intercepts final_answer and returns a terminal
+                        // observation. Seat it as the final agent thought and break — the
+                        // post-loop ResponseSynthesizer's native fast-path will surface
+                        // `finalAgentThought` to the user verbatim. For legacy/non-native
+                        // flows the synthesizer treats it as the agent's conclusion and
+                        // formats accordingly. Either way: the answer survives.
+                        if let terminal = observations.first(where: { $0.isTerminalSignal && $0.terminalKind == .finalAnswer }) {
+                            executionSummary.record(
+                                toolCallId: terminal.toolCallId,
+                                toolName: terminal.toolName,
+                                params: terminal.params,
+                                output: terminal.output,
+                                isSuccess: true
+                            )
+                            executionSummary.finalAgentThought = terminal.output
+                            memoryStrategy.recordObservation(
+                                stepId: terminal.stepId,
+                                toolCallId: terminal.toolCallId,
+                                toolName: terminal.toolName,
+                                result: terminal.result,
+                                artifacts: terminal.artifacts
+                            )
+                            logger.info("🏁 Terminal signal received (final_answer). Exiting cognitive loop at iteration \(currentIteration).")
+                            break cognitiveLoop
+                        }
+
                         // Commit observations to memory strategy
                         for obs in observations {
                             memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
@@ -354,10 +462,16 @@ actor ReActAgentExecutor: Executor {
                         case .abort(let reason):
                             shouldAbort = true
                             abortReason = reason
-                        case .proceedWithWarning(let message):
-                            // Surface the imminent-abort signal to the UI so the user can
-                            // intervene (cancel, refine prompt) before the next iteration trips.
-                            continuation.yield(.warning(category: .circuitBreaker, message: message))
+                        case .proceedWithWarning(let uiMessage, let modelAlert):
+                            // G2: Dual-channel imminent-abort signal.
+                            //   UI   — terse chip so the human can intervene (cancel, refine prompt).
+                            //   Model — directive alert injected into the next prompt's working
+                            //           memory so the model itself can course-correct before the
+                            //           hard abort. Without this injection, the warning reaches
+                            //           only the UI and the model repeats blindly into the 3rd
+                            //           strike.
+                            continuation.yield(.warning(category: .circuitBreaker, message: uiMessage))
+                            memoryStrategy.recordSystemAlert(msg: modelAlert)
                         case .proceed, .intervene:
                             break
                         }
@@ -381,8 +495,26 @@ actor ReActAgentExecutor: Executor {
                                 // Don't abort — fall through to next iteration
 
                             case .abort:
-                                // Default behavior: synthesize best-effort response and exit
+                                // Circuit-breaker abort path. Classify BEFORE emitting the
+                                // user-facing warning so the chain ID is available for
+                                // downstream error_chain_id correlation. The CB trigger could
+                                // be repetitive-action, consecutive-fail, or tool-retry-limit;
+                                // we use `.cbRepetitiveAction` as the typical default, since
+                                // that's the most common source of circuit-breaker aborts.
+                                // If we want finer classification, the breaker could return
+                                // the triggering category explicitly.
                                 executionSummary.markComplete(failureReason: abortReason)
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: .cbRepetitiveAction,
+                                    origin: "ReActAgentExecutor.circuitBreakerAbort",
+                                    message: "Circuit breaker triggered: \(abortReason)",
+                                    context: ["iteration": "\(currentIteration)"]
+                                )
+                                await TraceRecorder.shared.emitAgentError(
+                                    span: input.traceContext,
+                                    error: classified,
+                                    iteration: currentIteration
+                                )
                                 continuation.yield(.warning(category: .circuitBreaker, message: "Aborting: \(abortReason)"))
                                 // Circuit breaker abort: always force synthesis so the user
                                 // gets a coherent explanation, not raw partial reasoning.
@@ -442,6 +574,27 @@ actor ReActAgentExecutor: Executor {
                                 await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                                 logState.info("💾 Auto-Patched Active Episode to: FAILED (failHard)")
                             }
+                            // Structured error telemetry — this is a fatal exit path, not a
+                            // caught exception. Use `.synthetic(...)` so the SpanEvent carries
+                            // the category + chainID. `cbIdleLimit` doesn't quite fit (that's
+                            // ask_user exhaustion); iteration exhaustion reuses the same
+                            // phase-level fatal semantics. If we see these in dashboards and
+                            // want finer detail, add a dedicated `executorIterationExhausted`
+                            // case to AgentErrorCategory.
+                            let classified = ClassifiedAgentError.synthetic(
+                                category: .cbIdleLimit,
+                                origin: "ReActAgentExecutor.iterationExhaustion.failHard",
+                                message: failureMsg,
+                                context: [
+                                    "max_iterations": "\(maxIterations)",
+                                    "final_iteration": "\(currentIteration)"
+                                ]
+                            )
+                            await TraceRecorder.shared.emitAgentError(
+                                span: input.traceContext,
+                                error: classified,
+                                iteration: currentIteration
+                            )
                             continuation.yield(.error(failureMsg))
                             continuation.yield(.executionFinished(outcome: .failed, reason: failureMsg))
                             continuation.finish()
@@ -513,13 +666,33 @@ actor ReActAgentExecutor: Executor {
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
-                    logger.error("ReAct Fatal Error: \(error.localizedDescription)")
+                    // Classify the fatal error so analytics can bucket unexpected throws.
+                    // Uses `.executionThrew`-analogue — there isn't a perfect category for
+                    // "executor-level fatal throw"; the taxonomy has domain-specific fatals
+                    // (parseExhausted, providerAuth, etc.) but catches at this level are
+                    // already misclassified most of the time. Bucket as .toolSystemCrash
+                    // since it most closely matches "some execution layer threw unexpectedly."
+                    let classified = error.classify(
+                        as: .toolSystemCrash,
+                        origin: "ReActAgentExecutor.fatalCatch",
+                        message: "ReAct fatal error: \(error.localizedDescription)"
+                    )
+                    logger.error(
+                        "ReAct Fatal Error: \(classified.message)",
+                        error: classified,
+                        category: classified.category
+                    )
+                    await TraceRecorder.shared.emitAgentError(
+                        span: input.traceContext,
+                        error: classified
+                    )
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
-                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
+                    continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)
                 }
+                } // close LogContext.with
             }
-            
+
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }

@@ -9,7 +9,7 @@ import SwiftUI
 import AppKit
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatBubbleView")
+private let logger = DGLogger(category: "ChatBubbleView")
 
 private let STREAMING_BUBBLE_MIN_HEIGHT: CGFloat = 550
 

@@ -10,7 +10,7 @@ import Foundation
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "NotificationConfiguration")
+private let logger = DGLogger(category: "NotificationConfiguration")
 
 @Observable @MainActor
 final class NotificationConfiguration {

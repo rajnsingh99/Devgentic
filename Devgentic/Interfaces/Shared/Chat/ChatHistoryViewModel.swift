@@ -8,7 +8,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatHistoryViewModel")
+private let logger = DGLogger(category: "ChatHistoryViewModel")
 
 @Observable @MainActor
 final class ChatHistoryViewModel {
@@ -263,7 +263,7 @@ final class ChatHistoryViewModel {
             return
         }
 
-        logger.debug("Loading conversation \(selectedID.uuidString, privacy: .public), merging with active streams.")
+        logger.debug("Loading conversation \(selectedID.uuidString), merging with active streams.")
 
         isInitiallyLoadingConversation = true
         await Task.yield()
@@ -315,7 +315,7 @@ final class ChatHistoryViewModel {
         isLoadingPage = true
         
         let offset = currentChatMessages.count
-        logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString, privacy: .public).")
+        logger.debug("Loading page with offset \(offset) for conversation \(selectedID.uuidString).")
         
         // Fetches the next page of older messages, sorted newest-to-oldest.
         let olderMessages = await persistenceService.fetchMessages(for: selectedID, offset: offset, limit: subsequentPageSize)

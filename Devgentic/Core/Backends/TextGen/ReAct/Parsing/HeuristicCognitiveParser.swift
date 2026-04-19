@@ -9,7 +9,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "HeuristicCognitiveParser")
+private let logger = DGLogger(category: "HeuristicCognitiveParser")
 
 
 // MARK: - Shared Parsing Heuristics
@@ -76,20 +76,26 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
         // --- 2. Outermost Object Extraction ---
         guard let jsonString = extractOutermostJSON(from: cleanText) else {
-            logger.error("❌ [JSONParser] Failed to find valid JSON object. Raw text: \(rawText.prefix(500))")
+            // Static method — no TraceContext to emit a structured SpanEvent against.
+            // We still stamp the classified category on the DGLogger call so ring-buffer
+            // analytics can filter/aggregate parse failures by taxonomy. Full SpanEvent
+            // classification for parser sites would require threading TraceContext through
+            // the parser API, which is a future refactor.
+            logger.error(
+                "❌ [JSONParser] Failed to find valid JSON object. Raw text: \(rawText.prefix(500))",
+                category: .parseJsonEmpty,
+                metadata: ["raw_length": "\(rawText.count)"]
+            )
 
             // Recovery A: Lenient regex-based extraction directly on raw text.
-            // Handles truncated/bracket-mismatched JSON where the root object's braces
-            // never balance (e.g., model outputs `]` instead of `}`) but individual fields
-            // and tool call objects are still recoverable via regex.
             if let lenient = attemptLenientExtraction(from: cleanText) {
-                logger.info("✅ [JSONParser] Lenient extraction recovered from malformed JSON (no balanced braces).")
+                logger.info(
+                    "✅ [JSONParser] Lenient extraction recovered from malformed JSON (no balanced braces)."
+                )
                 return lenient
             }
 
             // Recovery B: Markdown-field format ("content: <text>\ntool_calls: <value>")
-            // Occurs when models wrap field names in triple backticks (```content```)
-            // which OutputSanitizer strips, leaving bare "content: ..." with no JSON braces.
             if let recovered = extractFromMarkdownFieldFormat(cleanText) {
                 logger.info("✅ [JSONParser] Recovered reasoning from markdown-field format.")
                 return recovered
@@ -135,7 +141,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
                 let args = singleDecoded.arguments ?? [:]
                 pending.append(PendingToolCall(id: UUID().uuidString, name: toolName, arguments: args))
             }
-            return ModernCognitiveStep(reasoning: singleDecoded.content.isEmpty ? "Executing..." : singleDecoded.content, toolCalls: pending)
+            // G7: empty reasoning stays empty. UI renders "Executing <tool>..." from .toolCall events.
+            return ModernCognitiveStep(reasoning: singleDecoded.content, toolCalls: pending)
         }
 
         // Attempt 3: Bare Tool Call (model emitted just {"name": "...", "arguments": {...}})
@@ -143,7 +150,9 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             let args = bareDecoded.arguments ?? bareDecoded.parameters ?? [:]
             let pending = [PendingToolCall(id: UUID().uuidString, name: bareDecoded.name, arguments: args)]
             logger.info("✅ [JSONParser] Bare tool call schema matched for tool: \(bareDecoded.name)")
-            return ModernCognitiveStep(reasoning: "Executing...", toolCalls: pending)
+            // G7: no prose was available inside the bare tool-call object. Caller
+            // (OllamaLLMProvider.splitProseAndJSON) captures any prose BEFORE the JSON block.
+            return ModernCognitiveStep(reasoning: "", toolCalls: pending)
         }
 
         // Attempt 4: Lenient Extraction
@@ -432,7 +441,8 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             }
         }
 
-        return ModernCognitiveStep(reasoning: reasoning.isEmpty ? "Executing..." : reasoning, toolCalls: pending)
+        // G7: empty reasoning stays empty. UI renders tool execution state from .toolCall events.
+        return ModernCognitiveStep(reasoning: reasoning, toolCalls: pending)
     }
 
     // MARK: - Array Tool Call Extraction

@@ -3,7 +3,7 @@ import SwiftUI
 import AppKit
 import os
 
-private let customTextEditorLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "CustomTextEditor")
+private let customTextEditorLogger = DGLogger(category: "CustomTextEditor")
 
 struct CustomTextEditor: NSViewRepresentable {
     // MARK: - Bindings and Properties
@@ -29,7 +29,7 @@ struct CustomTextEditor: NSViewRepresentable {
     var onNavigateQueryHistory: ((MainApplicationViewModel.QueryNavigationDirection) -> Void)?
     var onTextManuallyChanged: (() -> Void)?
 
-    let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.CustomTextEditor", category: "CustomTextEditor_Input")
+    let logger = DGLogger(category: "CustomTextEditor_Input")
 
     struct AttributedTextInsertionAction: Equatable {
         let id = UUID()

@@ -18,7 +18,7 @@ struct PPTXExtractor: DocumentExtractor {
     private let logger = Logger(subsystem: "com.devgentic", category: "PPTXExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
-        logger.info("Starting PPTX extraction: \(url.lastPathComponent, privacy: .public)")
+        logger.info("Starting PPTX extraction: \(url.lastPathComponent)")
 
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -35,10 +35,10 @@ struct PPTXExtractor: DocumentExtractor {
         process.waitUntilExit()
 
         guard process.terminationStatus == 0 else {
-            logger.error("Unzip failed with exit code \(process.terminationStatus) for: \(url.lastPathComponent, privacy: .public)")
+            logger.error("Unzip failed with exit code \(process.terminationStatus) for: \(url.lastPathComponent)")
             throw DocumentExtractionError.corruptedFile(url.path)
         }
-        logger.debug("Unzip successful for: \(url.lastPathComponent, privacy: .public)")
+        logger.debug("Unzip successful for: \(url.lastPathComponent)")
 
         // Find slide XML files: ppt/slides/slide1.xml, slide2.xml, ...
         let slidesDir = tempDir.appendingPathComponent("ppt/slides")
@@ -47,11 +47,11 @@ struct PPTXExtractor: DocumentExtractor {
         ).filter({ $0.pathExtension == "xml" && $0.lastPathComponent.hasPrefix("slide") })
         .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
         else {
-            logger.error("No slide XML files found in ppt/slides/ for: \(url.lastPathComponent, privacy: .public)")
+            logger.error("No slide XML files found in ppt/slides/ for: \(url.lastPathComponent)")
             throw DocumentExtractionError.corruptedFile(url.path)
         }
 
-        logger.info("Found \(slideFiles.count) slides in: \(url.lastPathComponent, privacy: .public)")
+        logger.info("Found \(slideFiles.count) slides in: \(url.lastPathComponent)")
 
         var fullText = ""
         var slideCount = 0
@@ -74,17 +74,17 @@ struct PPTXExtractor: DocumentExtractor {
 
         let wasTruncated = fullText.count >= maxSize
         if wasTruncated {
-            logger.warning("PPTX content truncated at \(maxSize) chars for \(url.lastPathComponent, privacy: .public)")
+            logger.warning("PPTX content truncated at \(maxSize) chars for \(url.lastPathComponent)")
             fullText = String(fullText.prefix(maxSize))
         }
 
         guard !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            logger.warning("PPTX contains no extractable text: \(url.lastPathComponent, privacy: .public)")
+            logger.warning("PPTX contains no extractable text: \(url.lastPathComponent)")
             throw DocumentExtractionError.emptyDocument(url.path)
         }
 
         let wordCount = fullText.split(separator: " ").count
-        logger.info("PPTX extraction complete: \(slideCount) slides, \(wordCount) words — \(url.lastPathComponent, privacy: .public)")
+        logger.info("PPTX extraction complete: \(slideCount) slides, \(wordCount) words — \(url.lastPathComponent)")
 
         return ExtractionResult(
             text: fullText,

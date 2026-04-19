@@ -14,6 +14,10 @@ struct ReportInspectorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
 
+    /// Phase F: controls presentation of the diagnostic bundle export sheet.
+    /// Triggered from the export button in DeveloperReportView.
+    @State private var showBundleExport: Bool = false
+
     init(messageID: UUID, conversationID: UUID, traceID: String?) {
         _viewModel = State(initialValue: ReportViewModel(
             messageID: messageID,
@@ -43,6 +47,14 @@ struct ReportInspectorView: View {
         .background(theme.primaryBackground)
         .task {
             await viewModel.loadData()
+        }
+        .sheet(isPresented: $showBundleExport) {
+            if let traceID = viewModel.activeTraceRecord?.traceID {
+                BundleExportSheet(
+                    defaultScope: .trace(traceID: traceID),
+                    feedback: nil
+                )
+            }
         }
     }
 
@@ -94,15 +106,12 @@ struct ReportInspectorView: View {
 
     // MARK: - Export
 
+    /// Phase F handoff — the export button now opens the configurable bundle
+    /// sheet instead of producing a single trace.json. Keeping the function
+    /// name so the call site in DeveloperReportView doesn't change, but the
+    /// behavior is upgraded.
     private func exportDeveloperReport() {
-        guard let trace = viewModel.activeTraceRecord else { return }
-
-        if let url = ReportExporter.export(
-            trace: trace,
-            summary: viewModel.summary,
-            isDeveloperMode: true
-        ) {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        }
+        guard viewModel.activeTraceRecord != nil else { return }
+        showBundleExport = true
     }
 }

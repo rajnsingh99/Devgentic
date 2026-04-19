@@ -12,7 +12,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "NativeJSONParser")
+private let logger = DGLogger(category: "NativeJSONParser")
 
 /// Parses responses where the model emits a well-formed JSON object
 /// containing a `content` field and a `tool_calls` array (OpenAI-compatible format).

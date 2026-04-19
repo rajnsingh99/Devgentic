@@ -18,7 +18,7 @@ struct DOCXExtractor: DocumentExtractor {
     private let logger = Logger(subsystem: "com.devgentic", category: "DOCXExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
-        logger.info("Starting DOCX extraction: \(url.lastPathComponent, privacy: .public)")
+        logger.info("Starting DOCX extraction: \(url.lastPathComponent)")
         return try extractWithUnzipFallback(from: url, maxSize: maxSize)
     }
 
@@ -41,36 +41,36 @@ struct DOCXExtractor: DocumentExtractor {
         process.waitUntilExit()
 
         guard process.terminationStatus == 0 else {
-            logger.error("Unzip failed with exit code \(process.terminationStatus) for: \(url.lastPathComponent, privacy: .public)")
+            logger.error("Unzip failed with exit code \(process.terminationStatus) for: \(url.lastPathComponent)")
             throw DocumentExtractionError.corruptedFile(url.path)
         }
-        logger.debug("Unzip successful for: \(url.lastPathComponent, privacy: .public)")
+        logger.debug("Unzip successful for: \(url.lastPathComponent)")
 
         // Parse word/document.xml
         let documentXML = tempDir.appendingPathComponent("word/document.xml")
         guard FileManager.default.fileExists(atPath: documentXML.path) else {
-            logger.error("word/document.xml not found in DOCX archive: \(url.lastPathComponent, privacy: .public)")
+            logger.error("word/document.xml not found in DOCX archive: \(url.lastPathComponent)")
             throw DocumentExtractionError.corruptedFile(url.path)
         }
 
         let xmlData = try Data(contentsOf: documentXML)
-        logger.debug("Parsing word/document.xml (\(xmlData.count) bytes) for: \(url.lastPathComponent, privacy: .public)")
+        logger.debug("Parsing word/document.xml (\(xmlData.count) bytes) for: \(url.lastPathComponent)")
 
         let parser = DOCXXMLTextParser()
         let text = parser.extractText(from: xmlData, maxSize: maxSize)
 
         let wasTruncated = text.count >= maxSize
         if wasTruncated {
-            logger.warning("DOCX content truncated at \(maxSize) chars for \(url.lastPathComponent, privacy: .public)")
+            logger.warning("DOCX content truncated at \(maxSize) chars for \(url.lastPathComponent)")
         }
 
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            logger.warning("DOCX contains no extractable text: \(url.lastPathComponent, privacy: .public)")
+            logger.warning("DOCX contains no extractable text: \(url.lastPathComponent)")
             throw DocumentExtractionError.emptyDocument(url.path)
         }
 
         let wordCount = text.split(separator: " ").count
-        logger.info("DOCX extraction complete: \(wordCount) words via unzip-xml — \(url.lastPathComponent, privacy: .public)")
+        logger.info("DOCX extraction complete: \(wordCount) words via unzip-xml — \(url.lastPathComponent)")
 
         return ExtractionResult(
             text: text,

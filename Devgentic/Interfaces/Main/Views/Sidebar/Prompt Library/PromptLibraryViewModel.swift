@@ -12,7 +12,7 @@ import os
 class PromptLibraryViewModel {
     // MARK: - Dependencies
     private let promptService = PromptService.shared
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptLibraryViewModel")
+    @ObservationIgnored private let logger = DGLogger(category: "PromptLibraryViewModel")
 
     // MARK: - State Properties for UI
     var searchText: String = "" {

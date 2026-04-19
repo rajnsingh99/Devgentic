@@ -13,7 +13,7 @@
 import Foundation
 import os
 
-private let wfStateLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WorkflowState")
+private let wfStateLogger = DGLogger(category: "WorkflowState")
 
 // MARK: - Node Output
 

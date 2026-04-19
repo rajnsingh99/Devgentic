@@ -10,7 +10,7 @@ import Foundation
 import os
 
 // MARK: - Logger
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaConnect")
+private let logger = DGLogger(category: "OllamaConnect")
 
 // MARK: - Ollama Data Structures
 

@@ -8,7 +8,8 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaLLMProvider")
+private let logger = DGLogger(category: "OllamaLLMProvider")
+private let logLLMOps = DGLogger(category: "LLMOps")
 
 // MARK: - Ollama Provider
 
@@ -96,8 +97,11 @@ struct OllamaLLMProvider: LLMProvider {
         }
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let requestBodyBytes = request.httpBody?.count ?? 0
 
+        let httpStart = Date()
         let (data, response) = try await URLSession.shared.data(for: request)
+        let httpWallDuration = Date().timeIntervalSince(httpStart)
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
@@ -113,6 +117,17 @@ struct OllamaLLMProvider: LLMProvider {
         }
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+        // G12 instrumentation: KV-cache-miss proxy. If prompt_eval_count on iter 2+ is
+        // close to full prompt length, cache is being invalidated every iter; if it's
+        // close to the last-turn delta, cache is hitting the prior prefix.
+        let promptEvalCount = json?["prompt_eval_count"] as? Int ?? 0
+        let promptEvalMs = Double((json?["prompt_eval_duration"] as? Int) ?? 0) / 1_000_000.0
+        let evalCount = json?["eval_count"] as? Int ?? 0
+        let evalMs = Double((json?["eval_duration"] as? Int) ?? 0) / 1_000_000.0
+        let totalMs = Double((json?["total_duration"] as? Int) ?? 0) / 1_000_000.0
+        logLLMOps.info("📊 [Ollama:\(config.modelName)] req=\(requestBodyBytes)B wall=\(String(format: "%.2f", httpWallDuration))s | prompt_eval=\(promptEvalCount)tok/\(String(format: "%.0f", promptEvalMs))ms | eval=\(evalCount)tok/\(String(format: "%.0f", evalMs))ms | total=\(String(format: "%.0f", totalMs))ms")
+
         guard let message = json?["message"] as? [String: Any] else {
             throw LLMProviderError.invalidResponse("Missing message object in Ollama response")
         }
@@ -143,23 +158,76 @@ struct OllamaLLMProvider: LLMProvider {
 
         // Dialect-Anchored Cascade fallback: when the model returned content but
         // no native tool_calls, the model may have leaked tool calls into the content
-        // field (format leakage). Pipe through the cascade pipeline to recover them.
+        // field (format leakage on e.g. qwen-coder whose trained format doesn't map
+        // cleanly onto Ollama's OpenAI-style wrapper). Pipe through the cascade pipeline
+        // to recover them. (G7 fix) Split prose-before-JSON from the JSON block so the
+        // agent's reasoning is preserved instead of discarded by the parser.
         if pendingTools.isEmpty && !content.isEmpty {
+            let (prose, jsonBlock) = Self.splitProseAndJSON(content)
             let pipeline = CognitiveParsePipeline(
                 expectedDialect: .nativeJSON,
                 modelId: config.modelName
             )
-            return pipeline.parse(raw: content)
-        }
+            let parsed = pipeline.parse(raw: jsonBlock.isEmpty ? content : jsonBlock)
 
-        let finalReasoning = content.isEmpty && !pendingTools.isEmpty
-            ? "Executing \(pendingTools.count) tools..."
-            : content
+            // Prefer the captured prose prefix; fall back to the parser's reasoning
+            // only if that parser found a real (non-placeholder) reasoning field.
+            // Placeholder strings like "Executing..." are filtered downstream.
+            let reasoning = prose.isEmpty ? parsed.reasoning : prose
+            let usage = json.flatMap { TokenUsage.fromOllama($0) }
+            return ModernCognitiveStep(
+                reasoning: reasoning,
+                thought: thinking,               // preserve Ollama's separate thinking channel
+                toolCalls: parsed.toolCalls,
+                tokenUsage: usage ?? parsed.tokenUsage
+            )
+        }
 
         // Extract token usage from Ollama API response
         let usage = json.flatMap { TokenUsage.fromOllama($0) }
 
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: thinking, toolCalls: pendingTools, tokenUsage: usage)
+        // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
+        // .toolCall events, not from this field. (G7 / reasoning refactor)
+        return ModernCognitiveStep(reasoning: content, thought: thinking, toolCalls: pendingTools, tokenUsage: usage)
+    }
+
+    // MARK: - Content-Leak Helpers (G7)
+
+    /// Splits a content string that mixes prose and a bare tool-call JSON into
+    /// `(prose, jsonBlock)`. Walks the string once with brace-depth tracking to
+    /// find the first balanced top-level `{...}` or `[...]` block; everything
+    /// before that block is returned as prose, the block itself as jsonBlock.
+    ///
+    /// If no balanced JSON block is found, returns `(content, "")` so callers
+    /// can fall back to passing the original content to the parser.
+    static func splitProseAndJSON(_ content: String) -> (prose: String, jsonBlock: String) {
+        var depth = 0
+        var startIndex: String.Index?
+        var inString = false
+        var prevChar: Character = "\0"
+        let openers: Set<Character> = ["{", "["]
+        let closers: Set<Character> = ["}", "]"]
+
+        for (index, char) in zip(content.indices, content) {
+            if char == "\"" && prevChar != "\\" {
+                inString.toggle()
+            }
+            if !inString {
+                if openers.contains(char) {
+                    if depth == 0 { startIndex = index }
+                    depth += 1
+                } else if closers.contains(char) {
+                    depth -= 1
+                    if depth == 0, let start = startIndex {
+                        let prose = String(content[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let jsonBlock = String(content[start...index])
+                        return (prose, jsonBlock)
+                    }
+                }
+            }
+            prevChar = char
+        }
+        return (content.trimmingCharacters(in: .whitespacesAndNewlines), "")
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {

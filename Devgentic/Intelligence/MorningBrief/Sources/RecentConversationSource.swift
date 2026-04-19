@@ -22,7 +22,7 @@ final class RecentConversationSource: MorningBriefSource, Sendable {
 
     private let maxConversations: Int
     private let maxMessagesPerConversation: Int
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "RecentConversationSource")
+    private let logger = DGLogger(category: "RecentConversationSource")
 
     init(maxConversations: Int = 3, maxMessagesPerConversation: Int = 20) {
         self.maxConversations = maxConversations

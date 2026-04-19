@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logToolExecution = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecution")
+private let logToolExecution = DGLogger(category: "ToolExecution")
 
 struct LegacyPromptAdapter: ToolSchemaAdapter {
     func formatForSystemPrompt(_ tools: [AgentTool]) -> String {

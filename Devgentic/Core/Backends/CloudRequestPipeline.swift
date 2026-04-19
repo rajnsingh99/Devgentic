@@ -11,7 +11,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CloudRequestPipeline")
+private let logger = DGLogger(category: "CloudRequestPipeline")
 
 /// A stateless pipeline that wraps URLSession calls with cross-cutting concerns
 /// shared by all cloud LLM providers: rate limiting, structured error creation,
@@ -59,7 +59,27 @@ struct CloudRequestPipeline: Sendable {
             if httpResponse.statusCode == 429 {
                 let penalty = retryAfter ?? 10.0
                 await GlobalRateLimiter.shared.drainAndPenalize(key: key, category: provider, penaltySeconds: penalty)
-                logger.warning("[\(key)] 429 Rate Limited. Retry-After: \(retryAfter ?? -1)s. Penalty applied: \(penalty)s.")
+                // Stamp the canonical category on the log so ring-buffer analytics can
+                // aggregate rate-limit events by provider without parsing message strings.
+                // The downstream CloudProviderError throws — LLMRetryStrategy catches it
+                // and can call `.classify(...)` to build the full structured event chain.
+                logger.warning(
+                    "[\(key)] 429 Rate Limited. Retry-After: \(retryAfter ?? -1)s. Penalty applied: \(penalty)s.",
+                    category: .providerRateLimit,
+                    metadata: ["provider": provider.rawValue, "request_id": requestId ?? ""]
+                )
+            } else if (500...599).contains(httpResponse.statusCode) {
+                logger.warning(
+                    "[\(key)] Provider server error \(httpResponse.statusCode). request-id: \(requestId ?? "nil")",
+                    category: .providerServerError,
+                    metadata: ["provider": provider.rawValue, "status": "\(httpResponse.statusCode)"]
+                )
+            } else if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                logger.warning(
+                    "[\(key)] Auth failure \(httpResponse.statusCode). request-id: \(requestId ?? "nil")",
+                    category: .providerAuth,
+                    metadata: ["provider": provider.rawValue, "status": "\(httpResponse.statusCode)"]
+                )
             }
 
             throw CloudProviderError(
@@ -117,7 +137,17 @@ struct CloudRequestPipeline: Sendable {
             if httpResponse.statusCode == 429 {
                 let penalty = retryAfter ?? 10.0
                 await GlobalRateLimiter.shared.drainAndPenalize(key: key, category: provider, penaltySeconds: penalty)
-                logger.warning("[\(key)] 429 on stream. Penalty: \(penalty)s.")
+                logger.warning(
+                    "[\(key)] 429 on stream. Penalty: \(penalty)s.",
+                    category: .providerRateLimit,
+                    metadata: ["provider": provider.rawValue, "path": "stream"]
+                )
+            } else if (500...599).contains(httpResponse.statusCode) {
+                logger.warning(
+                    "[\(key)] Stream provider server error \(httpResponse.statusCode).",
+                    category: .providerServerError,
+                    metadata: ["provider": provider.rawValue, "status": "\(httpResponse.statusCode)"]
+                )
             }
 
             throw CloudProviderError(

@@ -13,9 +13,14 @@ import Foundation
 enum CircuitBreakerAction: Equatable, Sendable {
     case proceed
     /// Continue execution but surface a visible warning — the next identical evaluation
-    /// will trigger an abort. Lets the caller emit a structured `.warning(.circuitBreaker)`
-    /// so users aren't blindsided by the imminent termination.
-    case proceedWithWarning(message: String)
+    /// will trigger an abort. Carries TWO messages:
+    ///   - `uiMessage`: terse text for the `.warning(.circuitBreaker)` stream event
+    ///     shown to the human (chip/toast).
+    ///   - `modelAlert`: directive text injected into the next iteration's working
+    ///     memory so the model itself can course-correct before the hard abort.
+    /// This split exists because the two audiences need different detail levels —
+    /// humans want a short signal, models need explicit escape hatches.
+    case proceedWithWarning(uiMessage: String, modelAlert: String)
     case intervene(systemMessage: String)
     case abort(reason: String)
 }

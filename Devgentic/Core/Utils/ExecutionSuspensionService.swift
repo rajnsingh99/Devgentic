@@ -8,7 +8,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ExecutionSuspensionService")
+private let logger = DGLogger(category: "ExecutionSuspensionService")
 
 /// Notification names posted after HITL suspensions are resolved (by any surface).
 /// Both the Mac UI and ChatOps bridge observe these to clear stale banners/buttons.

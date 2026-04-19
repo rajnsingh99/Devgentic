@@ -13,7 +13,7 @@ import AppKit
 import AVFoundation
 
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MainApplicationViewModel")
+private let logger = DGLogger(category: "MainApplicationViewModel")
 
 @Observable @MainActor
 final class MainApplicationViewModel {
@@ -922,7 +922,7 @@ final class MainApplicationViewModel {
         let profileID = conversationSD.backendEntityId
         self.backendConfiguration.selectedProfileID = profileID
 
-        logger.info("Loaded backend profile ID \(profileID?.uuidString ?? "nil") (type: \(self.selectedProfileType?.rawValue ?? "nil")) for conversation \(conversationID, privacy: .public)")
+        logger.info("Loaded backend profile ID \(profileID?.uuidString ?? "nil") (type: \(self.selectedProfileType?.rawValue ?? "nil")) for conversation \(conversationID)")
     }
 
     private func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {

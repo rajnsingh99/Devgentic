@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BracketHashParser")
+private let logger = DGLogger(category: "BracketHashParser")
 
 /// Parses the `<Functions#...>` format emitted by Devstral and OpenHands models.
 /// Handles both closed-tag (`</Functions>`) and self-closing bracket variants.

@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
+private let logLLMOps = DGLogger(category: "LLMOps")
 
 /// A specialized cognitive strategy specifically built for local MLX models that support native tools 
 /// (like Llama-3-Groq-Tool-Use). 

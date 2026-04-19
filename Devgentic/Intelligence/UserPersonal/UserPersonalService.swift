@@ -22,7 +22,7 @@ final class UserPersonalService {
 
     static let shared = UserPersonalService()
 
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "UserPersonalService")
+    @ObservationIgnored private let logger = DGLogger(category: "UserPersonalService")
 
     /// Registry of all available profile sources. Add new sources here.
     @ObservationIgnored private(set) var sourceRegistry: [any UserPersonalSource] = []

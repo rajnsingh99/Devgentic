@@ -16,7 +16,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ReActMarkdownParser")
+private let logger = DGLogger(category: "ReActMarkdownParser")
 
 struct ReActMarkdownParser: CognitiveParserProtocol {
 

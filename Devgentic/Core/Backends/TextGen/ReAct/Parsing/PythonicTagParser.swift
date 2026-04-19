@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PythonicTagParser")
+private let logger = DGLogger(category: "PythonicTagParser")
 
 /// Parses the `<|python_tag|>` format emitted by some Llama tool-calling variants.
 /// Splits on the tag marker and attempts JSON decoding of the payload.

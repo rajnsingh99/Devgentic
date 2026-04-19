@@ -10,7 +10,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ClaudeLLMProvider")
+private let logger = DGLogger(category: "ClaudeLLMProvider")
 
 /// Handles the official Anthropic Claude API via REST.
 /// Adapts Devgentic's standard message payloads to Claude's unique top-level system prompt
@@ -235,12 +235,14 @@ struct ClaudeLLMProvider: LLMProvider {
 
         let finalReasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
-        let fallbackReasoning = finalReasoning.isEmpty && !pendingTools.isEmpty ? "Executing \(pendingTools.count) tools..." : finalReasoning
 
         // Extract token usage from Anthropic API response
         let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
 
-        return ModernCognitiveStep(reasoning: fallbackReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+        // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
+        // .toolCall events, not from this field. A placeholder here would pollute any
+        // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
     }
 
     // MARK: - Bot Flow (Streaming)

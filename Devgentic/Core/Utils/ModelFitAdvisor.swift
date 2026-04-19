@@ -56,7 +56,7 @@ struct ModelFitAssessment: Sendable {
 /// Provider-agnostic — works with any source (MLX, Ollama) via `ModelMetadata` or raw parameters.
 struct ModelFitAdvisor {
 
-    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "ModelFitAdvisor")
+    private static let logger = DGLogger(category: "ModelFitAdvisor")
 
     // MARK: - Primary API
 
@@ -227,7 +227,7 @@ struct ModelFitAdvisor {
             recommendation = "This model is too large for your system. Consider a smaller variant"
         }
 
-        logger.info("Assessment: \(paramBillions, format: .fixed(precision: 1))B Q\(quantBits) → \(formatted) → \(verdict.rawValue)")
+        logger.info("Assessment: \(String(format: "%.1f", paramBillions))B Q\(quantBits) → \(formatted) → \(verdict.rawValue)")
 
         return ModelFitAssessment(
             verdict: verdict,

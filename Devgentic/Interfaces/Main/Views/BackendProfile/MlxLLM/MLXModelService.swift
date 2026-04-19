@@ -17,7 +17,7 @@ import os
 class MLXModelService {
     static let shared = MLXModelService()
 
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MLXModelService")
+    @ObservationIgnored private let logger = DGLogger(category: "MLXModelService")
 
     // MARK: - Observable State
 

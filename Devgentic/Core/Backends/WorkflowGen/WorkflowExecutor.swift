@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WorkflowExecutor")
+private let logger = DGLogger(category: "WorkflowExecutor")
 
 /// TaskLocal depth counter for sub-workflow recursion protection.
 enum WorkflowDepth {
@@ -565,6 +565,9 @@ actor WorkflowExecutor: Executor {
 
                         case .thought(let msg, let id, _):
                             continuation.yield(.thought("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
+
+                        case .reasoning(let msg, let id, _):
+                            continuation.yield(.reasoning("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
 
                         case .toolCall(let name, let params, _):
                             continuation.yield(.toolCall(name: name, params: params, sourceNodeID: nodeID))

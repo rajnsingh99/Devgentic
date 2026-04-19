@@ -13,7 +13,7 @@
 //@MainActor
 //@Observable
 //class AgentOnboardingViewModel: SetupFailedViewModelProtocol {
-//    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "AgentOnboardingViewModel")
+//    private static let logger = DGLogger(category: "AgentOnboardingViewModel")
 //
 //    // Overall onboarding steps
 //    enum OnboardingFlowStep: Identifiable {

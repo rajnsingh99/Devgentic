@@ -15,7 +15,7 @@ import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MLXImageGenService")
+private let logger = DGLogger(category: "MLXImageGenService")
 
 // MARK: - Shared Pipeline Manager
 

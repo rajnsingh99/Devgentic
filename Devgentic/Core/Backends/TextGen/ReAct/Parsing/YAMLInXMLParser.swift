@@ -18,7 +18,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "YAMLInXMLParser")
+private let logger = DGLogger(category: "YAMLInXMLParser")
 
 /// Parses YAML-in-XML hybrid format — XML wrapper tags with YAML list bodies.
 struct YAMLInXMLParser: CognitiveParserProtocol {

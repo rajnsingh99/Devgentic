@@ -11,7 +11,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaImageGenService")
+private let logger = DGLogger(category: "OllamaImageGenService")
 
 // MARK: - Ollama Image Generation Service
 

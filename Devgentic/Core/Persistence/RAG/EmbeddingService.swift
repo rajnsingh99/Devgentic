@@ -45,7 +45,7 @@ actor EmbeddingService {
     private var _tokenizer: (any Tokenizer)?
 
     /// Logger for diagnostics and error reporting.
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "EmbeddingService")
+    private let logger = DGLogger(category: "EmbeddingService")
 
     // MARK: - Initialization
 

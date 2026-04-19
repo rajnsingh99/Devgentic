@@ -12,7 +12,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WorkflowRunHistoryStore")
+private let logger = DGLogger(category: "WorkflowRunHistoryStore")
 
 final class WorkflowRunHistoryStore {
     static let shared = WorkflowRunHistoryStore()

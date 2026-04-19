@@ -15,7 +15,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "DeepXMLParser")
+private let logger = DGLogger(category: "DeepXMLParser")
 
 /// Parses Qwen-Coder style deep XML function calls where tool names
 /// and parameters are encoded as XML attribute values rather than JSON.

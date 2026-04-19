@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PlanGenerator")
+private let logger = DGLogger(category: "PlanGenerator")
 
 struct PlanGeneratorStrategy: Sendable {
 

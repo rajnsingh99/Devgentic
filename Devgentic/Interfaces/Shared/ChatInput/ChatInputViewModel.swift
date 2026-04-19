@@ -154,7 +154,7 @@ final class ChatInputViewModel {
     @ObservationIgnored private let promptService: PromptServiceProtocol
 
     // MARK: - Private State
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ChatInputViewModel")
+    @ObservationIgnored private let logger = DGLogger(category: "ChatInputViewModel")
     @ObservationIgnored private var recordingTimer: Timer?
     @ObservationIgnored private let maxPowerLevelsToShow = 100
 

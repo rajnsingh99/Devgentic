@@ -18,15 +18,15 @@ struct PDFExtractor: DocumentExtractor {
     private let logger = Logger(subsystem: "com.devgentic", category: "PDFExtractor")
 
     func extract(from url: URL, maxSize: Int) async throws -> ExtractionResult {
-        logger.info("Starting PDF extraction: \(url.lastPathComponent, privacy: .public)")
+        logger.info("Starting PDF extraction: \(url.lastPathComponent)")
 
         guard let pdfDocument = PDFDocument(url: url) else {
-            logger.error("Failed to initialize PDFDocument for: \(url.lastPathComponent, privacy: .public)")
+            logger.error("Failed to initialize PDFDocument for: \(url.lastPathComponent)")
             throw DocumentExtractionError.corruptedFile(url.path)
         }
 
         let pageCount = pdfDocument.pageCount
-        logger.info("PDF loaded: \(pageCount) pages — \(url.lastPathComponent, privacy: .public)")
+        logger.info("PDF loaded: \(pageCount) pages — \(url.lastPathComponent)")
 
         var fullText = ""
         var method = "pdfkit"
@@ -43,24 +43,24 @@ struct PDFExtractor: DocumentExtractor {
         // Phase 2: If PDFKit returned little/no text, try OCR via Vision
         let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.count < 50 && pageCount > 0 {
-            logger.info("PDFKit extracted only \(trimmed.count) chars — falling back to Vision OCR for \(url.lastPathComponent, privacy: .public)")
+            logger.info("PDFKit extracted only \(trimmed.count) chars — falling back to Vision OCR for \(url.lastPathComponent)")
             fullText = try await extractViaOCR(document: pdfDocument, maxSize: maxSize)
             method = "vision-ocr"
         }
 
         let wasTruncated = fullText.count >= maxSize
         if wasTruncated {
-            logger.warning("PDF content truncated at \(maxSize) chars for \(url.lastPathComponent, privacy: .public)")
+            logger.warning("PDF content truncated at \(maxSize) chars for \(url.lastPathComponent)")
             fullText = String(fullText.prefix(maxSize))
         }
 
         guard !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            logger.warning("PDF contains no extractable text: \(url.lastPathComponent, privacy: .public)")
+            logger.warning("PDF contains no extractable text: \(url.lastPathComponent)")
             throw DocumentExtractionError.emptyDocument(url.path)
         }
 
         let wordCount = fullText.split(separator: " ").count
-        logger.info("PDF extraction complete: \(wordCount) words via \(method, privacy: .public) — \(url.lastPathComponent, privacy: .public)")
+        logger.info("PDF extraction complete: \(wordCount) words via \(method) — \(url.lastPathComponent)")
 
         return ExtractionResult(
             text: fullText,
@@ -117,7 +117,7 @@ struct PDFExtractor: DocumentExtractor {
                 logger.debug("OCR page \(i + 1): extracted \(pageText.count) chars")
                 ocrText += pageText + "\n\n"
             } catch {
-                logger.error("Vision OCR failed on page \(i + 1): \(error.localizedDescription, privacy: .public)")
+                logger.error("Vision OCR failed on page \(i + 1): \(error.localizedDescription)")
             }
 
             if ocrText.count >= maxSize { break }

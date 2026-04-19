@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "GeminiAdapter")
+private let logger = DGLogger(category: "GeminiAdapter")
 
 /// Adapter for Google's Gemini models.
 /// Translates internal AgentTool representations into the exact `functionDeclarations`

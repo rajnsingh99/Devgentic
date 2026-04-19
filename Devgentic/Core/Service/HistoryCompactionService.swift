@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "HistoryCompaction")
+private let logger = DGLogger(category: "HistoryCompaction")
 
 // MARK: - Compaction Result
 

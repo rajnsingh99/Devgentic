@@ -87,7 +87,7 @@ final class ExplorerViewModel {
     @ObservationIgnored private var fileSystemMonitor: FileSystemMonitor?
     @ObservationIgnored private var fileSystemDebounceTask: Task<Void, Never>?
 
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.explorer", category: "ExplorerViewModel")
+    @ObservationIgnored private let logger = DGLogger(category: "ExplorerViewModel")
     @ObservationIgnored private static let lastOpenedFolderBookmarkKey = "explorerLastOpenedFolderBookmark"
 
     init() {

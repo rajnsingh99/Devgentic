@@ -9,7 +9,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ReadSessionHistoryTool")
+private let logger = DGLogger(category: "ReadSessionHistoryTool")
 
 /// A system tool that allows the agent to retrieve the full, uncompressed SessionGraph.
 /// Used to recover deep logs from completed episodes that were stripped by Semantic Compression.

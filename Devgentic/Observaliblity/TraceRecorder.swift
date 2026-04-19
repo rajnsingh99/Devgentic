@@ -32,14 +32,16 @@ actor TraceRecorder {
     // MARK: - Initialization
     
     private init() {
-        do {
-            self.store = try TraceStore()
-            logger.info("TraceRecorder initialized with persistent store.")
-        } catch {
-            self.store = nil
-            logger.error("Failed to initialize TraceStore: \(error.localizedDescription). Recording disabled.")
+        // Use the shared TraceStore singleton so LogRecorder, MetricsAggregator, and
+        // future observability actors share one connection pool + one migration run.
+        // Previously each created its own TraceStore, which would race on migrations.
+        self.store = TraceStore.shared
+        if self.store != nil {
+            logger.info("TraceRecorder initialized with shared persistent store.")
+        } else {
+            logger.error("TraceStore.shared is nil — recording disabled.")
         }
-        
+
         // Start the periodic flush loop after initialization completes
         Task {
             await self.startFlushLoop()
@@ -203,6 +205,13 @@ actor TraceRecorder {
     }
     
     /// Records a tool execution result.
+    ///
+    /// Populates the indexed `durationMs` column (Phase A) directly, so Phase E
+    /// aggregation queries can compute p50/p95 latency without parsing `detailJSON`
+    /// blobs. For tool FAILURES, also tags the event with a best-effort
+    /// `AgentErrorCategory` (e.g. `.toolSemanticFail` when the tool returned
+    /// error-shaped output) — this drives the per-tool failure-breakdown chart
+    /// in the Trends dashboard.
     func emitToolResult(span: TraceContext, name: String, success: Bool, output: String, durationMs: Int) {
         let detail: [String: Any] = [
             "tool_name": name,
@@ -210,13 +219,24 @@ actor TraceRecorder {
             "duration_ms": durationMs,
             "output_preview": String(output.prefix(500))
         ]
+        // Dev-mode-gated v2 column population. Non-dev-mode users get the legacy
+        // detailJSON representation; dev-mode users additionally get indexed columns
+        // for fast dashboard aggregation. Failures without an explicit category
+        // default to `.toolSemanticFail` (matches ToolExecutionMediator's
+        // `isSemanticFailure` detection — empty output or error-shaped strings).
+        let devModeOn = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+        let inferredCategory: AgentErrorCategory? = success ? nil : .toolSemanticFail
+
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
             eventType: .toolResult,
             content: "\(name): \(success ? "success" : "failed")",
             detailJSON: serializeDetail(detail),
-            severity: success ? .info : .warning
+            severity: success ? .info : .warning,
+            errorCategory: devModeOn ? inferredCategory : nil,
+            phase: devModeOn ? .tooling : nil,
+            durationMs: devModeOn ? durationMs : nil
         ))
     }
     
@@ -319,6 +339,152 @@ actor TraceRecorder {
             detailJSON: serializeDetail(detail),
             severity: .debug
         ))
+    }
+
+    /// Captures the full request configuration snapshot for a trace. Called once
+    /// per trace, immediately after `beginTrace(...)`. Safe to call before or after
+    /// the trace row is persisted — FK constraint is satisfied because both writes
+    /// happen in sequence on the same actor.
+    ///
+    /// On any serialization or persistence error, logs and swallows — observability
+    /// must never break the stream. The trace still exists without a config snapshot;
+    /// ReportInspector handles the nil case gracefully.
+    ///
+    /// - Parameters:
+    ///   - snapshot: pre-built `TraceConfigSnapshot` (call `TraceConfigSnapshot.capture(...)`)
+    func captureConfigSnapshot(_ snapshot: TraceConfigSnapshot) {
+        guard let store else { return }
+
+        do {
+            // Serialize the full snapshot, then pass through the sanitizer one more
+            // time at the JSON level. This catches anything the struct-level
+            // capture missed (secret-looking patterns in free-text fields like
+            // instructions, tool params, etc.).
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            let jsonData = try encoder.encode(snapshot)
+            guard let rawJSON = String(data: jsonData, encoding: .utf8) else {
+                logger.warning("Config snapshot JSON encoding produced no UTF-8 string")
+                return
+            }
+            let sanitizedJSON = TelemetrySanitizer.sanitizeFull(rawJSON, level: .standard)
+
+            let row = TraceConfigRow(
+                traceID:           snapshot.traceID,
+                provider:          snapshot.provider,
+                modelName:         snapshot.modelName,
+                profileType:       snapshot.profileType,
+                appVersion:        snapshot.appVersion,
+                osVersion:         snapshot.osVersion,
+                toolsCount:        snapshot.toolsEnabled.count,
+                capabilitiesCount: snapshot.capabilitiesEnabled.count,
+                instructionsHash:  snapshot.instructionsHash,
+                memoryBudgetBytes: Int64(snapshot.hardware.effectiveBudgetBytes),
+                historyStrategy:   snapshot.historyStrategy,
+                thinkingEnabled:   snapshot.thinkingEnabled,
+                snapshotJSON:      sanitizedJSON
+            )
+
+            try store.saveConfigSnapshot(row)
+            logger.debug("Captured config snapshot for trace \(snapshot.traceID.prefix(8))")
+        } catch {
+            // Fail-soft: log and move on. The rest of the trace still works.
+            logger.warning("Config snapshot capture failed for trace \(snapshot.traceID.prefix(8)): \(error.localizedDescription)")
+        }
+    }
+
+    /// Fetches the persisted config snapshot for a trace. Returns nil for traces
+    /// predating v3 migration or where capture was skipped.
+    func fetchConfigSnapshot(traceID: String) -> TraceConfigRow? {
+        guard let store else { return nil }
+        return try? store.fetchConfigSnapshot(traceID: traceID)
+    }
+
+    /// Records a classified `ClassifiedAgentError`. This is the canonical entry point
+    /// for structured error telemetry — every failure site catching a raw `Error`
+    /// should `error.classify(...)` first, then route the result here.
+    ///
+    /// The v2 observability columns (`errorCategory`, `errorChainID`, `phase`,
+    /// `iterationNumber`, `causedByEventID`) are populated only when developer mode
+    /// is on. In production builds they stay nil — legacy row layout, zero overhead.
+    ///
+    /// - Parameters:
+    ///   - span: span context where the error surfaced
+    ///   - error: the classified error
+    ///   - iteration: optional ReAct iteration number (for tooling/llm/capability phases)
+    ///   - causedBy: optional ID of a previously-emitted SpanEvent that triggered this one
+    func emitAgentError(
+        span: TraceContext,
+        error: ClassifiedAgentError,
+        iteration: Int? = nil,
+        causedBy: Int64? = nil
+    ) {
+        let devModeOn = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+
+        // Message + context always sanitized at the strictest level that's compatible
+        // with debug readability — redacts API keys/tokens but preserves paths' tails
+        // so the developer can still see "read_file failed on [USER_PATH]/foo.swift".
+        let sanitizedMessage = TelemetrySanitizer.sanitizeFull(error.message, level: .standard)
+
+        var detail: [String: Any] = [
+            "category":    error.category.rawValue,
+            "phase":       error.phase.rawValue,
+            "severity":    error.category.severity.rawValue,
+            "origin":      error.origin,
+            "chain_id":    error.chainID.uuidString,
+            "retryable":   error.isRecoverable
+        ]
+        // Context is already short-string valued. Sanitize each value defensively.
+        if !error.context.isEmpty {
+            var sanitizedContext: [String: String] = [:]
+            for (k, v) in error.context {
+                sanitizedContext[k] = TelemetrySanitizer.sanitizeFull(v, level: .standard)
+            }
+            detail["context"] = sanitizedContext
+        }
+
+        // Diagnostics are only present when developer mode was on at classify() time.
+        // Include them in detailJSON so the Report Inspector can render them later.
+        if devModeOn, let diag = error.diagnostics {
+            var diagBlob: [String: Any] = [:]
+            if let d = diag.errorDomain  { diagBlob["error_domain"] = d }
+            if let c = diag.errorCode    { diagBlob["error_code"] = c }
+            if let k = diag.userInfoKeys { diagBlob["user_info_keys"] = k }
+            if let s = diag.stackSignature {
+                diagBlob["stack_signature"] = TelemetrySanitizer.sanitizeFull(s, level: .standard)
+            }
+            if !diagBlob.isEmpty { detail["diagnostics"] = diagBlob }
+        }
+
+        // Severity mapping: AgentErrorCategory.severity → SpanEventSeverity.
+        let severity: SpanEventSeverity
+        switch error.category.severity {
+        case .informational: severity = .warning   // warning-level log entry, not error spam
+        case .recoverable:   severity = .warning
+        case .fatal:         severity = .error
+        }
+
+        // Dev-mode gate: populate the v2 columns only when enabled. Production builds
+        // still get the structured detailJSON (readable in exported traces), they just
+        // don't fill the indexed analytics columns. Keeps production tables compact
+        // and avoids skewing dashboards for users who aren't opted into telemetry.
+        let event = SpanEvent(
+            spanID: span.spanID,
+            traceID: span.traceID,
+            eventType: .error,
+            content: sanitizedMessage,
+            detailJSON: serializeDetail(detail),
+            severity: severity,
+            errorCategory: devModeOn ? error.category : nil,
+            errorChainID:  devModeOn ? error.chainID  : nil,
+            phase:         devModeOn ? error.phase    : nil,
+            iterationNumber: devModeOn ? iteration    : nil,
+            causedByEventID: devModeOn ? causedBy     : nil,
+            durationMs:    nil
+        )
+
+        emit(event)
     }
     
     // MARK: - Flush

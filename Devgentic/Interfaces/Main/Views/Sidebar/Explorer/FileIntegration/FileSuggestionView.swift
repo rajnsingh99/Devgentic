@@ -9,7 +9,7 @@ import SwiftUI
 import os
 
 // Logger for FileSuggestionView (Optional)
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "FileSuggestionView")
+private let logger = DGLogger(category: "FileSuggestionView")
 
 struct FileSuggestionView: View {
     // MARK: - Properties

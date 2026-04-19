@@ -11,7 +11,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "GeminiImageGenService")
+private let logger = DGLogger(category: "GeminiImageGenService")
 
 // MARK: - Gemini Image Generation Service
 

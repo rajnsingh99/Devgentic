@@ -13,7 +13,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MediaStore")
+private let logger = DGLogger(category: "MediaStore")
 
 /// Manages binary media lifecycle: write-to-disk, resolve, evict.
 public actor MediaStore {

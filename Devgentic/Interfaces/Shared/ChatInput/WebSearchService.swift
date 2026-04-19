@@ -8,7 +8,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WebSearchService")
+private let logger = DGLogger(category: "WebSearchService")
 
 /// A service responsible for interacting with the Google Custom Search API.
 /// This includes validating API keys and eventually performing searches.

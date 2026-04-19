@@ -20,6 +20,45 @@ import Foundation
     let params: String      // Serialised arguments — passed to ExecutionSummary
     let output: String      // LLM-facing output — passed to ExecutionSummary
     let artifacts: [MediaArtifact]  // Media artifacts produced by this tool execution
+
+    // Signal tools (final_answer, ask_user) short-circuit the cognitive loop.
+    // When true, the executor breaks the loop and routes `output` per `terminalKind`.
+    let isTerminalSignal: Bool
+    let terminalKind: TerminalKind?
+
+    init(
+        stepId: Int,
+        toolCallId: String,
+        toolName: String,
+        result: String,
+        summary: String,
+        isSuccess: Bool,
+        params: String,
+        output: String,
+        artifacts: [MediaArtifact],
+        isTerminalSignal: Bool = false,
+        terminalKind: TerminalKind? = nil
+    ) {
+        self.stepId = stepId
+        self.toolCallId = toolCallId
+        self.toolName = toolName
+        self.result = result
+        self.summary = summary
+        self.isSuccess = isSuccess
+        self.params = params
+        self.output = output
+        self.artifacts = artifacts
+        self.isTerminalSignal = isTerminalSignal
+        self.terminalKind = terminalKind
+    }
+}
+
+/// Marker for signal tools that short-circuit the ReAct loop.
+/// - `finalAnswer`: model has composed its complete response — exit with success.
+/// - `askUser`: model needs clarification — loop is suspended (existing HITL path).
+enum TerminalKind: Sendable, Codable, Equatable {
+    case finalAnswer
+    case askUser
 }
 
 struct APISpyModel: LLMProvider {

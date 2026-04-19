@@ -32,7 +32,7 @@ actor IntelligenceCoreService {
 
     static let shared = IntelligenceCoreService()
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "IntelligenceCoreService")
+    private let logger = DGLogger(category: "IntelligenceCoreService")
 
     private var modelContainer: ModelContainer?
 

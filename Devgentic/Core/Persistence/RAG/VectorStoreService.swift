@@ -25,7 +25,7 @@ final class VectorStoreService: @unchecked Sendable {
     private let store: Store
     private let parentBox: Box<ParentDocumentEntity>
     private let childBox: Box<ChildChunkEntity>
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "VectorStoreService")
+    private let logger = DGLogger(category: "VectorStoreService")
 
     // MARK: - HNSW Search Constants
 

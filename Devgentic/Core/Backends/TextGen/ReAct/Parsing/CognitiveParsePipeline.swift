@@ -19,7 +19,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CognitiveParsePipeline")
+private let logger = DGLogger(category: "CognitiveParsePipeline")
 
 /// A stateless value type that orchestrates the Dialect-Anchored Cascade.
 /// Instantiate per-call with the expected dialect and optional telemetry metadata.

@@ -9,7 +9,7 @@ import SwiftUI
 import AppKit
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "MainApplicationView")
+private let logger = DGLogger(category: "MainApplicationView")
 
 // MARK: - Main View
 struct MainApplicationView: View {

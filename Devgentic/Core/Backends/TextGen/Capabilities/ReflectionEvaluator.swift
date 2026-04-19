@@ -14,7 +14,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ReflectionEvaluator")
+private let logger = DGLogger(category: "ReflectionEvaluator")
 
 struct ReflectionEvaluator: Sendable {
 

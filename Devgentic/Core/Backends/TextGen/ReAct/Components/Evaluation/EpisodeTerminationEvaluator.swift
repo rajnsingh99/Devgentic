@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "TerminationEvaluator")
+private let logger = DGLogger(category: "TerminationEvaluator")
 
 /// A concrete implementation of `TerminationEvaluating`.
 /// Analyzes cognitive steps to determine if the agent has reached a valid exit condition

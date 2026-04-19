@@ -37,7 +37,7 @@ private func fsEventsCallback(
 class FileSystemMonitor {
     private var stream: FSEventStreamRef?
     private let callback: @Sendable ([URL]) -> Void
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "FileSystemMonitor")
+    private let logger = DGLogger(category: "FileSystemMonitor")
 
     private var monitoringURL: URL?
 

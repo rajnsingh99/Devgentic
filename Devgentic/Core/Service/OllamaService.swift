@@ -2,7 +2,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OllamaService")
+private let logger = DGLogger(category: "OllamaService")
 
 /// Represents a single, styled tag for a model.
 struct ModelTag: Identifiable, Hashable {

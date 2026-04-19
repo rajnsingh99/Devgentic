@@ -11,7 +11,7 @@ import Foundation
 import SwiftData
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MCPToolStore")
+private let logger = DGLogger(category: "MCPToolStore")
 
 /// Manages all SwiftData operations for MCP tools (MCPToolItem and MCPToolDefinitionModel).
 /// This class acts as a single source of truth for tool data and publishes changes to the UI.

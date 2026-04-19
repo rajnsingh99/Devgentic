@@ -155,6 +155,14 @@ struct DevgenticApp: App {
                     )
                 }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
+
+                // Phase E — Trends dashboard. Requires developer mode (gated internally
+                // by TrendsView itself). Listed here so developers can discover it via
+                // the app menu; the shortcut avoids collisions with standard macOS ones.
+                Button("Observability Trends...") {
+                    openWindow(id: "trends-window")
+                }
+                .keyboardShortcut("t", modifiers: [.command, .shift, .option])
             }
         }
 
@@ -167,6 +175,20 @@ struct DevgenticApp: App {
                     .tint(themeManager.currentTheme.accentColor)
             }
         }
+
+        // MARK: - Trends Dashboard (Phase E)
+        // Developer-facing window showing per-tool reliability, per-category error
+        // frequency, per-model outcomes, and circuit-breaker stats. Reads from the
+        // TraceStore live (no pre-aggregation). Gated internally on developerMode;
+        // non-devs see a "turn on developer mode to unlock" placeholder.
+        Window("Observability Trends", id: "trends-window") {
+            TrendsView()
+                .environment(themeManager)
+                .environment(\.appTheme, themeManager.currentTheme)
+                .frame(minWidth: 760, minHeight: 560)
+                .tint(themeManager.currentTheme.accentColor)
+        }
+        .windowResizability(.contentSize)
     }
 
     /// Removes legacy CoreData SQLite files (DevgenticDB) from Application Support.

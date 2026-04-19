@@ -10,7 +10,7 @@ import SwiftUI
 import SwiftData
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "ConversationSidebarView")
+private let logger = DGLogger(category: "ConversationSidebarView")
 
 
 // MARK: - ConversationSD Extension

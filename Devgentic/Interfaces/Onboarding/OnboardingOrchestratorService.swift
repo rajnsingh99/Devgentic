@@ -11,7 +11,7 @@
 //import os
 //import System
 //
-//private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "OnboardingOrchestrator")
+//private let logger = DGLogger(category: "OnboardingOrchestrator")
 //
 //enum OrchestrationError: LocalizedError {
 //    case pythonNotInstalled

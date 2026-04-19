@@ -10,7 +10,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ContentBlockView")
+private let logger = DGLogger(category: "ContentBlockView")
 private let CODE_BLOCK_LINE_LIMIT = 50
 
 struct ContentBlock: Identifiable, Equatable, Hashable {

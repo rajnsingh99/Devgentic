@@ -12,7 +12,7 @@ import Foundation
 import os
 
 // Define a specific logger for this subsystem.
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LocalToolManager")
+private let logger = DGLogger(category: "LocalToolManager")
 
 // MARK: - Native Tool Adapter
 

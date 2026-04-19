@@ -15,7 +15,7 @@ import os
 import AppKit
 #endif
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WorkflowCanvasView")
+private let logger = DGLogger(category: "WorkflowCanvasView")
 
 struct WorkflowCanvasView: View {
     @Binding var profile: BackendProfileModel

@@ -10,7 +10,7 @@
 
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ParserFactory")
+private let logger = DGLogger(category: "ParserFactory")
 
 /// Creates the correct `CognitiveParserProtocol` implementation for a given dialect.
 struct ParserFactory {

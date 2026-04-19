@@ -98,7 +98,7 @@ final class SystemHardwareProfiler: @unchecked Sendable {
 
     static let shared = SystemHardwareProfiler()
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "HardwareProfiler")
+    private let logger = DGLogger(category: "HardwareProfiler")
 
     /// Cached profile — computed once on first access.
     lazy var profile: SystemHardwareProfile = {

@@ -16,7 +16,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ConversationHistoryTool")
+private let logger = DGLogger(category: "ConversationHistoryTool")
 
 struct ConversationHistoryTool: DevgenticTool {
 

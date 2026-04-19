@@ -12,7 +12,7 @@ import Foundation
 import SwiftUI
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendProfileService")
+private let logger = DGLogger(category: "BackendProfileService")
 
 /// An ObservableObject that acts as the central service for the Backend Profile UI.
 /// It manages the list of profiles, handles persistence, and provides logic for advanced configurations.

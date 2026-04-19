@@ -8,7 +8,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendOrchestrationService")
+private let logger = DGLogger(category: "BackendOrchestrationService")
 
 /// The primary entry point for backend operations.
 /// Orchestrates the flow between the UI, file processing, RAG retrieval, and the Agent/Bot pipelines.
@@ -245,6 +245,9 @@ class BackendOrchestrationService {
                                 continuation.yield(event)
                             case .thought(_, let message, _):
                                 logger.debug("[THOUGHT] \(message)")
+                                continuation.yield(event)
+                            case .reasoning(let message, _, _):
+                                logger.debug("[REASONING] \(message)")
                                 continuation.yield(event)
                             case .toolSucceeded(let output, _, _), .toolFailed(let output, _, _, _):
                                 logger.debug("[ARTIFACT] \(output.toolName) - \(output.output.prefix(50))...")

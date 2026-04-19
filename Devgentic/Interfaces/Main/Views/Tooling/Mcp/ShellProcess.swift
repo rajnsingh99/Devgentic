@@ -8,7 +8,7 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "ShellProcess")
+private let logger = DGLogger(category: "ShellProcess")
 
 enum ShellProcessError: LocalizedError {
     case processFailedToStart(String)
@@ -110,7 +110,7 @@ class ShellProcess {
                 let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
                     // Log immediately to Console.app / Xcode
-                    logger.error("[STDERR] \(trimmed, privacy: .public)")
+                    logger.error("[STDERR] \(trimmed)")
                     
                     // Archive it safely
                     self?.stderrQueue.async {
@@ -120,9 +120,9 @@ class ShellProcess {
             }
         }
         
-        logger.info("Spawning ShellProcess: /bin/zsh -l -c \(fullCommandString, privacy: .public)")
+        logger.info("Spawning ShellProcess: /bin/zsh -l -c \(fullCommandString)")
         // Log the constructed PATH for debugging verification
-        logger.info("Constructed PATH: \(currentPath, privacy: .public)")
+        logger.info("Constructed PATH: \(currentPath)")
     }
     
     func run() throws {

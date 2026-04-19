@@ -11,7 +11,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AskUserTool")
+private let logger = DGLogger(category: "AskUserTool")
 
 /// A tool that pauses agent execution and asks the user a question.
 /// The agent's cognitive loop is suspended until the user responds via the UI.

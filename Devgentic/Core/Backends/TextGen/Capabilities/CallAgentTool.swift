@@ -10,7 +10,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CallAgentTool")
+private let logger = DGLogger(category: "CallAgentTool")
 
 // MARK: - Concurrency Limiter
 

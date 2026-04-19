@@ -8,7 +8,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendConfiguration")
+private let logger = DGLogger(category: "BackendConfiguration")
 
 // This struct will be a snapshot of the configuration, passed with each request.
 struct BackendRequestConfig {

@@ -9,7 +9,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "NotificationService")
+private let logger = DGLogger(category: "NotificationService")
 
 // MARK: - Notification Payload
 

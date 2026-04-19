@@ -9,7 +9,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecutionLoop")
+private let logger = DGLogger(category: "ToolExecutionLoop")
 
 /// Deduplicates and executes a set of tool calls with HITL, ask_user interception,
 /// tracing, and observation collection.
@@ -30,6 +30,27 @@ func executeToolCalls(
     continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
+
+    // --- Terminal Signal Fast-Path: final_answer wins ---
+    // If the model called `final_answer`, it's signalling task completion.
+    // Drop every other call in this iteration — the agent MUST only emit one
+    // action in the closing step (enforced via the prompt's termination_contract).
+    // This also prevents deadlocks where the model calls a read-only tool alongside
+    // final_answer and ends up blocking on unrelated dispatch.
+    if let finalCall = toolCalls.first(where: { $0.name == "final_answer" }) {
+        let droppedCount = toolCalls.count - 1
+        if droppedCount > 0 {
+            let droppedNames = toolCalls.filter { $0.name != "final_answer" }.map(\.name).joined(separator: ", ")
+            logger.warning("⚠️ final_answer called alongside \(droppedCount) other tool(s): [\(droppedNames)]. Dropping siblings — final_answer wins.")
+        }
+        return [try buildFinalAnswerObservation(
+            call: finalCall,
+            currentIteration: currentIteration,
+            iterationSpan: iterationSpan,
+            continuation: continuation,
+            onTraceUpdate: onTraceUpdate
+        )]
+    }
 
     // --- Deduplicate ---
     let uniqueToolCalls = deduplicateToolCalls(toolCalls)
@@ -383,4 +404,128 @@ struct AskUserInterceptor {
         guard toolName == "ask_user" else { return nil }
         return arguments["question"]?.stringValue ?? "Please provide clarification to proceed."
     }
+}
+
+// MARK: - final_answer Handling
+
+/// Hard cap on final_answer length. 32K chars ≈ 8K tokens — well beyond any
+/// reasonable user-facing response. Longer outputs indicate the model is
+/// dumping raw tool output into `answer`, which should be summarized instead.
+private let finalAnswerMaxChars = 32_000
+
+/// Builds the terminal observation for a `final_answer` call. Validates the
+/// payload; on invalid input returns a non-terminal failure observation so the
+/// loop continues and the model can retry with a valid answer. On success,
+/// returns a terminal observation that the executor breaks on.
+private func buildFinalAnswerObservation(
+    call: PendingToolCall,
+    currentIteration: Int,
+    iterationSpan: TraceContext,
+    continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
+    onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
+) throws -> ToolObservation {
+
+    let paramsString = serializeToolParams(call.arguments)
+
+    // Accept common aliases models reach for when they forget the schema.
+    let answerAliases = ["answer", "response", "content", "text", "message", "final_answer"]
+    var rawAnswer: String = ""
+    for key in answerAliases {
+        if let value = call.arguments[key]?.stringValue, !value.isEmpty {
+            rawAnswer = value
+            break
+        }
+    }
+
+    let trimmed = rawAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    // Emit standard UI events so the timeline shows the exit action.
+    continuation.yield(.toolCall(name: "final_answer", params: paramsString))
+    onTraceUpdate(AgentTraceLog(
+        traceID: iterationSpan.traceID,
+        spanID: iterationSpan.spanID,
+        parentSpanID: iterationSpan.parentSpanID,
+        stepNumber: currentIteration,
+        state: .acting(.tool(name: "final_answer")),
+        content: "Composing final answer...",
+        metadata: ["tool_name": "final_answer"]
+    ))
+
+    // --- Validation: empty or whitespace ---
+    // Don't terminate — return a non-terminal failure so the model retries.
+    // This counts against maxIterations (per product decision #2).
+    if trimmed.isEmpty {
+        let errMsg = "ERROR: final_answer requires a non-empty 'answer' argument. Retry by calling final_answer again with your actual response content."
+        let output = ToolOutput(toolName: "final_answer", params: paramsString, output: errMsg, isSuccess: false)
+        continuation.yield(.toolFailed(output, category: .invalidArgs))
+        logger.warning("final_answer called with empty answer — forcing retry.")
+        return ToolObservation(
+            stepId: currentIteration,
+            toolCallId: call.id,
+            toolName: "final_answer",
+            result: errMsg,
+            summary: "final_answer rejected: empty answer.",
+            isSuccess: false,
+            params: paramsString,
+            output: errMsg,
+            artifacts: [],
+            isTerminalSignal: false,
+            terminalKind: nil
+        )
+    }
+
+    // --- Validation: over-long ---
+    if trimmed.count > finalAnswerMaxChars {
+        let errMsg = "ERROR: final_answer 'answer' exceeds \(finalAnswerMaxChars) chars (\(trimmed.count) received). Summarize instead of dumping raw tool output. Retry with a concise response."
+        let output = ToolOutput(toolName: "final_answer", params: paramsString, output: errMsg, isSuccess: false)
+        continuation.yield(.toolFailed(output, category: .invalidArgs))
+        logger.warning("final_answer rejected — \(trimmed.count) chars exceeds cap of \(finalAnswerMaxChars).")
+        return ToolObservation(
+            stepId: currentIteration,
+            toolCallId: call.id,
+            toolName: "final_answer",
+            result: errMsg,
+            summary: "final_answer rejected: over cap.",
+            isSuccess: false,
+            params: paramsString,
+            output: errMsg,
+            artifacts: [],
+            isTerminalSignal: false,
+            terminalKind: nil
+        )
+    }
+
+    // --- Success: terminal signal ---
+    let successOutput = ToolOutput(
+        toolName: "final_answer",
+        params: paramsString,
+        output: "Answer composed (\(trimmed.count) chars).",
+        isSuccess: true
+    )
+    continuation.yield(.toolSucceeded(successOutput, durationMs: 0))
+    onTraceUpdate(AgentTraceLog(
+        traceID: iterationSpan.traceID,
+        spanID: iterationSpan.spanID,
+        parentSpanID: iterationSpan.parentSpanID,
+        stepNumber: currentIteration,
+        state: .thinking(.finalizing),
+        content: "Final answer received — terminating loop.",
+        metadata: ["tool_name": "final_answer", "answer_chars": "\(trimmed.count)"]
+    ))
+
+    logger.info("🏁 final_answer received (\(trimmed.count) chars). Loop will terminate.")
+
+    return ToolObservation(
+        stepId: currentIteration,
+        toolCallId: call.id,
+        toolName: "final_answer",
+        result: trimmed,
+        summary: "Final answer composed.",
+        isSuccess: true,
+        params: paramsString,
+        output: trimmed,
+        artifacts: [],
+        isTerminalSignal: true,
+        terminalKind: .finalAnswer
+    )
 }

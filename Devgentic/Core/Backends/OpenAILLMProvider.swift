@@ -10,7 +10,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OpenAILLMProvider")
+private let logger = DGLogger(category: "OpenAILLMProvider")
 
 // MARK: - OpenAI-Compatible Provider
 
@@ -185,14 +185,13 @@ struct OpenAILLMProvider: LLMProvider {
             }
         }
 
-        let finalReasoning = content.isEmpty && !pendingTools.isEmpty
-            ? "Executing \(pendingTools.count) tools..."
-            : content
-
+        // Empty reasoning stays empty — the UI derives "Executing <tool>..." labels from
+        // .toolCall events, not from this field. A placeholder here would pollute any
+        // future scratchpad injection with meaningless text. (G7 / reasoning refactor)
         // Extract token usage from OpenAI API response
         let usage = json.flatMap { TokenUsage.fromOpenAI($0) }
 
-        return ModernCognitiveStep(reasoning: finalReasoning, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
+        return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
     }
 
     // MARK: - Streaming

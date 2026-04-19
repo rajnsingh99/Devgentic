@@ -14,7 +14,7 @@ actor QueryRewritingService {
 
     static let shared = QueryRewritingService()
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "QueryRewritingService")
+    private let logger = DGLogger(category: "QueryRewritingService")
 
     /// Total number of rewrites attempted since app launch.
     private var totalRewriteCount: Int = 0

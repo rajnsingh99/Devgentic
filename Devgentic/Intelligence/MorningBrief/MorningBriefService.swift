@@ -23,7 +23,7 @@ final class MorningBriefService {
 
     static let shared = MorningBriefService()
 
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MorningBriefService")
+    @ObservationIgnored private let logger = DGLogger(category: "MorningBriefService")
 
     /// Registry of all available brief sources. Add new sources here.
     @ObservationIgnored private(set) var sourceRegistry: [any MorningBriefSource] = []

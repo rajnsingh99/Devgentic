@@ -9,7 +9,7 @@ import SwiftUI
 import os
 import AppKit
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.AgenticDev", category: "DynamicActionButton")
+private let logger = DGLogger(category: "DynamicActionButton")
 
 // MARK: - Mode Enum
 

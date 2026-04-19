@@ -12,7 +12,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "OpenAIImageGenService")
+private let logger = DGLogger(category: "OpenAIImageGenService")
 
 // MARK: - OpenAI Image Generation Service
 

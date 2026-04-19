@@ -15,7 +15,7 @@ import os
 actor ShellSessionManager {
 
     static let shared = ShellSessionManager()
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ShellSessionManager")
+    private let logger = DGLogger(category: "ShellSessionManager")
 
     // Maps ConversationID -> Current Directory Path
     private var sessionCWDs: [UUID: String] = [:]

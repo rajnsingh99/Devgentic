@@ -98,7 +98,7 @@
 //
 //    // MARK: - Properties
 //    let fileURL: URL
-//    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CodeEditorFileViewerState")
+//    private let logger = DGLogger(category: "CodeEditorFileViewerState")
 //
 //    // MARK: - Initializer
 //    init(fileURL: URL) {

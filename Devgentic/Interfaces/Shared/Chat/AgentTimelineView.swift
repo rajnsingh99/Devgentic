@@ -48,10 +48,15 @@ struct AgentTimelineView: View {
     static func buildGroupedNodes(from events: [TimelineEvent], isStreaming: Bool) -> [TimelineNode] {
         var events = events
 
-        // Deduplication: if not streaming and last event is a thought, hide it
-        // as it usually duplicates the final outcome shown immediately below.
-        if !isStreaming, let last = events.last, case .thought = last {
-            events.removeLast()
+        // Deduplication: if not streaming and last event is narrative (thought/reasoning),
+        // hide it — it usually duplicates the final outcome shown immediately below.
+        if !isStreaming, let last = events.last {
+            switch last {
+            case .thought, .reasoning:
+                events.removeLast()
+            default:
+                break
+            }
         }
 
         var nodes: [TimelineNode] = []
@@ -70,6 +75,13 @@ struct AgentTimelineView: View {
         for event in events {
             switch event {
             case .thought(let id, let text):
+                flushActions()
+                nodes.append(.thought(id: id, text: text))
+
+            case .reasoning(let id, let text):
+                // Reasoning reuses the `.thought` timeline node for identical visual
+                // treatment. The semantic split lives at the TimelineEvent layer so
+                // analytics / scratchpad paths can distinguish model vs. system prose.
                 flushActions()
                 nodes.append(.thought(id: id, text: text))
 

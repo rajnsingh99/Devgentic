@@ -14,7 +14,7 @@ class QuickAccessViewModel {
 
     @ObservationIgnored private let persistenceService = ChatPersistenceStore.shared
     @ObservationIgnored private let aiConnect = OllamaConnect()
-    @ObservationIgnored private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "QuickAccessViewModel")
+    @ObservationIgnored private let logger = DGLogger(category: "QuickAccessViewModel")
 
     // MARK: - Properties
     @ObservationIgnored private var targetConversationId: UUID?

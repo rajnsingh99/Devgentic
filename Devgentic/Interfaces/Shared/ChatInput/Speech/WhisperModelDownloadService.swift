@@ -51,10 +51,7 @@ final class WhisperModelDownloadService {
     /// to be considered fully downloaded (MelSpectrogram + AudioEncoder + TextDecoder).
     private let minimumModelFileCount = 3
 
-    private let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app",
-        category: "WhisperModelDownloadService"
-    )
+    private let logger = DGLogger(category: "WhisperModelDownloadService")
 
     // MARK: - Init
 

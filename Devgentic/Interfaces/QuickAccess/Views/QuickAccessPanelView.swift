@@ -21,7 +21,7 @@ private enum UserDefaultsKeys {
 class QuickAccessPanelView: NSPanel, NSWindowDelegate {
 
     private var hostingView: NSHostingView<QuickAccessContentView>?
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.Devgentic", category: "QuickAccessPanelView")
+    private let logger = DGLogger(category: "QuickAccessPanelView")
 
     let collapsedHeight: CGFloat = 95
     let initialMinWidth: CGFloat = 500
@@ -78,7 +78,7 @@ class QuickAccessPanelView: NSPanel, NSWindowDelegate {
     /// Determines if the panel should open in an expanded state.
     /// This is a static function so it can be called safely from within `init` before `super.init`.
     private static func determineInitialExpandedState(shouldResumeSession: Bool, forceExpandVisual: Bool) -> Bool {
-        let logger = Logger(subsystem: Bundle.main.bundleIdentifier!, category: "QuickAccessPanelView.Init")
+        let logger = DGLogger(category: "QuickAccessPanelView.Init")
         
         let defaults = UserDefaults.standard
         let wasExpandedOnClose = defaults.bool(forKey: GlobalConstants.quickAccessWasExpandedOnClose)

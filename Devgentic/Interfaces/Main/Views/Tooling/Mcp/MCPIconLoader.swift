@@ -9,7 +9,7 @@
 import SwiftUI
 import os.log
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "MCPIconLoader")
+private let logger = DGLogger(category: "MCPIconLoader")
 
 /// Loads and caches MCP tool icons from URLs or base64 data URIs.
 @Observable @MainActor

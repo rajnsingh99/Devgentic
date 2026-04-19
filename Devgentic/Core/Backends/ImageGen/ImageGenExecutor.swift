@@ -12,7 +12,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ImageGenExecutor")
+private let logger = DGLogger(category: "ImageGenExecutor")
 
 // MARK: - Image Generation Executor
 

@@ -9,7 +9,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PromptLibrarySidebarView")
+private let logger = DGLogger(category: "PromptLibrarySidebarView")
 
 /// A new SwiftUI view to display the Prompt Library directly in the sidebar.
 /// This view replaces the old modal panel approach.

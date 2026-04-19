@@ -11,7 +11,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SelfReflectionCapability")
+private let logger = DGLogger(category: "SelfReflectionCapability")
 
 // MARK: - Internal Memory (migrated from ReflexionMemoryState)
 
@@ -348,9 +348,22 @@ actor SelfReflectionExecutorWrapper: Executor {
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
-                    logger.error("Self-reflection fatal error: \(error.localizedDescription)")
+                    let classified = error.classify(
+                        as: .reflectionExhausted,
+                        origin: "SelfReflectionCapability.fatalCatch",
+                        message: "Self-reflection fatal error: \(error.localizedDescription)"
+                    )
+                    logger.error(
+                        "Self-reflection fatal error: \(classified.message)",
+                        error: classified,
+                        category: classified.category
+                    )
+                    await TraceRecorder.shared.emitAgentError(
+                        span: input.traceContext,
+                        error: classified
+                    )
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
-                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
+                    continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)
                 }
             }

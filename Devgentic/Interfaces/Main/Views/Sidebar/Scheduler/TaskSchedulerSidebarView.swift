@@ -9,7 +9,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "TaskSchedulerSidebarView")
+private let logger = DGLogger(category: "TaskSchedulerSidebarView")
 
 struct TaskSchedulerSidebarView: View {
 

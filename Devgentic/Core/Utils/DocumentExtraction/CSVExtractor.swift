@@ -19,20 +19,20 @@ struct CSVExtractor: DocumentExtractor {
         let ext = url.pathExtension.lowercased()
         let delimiter: Character = ext == "tsv" ? "\t" : ","
 
-        logger.info("Starting \(ext.uppercased(), privacy: .public) extraction: \(url.lastPathComponent, privacy: .public)")
+        logger.info("Starting \(ext.uppercased()) extraction: \(url.lastPathComponent)")
 
         let rawContent: String
         do {
             rawContent = try String(contentsOf: url, encoding: .utf8)
         } catch {
             // Try other encodings
-            logger.debug("UTF-8 decoding failed for \(url.lastPathComponent, privacy: .public), trying ISO Latin-1")
+            logger.debug("UTF-8 decoding failed for \(url.lastPathComponent), trying ISO Latin-1")
             if let data = try? Data(contentsOf: url),
                let latin1 = String(data: data, encoding: .isoLatin1) {
-                logger.info("ISO Latin-1 fallback succeeded for \(url.lastPathComponent, privacy: .public)")
+                logger.info("ISO Latin-1 fallback succeeded for \(url.lastPathComponent)")
                 rawContent = latin1
             } else {
-                logger.error("All encoding attempts failed for: \(url.lastPathComponent, privacy: .public)")
+                logger.error("All encoding attempts failed for: \(url.lastPathComponent)")
                 throw DocumentExtractionError.extractionFailed("csv", underlying: error)
             }
         }
@@ -41,11 +41,11 @@ struct CSVExtractor: DocumentExtractor {
         let rows = parseCSV(rawContent, delimiter: delimiter)
 
         guard !rows.isEmpty else {
-            logger.warning("CSV contains no data rows: \(url.lastPathComponent, privacy: .public)")
+            logger.warning("CSV contains no data rows: \(url.lastPathComponent)")
             throw DocumentExtractionError.emptyDocument(url.path)
         }
 
-        logger.debug("Parsed \(rows.count) rows from \(url.lastPathComponent, privacy: .public)")
+        logger.debug("Parsed \(rows.count) rows from \(url.lastPathComponent)")
 
         // Convert to markdown table
         var fullText = ""
@@ -67,12 +67,12 @@ struct CSVExtractor: DocumentExtractor {
 
         let wasTruncated = fullText.count >= maxSize
         if wasTruncated {
-            logger.warning("\(ext.uppercased(), privacy: .public) content truncated at \(maxSize) chars for \(url.lastPathComponent, privacy: .public)")
+            logger.warning("\(ext.uppercased()) content truncated at \(maxSize) chars for \(url.lastPathComponent)")
             fullText = String(fullText.prefix(maxSize))
         }
 
         let cellCount = rows.reduce(0) { $0 + $1.count }
-        logger.info("\(ext.uppercased(), privacy: .public) extraction complete: \(rows.count) rows, \(cellCount) cells — \(url.lastPathComponent, privacy: .public)")
+        logger.info("\(ext.uppercased()) extraction complete: \(rows.count) rows, \(cellCount) cells — \(url.lastPathComponent)")
 
         return ExtractionResult(
             text: fullText,

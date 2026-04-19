@@ -11,7 +11,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "CodeSessionManager")
+private let logger = DGLogger(category: "CodeSessionManager")
 
 @Observable @MainActor
 final class CodeSessionManager {
@@ -249,15 +249,18 @@ final class CodeSessionManager {
         dateFormatter.dateFormat = "yyyy-MM-dd"
         let currentDate = dateFormatter.string(from: Date())
 
-        // Assemble instructions: system prompt + project memory (if exists)
-        var instructions = CodeSystemPrompt.production(
+        // Assemble instructions — CodeSystemPrompt picks the XML or markdown variant
+        // based on provider (Claude → XML for trained preference; all others → markdown)
+        // and formats the project_context injection to match.
+        let memoryContent = loadProjectMemory()
+        let instructions = CodeSystemPrompt.production(
             projectPath: projectPathStr,
             projectName: projectName,
-            currentDate: currentDate
+            currentDate: currentDate,
+            apiProvider: agentConfig.llmConfig.apiProvider,
+            projectContext: memoryContent
         )
-        let memoryContent = loadProjectMemory()
         if let projectMemory = memoryContent {
-            instructions += "\n\n<project_context source=\".devgentic/context.md\">\n\(projectMemory)\n</project_context>"
             logger.info("[CODE] Injected project context into instructions (\(projectMemory.count) chars)")
         } else {
             logger.debug("[CODE] No project context to inject (context.md empty or missing)")

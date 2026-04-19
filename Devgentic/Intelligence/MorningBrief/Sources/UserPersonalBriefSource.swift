@@ -20,7 +20,7 @@ final class UserPersonalBriefSource: MorningBriefSource, @unchecked Sendable {
     let displayName = "User Profile"
     let icon = "person.text.rectangle.fill"
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "UserPersonalBriefSource")
+    private let logger = DGLogger(category: "UserPersonalBriefSource")
 
     var isEnabled: Bool {
         UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey)

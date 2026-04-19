@@ -9,7 +9,7 @@ import Foundation
 import UserNotifications
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LocalNotificationChannel")
+private let logger = DGLogger(category: "LocalNotificationChannel")
 
 enum LocalNotificationError: LocalizedError {
     case permissionDenied

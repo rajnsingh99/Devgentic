@@ -9,7 +9,7 @@ import Foundation
 import Security
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "SecureKeyStorage")
+private let logger = DGLogger(category: "SecureKeyStorage")
 
 /// A service for securely saving, retrieving, and deleting sensitive data like API keys from the system Keychain.
 struct SecureKeyStorage {

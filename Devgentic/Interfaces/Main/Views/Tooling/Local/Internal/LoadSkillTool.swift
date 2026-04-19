@@ -10,7 +10,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LoadSkillTool")
+private let logger = DGLogger(category: "LoadSkillTool")
 
 /// Loads a skill's full SKILL.md body (and optionally bundled resources) from disk.
 /// Registered conditionally in `resolveExecutableTools()` when the profile has skills configured.

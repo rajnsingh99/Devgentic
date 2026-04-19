@@ -9,7 +9,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MLXTokenizerAnalyzer")
+private let logger = DGLogger(category: "MLXTokenizerAnalyzer")
 
 /// A utility class to analyze MLX model tokenizer configurations to determine
 /// its exact tool-calling capabilities and required generation strategy.

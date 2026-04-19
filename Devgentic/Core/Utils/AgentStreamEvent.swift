@@ -22,10 +22,22 @@ struct AgentThought: Sendable, Identifiable, Codable, Equatable {
 /// This structured stream allows the UI to render "Thinking", "Artifacts", and "Text" separately.
 enum AgentStreamEvent: Sendable {
     
-    /// The agent is reasoning. Use this to update a "Thinking..." UI component.
-    /// Wrapped with a stable ID to fix SwiftUI ForEach layout jumps.
+    /// Generic "thinking" / narration channel. Used for:
+    ///   - Extended thinking traces (step.thought — e.g. Claude thinking blocks, OpenAI o-series reasoning_content, Ollama thinking)
+    ///   - Progress narration from capabilities (plan subtask status, reflection trials, workflow node progress)
+    ///   - Executor-level status (throttle, format correction, synthesis progress)
+    /// For the LLM's visible assistant monologue (step.reasoning), use `.reasoning` instead.
     /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this thought.
     case thought(_ message: String, id: UUID = UUID(), sourceNodeID: UUID? = nil)
+
+    /// The LLM's visible assistant monologue — specifically the `step.reasoning`
+    /// field produced by the model alongside its tool calls. Distinct from `.thought`
+    /// which is used for extended-thinking traces and system narration.
+    ///
+    /// This separation lets analytics, scratchpad injection, and UI rendering treat
+    /// model-authored prose differently from system-authored status text.
+    /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this reasoning.
+    case reasoning(_ message: String, id: UUID = UUID(), sourceNodeID: UUID? = nil)
 
     /// The agent is about to execute a tool.
     /// - name: The tool name (e.g., "list_directory")

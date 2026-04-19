@@ -39,6 +39,11 @@ enum SpanEventSeverity: String, Codable, Sendable, DatabaseValueConvertible {
 
 /// A single observable event within a span.
 /// This is the universal log record — each row in `span_events`.
+///
+/// Columns added in migration v2 (`errorCategory`, `errorChainID`, `phase`,
+/// `iterationNumber`, `causedByEventID`, `durationMs`) are all nullable. Writes
+/// are dev-mode-gated in `TraceRecorder` — legacy call sites continue to pass
+/// nil and stay backward-compatible.
 struct SpanEvent: Codable, Identifiable, Sendable {
     var id: Int64?  // Auto-assigned by DB (AUTOINCREMENT)
     let spanID: String
@@ -48,7 +53,35 @@ struct SpanEvent: Codable, Identifiable, Sendable {
     let content: String?
     let detailJSON: String?   // Serialized JSON string for flexible structured data
     let severity: SpanEventSeverity
-    
+
+    // MARK: - v2 observability columns (all nullable, dev-mode-gated writes)
+
+    /// Canonical failure classification. `AgentErrorCategory.rawValue`.
+    /// Nil for non-error events (thoughts, LLM requests, successful tool results).
+    let errorCategory: AgentErrorCategory?
+
+    /// UUID shared across every SpanEvent emitted about the same underlying
+    /// incident, so analytics can collapse propagation duplicates.
+    /// Nil for events not part of an error chain.
+    let errorChainID: UUID?
+
+    /// Coarse execution phase. Redundant with `errorCategory.phase` but indexed
+    /// for dashboard queries. `ExecutionPhase.rawValue`.
+    let phase: ExecutionPhase?
+
+    /// ReAct iteration number if this event was emitted inside the cognitive loop.
+    /// Nil for pre-loop (trace init, plan generation) or post-loop (synthesis) events.
+    let iterationNumber: Int?
+
+    /// ID of the event that causally triggered this one. Enables cause→effect
+    /// linking in the Report Inspector. Not enforced as a DB foreign key —
+    /// tolerates out-of-order event writes.
+    let causedByEventID: Int64?
+
+    /// Intrinsic duration of the event (LLM response time, tool latency).
+    /// Distinct from the enclosing span's wall-clock duration.
+    let durationMs: Int?
+
     init(
         id: Int64? = nil,
         spanID: String,
@@ -57,7 +90,13 @@ struct SpanEvent: Codable, Identifiable, Sendable {
         eventType: SpanEventType,
         content: String? = nil,
         detailJSON: String? = nil,
-        severity: SpanEventSeverity = .info
+        severity: SpanEventSeverity = .info,
+        errorCategory: AgentErrorCategory? = nil,
+        errorChainID: UUID? = nil,
+        phase: ExecutionPhase? = nil,
+        iterationNumber: Int? = nil,
+        causedByEventID: Int64? = nil,
+        durationMs: Int? = nil
     ) {
         self.id = id
         self.spanID = spanID
@@ -67,6 +106,12 @@ struct SpanEvent: Codable, Identifiable, Sendable {
         self.content = content
         self.detailJSON = detailJSON
         self.severity = severity
+        self.errorCategory = errorCategory
+        self.errorChainID = errorChainID
+        self.phase = phase
+        self.iterationNumber = iterationNumber
+        self.causedByEventID = causedByEventID
+        self.durationMs = durationMs
     }
 }
 
@@ -74,11 +119,12 @@ struct SpanEvent: Codable, Identifiable, Sendable {
 
 extension SpanEvent: FetchableRecord, PersistableRecord, MutablePersistableRecord {
     static var databaseTableName: String { "span_events" }
-    
+
     enum Columns: String, ColumnExpression {
         case id, spanID, traceID, timestamp, eventType, content, detailJSON, severity
+        case errorCategory, errorChainID, phase, iterationNumber, causedByEventID, durationMs
     }
-    
+
     mutating func didInsert(_ inserted: InsertionSuccess) {
         id = inserted.rowID
     }

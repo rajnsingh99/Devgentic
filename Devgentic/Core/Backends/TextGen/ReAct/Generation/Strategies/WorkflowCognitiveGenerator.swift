@@ -29,7 +29,7 @@
 import Foundation
 import OSLog
 
-private let wfGenLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "WorkflowGenerator")
+private let wfGenLogger = DGLogger(category: "WorkflowGenerator")
 
 // MARK: - Workflow Cognitive Generator
 

@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMRetryStrategy")
+private let logger = DGLogger(category: "LLMRetryStrategy")
 
 /// A concrete implementation of `LLMRetryHandling`.
 /// Parses errors thrown by the `CognitiveGenerator` (HTTP 429s, Timeouts, JSON Parse Failures)

@@ -11,7 +11,7 @@ import Foundation
 import SwiftData
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendProfileStore")
+private let logger = DGLogger(category: "BackendProfileStore")
 
 // MARK: - Store Errors
 

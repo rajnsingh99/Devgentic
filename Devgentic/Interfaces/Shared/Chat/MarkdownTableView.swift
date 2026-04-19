@@ -9,7 +9,7 @@
 import SwiftUI
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "MarkdownTableView")
+private let logger = DGLogger(category: "MarkdownTableView")
 
 struct MarkdownTableView: View {
     let headers: [String]

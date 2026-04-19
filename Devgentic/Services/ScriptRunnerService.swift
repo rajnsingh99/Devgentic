@@ -3,7 +3,7 @@ import Foundation
 import Combine
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.Devgentic", category: "ScriptRunner")
+private let logger = DGLogger(category: "ScriptRunner")
 
 /// Represents the output or event from a script execution phase.
 enum ScriptOutputEvent: Equatable {

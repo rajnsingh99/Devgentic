@@ -9,8 +9,8 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "AgentConnect")
-private let logToolExecution = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecution")
+private let logger = DGLogger(category: "AgentConnect")
+private let logToolExecution = DGLogger(category: "ToolExecution")
 
 /// A unified agent connection service that serves as the central controller for
 /// all LLM interactions (Bots, Agents, Workflows).
@@ -182,12 +182,19 @@ class AgentConnect: @unchecked Sendable {
                         skillManifests: skillManifests
                     )
 
-                    // 5.5 Code mode: inject project context tool (needs projectPath from AgentConfig)
+                    // 5.5 Code mode: inject project context tool + final_answer terminator.
+                    // `final_answer` is pinned to index 0 so weak local models see it first
+                    // when scanning the tool schema (ordering bias is real on 7-14B models).
+                    // It's the ONLY clean exit from the ReAct loop — without it, local tool-calling
+                    // models emit tool calls indefinitely and trip the circuit breaker (see G1).
                     if case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath {
+                        let finalAnswerTool = self.wrapTool(FinalAnswerTool(), requiresConfirmation: false)
+                        activeTools.insert(finalAnswerTool, at: 0)
+
                         let contextTool = UpdateProjectContextTool(projectPath: projectPath)
                         activeTools.append(self.wrapTool(contextTool, requiresConfirmation: false))
                         let toolNames = activeTools.map(\.name).joined(separator: ", ")
-                        logger.info("[CODE] Tool resolution complete — \(activeTools.count) tools (incl. update_project_context): [\(toolNames)]")
+                        logger.info("[CODE] Tool resolution complete — \(activeTools.count) tools (incl. final_answer, update_project_context): [\(toolNames)]")
                     }
 
                     // 6. Initialize Evaluation Session (Metrics)

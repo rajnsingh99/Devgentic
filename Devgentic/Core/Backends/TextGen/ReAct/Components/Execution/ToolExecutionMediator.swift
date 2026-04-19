@@ -8,7 +8,7 @@
 import Foundation
 import OSLog
 
-private let logToolExecution = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ToolExecution")
+private let logToolExecution = DGLogger(category: "ToolExecution")
 
 /// A concrete implementation of `ToolDispatching`.
 /// Encapsulates the serialization of tool parameters, metric recording,
@@ -67,10 +67,27 @@ struct ToolExecutionMediator: ToolDispatching {
                 let hasPermissions = await PermissionManager.shared.ensurePermissions(for: requiredPermissions)
                 
                 if !hasPermissions {
-                    logToolExecution.warning("⚠️ Pre-flight Permission Check Failed for '\(sanitizedName)'.")
                     let msg = "System Error: Missing required macOS permissions. Please ask the user to grant access in System Settings -> Privacy & Security."
+                    // Synthetic classification — no underlying Error to preserve, this is a
+                    // detected condition. `.toolPermissionDenied` drives dashboards toward
+                    // the "user needs to grant permission" remediation path.
+                    let classified = ClassifiedAgentError.synthetic(
+                        category: .toolPermissionDenied,
+                        origin: "ToolExecutionMediator.preflightPermission",
+                        message: msg,
+                        context: [
+                            "tool_name": sanitizedName,
+                            "permissions": requiredPermissions.map { String(describing: $0) }.joined(separator: ",")
+                        ]
+                    )
+                    logToolExecution.warning(
+                        "⚠️ Pre-flight Permission Check Failed for '\(sanitizedName)'.",
+                        category: classified.category
+                    )
+                    await TraceRecorder.shared.emitAgentError(span: toolSpan, error: classified)
+
                     let failResult = ToolExecutionResult.systemError(reason: msg)
-                    
+
                     // Fire-and-forget metrics recording for permission failure
                     let duration = Date().timeIntervalSince(startTime)
                     Task { @MainActor in
@@ -93,7 +110,24 @@ struct ToolExecutionMediator: ToolDispatching {
             )
             if !validationErrors.isEmpty {
                 let errorMsg = validationErrors.joined(separator: " ")
-                logToolExecution.warning("⚠️ Argument validation failed for '\(sanitizedName)': \(errorMsg)")
+                // Synthetic classification — argument validation is a pre-dispatch rejection,
+                // not a caught exception. `.toolArgInvalid` signals the model should retry
+                // with corrected arguments (isRetryable=false since args are wrong, not transient).
+                let classified = ClassifiedAgentError.synthetic(
+                    category: .toolArgInvalid,
+                    origin: "ToolExecutionMediator.argValidation",
+                    message: errorMsg,
+                    context: [
+                        "tool_name": sanitizedName,
+                        "validation_error_count": "\(validationErrors.count)"
+                    ]
+                )
+                logToolExecution.warning(
+                    "⚠️ Argument validation failed for '\(sanitizedName)': \(errorMsg)",
+                    category: classified.category
+                )
+                await TraceRecorder.shared.emitAgentError(span: toolSpan, error: classified)
+
                 result = .semanticFailure(toolName: sanitizedName, output: errorMsg)
                 errorDescriptionForMetrics = errorMsg
 
@@ -163,18 +197,31 @@ struct ToolExecutionMediator: ToolDispatching {
                 errorDescriptionForMetrics = "Per-tool timeout after \(Int(timeoutError.duration))s"
 
             } catch {
-                logToolExecution.error("❌ Tool '\(toolName)' threw system error:\n\(error.localizedDescription)")
-                // Some tools throw Apple `NSError`s containing strings like "File not found"
-                // (e.g., an underlying file-system throw that bypassed the tool's own guard).
-                // Running the recovery enricher here catches those paths too — if no registry
-                // pattern matches, the original reason is returned unchanged.
+                // Classify the underlying error into the canonical taxonomy so downstream
+                // analytics can dedupe across the propagation chain and filter by category.
+                // `.classify(...)` preserves the original Error object and — in developer mode —
+                // captures NSError domain/code/userInfo keys + a stack signature in the emitted
+                // SpanEvent (see `ClassifiedAgentError.Diagnostics`).
+                let classified = error.classify(
+                    as: .toolSystemCrash,
+                    origin: "ToolExecutionMediator.toolRun",
+                    context: ["tool_name": toolName]
+                )
+                logToolExecution.error(
+                    "❌ Tool '\(toolName)' threw system error:\n\(classified.message)",
+                    error: classified,
+                    category: classified.category
+                )
+                await TraceRecorder.shared.emitAgentError(span: toolSpan, error: classified)
+
+                // Enrich the user-facing error with recovery hints (same behavior as before).
                 let enrichedReason = ToolRecoveryHints.enrich(
                     toolName: toolName,
-                    originalError: error.localizedDescription,
+                    originalError: classified.message,
                     availableToolNames: Set(availableTools.map(\.name))
                 )
                 result = .systemError(reason: enrichedReason)
-                errorDescriptionForMetrics = error.localizedDescription
+                errorDescriptionForMetrics = classified.message
             }
         } else {
             result = .hallucinated(toolName: toolName, availableTools: availableTools.map(\.name))

@@ -19,7 +19,7 @@ final class ToolUsageSource: UserPersonalSource, @unchecked Sendable {
     let displayName = "Tool Usage Patterns"
     var isEnabled: Bool { true }
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "ToolUsageSource")
+    private let logger = DGLogger(category: "ToolUsageSource")
 
     func gather(from conversations: [UserPersonalConversationData]) async -> [ProfileFragment] {
         let allExecutions = conversations.flatMap(\.toolExecutions)

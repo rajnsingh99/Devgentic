@@ -10,7 +10,7 @@ import AppKit
 import os
 
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ActiveStreamManager")
+private let logger = DGLogger(category: "ActiveStreamManager")
 
 /// Delegate protocol for RemoteMirrorService to observe stream lifecycle.
 @MainActor
@@ -186,6 +186,24 @@ final class ActiveStreamManager {
                         messageID: agentMessage.id,
                         modelName: nil
                     )
+
+                    // Phase B: capture the complete request configuration so the
+                    // Report Inspector can show exactly which profile/model/tools/
+                    // capabilities/retry-policy/hardware were in effect. Writes one
+                    // row to `trace_configs` cascading on `traces.traceID`.
+                    //
+                    // TODO: pass `codeMemoryContent` from MainApplicationViewModel
+                    // (reads from CodeSessionManager.projectMemoryContent) for a
+                    // complete Code-mode snapshot. Current capture records only
+                    // the project path — memory length/hash stay nil.
+                    let snapshot = TraceConfigSnapshot.capture(
+                        traceID: traceContext.traceID,
+                        config: config,
+                        historyTurnCount: history.count,
+                        files: files,
+                        codeMemoryContent: nil
+                    )
+                    await TraceRecorder.shared.captureConfigSnapshot(snapshot)
                 }
 
                 logger.info("[STREAM_HANDOFF] Passing to BackendOrchestrationService — traceID: \(traceContext.traceID), query: \(String(userQuery.prefix(80))), history: \(history.count) msgs, files: \(files.count)")
@@ -221,6 +239,20 @@ final class ActiveStreamManager {
                             logger.debug("[WF_ROUTE] Thought → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
                         } else {
                             agentMessage.appendTimelineEvent(thoughtEvent)
+                        }
+
+                    case .reasoning(let text, let id, let sourceNodeID):
+                        // Model-authored monologue (step.reasoning). Same UI handling as
+                        // .thought for now (shared ThinkingDynamicIsland + timeline rendering),
+                        // but persisted as .reasoning so downstream consumers can distinguish.
+                        agentMessage.thinkingHeadline = text
+                        agentMessage.agentState = .thinking(.reasoning)
+                        let reasoningEvent = TimelineEvent.reasoning(id: id, text: text)
+                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
+                            wfState.appendNodeTimelineEvent(reasoningEvent, for: nodeID)
+                            logger.debug("[WF_ROUTE] Reasoning → node timeline [\(nodeID)], count=\(wfState.nodeTimelines[nodeID]?.count ?? 0)")
+                        } else {
+                            agentMessage.appendTimelineEvent(reasoningEvent)
                         }
 
                     case .toolCall(let name, let params, let sourceNodeID):

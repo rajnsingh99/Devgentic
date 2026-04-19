@@ -12,7 +12,7 @@
 import Foundation
 import OSLog
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "PlanningCapability")
+private let logger = DGLogger(category: "PlanningCapability")
 
 // MARK: - Capability Definition
 
@@ -325,9 +325,22 @@ actor PlanningExecutorWrapper: Executor {
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
-                    logger.error("Planning capability fatal error: \(error.localizedDescription)")
+                    let classified = error.classify(
+                        as: .planGenFailed,
+                        origin: "PlanningCapability.fatalCatch",
+                        message: "Planning capability fatal error: \(error.localizedDescription)"
+                    )
+                    logger.error(
+                        "Planning capability fatal error: \(classified.message)",
+                        error: classified,
+                        category: classified.category
+                    )
+                    await TraceRecorder.shared.emitAgentError(
+                        span: input.traceContext,
+                        error: classified
+                    )
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
-                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
+                    continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)
                 }
             }

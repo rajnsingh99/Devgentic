@@ -19,7 +19,7 @@ final class WorkflowPreferenceSource: UserPersonalSource, @unchecked Sendable {
     let displayName = "Workflow Preferences"
     var isEnabled: Bool { true }
 
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "WorkflowPreferenceSource")
+    private let logger = DGLogger(category: "WorkflowPreferenceSource")
 
     func gather(from conversations: [UserPersonalConversationData]) async -> [ProfileFragment] {
         guard !conversations.isEmpty else { return [] }

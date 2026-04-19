@@ -14,7 +14,7 @@
 import Foundation
 import OSLog
 
-private let logLLMOps = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "LLMOps")
+private let logLLMOps = DGLogger(category: "LLMOps")
 
 /// A parallel-capable cognitive strategy for Mistral-family MLX models that
 /// produce tool calls in pseudo-XML format (`<tool_call>...</tool_call>`).

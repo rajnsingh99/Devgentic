@@ -14,7 +14,7 @@ import Foundation
 import SwiftData
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "BackendProfileSD")
+private let logger = DGLogger(category: "BackendProfileSD")
 
 // MARK: - SwiftData Model
 

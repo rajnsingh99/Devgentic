@@ -12,7 +12,7 @@
 import Foundation
 import os
 
-private let compressorLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic.app", category: "ContextCompressor")
+private let compressorLogger = DGLogger(category: "ContextCompressor")
 
 /// Compresses upstream node results into a context string suitable for
 /// injection into a downstream node's system instructions.

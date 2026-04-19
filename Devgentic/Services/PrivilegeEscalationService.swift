@@ -2,7 +2,7 @@
 import Foundation
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.example.Devgentic", category: "PrivilegeEscalation")
+private let logger = DGLogger(category: "PrivilegeEscalation")
 
 struct PrivilegeEscalationService {
 
