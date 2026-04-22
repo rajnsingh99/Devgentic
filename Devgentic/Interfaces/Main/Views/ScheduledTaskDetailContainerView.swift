@@ -15,34 +15,30 @@ struct ScheduledTaskDetailContainerView: View {
 
     let taskID: UUID
 
-    @Environment(MainViewRouter.self) private var router
-    @Environment(\.appTheme) private var theme
-
     private var task: ScheduledTask? {
         SchedulerService.shared.scheduledTasks.first(where: { $0.id == taskID })
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar()
+            DynamicIslandBar(
+                title: task?.displayName ?? "Edit Task",
+                icon: "clock.badge"
+            )
 
             if let task = task {
                 ScrollView {
                     CreateScheduledTaskView(existingTask: task)
                         .padding(24)
-                        .frame(maxWidth: 1000)
+                        .frame(maxWidth: ViewLayout.maxContentWidth)
                         .frame(maxWidth: .infinity)
                 }
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 36)) // Fixed size: intentional (icon)
-                        .foregroundColor(theme.secondaryText)
-                    Text("Task not found")
-                        .font(.title3)
-                        .foregroundColor(theme.secondaryText)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ContentNotFoundView(
+                    icon: "clock.badge.exclamationmark",
+                    title: "Task Not Found",
+                    subtitle: "This scheduled task may have been deleted. Use the back button to return."
+                )
             }
         }
     }

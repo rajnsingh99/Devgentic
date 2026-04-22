@@ -28,6 +28,10 @@ final class ConversationSyncService {
     /// Tracks message IDs already in the view (to avoid duplicate insertions).
     private var syncedMessageIDs: Set<UUID> = []
 
+    /// Bridges `ActiveStreamManager.activeStreams` changes so we can inject
+    /// newly-started streams into the visible conversation.
+    private var activeStreamsObserver: ObservationStream?
+
     init(chatHistoryViewModel: ChatHistoryViewModel, activeStreamManager: ActiveStreamManager) {
         self.chatHistoryViewModel = chatHistoryViewModel
         self.activeStreamManager = activeStreamManager
@@ -53,37 +57,32 @@ final class ConversationSyncService {
     private func setupActiveStreamsObserver() {
         guard let asm = activeStreamManager else { return }
 
-        func observe() {
-            withObservationTracking {
+        activeStreamsObserver = ObservationStream(
+            track: {
                 _ = asm.activeStreams
-            } onChange: {
-                Task { @MainActor [weak self] in
-                    guard let self, let chvm = self.chatHistoryViewModel, let asm = self.activeStreamManager else { return }
-                    guard let displayedID = self.displayedConversationID else {
-                        self.setupActiveStreamsObserver()
-                        return
-                    }
+            },
+            onChange: { [weak self] in
+                guard let self,
+                      let chvm = self.chatHistoryViewModel,
+                      let asm = self.activeStreamManager else { return }
+                guard let displayedID = self.displayedConversationID else { return }
 
-                    for (_, message) in asm.activeStreams {
-                        guard message.conversationId == displayedID else { continue }
-                        guard !self.syncedMessageIDs.contains(message.id) else { continue }
+                for (_, message) in asm.activeStreams {
+                    guard message.conversationId == displayedID else { continue }
+                    guard !self.syncedMessageIDs.contains(message.id) else { continue }
 
-                        let alreadyInView = chvm.currentChatMessages.contains { $0.id == message.id }
-                        guard !alreadyInView else {
-                            self.syncedMessageIDs.insert(message.id)
-                            continue
-                        }
-
-                        chvm.currentChatMessages.insert(message, at: 0)
+                    let alreadyInView = chvm.currentChatMessages.contains { $0.id == message.id }
+                    guard !alreadyInView else {
                         self.syncedMessageIDs.insert(message.id)
-                        self.logger.info("[Sync] Injected streaming message \(message.id) into displayed conversation.")
+                        continue
                     }
 
-                    self.setupActiveStreamsObserver()
+                    chvm.currentChatMessages.insert(message, at: 0)
+                    self.syncedMessageIDs.insert(message.id)
+                    self.logger.info("[Sync] Injected streaming message \(message.id) into displayed conversation.")
                 }
             }
-        }
-        observe()
+        )
     }
 
     // CoreData observation removed — SwiftData handles persistence updates via @Observable.

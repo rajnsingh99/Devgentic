@@ -58,6 +58,9 @@ protocol WebSearchServiceProtocol {
 
 protocol PromptServiceProtocol {
     func getAllPrompts() -> [DevPrompt]
+    /// Records that a prompt was inserted into chat input. Drives the
+    /// "Recently Used" sort in the sidebar.
+    func recordUsage(of prompt: DevPrompt)
 }
 
 // MARK: - Service Conformance Extensions
@@ -130,6 +133,13 @@ final class ChatInputViewModel {
     var fileSuggestionState = FileSuggestionState()
     var attributedTextInsertionRequest: CustomTextEditor.AttributedTextInsertionAction? = nil
 
+    /// Set to `true` to request that the chat input's `TextEditor` grab
+    /// keyboard focus on next render. `ChatInputAreaView` observes this via
+    /// `.onChange` and flips its `@FocusState`, then the VM resets the flag.
+    /// Used by external callers (prompt library's "Use in Chat") so the user
+    /// doesn't have to manually click the input after navigation.
+    var pendingInputFocusRequest: Bool = false
+
     // MARK: - Delegates
     @ObservationIgnored weak var mainDelegate: (any ChatInputMainDelegate)?
     @ObservationIgnored var onFileSearchRequest: ((String) -> (candidates: [FileSystemItem], attached: [FileSystemItem]))?
@@ -166,6 +176,24 @@ final class ChatInputViewModel {
     // MARK: - Keyboard Shortcut Observer
     @ObservationIgnored private var notificationObserver: Any?
 
+    /// Guard for `setupMainDelegateObservers()`. Since this VM is app-scoped,
+    /// `ChatInputAreaView.onAppear` can re-fire on view recreation — this flag
+    /// prevents us from stacking duplicate `ObservationStream` instances for
+    /// the same two signals.
+    @ObservationIgnored private var hasMainDelegateObservers = false
+
+    /// Holds the two ObservationStreams bridging `mainDelegate`'s state.
+    /// Released (→ each stream's `deinit` → chain cancellation) when the VM
+    /// deallocates, though in practice this VM lives for the app's lifetime.
+    @ObservationIgnored private var attachedFilesObserver: ObservationStream?
+    @ObservationIgnored private var streamingStateObserver: ObservationStream?
+
+    /// Suggestion-pipeline and recognition-loading observers — same lifetime
+    /// semantics as above.
+    @ObservationIgnored private var promptQueryObserver: ObservationStream?
+    @ObservationIgnored private var fileQueryObserver: ObservationStream?
+    @ObservationIgnored private var recognitionLoadingObserver: ObservationStream?
+
     // MARK: - Async Task Handles
     @ObservationIgnored private var searchTask: Task<Void, Never>?
     @ObservationIgnored private var fileSearchTask: Task<Void, Never>?
@@ -199,44 +227,49 @@ final class ChatInputViewModel {
     }
 
     /// Call once after setting `mainDelegate` to mirror its observed state and
-    /// refresh file suggestions on changes.
+    /// refresh file suggestions on changes. Subsequent calls are no-ops — the
+    /// observer chains registered on first call persist for the VM's lifetime.
     func setupMainDelegateObservers() {
         guard let delegate = mainDelegate else {
             logger.warning("setupMainDelegateObservers called but mainDelegate is nil — attached files and streaming state will not update.")
             return
         }
+        guard !hasMainDelegateObservers else {
+            // Already wired on a prior .onAppear. Just refresh the mirrored
+            // snapshots in case the delegate's state changed between setups.
+            self.attachedFiles = delegate.attachedFiles
+            self.isStreaming = delegate.streamingMessageID != nil
+            return
+        }
+        hasMainDelegateObservers = true
 
-        // Mirror attached files via withObservationTracking
-        func observeFiles() {
-            withObservationTracking {
+        // Mirror attached files.
+        attachedFilesObserver = ObservationStream(
+            track: { [weak self] in
+                guard let self, let delegate = self.mainDelegate else { return }
                 _ = delegate.attachedFiles
-            } onChange: {
-                Task { @MainActor [weak self] in
-                    guard let self, let delegate = self.mainDelegate else { return }
-                    self.attachedFiles = delegate.attachedFiles
-                    if self.fileSuggestionState.isShowing {
-                        self.performFileSearch(query: self.fileSuggestionState.query)
-                    }
-                    observeFiles()
+            },
+            onChange: { [weak self] in
+                guard let self, let delegate = self.mainDelegate else { return }
+                self.attachedFiles = delegate.attachedFiles
+                if self.fileSuggestionState.isShowing {
+                    self.performFileSearch(query: self.fileSuggestionState.query)
                 }
             }
-        }
-        observeFiles()
+        )
         self.attachedFiles = delegate.attachedFiles
 
-        // Mirror streaming state
-        func observeStreaming() {
-            withObservationTracking {
+        // Mirror streaming state.
+        streamingStateObserver = ObservationStream(
+            track: { [weak self] in
+                guard let self, let delegate = self.mainDelegate else { return }
                 _ = delegate.streamingMessageID
-            } onChange: {
-                Task { @MainActor [weak self] in
-                    guard let self, let delegate = self.mainDelegate else { return }
-                    self.isStreaming = delegate.streamingMessageID != nil
-                    observeStreaming()
-                }
+            },
+            onChange: { [weak self] in
+                guard let self, let delegate = self.mainDelegate else { return }
+                self.isStreaming = delegate.streamingMessageID != nil
             }
-        }
-        observeStreaming()
+        )
         self.isStreaming = delegate.streamingMessageID != nil
     }
 
@@ -276,49 +309,41 @@ final class ChatInputViewModel {
     @ObservationIgnored private var lastFileQuery: String = ""
 
     private func setupSuggestionPipelines() {
-        func observePromptQuery() {
-            withObservationTracking {
-                _ = self.promptSuggestionState.query
-            } onChange: {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let newQuery = self.promptSuggestionState.query
-                    if newQuery != self.lastPromptQuery {
-                        self.lastPromptQuery = newQuery
-                        self.promptDebounceTask?.cancel()
-                        self.promptDebounceTask = Task {
-                            try? await Task.sleep(nanoseconds: 150_000_000)
-                            guard !Task.isCancelled else { return }
-                            self.performAsyncPromptFilter(query: newQuery)
-                        }
-                    }
-                    observePromptQuery()
+        promptQueryObserver = ObservationStream(
+            track: { [weak self] in
+                _ = self?.promptSuggestionState.query
+            },
+            onChange: { [weak self] in
+                guard let self else { return }
+                let newQuery = self.promptSuggestionState.query
+                guard newQuery != self.lastPromptQuery else { return }
+                self.lastPromptQuery = newQuery
+                self.promptDebounceTask?.cancel()
+                self.promptDebounceTask = Task {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    guard !Task.isCancelled else { return }
+                    self.performAsyncPromptFilter(query: newQuery)
                 }
             }
-        }
-        observePromptQuery()
+        )
 
-        func observeFileQuery() {
-            withObservationTracking {
-                _ = self.fileSuggestionState.query
-            } onChange: {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let newQuery = self.fileSuggestionState.query
-                    if newQuery != self.lastFileQuery {
-                        self.lastFileQuery = newQuery
-                        self.fileDebounceTask?.cancel()
-                        self.fileDebounceTask = Task {
-                            try? await Task.sleep(nanoseconds: 150_000_000)
-                            guard !Task.isCancelled else { return }
-                            self.performFileSearch(query: newQuery)
-                        }
-                    }
-                    observeFileQuery()
+        fileQueryObserver = ObservationStream(
+            track: { [weak self] in
+                _ = self?.fileSuggestionState.query
+            },
+            onChange: { [weak self] in
+                guard let self else { return }
+                let newQuery = self.fileSuggestionState.query
+                guard newQuery != self.lastFileQuery else { return }
+                self.lastFileQuery = newQuery
+                self.fileDebounceTask?.cancel()
+                self.fileDebounceTask = Task {
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    guard !Task.isCancelled else { return }
+                    self.performFileSearch(query: newQuery)
                 }
             }
-        }
-        observeFileQuery()
+        )
     }
 
     private func performAsyncPromptFilter(query: String) {
@@ -399,7 +424,69 @@ final class ChatInputViewModel {
         let insertionText = NSAttributedString(string: prompt.text + " ", attributes: defaultTypingAttributes)
         self.attributedTextInsertionRequest = .init(range: range, attributedString: insertionText)
 
+        promptService.recordUsage(of: prompt)
+
         resetPromptState()
+    }
+
+    /// Stages a prompt for insertion from *outside* the chat input (e.g. the
+    /// Prompt Library detail view's "Use in chat" action or the sidebar row
+    /// hover button). Unlike `selectPrompt`, no `/` trigger range is required.
+    ///
+    /// **Only `prompt.text` is inserted — the prompt's title, category, tags,
+    /// and any other metadata stay in the library.** The text is trimmed of
+    /// leading/trailing whitespace so no stray newlines bleed in. A leading
+    /// space is prepended only when the existing `userInput` doesn't already
+    /// end in whitespace — preserves the user's partially-typed draft without
+    /// smashing it up against the prompt text.
+    ///
+    /// Also records usage so the prompt bubbles up in Recently-Used sort.
+    /// Also flips `pendingInputFocusRequest` so the chat input grabs keyboard
+    /// focus on the next render — spares the user a click after navigation.
+    ///
+    /// - Returns: `true` when the prompt body was staged, `false` when it was
+    ///   empty (and therefore nothing would visibly change in the editor).
+    ///   Callers typically surface a toast on `false`.
+    @discardableResult
+    func stagePromptFromLibrary(_ prompt: DevPrompt) -> Bool {
+        let cleanText = prompt.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanText.isEmpty else {
+            logger.warning("stagePromptFromLibrary: prompt '\(prompt.title)' has empty text — nothing to insert")
+            return false
+        }
+
+        let needsLeadingSpace = !userInput.isEmpty
+            && !userInput.hasSuffix(" ")
+            && !userInput.hasSuffix("\n")
+        let stringToInsert = (needsLeadingSpace ? " " : "") + cleanText
+
+        logger.log("Staging prompt body from library: title='\(prompt.title)' chars=\(cleanText.count)")
+
+        let insertionText = NSAttributedString(
+            string: stringToInsert,
+            attributes: defaultTypingAttributes
+        )
+        let endLocation = (userInput as NSString).length
+        self.attributedTextInsertionRequest = .init(
+            range: NSRange(location: endLocation, length: 0),
+            attributedString: insertionText
+        )
+
+        promptService.recordUsage(of: prompt)
+
+        // Defer the focus request to the next runloop tick. Setting it in
+        // the same synchronous frame as `attributedTextInsertionRequest`
+        // causes SwiftUI to fire our `.onChange(of: pendingInputFocusRequest)`
+        // handler (which also mutates the VM), triggering an extra
+        // `updateNSView` pass that beats `CustomTextEditor`'s async
+        // `self.text = textView.string` sync-back — the stale empty
+        // `userInput` then wins and wipes the just-inserted text via the
+        // fallback sync-to-binding path. Separating the two mutations
+        // across runloop ticks avoids that race.
+        DispatchQueue.main.async { [weak self] in
+            self?.pendingInputFocusRequest = true
+        }
+        return true
     }
 
     func selectFile(_ file: FileSystemItem) -> FileSystemItem {
@@ -531,7 +618,12 @@ final class ChatInputViewModel {
         case .download:
             guard let modelId = pendingDownloadModelId else { return }
             pendingDownloadModelId = nil
-            WhisperModelDownloadService.shared.downloadModel(modelId)
+            // Route through DownloadCoordinator so the download is
+            // persisted to history and short-circuits correctly if the
+            // model was already pulled in a past session.
+            Task { @MainActor in
+                _ = await DownloadCoordinator.startWhisperDownloadIfNeeded(modelId: modelId)
+            }
         case .delete:
             guard let modelId = pendingDeleteModelId else { return }
             pendingDeleteModelId = nil
@@ -594,19 +686,20 @@ final class ChatInputViewModel {
 
     // MARK: - State Management (Internal)
 
-    /// Observes the recognition service's loadingState using @Observable tracking,
+    /// Observes the recognition service's loadingState via `ObservationStream`,
     /// replacing the previous Combine publisher bridge.
     private func observeRecognitionLoadingState() {
         guard let service = recognitionService as? WhisperRecognitionService else { return }
-        withObservationTracking {
-            _ = service.loadingState
-        } onChange: { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self, let service = self.recognitionService as? WhisperRecognitionService else { return }
+        recognitionLoadingObserver = ObservationStream(
+            track: { [weak service] in
+                _ = service?.loadingState
+            },
+            onChange: { [weak self] in
+                guard let self,
+                      let service = self.recognitionService as? WhisperRecognitionService else { return }
                 self.handleModelLoadingState(service.loadingState)
-                self.observeRecognitionLoadingState()
             }
-        }
+        )
         // Handle initial state
         handleModelLoadingState(service.loadingState)
     }

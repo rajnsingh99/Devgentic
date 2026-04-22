@@ -233,31 +233,32 @@ struct ChatHistoryView: View {
                 .keyboardShortcut("f", modifiers: .command)
             }
             // MARK: - Speech Playback Keyboard Shortcuts
+            //
+            // These are gated on `speechService.isActive`. A `keyboardShortcut` in the
+            // view hierarchy captures its key combo GLOBALLY within the key window —
+            // the in-action `guard` fires too late, AppKit never sees the event. That
+            // meant Option+Left / Option+Right (standard word-by-word cursor nav on
+            // macOS) were permanently swallowed in the chat input, even with no speech
+            // playing. Rendering the buttons only while active frees the combos for
+            // normal text-editing use.
             .background {
-                Group {
-                    // Option+Space: Pause / Resume
-                    Button(action: {
-                        guard speechService.isActive else { return }
-                        speechService.togglePause()
-                    }) { EmptyView() }
-                    .hidden()
-                    .keyboardShortcut(.space, modifiers: .option)
+                if speechService.isActive {
+                    Group {
+                        // Option+Space: Pause / Resume
+                        Button(action: { speechService.togglePause() }) { EmptyView() }
+                            .hidden()
+                            .keyboardShortcut(.space, modifiers: .option)
 
-                    // Option+Right: Skip forward
-                    Button(action: {
-                        guard speechService.isActive else { return }
-                        speechService.skipForward()
-                    }) { EmptyView() }
-                    .hidden()
-                    .keyboardShortcut(.rightArrow, modifiers: .option)
+                        // Option+Right: Skip forward
+                        Button(action: { speechService.skipForward() }) { EmptyView() }
+                            .hidden()
+                            .keyboardShortcut(.rightArrow, modifiers: .option)
 
-                    // Option+Left: Skip backward
-                    Button(action: {
-                        guard speechService.isActive else { return }
-                        speechService.skipBackward()
-                    }) { EmptyView() }
-                    .hidden()
-                    .keyboardShortcut(.leftArrow, modifiers: .option)
+                        // Option+Left: Skip backward
+                        Button(action: { speechService.skipBackward() }) { EmptyView() }
+                            .hidden()
+                            .keyboardShortcut(.leftArrow, modifiers: .option)
+                    }
                 }
             }
         }

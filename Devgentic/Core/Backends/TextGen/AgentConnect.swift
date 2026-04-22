@@ -182,15 +182,22 @@ class AgentConnect: @unchecked Sendable {
                         skillManifests: skillManifests
                     )
 
-                    // 5.5 Code mode: inject project context tool + final_answer terminator.
-                    // `final_answer` is pinned to index 0 so weak local models see it first
-                    // when scanning the tool schema (ordering bias is real on 7-14B models).
-                    // It's the ONLY clean exit from the ReAct loop — without it, local tool-calling
-                    // models emit tool calls indefinitely and trip the circuit breaker (see G1).
-                    if case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath {
+                    // 5.5 Inject `final_answer` terminator for all tool-supporting flows.
+                    // Pinned to index 0 so weak local models see it first when scanning the
+                    // tool schema (ordering bias is real on 7-14B models). It's the ONLY
+                    // clean exit from the ReAct loop — without it, local tool-calling models
+                    // emit tool calls indefinitely and trip the circuit breaker (G1).
+                    //
+                    // Scope: Agent / Code / Workflow profiles (all ReAct-based executors).
+                    // Bot profiles are excluded — they run on ChatExecutor with no tool
+                    // dispatch loop, so terminator semantics don't apply.
+                    if !isBotFlow {
                         let finalAnswerTool = self.wrapTool(FinalAnswerTool(), requiresConfirmation: false)
                         activeTools.insert(finalAnswerTool, at: 0)
+                    }
 
+                    // 5.6 Code mode: inject project context tool.
+                    if case .code(let codeConfig) = profile.details, let projectPath = codeConfig.projectPath {
                         let contextTool = UpdateProjectContextTool(projectPath: projectPath)
                         activeTools.append(self.wrapTool(contextTool, requiresConfirmation: false))
                         let toolNames = activeTools.map(\.name).joined(separator: ", ")
@@ -295,47 +302,53 @@ class AgentConnect: @unchecked Sendable {
                             )
                         }
 
+                        // Hybrid history channel policy:
+                        //   - `recentHistory` (episodic XML) → embedded in system prompt
+                        //     for EVERY flow. Carries tool-execution context without
+                        //     priming the model to mimic a prose tool-call format.
+                        //   - `nativeHistoryTurns` (user/assistant prose pairs) → appended
+                        //     as real turn pairs for native providers only. Prose-only now
+                        //     (no `[Used:]` markers) so the model sees natural conversation
+                        //     flow and learns tool-call structure from the in-request
+                        //     iteration scratchpad alone.
+                        //   - MLX (non-native): keeps `recentHistory` only, no turn pairs.
                         switch historyStrategy {
                         case .recentHistory:
+                            recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
+                                from: effectiveHistory, limit: 10
+                            )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
                                     from: effectiveHistory, limit: 10, charBudget: charBudget
                                 )
-                            } else {
-                                recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
-                                    from: effectiveHistory, limit: 10
-                                )
                             }
                         case .fullHistory:
+                            recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
+                                from: effectiveHistory, limit: effectiveHistory.count
+                            )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildNativeTurns(
                                     from: effectiveHistory, limit: nil, charBudget: charBudget
                                 )
-                            } else {
-                                recentHistory = EpisodicHistoryFormatter.buildRecentHistoryString(
-                                    from: effectiveHistory, limit: effectiveHistory.count
-                                )
                             }
 
                         case .pointer:
+                            recentHistory = EpisodicHistoryFormatter.buildPointerHistoryString(
+                                from: effectiveHistory
+                            )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildPointerTurns(
-                                    from: effectiveHistory
-                                )
-                            } else {
-                                recentHistory = EpisodicHistoryFormatter.buildPointerHistoryString(
                                     from: effectiveHistory
                                 )
                             }
 
                         case .hybrid:
+                            recentHistory = EpisodicHistoryFormatter.buildHybridHistoryString(
+                                from: effectiveHistory, inlineCount: 3
+                            )
                             if isNativeProvider {
                                 nativeHistoryTurns = NativeHistoryConverter.buildHybridTurns(
                                     from: effectiveHistory, inlineCount: 3, charBudget: charBudget
-                                )
-                            } else {
-                                recentHistory = EpisodicHistoryFormatter.buildHybridHistoryString(
-                                    from: effectiveHistory, inlineCount: 3
                                 )
                             }
                         }
@@ -394,9 +407,10 @@ class AgentConnect: @unchecked Sendable {
                         errorRecovery: errorRecovery,
                         responseSynthesisEnabled: responseSynthesisEnabled,
                         nativeHistoryTurns: nativeHistoryTurns,
-                        traceContext: traceContext
+                        traceContext: traceContext,
+                        modelTier: llmConfig.modelMetadata?.tier
                     )
-                    
+
                     // 8. Execute & Stream
                     let traceHandler: @Sendable (AgentTraceLog) -> Void = { log in
                         logger.debug("[\(log.state.headline)] \(log.content) (span: \(log.spanID))")
@@ -583,7 +597,7 @@ class AgentConnect: @unchecked Sendable {
                         baseURL: llmConfig.baseURL
                     )
 
-                    let activeTools = await self.resolveExecutableTools(
+                    var activeTools = await self.resolveExecutableTools(
                         profileTools: rawTools,
                         conversationID: conversationID,
                         longTermMemory: longTermMemory,
@@ -595,6 +609,15 @@ class AgentConnect: @unchecked Sendable {
                         parentProvider: llmConfig.apiProvider,
                         skillManifests: skillManifests
                     )
+
+                    // 6.5 Inject `final_answer` terminator for workflow nodes that run on
+                    // ReAct (agent/code profiles). Mirrors the streaming chat path —
+                    // workflow node output relies on `finalAgentThought`, which is
+                    // populated cleanly when the model calls `final_answer`.
+                    if !isBotFlow {
+                        let finalAnswerTool = self.wrapTool(FinalAnswerTool(), requiresConfirmation: false)
+                        activeTools.insert(finalAnswerTool, at: 0)
+                    }
 
                     // 7. Build AgentInput — workflow-aware, no history/RAG/compaction
                     // taskDescription contains the merged user query for first nodes.
@@ -640,7 +663,8 @@ class AgentConnect: @unchecked Sendable {
                         nativeHistoryTurns: nil,
                         suppressEpisodeManagement: true,
                         workflowContext: workflowContext,
-                        traceContext: traceContext
+                        traceContext: traceContext,
+                        modelTier: llmConfig.modelMetadata?.tier
                     )
 
                     logger.info("[Workflow] AgentInput: tools=\(activeTools.count), generator=WorkflowCognitiveGenerator(\(type(of: innerGenerator))), node='\(workflowContext.nodeName)'")
@@ -685,13 +709,22 @@ class AgentConnect: @unchecked Sendable {
         
         switch llmConfig.apiProvider {
         case .anthropic:
-            return NativeStructuredGenerator(toolAdapter: ClaudeToolSchemaAdapter())
-            
+            return NativeStructuredGenerator(
+                toolAdapter: ClaudeToolSchemaAdapter(),
+                toolTurnAdapter: ClaudeToolTurnAdapter()
+            )
+
         case .google:
-            return NativeStructuredGenerator(toolAdapter: GeminiToolSchemaAdapter())
-            
+            return NativeStructuredGenerator(
+                toolAdapter: GeminiToolSchemaAdapter(),
+                toolTurnAdapter: GeminiToolTurnAdapter()
+            )
+
         case .openAI:
-            return NativeStructuredGenerator(toolAdapter: NativeJSONSchemaAdapter())
+            return NativeStructuredGenerator(
+                toolAdapter: NativeJSONSchemaAdapter(),
+                toolTurnAdapter: OpenAIToolTurnAdapter()
+            )
             
         case .mlx, .ollama:
             let cognitiveProfile = llmConfig.cognitiveProfile
@@ -736,7 +769,11 @@ class AgentConnect: @unchecked Sendable {
                 } else {
                     strategyName = "NativeStructuredGenerator"
                     logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
-                    return NativeStructuredGenerator()
+                    // Ollama-native path uses the Ollama-shaped turn adapter (dict args).
+                    return NativeStructuredGenerator(
+                        toolAdapter: NativeJSONSchemaAdapter(),
+                        toolTurnAdapter: OllamaToolTurnAdapter()
+                    )
                 }
             }
         }
@@ -1056,6 +1093,15 @@ class AgentConnect: @unchecked Sendable {
         case "create_file": return wrapTool(CreateFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
         case "file_overview": return wrapTool(FileOverviewTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
         case "codebase_map": return wrapTool(CodebaseMapTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+
+        // CODE-INTERFACE-ONLY SPLITS (not registered in LocalToolManager — hidden from Tool Library)
+        case "edit_code_single": return wrapTool(EditCodeSingleTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+        case "edit_code_batch": return wrapTool(EditCodeBatchTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+        case "code_search_text": return wrapTool(CodeSearchTextTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+        case "code_search_symbol": return wrapTool(CodeSearchSymbolTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+        case "code_search_files": return wrapTool(CodeSearchFilesTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+        case "create_new_file": return wrapTool(CreateNewFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
+        case "overwrite_file": return wrapTool(OverwriteFileTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)
 
         // MACOS UTILITY TOOLS
         case "screen_capture": return wrapTool(ScreenCaptureTool(), requiresConfirmation: requiresConfirmation, timeout: timeout, timeoutMessage: timeoutMessage)

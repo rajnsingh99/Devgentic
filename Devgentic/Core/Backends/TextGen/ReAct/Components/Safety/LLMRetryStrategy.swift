@@ -79,6 +79,17 @@ struct LLMRetryStrategy: LLMRetryHandling {
             return .modelReload(message: "⏳ Model was released from memory. Reloading...")
         }
 
+        // Capability gap: the model doesn't support tool calling at all.
+        // Reasoning-only models (deepseek-r1 family, o1-likes) hit this — Ollama
+        // rejects the request at the server layer before the model runs. Retrying
+        // yields the same 400 every time, so fail fast with a distinct UI path:
+        // `capabilityFailure` routes to an error card, not plain content.
+        if let providerError = error as? LLMProviderError,
+           case .toolsUnsupported = providerError {
+            logger.error("Tools-unsupported capability gap: \(errorDesc). Aborting without retry.")
+            return .capabilityFailure(reason: errorDesc)
+        }
+
         // Treat as a Parse Failure (e.g., model returned malformed JSON)
         consecutiveParseFailures += 1
         

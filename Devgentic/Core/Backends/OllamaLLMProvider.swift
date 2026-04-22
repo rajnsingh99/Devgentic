@@ -70,11 +70,28 @@ struct OllamaLLMProvider: LLMProvider {
     }
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
-        let url = config.baseURL.appendingPathComponent("api/chat")
-        var request = URLRequest(url: url, timeoutInterval: config.timeout)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Upcast to [[String: Any]] so the shared dispatch path can treat legacy and
+        // native messages uniformly. String values are valid Any values; no data loss.
+        let upcast: [[String: Any]] = messages.map { $0 as [String: Any] }
+        let body = buildCognitiveBody(messages: upcast, tools: tools)
+        return try await dispatchCognitiveRequest(body: body)
+    }
 
+    /// Native-turn overload. Accepts provider-shape messages carrying structural
+    /// tool_calls / tool role entries produced by `OllamaToolTurnAdapter`. Shares the
+    /// dispatch + response parsing logic with the legacy path via `dispatchCognitiveRequest`.
+    func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        let body = buildCognitiveBody(messages: nativeMessages, tools: tools)
+        return try await dispatchCognitiveRequest(body: body)
+    }
+
+    // MARK: - Body Construction
+
+    /// Assembles the /api/chat body. Messages typed as `[[String: Any]]` preserves
+    /// nested structural content (tool_calls arrays, tool call arguments dicts)
+    /// across the Swift type system — Any-erasure through a generic parameter was
+    /// observed to stringify nested arrays on some code paths.
+    private func buildCognitiveBody(messages: [[String: Any]], tools: [[String: Any]]?) -> [String: Any] {
         var body: [String: Any] = [
             "model": config.modelName,
             "messages": messages,
@@ -96,6 +113,19 @@ struct OllamaLLMProvider: LLMProvider {
             body["tools"] = tools
         }
 
+        return body
+    }
+
+    /// Sends the /api/chat POST, emits G12 instrumentation, and parses the response
+    /// into a `ModernCognitiveStep`. Shared between legacy and native-turn paths so
+    /// both benefit from the same error handling, thinking-unsupported auto-heal, and
+    /// KV-cache-miss proxy metrics.
+    private func dispatchCognitiveRequest(body: [String: Any]) async throws -> ModernCognitiveStep {
+        let url = config.baseURL.appendingPathComponent("api/chat")
+        var request = URLRequest(url: url, timeoutInterval: config.timeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let requestBodyBytes = request.httpBody?.count ?? 0
 
@@ -111,6 +141,14 @@ struct OllamaLLMProvider: LLMProvider {
             // Detect the specific "does not support thinking" 400 so the caller can auto-heal.
             if status == 400 && bodyStr.lowercased().contains("does not support thinking") {
                 throw LLMProviderError.thinkingUnsupported(modelName: config.modelName)
+            }
+
+            // Detect "does not support tools" 400. Reasoning-only models (deepseek-r1 family,
+            // o1-likes) are rejected at the Ollama server layer before the model runs.
+            // The retry strategy aborts immediately on this — no amount of format correction
+            // fixes a capability gap.
+            if status == 400 && bodyStr.lowercased().contains("does not support tools") {
+                throw LLMProviderError.toolsUnsupported(modelName: config.modelName)
             }
 
             throw LLMProviderError.httpError(status, bodyStr)
@@ -136,11 +174,26 @@ struct OllamaLLMProvider: LLMProvider {
         let thinking = message["thinking"] as? String // Capture raw thinking trace if provided separately
         var pendingTools: [PendingToolCall] = []
 
-        if let toolCalls = message["tool_calls"] as? [[String: Any]] {
+        // --- Raw-response diagnostic logging ---
+        // Captures what Ollama actually returned so parse regressions can be diagnosed
+        // without attaching a debugger. Content preview is capped at 1KB; tool_calls
+        // are logged in full (usually small). Thinking presence only, not body.
+        // Both summary AND content are at .info level so they appear in release logs —
+        // the content body is the single most useful signal when diagnosing why a
+        // particular model's output didn't parse into a tool call.
+        let rawToolCalls = message["tool_calls"] as? [[String: Any]]
+        let contentPreview = content.count > 1000 ? String(content.prefix(1000)) + "…[+\(content.count - 1000) chars]" : content
+        logLLMOps.info("📥 [Ollama:raw] content=\(content.count)B | tool_calls=\(rawToolCalls?.count ?? 0) | thinking=\(thinking != nil)")
+        logLLMOps.info("📥 [Ollama:content] \(contentPreview)")
+        if let toolCalls = rawToolCalls, !toolCalls.isEmpty {
+            logLLMOps.info("📥 [Ollama:tool_calls] \(toolCalls)")
+        }
+
+        if let toolCalls = rawToolCalls {
             for toolCall in toolCalls {
                 if let function = toolCall["function"] as? [String: Any],
                    let toolName = function["name"] as? String {
-                   
+
                     let id = UUID().uuidString
                     var argumentsDict: [String: JSONValue] = [:]
 
@@ -150,7 +203,7 @@ struct OllamaLLMProvider: LLMProvider {
                               let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
                         argumentsDict = parsedDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
                     }
-                    
+
                     pendingTools.append(PendingToolCall(id: id, name: toolName, arguments: argumentsDict))
                 }
             }
@@ -162,6 +215,10 @@ struct OllamaLLMProvider: LLMProvider {
         // cleanly onto Ollama's OpenAI-style wrapper). Pipe through the cascade pipeline
         // to recover them. (G7 fix) Split prose-before-JSON from the JSON block so the
         // agent's reasoning is preserved instead of discarded by the parser.
+        //
+        // Tool-name resolution happens one level up in the generator (which has access
+        // to the registered `[AgentTool]`), so we call the pipeline without a registry
+        // here — it parses and classifies, validation is layered on top.
         if pendingTools.isEmpty && !content.isEmpty {
             let (prose, jsonBlock) = Self.splitProseAndJSON(content)
             let pipeline = CognitiveParsePipeline(
@@ -179,7 +236,8 @@ struct OllamaLLMProvider: LLMProvider {
                 reasoning: reasoning,
                 thought: thinking,               // preserve Ollama's separate thinking channel
                 toolCalls: parsed.toolCalls,
-                tokenUsage: usage ?? parsed.tokenUsage
+                tokenUsage: usage ?? parsed.tokenUsage,
+                parseOutcome: parsed.parseOutcome  // forward pipeline's verdict (.success / .failed / .genuineCompletion)
             )
         }
 
@@ -197,6 +255,11 @@ struct OllamaLLMProvider: LLMProvider {
     /// `(prose, jsonBlock)`. Walks the string once with brace-depth tracking to
     /// find the first balanced top-level `{...}` or `[...]` block; everything
     /// before that block is returned as prose, the block itself as jsonBlock.
+    ///
+    /// Strips orphan markdown code fences (```json opener, ``` closer) from the
+    /// returned prose — those are wrapping syntax, not reasoning text, and
+    /// leaking them into `step.reasoning` shows up in the UI as `Model
+    /// Reasoning: ```json` which is nonsense.
     ///
     /// If no balanced JSON block is found, returns `(content, "")` so callers
     /// can fall back to passing the original content to the parser.
@@ -219,15 +282,34 @@ struct OllamaLLMProvider: LLMProvider {
                 } else if closers.contains(char) {
                     depth -= 1
                     if depth == 0, let start = startIndex {
-                        let prose = String(content[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let rawProse = String(content[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
                         let jsonBlock = String(content[start...index])
-                        return (prose, jsonBlock)
+                        return (stripOrphanFences(rawProse), jsonBlock)
                     }
                 }
             }
             prevChar = char
         }
-        return (content.trimmingCharacters(in: .whitespacesAndNewlines), "")
+        return (stripOrphanFences(content.trimmingCharacters(in: .whitespacesAndNewlines)), "")
+    }
+
+    /// Removes a leading ` ```json `/` ``` ` opener and trailing ` ``` ` closer
+    /// when they frame the string as wrapping syntax. Real reasoning that
+    /// happens to mention backticks inside the prose is preserved — the
+    /// anchored regex only matches at string boundaries.
+    private static func stripOrphanFences(_ prose: String) -> String {
+        var result = prose
+        result = result.replacingOccurrences(
+            of: #"^```(?:[a-zA-Z0-9_-]+)?\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: #"```\s*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {

@@ -568,6 +568,30 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
     }
 
+    func testBareToolCall_MissingOuterBrace_RecoversFinalAnswer() {
+        // Reproduction of the iter-13 production bug: qwen2.5-coder:14b emitted a
+        // bare `final_answer` call with the outer `}` dropped. Depth ends at 1;
+        // extractOutermostJSON should append a closer and BareToolCallSchema
+        // should decode cleanly.
+        let input = #"{"name": "final_answer", "arguments": {"answer": "Here are the files:\n- a.pdf\n- b.pdf"}"#
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Missing outer brace should be salvaged")
+        XCTAssertEqual(result.toolCalls.first?.name, "final_answer")
+        let answer = result.toolCalls.first?.arguments["answer"]?.stringValue ?? ""
+        XCTAssertTrue(answer.contains("Here are the files"))
+        XCTAssertTrue(answer.contains("a.pdf"))
+    }
+
+    func testBareToolCall_MissingTwoClosingBraces_RecoversFinalAnswer() {
+        // Deeper truncation: both the `arguments` closer and the root closer dropped.
+        // Depth ends at 2; recovery appends two `}` and the payload decodes.
+        let input = #"{"name": "final_answer", "arguments": {"answer": "Task complete""#
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Two missing braces should still be salvaged")
+        XCTAssertEqual(result.toolCalls.first?.name, "final_answer")
+        XCTAssertEqual(result.toolCalls.first?.arguments["answer"]?.stringValue, "Task complete")
+    }
+
     // MARK: - Bug 3: Malformed Content with Valid tool_calls
 
     func testMalformedContent_HTMLTags_RecoverToolCalls() {
@@ -614,5 +638,100 @@ final class HeuristicCognitiveParserTests: XCTestCase {
         let result = parser.parse(rawResponse: input)
         XCTAssertEqual(result.toolCalls.count, 0)
         XCTAssertTrue(result.reasoning.contains("plain text"), "Plain text should be preserved as reasoning")
+    }
+
+    // MARK: - Raw Newline Recovery (Step 7: escapeRawControlsInsideStrings)
+    // Quantized models (qwen-coder:14b Q4_K_M observed in prod) sometimes emit a literal
+    // LF character inside a JSON string value instead of the escape sequence `\n`.
+    // JSONDecoder rejects this; step 7 of sanitizeJSON rewrites those raw LFs before decoding.
+
+    func testRawNewline_InsideFinalAnswerString_Recovered() {
+        // Reduced shape of the exact production failure — raw LF between escaped \n sequences
+        // inside the `answer` string of a final_answer tool call.
+        // The blank line after "**Symbols Found:**" is a literal LF in the Swift source,
+        // which becomes a raw LF in the JSON string at runtime.
+        let input = """
+        {
+          "name": "final_answer",
+          "arguments": {
+            "answer": "**Project Analysis Summary**\\n\\n**Symbols Found:**
+        - `public class January2026` defined at line 9\\n\\n*No further actions needed.*"
+          }
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Raw LF inside string should be escaped and parse recovered")
+        XCTAssertEqual(result.toolCalls.first?.name, "final_answer")
+        let answer = result.toolCalls.first?.arguments["answer"]?.stringValue ?? ""
+        XCTAssertTrue(answer.contains("Project Analysis Summary"))
+        XCTAssertTrue(answer.contains("Symbols Found"))
+        XCTAssertTrue(answer.contains("public class January2026"))
+    }
+
+    func testRawNewline_BetweenJSONTokens_NotModified() {
+        // Pretty-printed JSON has raw LFs BETWEEN tokens — these are valid whitespace and
+        // must not be escaped by the transform (they're outside any string value).
+        let input = """
+        {
+          "content": "hello",
+          "tool_calls": [
+            {"name": "list_directory", "arguments": {"path": "/tmp"}}
+          ]
+        }
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1, "Pretty-printed JSON must still parse cleanly")
+        XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
+        XCTAssertEqual(result.reasoning, "hello")
+    }
+
+    func testEscapedNewline_PreservedThroughTransform() {
+        // Already-correct `\n` escape sequence (2 chars in JSON) should not be double-escaped.
+        let input = #"{"content": "line one\nline two", "tool_calls": []}"#
+        let result = parser.parse(rawResponse: input)
+        // After JSONDecoder, the escape becomes a real LF char in the parsed string.
+        XCTAssertEqual(result.reasoning, "line one\nline two")
+        XCTAssertEqual(result.toolCalls.count, 0)
+    }
+
+    func testEscapedQuoteInsideString_NotTreatedAsBoundary() {
+        // Escape handling: `\"` inside a string must not prematurely close it,
+        // so raw LF elsewhere in the same string is still detected as in-string.
+        let input = """
+        {"name": "foo", "arguments": {"quote": "she said \\"hi\\" then walked away
+        on a new line"}}
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "foo")
+        let quote = result.toolCalls.first?.arguments["quote"]?.stringValue ?? ""
+        XCTAssertTrue(quote.contains("she said"))
+        XCTAssertTrue(quote.contains("on a new line"))
+    }
+
+    func testUnmatchedBraces_WithRawNewlines_DoesNotFabricateToolCall() {
+        // Risk-surface case: JSON is broken for a DIFFERENT reason (truncated / unmatched
+        // braces) AND happens to contain raw newlines. After step 7 escapes the newlines,
+        // the outer structure is still invalid — the transform must NOT falsely succeed.
+        //
+        // Acceptable outcomes: empty tool_calls OR recovery via existing lenient paths with
+        // a correct tool name. Unacceptable: a tool call with a fabricated/wrong name.
+        let input = """
+        {"name": "read_file", "arguments": {"path": "/tmp/abc
+        xyz.txt"
+        """
+        let result = parser.parse(rawResponse: input)
+        if let toolCall = result.toolCalls.first {
+            XCTAssertEqual(toolCall.name, "read_file", "If recovered, the tool name must be correct — never fabricated")
+        }
+        // Whether it's recovered or not is acceptable; what matters is no wrong-name result.
+    }
+
+    func testRawTab_InsideStringValue_Recovered() {
+        // Same bug family, different control char. A raw TAB inside a JSON string is invalid
+        // and should be escaped to `\t`.
+        let input = "{\"content\": \"col1\tcol2\", \"tool_calls\": []}"
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.reasoning, "col1\tcol2", "Raw tab inside string value should parse correctly after step 7")
     }
 }

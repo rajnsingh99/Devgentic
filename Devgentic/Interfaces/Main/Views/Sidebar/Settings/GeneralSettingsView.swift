@@ -152,19 +152,21 @@ struct GeneralSettingsView: View {
                                 }
                             }
 
-                            if downloadService.isModelDownloaded(selectedModel) {
-                                Button {
+                            // Shared status chip — shows Installed / Downloading /
+                            // Download state for the currently-selected model.
+                            // Deletion routes through the existing alert; the
+                            // download alert is handled via Picker onChange above.
+                            ModelDownloadStatusView(
+                                backend: .whisper,
+                                modelIdentifier: selectedModel,
+                                displayName: selectedModel,
+                                isInstalled: downloadService.isModelDownloaded(selectedModel),
+                                onDeleteRequested: {
                                     pendingModelId = selectedModel
                                     activeAlert = .delete
                                     showWhisperAlert = true
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .font(.system(.caption))
-                                        .foregroundColor(theme.errorColor.opacity(0.7))
                                 }
-                                .buttonStyle(.plain)
-                                .help("Delete downloaded model")
-                            }
+                            )
                         }
                     }
 
@@ -213,11 +215,9 @@ struct GeneralSettingsView: View {
                             }
                     }
 
-                    // Floating download progress
-                    if downloadService.isDownloading {
-                        Divider().background(theme.dividerColor)
-                        WhisperDownloadProgressOverlay()
-                    }
+                    // Progress UI intentionally omitted — `ModelDownloadStatusView`
+                    // above renders inline progress for the selected model,
+                    // and the Downloads sidebar surfaces background pulls.
                 }
                 .alert(settingsAlertTitle, isPresented: $showWhisperAlert) {
                     if activeAlert == .delete {
@@ -278,7 +278,12 @@ struct GeneralSettingsView: View {
 
         switch activeAlert {
         case .download:
-            downloadService.downloadModel(modelId)
+            // Route through DownloadCoordinator so the history store gets
+            // the record + short-circuit semantics match every other entry
+            // point (hover button, sidebar re-download, etc.).
+            Task { @MainActor in
+                _ = await DownloadCoordinator.startWhisperDownloadIfNeeded(modelId: modelId)
+            }
         case .delete:
             Task {
                 let fallback = await downloadService.deleteModel(modelId)

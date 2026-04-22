@@ -57,7 +57,16 @@ enum RetryAction: Equatable, Sendable {
     /// The local model was unloaded (e.g., idle timer fired during HITL suspension).
     /// The executor should attempt to reload the model and retry the iteration.
     case modelReload(message: String)
+    /// Soft abort with a best-effort synthesized answer. The executor emits the
+    /// reason as message content so the user sees *something* — used for
+    /// iteration-exhaustion and circuit-breaker paths that still want to show
+    /// partial work.
     case abort(reason: String)
+    /// Hard capability failure — the model cannot satisfy the request at all
+    /// (e.g. reasoning-only model rejecting `tools` parameter). The executor
+    /// emits this as an `.error` stream event so the UI renders a distinct
+    /// error card instead of plain message content. No retries attempted.
+    case capabilityFailure(reason: String)
 }
 
 /// Handles LLM rate limits (HTTP 429) and network/JSON retry logic.
@@ -73,9 +82,11 @@ enum TerminationStatus: Equatable, Sendable {
     case proceed
     case completed(finalThought: String)
     case maxIterationsReached
-    /// The LLM returned prose describing tool usage intent but failed to produce structured tool calls.
-    /// The executor should inject a corrective system alert and retry.
-    case suspectedFormatFailure(reasoning: String)
+    /// Parsing or validation failed and the model needs a targeted corrective alert
+    /// to course-correct in the next iteration. Carries the typed reason so the
+    /// executor can build a reason-specific alert instead of a generic "invalid JSON"
+    /// string. `reasoning` is the model's raw reasoning text (what little was extractable).
+    case suspectedFormatFailure(reason: ParseFailureReason, reasoning: String)
 }
 
 /// Analyzes cognitive steps to determine if the execution loop has reached a natural conclusion.

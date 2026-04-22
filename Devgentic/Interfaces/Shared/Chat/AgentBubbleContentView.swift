@@ -29,6 +29,15 @@ struct AgentBubbleContentView: View {
         message.profileType == .code ? .timeline : agentViewVariant
     }
 
+    /// True when the bubble's current content is an `.error` card. The error
+    /// card already carries a full title + details + retry affordance, so the
+    /// terminal-outcome warning chip would duplicate the same "something went
+    /// wrong" signal and clutter the bubble.
+    private var isErrorContent: Bool {
+        if case .error = contentToDisplay { return true }
+        return false
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacingMedium) {
 
@@ -94,9 +103,14 @@ struct AgentBubbleContentView: View {
             // (circuit-breaker abort, iteration exhaustion, cancellation). Keeps
             // the bubble honest — user shouldn't mistake best-effort synthesis
             // for an authoritative answer.
+            //
+            // Skipped when content is already a `.error` card — the card itself
+            // communicates the failure with more detail than the chip, and
+            // showing both creates a redundant "something went wrong" double-banner.
             if !message.isStreaming,
                let outcome = message.terminalOutcome,
-               outcome != .completed {
+               outcome != .completed,
+               !isErrorContent {
                 TerminalOutcomeChip(outcome: outcome, reason: message.terminalReason)
             }
 

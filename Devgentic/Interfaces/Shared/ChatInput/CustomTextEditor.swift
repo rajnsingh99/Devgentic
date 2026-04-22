@@ -341,8 +341,12 @@ struct CustomTextEditor: NSViewRepresentable {
             
             let isAtStart = self.selectedRange().location == 0
             let isEmpty = self.string.isEmpty
-            if event.keyCode == 126 && (isEmpty || isAtStart) { coordinator?.parent.onNavigateQueryHistory?(.up); return }
-            if event.keyCode == 125 && (isEmpty || self.selectedRange().location == self.string.count) { coordinator?.parent.onNavigateQueryHistory?(.down); return }
+            // Query history nav on bare Up/Down only — any modifier (shift for
+            // selection extension, option for paragraph jump, etc.) must pass
+            // through to AppKit's standard text-editing commands.
+            let hasModifier = !event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty
+            if !hasModifier && event.keyCode == 126 && (isEmpty || isAtStart) { coordinator?.parent.onNavigateQueryHistory?(.up); return }
+            if !hasModifier && event.keyCode == 125 && (isEmpty || self.selectedRange().location == self.string.count) { coordinator?.parent.onNavigateQueryHistory?(.down); return }
             
             let keyCodeReturn: UInt16 = 36
             if event.modifierFlags.intersection([.shift, .option, .command, .control]).isEmpty && event.keyCode == keyCodeReturn {

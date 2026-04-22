@@ -16,77 +16,56 @@ struct MLXModelStoreContainerView: View {
 
     let filterForTools: Bool
 
-    @State private var viewModel: MLXModelStoreViewModel
-    @Environment(\.appTheme) private var theme
+    /// View model is owned by `DestinationCoordinator` (separate instance per
+    /// `filterForTools` value) so its category / search / sort state survives
+    /// the view re-creation cascade when navigating away and back.
+    @Environment(DestinationCoordinator.self) private var coordinator
 
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
-        _viewModel = State(wrappedValue: MLXModelStoreViewModel(filterForTools: filterForTools))
     }
 
     var body: some View {
+        @Bindable var viewModel = coordinator.mlxStore(filterForTools: filterForTools)
+
         VStack(spacing: 0) {
             DynamicIslandBar {
-                // Search bar in center
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(.caption))
-                        .foregroundColor(theme.secondaryText)
-
-                    TextField(
-                        viewModel.selectedCategory == .installed ? "Filter models..." : "Search Hugging Face...",
-                        text: $viewModel.searchText
-                    )
-                    .textFieldStyle(.plain)
-                    .font(theme.fontSubheadline)
-
-                    if !viewModel.searchText.isEmpty {
-                        Button {
-                            viewModel.searchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(.caption))
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.primaryBackground)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(theme.dividerColor, lineWidth: 1)
+                IslandSearchField(
+                    text: $viewModel.searchText,
+                    placeholder: viewModel.selectedCategory == .installed ? "Filter models..." : "Search Hugging Face...",
+                    autoFocus: true,
+                    isSearching: viewModel.isLoading,
+                    accessibilityIdentifier: "mlx.store.search"
                 )
             } trailing: {
-                // Sort menu
-                Menu {
-                    Picker("Sort By", selection: $viewModel.sortOption) {
-                        ForEach(MLXModelStoreViewModel.SortOption.allCases) { option in
-                            Label(option.rawValue, systemImage: option.icon).tag(option)
+                HStack(spacing: 6) {
+                    Menu {
+                        Picker("Sort By", selection: $viewModel.sortOption) {
+                            ForEach(MLXModelStoreViewModel.SortOption.allCases) { option in
+                                Label(option.rawValue, systemImage: option.icon).tag(option)
+                            }
                         }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .islandCircleAffordance()
                     }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(.caption, weight: .medium))
-                        .foregroundColor(theme.accentColor)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Sort Models")
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Sort Models")
+                    .accessibilityLabel("Sort models")
+                    .disabled(viewModel.isLoading)
 
-                Button {
-                    viewModel.refresh()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(.caption, weight: .medium))
-                        .foregroundColor(theme.accentColor)
+                    IslandIconButton(
+                        symbol: "arrow.clockwise",
+                        help: "Refresh Store (⌘R)",
+                        accessibilityLabel: "Refresh store",
+                        keyboardShortcut: KeyboardShortcut("r", modifiers: .command),
+                        isLoading: viewModel.isLoading
+                    ) {
+                        viewModel.refresh()
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Refresh Store")
             }
 
             MLXModelStoreContent(

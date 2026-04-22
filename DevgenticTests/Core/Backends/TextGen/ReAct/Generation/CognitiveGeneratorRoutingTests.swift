@@ -157,7 +157,8 @@ final class WorkflowGeneratorRoutingTests: XCTestCase {
             availableTools: [],
             userProfile: nil,
             skillManifests: nil,
-            taskDescription: nil
+            taskDescription: nil,
+            promptLayerConfig: .agent
         )
     }
 

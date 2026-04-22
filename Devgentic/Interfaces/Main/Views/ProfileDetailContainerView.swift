@@ -27,24 +27,34 @@ struct ProfileDetailContainerView: View {
                     .id(profileID)
                     .environment(profileService)
             } else if didAttemptBufferActivation {
-                // Buffer activation was attempted but profile wasn't found — show error
-                ContentNotFoundView(
-                    icon: "person.crop.circle.badge.exclamationmark",
-                    title: "Profile Not Found",
-                    subtitle: "This profile may have been deleted. Use the back button to return."
-                )
+                // Buffer activation was attempted but profile wasn't found.
+                // Show the island (for back navigation) on top of the error state.
+                VStack(spacing: 0) {
+                    DynamicIslandBar(
+                        title: "Profile Not Found",
+                        icon: "person.crop.circle.badge.exclamationmark"
+                    )
+                    ContentNotFoundView(
+                        icon: "person.crop.circle.badge.exclamationmark",
+                        title: "Profile Not Found",
+                        subtitle: "This profile may have been deleted. Use the back button to return."
+                    )
+                }
             } else {
-                // First render: eagerly activate the buffer
-                // (e.g. deep-link, state restoration, or first render edge case).
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .onAppear {
-                        profileService.activateEditBuffer(for: profileID)
-                        // If the buffer still isn't set after activation, the profile doesn't exist
-                        DispatchQueue.main.async {
-                            didAttemptBufferActivation = true
-                        }
+                // First render: eagerly activate the buffer.
+                // Keep the island visible during load so back nav stays reachable
+                // even if activation hangs (e.g. disk I/O, state restoration).
+                VStack(spacing: 0) {
+                    DynamicIslandBar(title: "Loading…", icon: "hourglass")
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .onAppear {
+                    profileService.activateEditBuffer(for: profileID)
+                    DispatchQueue.main.async {
+                        didAttemptBufferActivation = true
                     }
+                }
             }
         }
     }

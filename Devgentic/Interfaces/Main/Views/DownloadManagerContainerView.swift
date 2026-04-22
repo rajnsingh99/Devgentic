@@ -3,73 +3,78 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 19/03/26.
-//
-//  Full detail view for the download manager, rendered in the
-//  main content area. Shows active and completed downloads with
-//  rich detail including progress, cancel/retry, and backend info.
+//  Rewritten 2026-04-21 — reads from `DownloadHistoryStore` directly via
+//  `@Query` so history survives relaunches. Mirrors the sidebar's layout
+//  (in-progress section + date-grouped history) at a roomier scale.
 //
 
 import SwiftUI
+import SwiftData
 
 struct DownloadManagerContainerView: View {
 
-    var manager = DownloadManager.shared
+    @Query(sort: \DownloadRecord.updatedAt, order: .reverse)
+    private var allRecords: [DownloadRecord]
+
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
+
+    @State private var showingClearAlert: Bool = false
+
+    private var activeRecords: [DownloadRecord] { allRecords.filter { $0.isActive } }
+    private var historyRecords: [DownloadRecord] { allRecords.filter { !$0.isActive } }
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(.caption))
-                        .foregroundColor(theme.accentColor)
-                    Text("Download Manager")
-                        .font(theme.fontSubheadline.weight(.semibold))
-                        .foregroundColor(theme.primaryText)
-                }
-            } trailing: {
-                if !manager.completedDownloads.isEmpty {
-                    Button {
-                        withAnimation { manager.clearCompleted() }
-                    } label: {
-                        Text("Clear History")
-                            .font(.system(.caption, weight: .medium))
-                            .foregroundColor(theme.accentColor)
+            DynamicIslandBar(title: "Download Manager", icon: "arrow.down.circle") {
+                if !historyRecords.isEmpty {
+                    IslandPillButton(
+                        title: "Clear History",
+                        style: .subtle,
+                        accessibilityLabel: "Clear download history"
+                    ) {
+                        showingClearAlert = true
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
-            if manager.activeDownloads.isEmpty && manager.completedDownloads.isEmpty {
+            if allRecords.isEmpty {
                 emptyState
             } else {
                 ScrollView {
-                    VStack(spacing: 16) {
-                        // Active Downloads
-                        if !manager.activeDownloads.isEmpty {
-                            sectionView(title: "Active Downloads") {
-                                ForEach(manager.activeDownloads) { entry in
-                                    ActiveDownloadCardView(entry: entry)
+                    VStack(spacing: 20) {
+                        if !activeRecords.isEmpty {
+                            sectionView(title: "Active Downloads (\(activeRecords.count))") {
+                                ForEach(activeRecords) { record in
+                                    ActiveDownloadCardView(record: record)
                                 }
                             }
                         }
 
-                        // Completed Downloads
-                        if !manager.completedDownloads.isEmpty {
-                            sectionView(title: "Recent Downloads") {
-                                ForEach(manager.completedDownloads) { entry in
-                                    CompletedDownloadCardView(entry: entry)
+                        if !historyRecords.isEmpty {
+                            sectionView(title: "History (\(historyRecords.count))") {
+                                ForEach(historyRecords) { record in
+                                    HistoryDownloadCardView(record: record)
                                 }
                             }
                         }
                     }
                     .padding(24)
-                    .frame(maxWidth: 1000)
+                    .frame(maxWidth: ViewLayout.maxContentWidth)
                     .frame(maxWidth: .infinity)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert("Clear download history?", isPresented: $showingClearAlert) {
+            Button("Clear", role: .destructive) {
+                let cleared = (try? DownloadHistoryStore.shared.deleteAllHistory(keepingActive: true).get()) ?? 0
+                toastManager.show("Removed \(cleared) record\(cleared == 1 ? "" : "s")", style: .success)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Removes all completed, failed, and cancelled records. Active downloads are kept.")
+        }
     }
 
     // MARK: - Helpers
@@ -112,54 +117,66 @@ struct DownloadManagerContainerView: View {
     }
 }
 
-// MARK: - Active Download Card
+// MARK: - Active card
 
 private struct ActiveDownloadCardView: View {
 
-    let entry: DownloadEntry
-    var manager = DownloadManager.shared
+    let record: DownloadRecord
     @Environment(\.appTheme) private var theme
+
+    private var tint: Color { record.backend?.tintColor ?? .blue }
+    private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
+    private var backendName: String { record.backend?.rawValue ?? "Unknown" }
+
+    private var speedSnapshot: DownloadSpeedSnapshot? {
+        DownloadManager.shared.activeSpeeds[record.id]
+    }
 
     var body: some View {
         HStack(spacing: 16) {
-            // Backend Icon
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(entry.backend.tintColor.opacity(0.12))
+                    .fill(tint.opacity(0.12))
                     .frame(width: 44, height: 44)
-                Image(systemName: entry.backend.icon)
+                Image(systemName: icon)
                     .font(.title3)
-                    .foregroundColor(entry.backend.tintColor)
+                    .foregroundColor(tint)
             }
 
-            // Info
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(entry.modelName)
+                    Text(record.displayName)
                         .font(.headline)
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 
                     Spacer()
 
-                    Text("\(Int(entry.progress * 100))%")
+                    Text("\(Int(record.progress * 100))%")
                         .font(theme.fontBody.weight(.bold).monospacedDigit())
-                        .foregroundColor(entry.backend.tintColor)
+                        .foregroundColor(tint)
                 }
 
-                ProgressView(value: entry.progress)
+                ProgressView(value: record.progress)
                     .progressViewStyle(.linear)
-                    .tint(entry.backend.tintColor)
+                    .tint(tint)
 
-                HStack {
-                    Text(entry.backend.rawValue)
+                HStack(spacing: 8) {
+                    Text(backendName)
                         .font(.caption)
                         .foregroundColor(theme.secondaryText)
+
+                    Text("·").foregroundColor(theme.tertiaryText)
+
+                    Text(DownloadSpeedFormatter.compactLine(snapshot: speedSnapshot))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
 
                     Spacer()
 
                     Button {
-                        manager.cancelDownload(for: entry)
+                        DownloadManager.shared.cancelDownload(record)
                     } label: {
                         Label("Cancel", systemImage: "xmark.circle")
                             .font(.caption)
@@ -179,56 +196,70 @@ private struct ActiveDownloadCardView: View {
     }
 }
 
-// MARK: - Completed Download Card
+// MARK: - History card
 
-private struct CompletedDownloadCardView: View {
+private struct HistoryDownloadCardView: View {
 
-    let entry: DownloadEntry
-    var manager = DownloadManager.shared
+    let record: DownloadRecord
+    @Environment(ToastManager.self) private var toastManager
     @Environment(\.appTheme) private var theme
+    @State private var showingRedownloadAlert: Bool = false
+
+    private var tint: Color { record.backend?.tintColor ?? .blue }
+    private var icon: String { record.backend?.icon ?? "arrow.down.circle" }
+    private var backendName: String { record.backend?.rawValue ?? "Unknown" }
 
     var body: some View {
         HStack(spacing: 16) {
-            // Backend Icon
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(entry.backend.tintColor.opacity(0.08))
+                    .fill(tint.opacity(0.08))
                     .frame(width: 44, height: 44)
-                Image(systemName: entry.backend.icon)
+                Image(systemName: icon)
                     .font(.title3)
-                    .foregroundColor(entry.backend.tintColor.opacity(0.6))
+                    .foregroundColor(tint.opacity(0.6))
             }
 
-            // Info
             VStack(alignment: .leading, spacing: 4) {
-                Text(entry.modelName)
+                Text(record.displayName)
                     .font(.headline)
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
 
                 HStack(spacing: 6) {
                     statusView
-                    Text("·")
-                        .foregroundColor(theme.secondaryText)
-                    Text(entry.backend.rawValue)
-                        .foregroundColor(theme.secondaryText)
+                    Text("·").foregroundColor(theme.secondaryText)
+                    Text(backendName).foregroundColor(theme.secondaryText)
+                    Text("·").foregroundColor(theme.secondaryText)
+                    Text(relativeDate).foregroundColor(theme.secondaryText)
                 }
                 .font(.caption)
             }
 
             Spacer()
 
-            Button {
-                withAnimation { manager.removeCompleted(entry) }
+            Menu {
+                Button {
+                    showingRedownloadAlert = true
+                } label: {
+                    Label("Re-download…", systemImage: "arrow.clockwise")
+                }
+                Button(role: .destructive) {
+                    _ = DownloadHistoryStore.shared.delete(id: record.id)
+                } label: {
+                    Label("Remove from History", systemImage: "trash")
+                }
             } label: {
-                Image(systemName: "xmark")
-                    .font(.system(.caption2, weight: .bold))
+                Image(systemName: "ellipsis")
+                    .font(.system(.body, weight: .semibold))
+                    .frame(width: 28, height: 28)
                     .foregroundColor(theme.secondaryText)
-                    .padding(6)
                     .background(Circle().fill(theme.surfaceOverlay))
             }
             .buttonStyle(.plain)
-            .help("Dismiss")
+            .menuIndicator(.hidden)
+            .help("More actions")
+            .accessibilityLabel("Actions for \(record.displayName)")
         }
         .padding(16)
         .background(theme.secondaryBackground)
@@ -237,24 +268,78 @@ private struct CompletedDownloadCardView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(theme.dividerColor, lineWidth: 1)
         )
+        .alert(
+            "Re-download \(record.displayName)?",
+            isPresented: $showingRedownloadAlert
+        ) {
+            Button("Download") { triggerRedownload() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Re-pull \(record.displayName) from \(backendName)? Existing files will be overwritten.")
+        }
+    }
+
+    private var relativeDate: String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: record.updatedAt, relativeTo: Date())
     }
 
     @ViewBuilder
     private var statusView: some View {
-        switch entry.status {
+        switch record.status {
         case .completed:
             Label("Completed", systemImage: "checkmark.circle.fill")
-                .foregroundColor(.green)
-        case .failed(let message):
-            Label(message ?? "Failed", systemImage: "exclamationmark.circle.fill")
-                .foregroundColor(.red)
+                .foregroundColor(theme.successColor)
+        case .failed:
+            Label(record.errorMessage ?? "Failed", systemImage: "exclamationmark.triangle.fill")
+                .foregroundColor(theme.errorColor)
                 .lineLimit(1)
         case .cancelled:
             Label("Cancelled", systemImage: "minus.circle.fill")
-                .foregroundColor(.orange)
-        case .downloading:
-            Label("Downloading", systemImage: "arrow.down.circle")
-                .foregroundColor(theme.accentColor)
+                .foregroundColor(theme.warningColor)
+        case .interrupted:
+            Label("Interrupted", systemImage: "bolt.horizontal.circle.fill")
+                .foregroundColor(theme.warningColor)
+        default:
+            Label(record.status?.rawValue.capitalized ?? "Unknown", systemImage: "questionmark.circle")
+                .foregroundColor(theme.tertiaryText)
+        }
+    }
+
+    private func triggerRedownload() {
+        guard let backend = record.backend else { return }
+        Task { @MainActor in
+            let outcome: DownloadStartOutcome
+            switch backend {
+            case .ollama:
+                outcome = await DownloadCoordinator.startOllamaDownloadIfNeeded(
+                    modelName: record.modelIdentifier,
+                    profileID: record.profileID
+                )
+            case .mlx:
+                outcome = await DownloadCoordinator.startMLXDownloadIfNeeded(
+                    repoId: record.modelIdentifier,
+                    profileID: record.profileID
+                )
+            case .whisper:
+                outcome = await DownloadCoordinator.startWhisperDownloadIfNeeded(
+                    modelId: record.modelIdentifier,
+                    profileID: record.profileID
+                )
+            }
+            switch outcome {
+            case .alreadyInstalled:
+                toastManager.show("\(record.displayName) is already installed", style: .success)
+            case .alreadyInProgress:
+                toastManager.show("Already downloading", style: .warning)
+            case .resumedFromHistory:
+                toastManager.show("Re-downloading \(record.displayName)…", style: .success)
+            case .startedFresh:
+                toastManager.show("Downloading \(record.displayName)…", style: .success)
+            case .failed(let reason):
+                toastManager.show(reason, style: .error)
+            }
         }
     }
 }

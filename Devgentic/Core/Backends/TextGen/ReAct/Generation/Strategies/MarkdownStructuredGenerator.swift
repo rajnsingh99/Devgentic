@@ -31,20 +31,23 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
     You MUST respond using the following structured format EXACTLY:
 
     Thought: [Your reasoning about what to do next]
-    Action: [The exact tool name from the TOOLS list, or "None" if done]
+    Action: [The exact tool name from the TOOLS list]
     Action Input: [A valid JSON object with the tool's arguments]
 
     TERMINATION:
-    If the task is complete or you need to reply to the user, use:
+    To end the task, call the `final_answer` tool:
     Thought: [Your final reasoning]
-    Action: None
-    Final Answer: [Your response to the user]
+    Action: final_answer
+    Action Input: {"answer": "Your complete response to the user as markdown"}
+
+    This is the ONLY way to terminate. Do NOT use "Action: None", "Final Answer:" on its
+    own, or plain prose as a termination signal.
 
     RULES:
-    1. "Action" MUST be a tool name from the TOOLS list, or "None"/"Null".
+    1. "Action" MUST be a tool name from the TOOLS list (use `final_answer` to end).
     2. "Action Input" MUST be a valid JSON object.
     3. Do NOT use markdown code fences (```json). Output plain text only.
-    4. NEVER invent tool names. If a tool is not in the TOOLS list, use Action: None.
+    4. NEVER invent tool names. Use only tools listed in TOOLS; use `final_answer` to end.
     5. One action per response only.
     """
 

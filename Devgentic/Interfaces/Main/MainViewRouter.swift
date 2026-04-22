@@ -23,6 +23,23 @@ enum MainViewDestination: Equatable, Hashable {
     case mlxModelStore(profileID: UUID, filterForTools: Bool)
     case downloadManager
     case userPersonalProfile
+
+    /// Short label used in back-button help text and context menus
+    /// (e.g. "Back to Chat", "Back to Settings").
+    var displayName: String {
+        switch self {
+        case .chat: return "Chat"
+        case .profileDetail: return "Profile"
+        case .settingsDetail(let category): return category.rawValue
+        case .toolLibrary: return "Tool Library"
+        case .promptDetail: return "Prompt"
+        case .scheduledTaskDetail: return "Scheduled Task"
+        case .ollamaModelStore: return "Ollama Models"
+        case .mlxModelStore: return "MLX Models"
+        case .downloadManager: return "Downloads"
+        case .userPersonalProfile: return "Your Profile"
+        }
+    }
 }
 
 /// Manages push/pop stack navigation for the main content area.

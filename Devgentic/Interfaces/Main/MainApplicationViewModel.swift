@@ -29,21 +29,48 @@ final class MainApplicationViewModel {
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let chatHistoryViewModel: ChatHistoryViewModel
 
-    @ObservationIgnored private var conversationLoadTask: Task<Void, Never>?
     @ObservationIgnored private var useStreamingResponseObserver: AnyCancellable?
     @ObservationIgnored private var intelligenceCoreObserver: AnyCancellable?
-    @ObservationIgnored private var conversationLoaderObserver: AnyCancellable?
-
-    @ObservationIgnored private let webSearchAPIKeyDefaultsKey = "webSearchAPIKey"
 
     // Code mode — used to build ephemeral profiles on each send
     @ObservationIgnored private(set) var codeSessionManager: CodeSessionManager?
 
     // MARK: - ChatOps
-    @ObservationIgnored private(set) var chatOpsBridge: ChatOpsBridge?
-    @ObservationIgnored private(set) var discordChatOpsBridge: DiscordChatOpsBridge?
-    @ObservationIgnored private(set) var slackChatOpsBridge: SlackChatOpsBridge?
-    @ObservationIgnored private var conversationSyncService: ConversationSyncService?
+    //
+    // Lifecycle + bridge ownership has been extracted to `ChatOpsCoordinator`
+    // (Gap C — the MainApplicationViewModel god-object split). The properties
+    // and methods remaining in this file are thin forwards preserved for
+    // external callers (currently: `ChatOpsSettingsView`).
+    @ObservationIgnored private var chatOpsCoordinator: ChatOpsCoordinator!
+
+    /// Owns the message-sending pipeline (local + remote sends, regeneration,
+    /// cancellation, HITL resolutions, createUserMessage factory). Extracted
+    /// from this file as part of Gap C — see `MessagingCoordinator.swift`.
+    @ObservationIgnored private(set) var messagingCoordinator: MessagingCoordinator!
+
+    /// Owns conversation CRUD (create/select/pin/rename/delete/export + the
+    /// conversation↔profile mapping). See `ConversationManagementCoordinator.swift`.
+    @ObservationIgnored private(set) var conversationManagementCoordinator: ConversationManagementCoordinator!
+
+    /// Owns load/persist for every UserDefaults-backed setting (streaming
+    /// toggle, intelligence core, web search, interface mode). See
+    /// `SettingsCoordinator.swift`.
+    @ObservationIgnored private(set) var settingsCoordinator: SettingsCoordinator!
+
+    /// Owns scheduled-task + ChatOps-bridge message flows that run outside the
+    /// Mac UI's selected conversation. See `SchedulerCoordinator.swift`.
+    @ObservationIgnored private(set) var schedulerCoordinator: SchedulerCoordinator!
+
+    /// Owns the "what happens on conversation selection change" pipeline —
+    /// observation, debounce, model unload, message load, backend rebind,
+    /// workflow history fetch. See `ConversationSwitchCoordinator.swift`.
+    @ObservationIgnored private var conversationSwitchCoordinator: ConversationSwitchCoordinator!
+    /// Forward for external callers that previously reached `viewModel.chatOpsBridge?.stop()`.
+    var chatOpsBridge: ChatOpsBridge? { chatOpsCoordinator.telegramBridge }
+    /// Forward for external callers that previously reached `viewModel.discordChatOpsBridge?.stop()`.
+    var discordChatOpsBridge: DiscordChatOpsBridge? { chatOpsCoordinator.discordBridge }
+    /// Forward for external callers that previously reached `viewModel.slackChatOpsBridge?.stop()`.
+    var slackChatOpsBridge: SlackChatOpsBridge? { chatOpsCoordinator.slackBridge }
 
     // MARK: - Service & Store
     @ObservationIgnored var ollamaService = OllamaService.shared
@@ -115,7 +142,7 @@ final class MainApplicationViewModel {
         backendConfiguration.selectedProfileID = nil
         chatHistoryViewModel.currentChatMessages = []
         chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-        UserDefaults.standard.set(mode.rawValue, forKey: "devgentic.interfaceMode")
+        settingsCoordinator.didChangeInterfaceMode(mode)
         logger.info("Switched interface mode to \(mode.rawValue).")
     }
 
@@ -163,28 +190,60 @@ final class MainApplicationViewModel {
 
         logger.info("MainApplicationViewModel initialized.")
 
-        // Restore persisted interface mode
-        if let saved = UserDefaults.standard.string(forKey: "devgentic.interfaceMode"),
-           let mode = InterfaceMode(rawValue: saved) {
-            self.interfaceMode = mode
-        }
+        // Settings load is first so other coordinators see the correct persisted
+        // values (e.g. `interfaceMode`, `useStreamingResponse`) during their setup.
+        settingsCoordinator = SettingsCoordinator(viewModel: self)
+        settingsCoordinator.load()
 
-        loadSettings()
-        setupConversationLoader()
         migrateWorkflowRunHistoryIfNeeded()
-        
-        self.webSearchAPIKey = UserDefaults.standard.string(forKey: webSearchAPIKeyDefaultsKey)
-        self.isWebSearchEnabled = (self.webSearchAPIKey != nil && !self.webSearchAPIKey!.isEmpty)
-        self.isWebSearchActive = false
-        
-        if isWebSearchEnabled {
-            logger.info("Web search is enabled (API key found in UserDefaults).")
-        } else {
-            logger.info("Web search is disabled (API key not found in UserDefaults).")
-        }
 
-        // Start ChatOps bridge if enabled
-        setupChatOps()
+        // Conversation CRUD lives in its own coordinator (Gap C extraction).
+        conversationManagementCoordinator = ConversationManagementCoordinator(
+            viewModel: self,
+            chatHistoryViewModel: chatHistoryViewModel,
+            persistenceService: persistenceService,
+            backendConfiguration: backendConfiguration
+        )
+
+        // Selection-change observer. Constructed AFTER `conversationManagementCoordinator`
+        // because its debounced task calls into it for the backend rebind.
+        conversationSwitchCoordinator = ConversationSwitchCoordinator(
+            viewModel: self,
+            chatHistoryViewModel: chatHistoryViewModel,
+            persistenceService: persistenceService,
+            backendConfiguration: backendConfiguration,
+            ollamaService: ollamaService
+        )
+
+        // Messaging pipeline lives in its own coordinator. Constructed before
+        // ChatOps so remote bridges can reach it immediately.
+        messagingCoordinator = MessagingCoordinator(
+            viewModel: self,
+            chatHistoryViewModel: chatHistoryViewModel,
+            activeStreamManager: activeStreamManager,
+            persistenceService: persistenceService,
+            fileProcessorService: fileProcessorService,
+            backendConfiguration: backendConfiguration
+        )
+
+        // Scheduler / remote-bridge message flow. Must come after
+        // messagingCoordinator since it reaches through the VM for the
+        // shared `createUserMessage` factory.
+        schedulerCoordinator = SchedulerCoordinator(
+            viewModel: self,
+            persistenceService: persistenceService,
+            activeStreamManager: activeStreamManager
+        )
+
+        // ChatOps lifecycle lives in its own coordinator. We build it here
+        // (needs `self` as back-reference for bridges) and let it bootstrap
+        // the always-on sync service plus any enabled bridges.
+        chatOpsCoordinator = ChatOpsCoordinator(
+            viewModel: self,
+            chatHistoryViewModel: chatHistoryViewModel,
+            activeStreamManager: activeStreamManager
+        )
+        chatOpsCoordinator.bootstrap()
     }
 
     // MARK: - Code Session
@@ -196,7 +255,8 @@ final class MainApplicationViewModel {
 
     /// Refreshes the code profile's instructions and sets it as the selected profile for send.
     /// Called before each send when `interfaceMode == .code`.
-    private func prepareCodeProfileForSend() {
+    /// Visibility: needed by `MessagingCoordinator` for its code-mode branch.
+    func prepareCodeProfileForSend() {
         guard let csm = codeSessionManager, csm.isConfigured else {
             logger.warning("[CODE] prepareCodeProfileForSend: CodeSessionManager not configured")
             return
@@ -206,132 +266,53 @@ final class MainApplicationViewModel {
         logger.info("[CODE] Code profile prepared for send (profile ID: \(csm.codeProfileID?.uuidString ?? "nil"))")
     }
 
-    // MARK: - ChatOps Setup
+    // MARK: - ChatOps Lifecycle (forwards to ChatOpsCoordinator)
+    //
+    // These entry points are kept on the VM so `ChatOpsSettingsView` (the
+    // only external caller) continues to work unchanged. All logic lives in
+    // the coordinator — the methods here are one-line forwards.
 
-    /// Starts the ChatOps bridge. Called on launch (if already enabled) and from Settings after pairing/toggle.
-    func startChatOps() {
-        let chatOpsConfig = ChatOpsConfigManager.shared
-        guard chatOpsConfig.botToken != nil,
-              chatOpsConfig.authorizedChatID != nil else {
-            logger.info("ChatOps not configured — missing token or chat ID.")
-            return
-        }
-
-        // Reuse existing bridge or create a new one
-        if chatOpsBridge == nil {
-            chatOpsBridge = ChatOpsBridge(viewModel: self)
-        }
-        chatOpsBridge?.start()
-        logger.info("ChatOps bridge started.")
-    }
-
-    /// Stops the ChatOps bridge.
-    func stopChatOps() {
-        chatOpsBridge?.stop()
-        logger.info("ChatOps bridge stopped.")
-    }
-
-    // MARK: - Discord ChatOps
-
-    /// Starts the Discord ChatOps bridge. Called on launch (if already enabled) and from Settings after pairing/toggle.
-    func startDiscordChatOps() {
-        let chatOpsConfig = ChatOpsConfigManager.shared
-        guard chatOpsConfig.discordBotToken != nil,
-              chatOpsConfig.discordAuthorizedChannelID != nil else {
-            logger.info("Discord ChatOps not configured — missing token or channel ID.")
-            return
-        }
-
-        if discordChatOpsBridge == nil {
-            discordChatOpsBridge = DiscordChatOpsBridge(viewModel: self)
-        }
-        discordChatOpsBridge?.start()
-        logger.info("Discord ChatOps bridge started.")
-    }
-
-    /// Stops the Discord ChatOps bridge.
-    func stopDiscordChatOps() {
-        discordChatOpsBridge?.stop()
-        logger.info("Discord ChatOps bridge stopped.")
-    }
-
-    // MARK: - Slack ChatOps
-
-    /// Starts the Slack ChatOps bridge.
-    func startSlackChatOps() {
-        let chatOpsConfig = ChatOpsConfigManager.shared
-        guard chatOpsConfig.slackBotToken != nil,
-              chatOpsConfig.slackAppToken != nil,
-              chatOpsConfig.slackAuthorizedChannelID != nil else {
-            logger.info("Slack ChatOps not configured — missing tokens or channel ID.")
-            return
-        }
-
-        if slackChatOpsBridge == nil {
-            slackChatOpsBridge = SlackChatOpsBridge(viewModel: self)
-        }
-        slackChatOpsBridge?.start()
-        logger.info("Slack ChatOps bridge started.")
-    }
-
-    /// Stops the Slack ChatOps bridge.
-    func stopSlackChatOps() {
-        slackChatOpsBridge?.stop()
-        logger.info("Slack ChatOps bridge stopped.")
-    }
-
-    private func setupChatOps() {
-        // ConversationSyncService is always active (handles real-time UI updates for remote messages)
-        if conversationSyncService == nil {
-            conversationSyncService = ConversationSyncService(
-                chatHistoryViewModel: chatHistoryViewModel,
-                activeStreamManager: activeStreamManager
-            )
-        }
-
-        let chatOpsConfig = ChatOpsConfigManager.shared
-
-        // Start Telegram if enabled
-        if chatOpsConfig.isEnabled {
-            startChatOps()
-        } else {
-            logger.info("Telegram ChatOps is disabled.")
-        }
-
-        // Start Discord if enabled
-        if chatOpsConfig.isDiscordEnabled {
-            startDiscordChatOps()
-        } else {
-            logger.info("Discord ChatOps is disabled.")
-        }
-
-        // Start Slack if enabled
-        if chatOpsConfig.isSlackEnabled {
-            startSlackChatOps()
-        } else {
-            logger.info("Slack ChatOps is disabled.")
-        }
-    }
+    func startChatOps()        { chatOpsCoordinator.startTelegram() }
+    func stopChatOps()         { chatOpsCoordinator.stopTelegram() }
+    func startDiscordChatOps() { chatOpsCoordinator.startDiscord() }
+    func stopDiscordChatOps()  { chatOpsCoordinator.stopDiscord() }
+    func startSlackChatOps()   { chatOpsCoordinator.startSlack() }
+    func stopSlackChatOps()    { chatOpsCoordinator.stopSlack() }
 
     deinit {
         logger.info("MainApplicationViewModel deinitialized.")
         useStreamingResponseObserver?.cancel()
         intelligenceCoreObserver?.cancel()
-        conversationLoaderObserver?.cancel()
         NotificationCenter.default.removeObserver(self)
-        conversationLoadTask?.cancel()
+        // `conversationSwitchCoordinator` owns the former `conversationLoadTask`
+        // and observation stream; they unwind via its own deinit.
     }
     
-    // MARK: - Settings Management
-    private func loadSettings() {
-        if UserDefaults.standard.object(forKey: AppSettings.useStreamingResponseKey) == nil {
-            UserDefaults.standard.set(true, forKey: AppSettings.useStreamingResponseKey)
-        }
-        self.useStreamingResponse = UserDefaults.standard.bool(forKey: AppSettings.useStreamingResponseKey)
-        
-        self.isIntelligenceCoreEnabled = UserDefaults.standard.bool(forKey: AppSettings.isIntelligenceCoreEnabledKey)
-        
-        logger.info("Loaded 'useStreamingResponse' setting from UserDefaults: \(self.useStreamingResponse)")
+    // MARK: - Settings (forwards to SettingsCoordinator)
+    //
+    // Load + persist paths live in `SettingsCoordinator`. These forwards are
+    // kept so the SwiftUI settings views (GeneralSettings, CoreIntelligence,
+    // ChatInput's API key popup) can keep calling `viewModel.didChange...()`
+    // / `viewModel.saveAndEnableWebSearch(...)` without refactoring.
+
+    func didChangeUseStreamingResponse() {
+        settingsCoordinator.didChangeUseStreamingResponse()
+    }
+
+    func didChangeIntelligenceCoreEnabled() {
+        settingsCoordinator.didChangeIntelligenceCoreEnabled()
+    }
+
+    func toggleWebSearch() {
+        settingsCoordinator.toggleWebSearch()
+    }
+
+    func saveAndEnableWebSearch(apiKey: String) {
+        settingsCoordinator.saveAndEnableWebSearch(apiKey: apiKey)
+    }
+
+    func disableAndRemoveWebSearch() {
+        settingsCoordinator.disableAndRemoveWebSearch()
     }
 
     /// One-time migration from profile-keyed to conversation-keyed workflow run history.
@@ -342,238 +323,31 @@ final class MainApplicationViewModel {
         WorkflowRunHistoryStore.shared.migrateFromProfileKeyedStorage(profileIDs: workflowIDs)
     }
 
-    /// Lazily loads workflow run history for a conversation from disk when first needed.
-    func loadWorkflowRunHistoryIfNeeded(for conversationID: UUID) {
-        guard workflowRunHistory[conversationID] == nil else { return }
-        let records = WorkflowRunHistoryStore.shared.load(forConversation: conversationID)
-        if !records.isEmpty {
-            workflowRunHistory[conversationID] = records
-        }
-    }
+    // `loadWorkflowRunHistoryIfNeeded` (was a private helper here) and
+    // `setupConversationLoader` (was a ~65-line method) both moved to
+    // `ConversationSwitchCoordinator` — the selection-change pipeline lives
+    // fully in that coordinator now.
 
-    private func setupConversationLoader() {
-        // Use withObservationTracking to detect selectedConversationID changes.
-        // This replaces the Combine $selectedConversationID pipeline.
-        func observe() {
-            withObservationTracking {
-                _ = self.selectedConversationID
-            } onChange: {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    // Debounce by cancelling and re-scheduling
-                    self.conversationLoadTask?.cancel()
+    // MARK: - Message Sending (forwards to MessagingCoordinator)
+    //
+    // Full implementation lives in `MessagingCoordinator`. Kept here as a
+    // forwarding method for API stability — many SwiftUI views call
+    // `viewModel.sendMessage(...)` directly via a closure passed down from
+    // `MainApplicationView`.
 
-                    self.isWebSearchActive = false
-                    logger.debug("Conversation changed. Resetting web search active state to OFF.")
-
-                    let conversationID = self.selectedConversationID
-
-                    self.conversationLoadTask = Task {
-                        // Brief debounce
-                        try? await Task.sleep(nanoseconds: 250_000_000)
-                        guard !Task.isCancelled else { return }
-
-                        // Only unload models if no agent is actively streaming
-                        // AND the new conversation uses a different backend profile.
-                        if self.streamingMessageID == nil {
-                            let newProfileID: UUID? = conversationID.flatMap {
-                                self.persistenceService.getConversation(withId: $0)?.backendEntityId
-                            }
-                            let currentProfileID = self.backendConfiguration.selectedProfileID
-
-                            if newProfileID != currentProfileID || newProfileID == nil {
-                                let stats = await MLXService.shared.unloadModel()
-                                logger.debug("Conversation switch MLX unload stats: \(stats)")
-                                await self.ollamaService.unloadModel()
-                            } else {
-                                logger.info("Skipping model unload — new conversation uses same backend profile (\(currentProfileID?.uuidString ?? "nil")).")
-                            }
-                        } else {
-                            logger.info("Skipping model unload — agent is actively streaming (messageID: \(self.streamingMessageID!.uuidString)).")
-                        }
-
-                        await self.chatHistoryViewModel.loadConversation(id: conversationID)
-                        if let id = conversationID {
-                            self.loadBackendStateForSelectedConversation(conversationID: id)
-                            self.loadWorkflowRunHistoryIfNeeded(for: id)
-                        }
-                    }
-
-                    // Re-register observation
-                    observe()
-
-                    // User Personal: Trigger background analysis when leaving a conversation.
-                    // Uses a delay to avoid competing with conversation cleanup work.
-                    if conversationID == nil || conversationID != self.selectedConversationID {
-                        Task { @MainActor in
-                            try? await Task.sleep(for: .seconds(5))
-                            guard UserPersonalService.shared.shouldAnalyze() else { return }
-                            await UserPersonalService.shared.analyzeRecentConversations()
-                        }
-                    }
-                }
-            }
-        }
-        observe()
-    }
-
-    /// Persists `useStreamingResponse` and `isIntelligenceCoreEnabled` changes to UserDefaults.
-    /// Called after property writes from the UI.
-    func didChangeUseStreamingResponse() {
-        UserDefaults.standard.set(useStreamingResponse, forKey: AppSettings.useStreamingResponseKey)
-        logger.info("Saved 'useStreamingResponse' setting to UserDefaults: \(self.useStreamingResponse)")
-    }
-
-    func didChangeIntelligenceCoreEnabled() {
-        UserDefaults.standard.set(isIntelligenceCoreEnabled, forKey: AppSettings.isIntelligenceCoreEnabledKey)
-        if !isIntelligenceCoreEnabled {
-            Task { await IntelligenceCoreService.shared.unload() }
-        }
-    }
-
-    // MARK: - Message Sending Logic
-    
     func sendMessage(attributedString: NSAttributedString, withConfig config: BackendRequestConfig) {
-
-
-        let plainUserQueryFromEditor = attributedString.string.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !chatHistoryViewModel.isSending else {
-            logger.warning("[sendMessage] Message sending already in progress. Ignoring new request.")
-            return
-        }
-        guard !plainUserQueryFromEditor.isEmpty || !attachedFiles.isEmpty else {
-            return
-        }
-
-        // Code mode: refresh instructions (picks up context.md changes) and set selectedProfileID.
-        if interfaceMode == .code {
-            logger.info("[CODE] ────────── Code mode send initiated ──────────")
-            logger.info("[CODE] Query preview: \(String(plainUserQueryFromEditor.prefix(120)))")
-            prepareCodeProfileForSend()
-        }
-
-        guard let config = backendConfiguration.getRequestConfig() else {
-            logger.error("[sendMessage] CRITICAL: Could not get backend request config. Is a profile selected? (interfaceMode: \(self.interfaceMode.rawValue), selectedProfileID: \(self.backendConfiguration.selectedProfileID?.uuidString ?? "nil"))")
-            return
-        }
-
-        chatHistoryViewModel.isSending = true
-        let profileType: String
-        switch config.profile.details {
-        case .bot: profileType = "bot"
-        case .agent: profileType = "agent"
-        case .workflow: profileType = "workflow"
-        case .imageGen: profileType = "imageGen"
-        case .code: profileType = "code"
-        }
-        logger.info("[sendMessage] Profile: \(config.profile.displayName) (type: \(profileType), id: \(config.profile.id.uuidString.prefix(8)))")
-
-        // Add to query history
-        if !plainUserQueryFromEditor.isEmpty, queryHistory.last != plainUserQueryFromEditor {
-            queryHistory.append(plainUserQueryFromEditor)
-        }
-        resetQueryHistoryIndex() // Reset index after sending a new message
-
-        let conversationIDToUse = selectedConversationID ?? createAndSelectNewConversation()
-
-        // Persist the selected profile to the conversation at send time.
-        updateBackendForCurrentConversation(conversationID: conversationIDToUse, profileID: backendConfiguration.selectedProfileID)
-
-        // Tag Code mode conversations with profileTypeRaw for sidebar filtering
-        if interfaceMode == .code {
-            persistenceService.updateProfileType(for: conversationIDToUse, profileTypeRaw: ProfileType.code.rawValue)
-        }
-
-        // Auto-title if empty
-        if let conversationSD = persistenceService.getConversation(withId: conversationIDToUse) {
-            if conversationSD.userDefinedTitle == nil || conversationSD.userDefinedTitle?.isEmpty == true {
-                conversationSD.userDefinedTitle = plainUserQueryFromEditor
-                logger.info("Auto-setting conversation title to: \(plainUserQueryFromEditor)")
-            }
-        } else {
-            logger.error("[sendMessage] CRITICAL: Could not find conversation for ID: \(conversationIDToUse.uuidString)")
-            chatHistoryViewModel.isSending = false
-            return
-        }
-
-        let filesForBackend = self.attachedFiles
-        self.clearAttachedFiles()
-        logger.debug("Cleared user input and attachments from UI.")
-
-        Task { @MainActor in
-            let userMessage = await createUserMessage(
-                conversationID: conversationIDToUse,
-                query: plainUserQueryFromEditor,
-                files: filesForBackend
-            )
-
-            chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
-            logger.debug("Appended user message into UI.")
-
-            Task {
-                await persistenceService.addMessage(userMessage, toConversation: conversationIDToUse)
-                logger.debug("User message persisted successfully.")
-            }
-
-            // Prepare workflow execution state if this is a workflow profile
-            let workflowState: WorkflowExecutionState? = {
-                guard config.profile.profileType == .workflow else { return nil }
-                let state = WorkflowExecutionState()
-                workflowExecutionStates[conversationIDToUse] = state
-                return state
-            }()
-
-            logger.info("[sendMessage] Handing off to ActiveStreamManager — conversationID: \(conversationIDToUse.uuidString.prefix(8)), messageID: \(userMessage.id.uuidString.prefix(8)), historyCount: \(self.chatHistoryViewModel.currentChatMessages.count), files: \(filesForBackend.count)")
-
-            let agentMessage = activeStreamManager.startMessageStream(
-                withConfig: config,
-                conversationID: conversationIDToUse,
-                userQuery: plainUserQueryFromEditor,
-                history: chatHistoryViewModel.currentChatMessages.reversed(),
-                files: filesForBackend,
-                updating: nil,
-                workflowExecutionState: workflowState,
-                onComplete: { [weak self] in
-                    DispatchQueue.main.async {
-                        self?.streamingMessageID = nil
-                        self?.streamingMessage = nil
-                        logger.info("Stream completed. Resetting streamingMessageID.")
-
-                        // Freeze workflow execution state into a persistent run record
-                        if let self, let wfState = workflowState, config.profile.profileType == .workflow {
-                            let layout = WorkflowLayoutStore.shared.load(for: config.profile.id)
-                            let record = WorkflowRunRecord.freeze(
-                                from: wfState,
-                                conversationID: conversationIDToUse,
-                                workflowProfileID: config.profile.id,
-                                workflowName: config.profile.displayName,
-                                userInput: plainUserQueryFromEditor,
-                                timestamp: Date(),
-                                layout: layout
-                            )
-                            self.workflowRunHistory[conversationIDToUse, default: []].insert(record, at: 0)
-                            if self.workflowRunHistory[conversationIDToUse]!.count > 20 {
-                                self.workflowRunHistory[conversationIDToUse] = Array(self.workflowRunHistory[conversationIDToUse]!.prefix(20))
-                            }
-                            WorkflowRunHistoryStore.shared.append(record, forConversation: conversationIDToUse)
-                            logger.info("Workflow run record frozen: \(record.id) — \(record.status.rawValue)")
-                        }
-                    }
-                }
-            )
-
-            self.streamingMessageID = agentMessage.id
-            self.streamingMessage = agentMessage
-            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-            logger.debug("Appended agent's streaming message placeholder into UI for real-time updates.")
-
-            await chatHistoryViewModel.resetSendingState()
-        }
+        messagingCoordinator.sendMessage(attributedString: attributedString, withConfig: config)
     }
-    
+
     // MARK: - Query History Navigation
-    
+
+    /// Appends a query to history without allowing external callers to corrupt
+    /// the array. Used by `MessagingCoordinator.sendMessage` (the `private(set)`
+    /// on `queryHistory` prevents direct mutation from outside the VM).
+    func appendToQueryHistory(_ query: String) {
+        queryHistory.append(query)
+    }
+
     func getQueryFromHistory(direction: QueryNavigationDirection) -> String? {
         if queryHistory.isEmpty { return nil }
 
@@ -607,405 +381,102 @@ final class MainApplicationViewModel {
         currentHistoryIndex = -1
     }
     
-    // MARK: - Response Regeneration
-    
-    @MainActor
+    // MARK: - Response Regeneration / Cancel / HITL / Remote Send
+    //
+    // All bodies live in `MessagingCoordinator`. These are thin forwards for
+    // API stability (multiple SwiftUI views and the three ChatOps bridges
+    // call `viewModel.xxx(...)` directly).
+
     func regenerateResponse(for agentMessage: ChatMessage) {
-        guard let agentResponse = agentMessage.agentResponse, agentResponse.generationAttempts < 5 else {
-            logger.warning("Max generation attempts reached for message \(agentMessage.id.uuidString).")
-            return
-        }
-
-        guard let agentMessageIndex = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
-            logger.error("Could not find agent message in chat history to regenerate.")
-            return
-        }
-        
-        let historyForRegeneration = Array(chatHistoryViewModel.currentChatMessages.dropFirst(agentMessageIndex + 1).reversed())
-        
-        guard let userQueryMessage = chatHistoryViewModel.currentChatMessages[safe: agentMessageIndex + 1],
-              userQueryMessage.sender == .user else {
-            logger.error("Could not find the preceding user query for regeneration.")
-            return
-        }
-        let userQuery = userQueryMessage.content.textContent ?? ""
-        
-        let filesForBackend = (userQueryMessage.attachedTextFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? []) +
-                              (userQueryMessage.attachedImageFiles?.map { FileSystemItem(id: $0.url, name: $0.name, url: $0.url, isDirectory: false) } ?? [])
-
-        guard let config = backendConfiguration.getRequestConfig() else {
-            logger.error("[regenerateResponse] Could not get backend request config. Is a profile selected?")
-            return
-        }
-        
-        let newVariant = ResponseMessageVariant(
-            content: .markdownText(""),
-            backendEntityId: config.profile.id
-        )
-        agentMessage.agentResponse?.variants.append(newVariant)
-        agentMessage.agentResponse?.selectedVariantIndex = (agentMessage.agentResponse?.variants.count ?? 1) - 1
-        agentMessage.agentResponse?.generationAttempts += 1
-        agentMessage.isStreaming = true
-
-        let newStreamingMessage = activeStreamManager.startMessageStream(
-            withConfig: config,
-            conversationID: agentMessage.conversationId,
-            userQuery: userQuery,
-            history: historyForRegeneration,
-            files: filesForBackend,
-            updating: agentMessage,
-            onComplete: { [weak self] in
-                DispatchQueue.main.async {
-                    self?.streamingMessageID = nil
-                    self?.streamingMessage = nil
-                    logger.info("Regeneration stream completed for message \(agentMessage.id.uuidString).")
-                }
-            }
-        )
-        
-        self.streamingMessageID = newStreamingMessage.id
-        self.streamingMessage = newStreamingMessage
+        messagingCoordinator.regenerateResponse(for: agentMessage)
     }
-    
+
     func cancelStreamingResponse() {
-        guard let messageID = streamingMessageID else {
-            logger.warning("cancelStreamingResponse called but no streamingMessageID is set.")
-            return
-        }
-        
-        logger.info("User requested to cancel streaming for message: \(messageID.uuidString)")
-        activeStreamManager.cancelStream(for: messageID)
+        messagingCoordinator.cancelStreamingResponse()
     }
-    
-    // MARK: - [HITL] Human-in-the-Loop Permissions
-    
-    /// Submits the user's decision (Approve/Deny) for a pending tool execution.
-    /// - Parameters:
-    ///   - operationID: The unique HITL operation identifier (from PendingToolConfirmation.id).
-    ///   - approved: True to execute the tool, False to reject it.
+
     func submitToolApproval(operationID: UUID, approved: Bool) {
-        logger.info("[HITL] Submitting approval decision: \(approved) for operation \(operationID)")
-
-        Task {
-            await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved)
-        }
+        messagingCoordinator.submitToolApproval(operationID: operationID, approved: approved)
     }
 
-    /// Submits the user's text response (or nil for skip) for a pending clarification request.
-    /// - Parameters:
-    ///   - operationID: The unique HITL operation identifier (from PendingClarification.id).
-    ///   - response: The user's text response, or nil to skip.
     func submitClarificationResponse(operationID: UUID, response: String?) {
-        logger.info("[ASK_USER] Submitting clarification response for operation \(operationID)")
-
-        Task {
-            await ExecutionSuspensionService.shared.resumeClarification(for: operationID, userInput: response)
-        }
+        messagingCoordinator.submitClarificationResponse(operationID: operationID, response: response)
     }
 
-    /// Submits the user's plan review decision — approved (with edited subtasks) or rejected (nil).
-    /// - Parameters:
-    ///   - operationID: The unique HITL operation identifier (from PendingPlanReview.id).
-    ///   - editedPlan: The user-edited subtask array, or nil if the user rejected the plan.
     func submitPlanReview(operationID: UUID, editedPlan: [SubTask]?) {
-        logger.info("[PLAN_REVIEW] Submitting plan review for \(operationID), approved: \(editedPlan != nil)")
-
-        Task {
-            await ExecutionSuspensionService.shared.resumePlanReview(for: operationID, editedPlan: editedPlan)
-        }
+        messagingCoordinator.submitPlanReview(operationID: operationID, editedPlan: editedPlan)
     }
 
-    // MARK: - Remote Message Submission (ChatOps Single-Path)
-
-    /// Submits a message from a remote transport (Telegram, Discord, etc.) through the SAME
-    /// flow as the Mac UI's `sendMessage()`. This ensures:
-    /// - The message appears in Mac UI chat history
-    /// - HITL banners work identically on both surfaces
-    /// - The agent response streams through ActiveStreamManager (not a truncated summary)
-    ///
-    /// The `RemoteMirrorService` observes the resulting stream and mirrors events back to the transport.
     func submitRemoteMessage(
         prompt: String,
         conversationID: UUID,
         source: MessageSource,
         config: BackendRequestConfig
     ) {
-        guard let conversationSD = persistenceService.getConversation(withId: conversationID) else {
-            logger.error("[ChatOps] Could not find conversation for ID: \(conversationID.uuidString)")
-            return
-        }
-
-        // Auto-title if empty (same as sendMessage)
-        if conversationSD.userDefinedTitle == nil || conversationSD.userDefinedTitle?.isEmpty == true {
-            conversationSD.userDefinedTitle = prompt
-        }
-
-        // Auto-navigate Mac UI to this conversation so the user can see remote activity,
-        // HITL banners, and agent responses in real-time. Setting selectedConversationID
-        // triggers the Combine conversation loader which loads messages and merges active streams.
-        if selectedConversationID != conversationID {
-            logger.info("[ChatOps] Auto-navigating Mac UI to conversation \(conversationID.uuidString).")
-            selectedConversationID = conversationID
-        }
-
-        Task { @MainActor in
-            let userMessage = await createUserMessage(conversationID: conversationID, query: prompt, files: [])
-            userMessage.messageSource = source
-
-            // Insert into Mac UI — the conversation is now guaranteed to be selected
-            chatHistoryViewModel.currentChatMessages.insert(userMessage, at: 0)
-
-            Task {
-                await persistenceService.addMessage(userMessage, toConversation: conversationID)
-            }
-
-            // Fetch history for context (same as sendMessage)
-            let history = chatHistoryViewModel.currentChatMessages.filter { $0.conversationId == conversationID }.reversed()
-
-            let agentMessage = activeStreamManager.startMessageStream(
-                withConfig: config,
-                conversationID: conversationID,
-                userQuery: prompt,
-                history: Array(history),
-                files: [],
-                updating: nil,
-                onComplete: { [weak self] in
-                    DispatchQueue.main.async {
-                        self?.streamingMessageID = nil
-                        self?.streamingMessage = nil
-                        logger.info("[ChatOps] Remote stream completed for conversation \(conversationID).")
-                    }
-                }
-            )
-
-            agentMessage.messageSource = source
-            self.streamingMessageID = agentMessage.id
-            self.streamingMessage = agentMessage
-
-            // Insert agent streaming message into Mac UI
-            chatHistoryViewModel.currentChatMessages.insert(agentMessage, at: 0)
-        }
-    }
-
-    // MARK: - Message Helpers
-    
-    private func createUserMessage(conversationID: UUID, query: String, files: [FileSystemItem]) async -> ChatMessage {
-        var attachedTextFiles: [AttachedTextFile] = []
-        var attachedImageFiles: [AttachedImageFile] = []
-
-        for fileItem in files {
-            let mimeType = fileProcessorService.getFileMimeType(for: fileItem.url)
-            let fileExtension = fileItem.url.pathExtension
-            let attributes = try? FileManager.default.attributesOfItem(atPath: fileItem.url.path)
-            let fileSize = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-
-            if fileProcessorService.isTextFile(mimeType: mimeType, url: fileItem.url) {
-                if let content = await fileProcessorService.readFileContent(for: fileItem.url) {
-                    let textFile = AttachedTextFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, content: content, size: fileSize)
-                    attachedTextFiles.append(textFile)
-                }
-            } else if fileProcessorService.isImageFile(mimeType: mimeType, url: fileItem.url) {
-                do {
-                    _ = fileItem.url.startAccessingSecurityScopedResource()
-                    let data = try Data(contentsOf: fileItem.url)
-                    fileItem.url.stopAccessingSecurityScopedResource()
-                    let imageFile = AttachedImageFile(name: fileItem.name, url: fileItem.url, fileExtension: fileExtension, binaryData: data, size: fileSize)
-                    attachedImageFiles.append(imageFile)
-                } catch {
-                    logger.error("Could not read image data for file: \(fileItem.name)")
-                }
-            }
-        }
-
-        return ChatMessage(
-            conversationId: conversationID,
-            sender: .user,
-            content: .plainText(query),
-            attachedTextFiles: attachedTextFiles.isEmpty ? nil : attachedTextFiles,
-            attachedImageFiles: attachedImageFiles.isEmpty ? nil : attachedImageFiles
+        messagingCoordinator.submitRemoteMessage(
+            prompt: prompt,
+            conversationID: conversationID,
+            source: source,
+            config: config
         )
     }
-    
-    // MARK: - Chat History Management
+
+    // MARK: - Chat History Management (forwards to ConversationManagementCoordinator)
+    //
+    // All bodies live in `ConversationManagementCoordinator`. Kept here as
+    // thin forwards because many SwiftUI views (sidebar, welcome, activity
+    // bar) plus `MessagingCoordinator` call `viewModel.xxx(...)` directly.
 
     func toggleUserMessagesFilter() {
-        chatHistoryViewModel.toggleUserMessagesFilter()
+        conversationManagementCoordinator.toggleUserMessagesFilter()
     }
-    
+
     func startNewConversation() {
-
-        clearAttachedFiles()
-        let newConversationID = createAndSelectNewConversation()
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-        logger.info("Started new conversation with ID \(newConversationID.uuidString).")
+        conversationManagementCoordinator.startNewConversation()
     }
-    
-    // NEW: Function to deselect conversation and return to the welcome screen
+
     func deselectConversationAndShowWelcome() {
-
-        clearAttachedFiles()
-        selectedConversationID = nil
-        backendConfiguration.selectedProfileID = nil
-        chatHistoryViewModel.currentChatMessages = []
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-
-        if interfaceMode == .code {
-            codeSessionManager?.resetSession()
-        }
-
-        logger.info("Deselected conversation, returning to welcome screen.")
+        conversationManagementCoordinator.deselectConversationAndShowWelcome()
     }
 
     @discardableResult
     func createAndSelectNewConversation() -> UUID {
+        conversationManagementCoordinator.createAndSelectNewConversation()
+    }
 
-        // Reuse an existing empty conversation if one exists — prevents duplicate empties.
-        if let emptyConvID = findReusableEmptyConversation() {
-            logger.info("[NewChat] Reusing existing empty conversation \(emptyConvID.uuidString).")
-            tagConversationWithCurrentMode(emptyConvID)
-            chatHistoryViewModel.currentChatMessages = []
-            selectedConversationID = emptyConvID
-            chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-            return emptyConvID
-        }
-
-        let newConversation = Conversation(
-            id: UUID(),
-            messages: [],
-            timestamp: Date(),
-            backendType: .none,
-            backendEntityId: nil
+    /// Persists the backend profile selection on the given conversation.
+    /// Visibility: needed by `MessagingCoordinator.sendMessage` at send time
+    /// (stays on the VM so the messaging coordinator can reach it via its
+    /// own weak VM back-reference without learning about a second coordinator).
+    func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
+        conversationManagementCoordinator.updateBackendForCurrentConversation(
+            conversationID: conversationID,
+            profileID: profileID
         )
-        persistenceService.addConversation(from: newConversation)
-        tagConversationWithCurrentMode(newConversation.id)
-        chatHistoryViewModel.currentChatMessages = []
-        selectedConversationID = newConversation.id
-        chatHistoryViewModel.isUserMessagesOnlyFilterActive = false
-
-        return newConversation.id
     }
 
-    /// Tags a freshly-created or freshly-reused conversation with the current mode's
-    /// profile type so it appears in the matching sidebar immediately. Chat mode is
-    /// intentionally left untagged — chat hosts multiple profile types (bot/agent/imageGen)
-    /// and the exact one isn't resolved until send time. This eliminates the "new code
-    /// conversation invisible in sidebar until first message" edge case.
-    private func tagConversationWithCurrentMode(_ conversationID: UUID) {
-        switch interfaceMode {
-        case .code:
-            persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.code.rawValue)
-        case .workflow:
-            persistenceService.updateProfileType(for: conversationID, profileTypeRaw: ProfileType.workflow.rawValue)
-        case .chat:
-            break
-        }
-    }
-
-    /// Finds the most recent empty conversation (zero messages) that can be reused.
-    private func findReusableEmptyConversation() -> UUID? {
-        guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
-        var descriptor = FetchDescriptor<ConversationSD>(
-            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
-        )
-        descriptor.fetchLimit = 5
-        guard let results = try? context.fetch(descriptor) else { return nil }
-        return results.first(where: { $0.messages.isEmpty })?.id
-    }
-    
-    private func loadBackendStateForSelectedConversation(conversationID: UUID) {
-        guard let conversationSD = persistenceService.getConversation(withId: conversationID) else {
-            logger.warning("Could not find conversation \(conversationID.uuidString) to load backend state. Resetting.")
-            self.backendConfiguration.selectedProfileID = nil
-            return
-        }
-
-        let profileID = conversationSD.backendEntityId
-        self.backendConfiguration.selectedProfileID = profileID
-
-        logger.info("Loaded backend profile ID \(profileID?.uuidString ?? "nil") (type: \(self.selectedProfileType?.rawValue ?? "nil")) for conversation \(conversationID)")
-    }
-
-    private func updateBackendForCurrentConversation(conversationID: UUID, profileID: UUID?) {
-        var legacyBackendType: BackendType = .none
-        if let id = profileID, let profile = (try? BackendProfileStore.shared.fetchProfiles())?.first(where: { $0.id == id }) {
-            switch profile.profileType {
-            case .agent:
-                legacyBackendType = .agent
-            case .bot:
-                if case .bot(let config) = profile.details, config.llmConfig.apiProvider == .ollama {
-                    legacyBackendType = .ollama
-                } else {
-                    legacyBackendType = .remote
-                }
-            case .workflow:
-                legacyBackendType = .none
-            case .imageGen:
-                legacyBackendType = .none
-            case .code:
-                legacyBackendType = .none
-            }
-        }
-        
-        persistenceService.updateBackendForConversation(
-            id: conversationID,
-            backendType: legacyBackendType,
-            backendEntityId: profileID
-        )
-        logger.debug("Persisted profile ID \(profileID?.uuidString ?? "nil") for conversation \(conversationID.uuidString).")
-    }
-    
     func transferSelectedConversationToOverlay() {
-        guard let conversationID = selectedConversationID else { return }
-        UserDefaults.standard.set(conversationID.uuidString, forKey: "quickAccessOverlayConversationId")
-        NotificationCenter.default.post(name: NSNotification.Name("showQuickAccessPanel"), object: nil, userInfo: ["forceExpand": true])
-        self.selectedConversationID = nil
-    }
-    
-    func togglePinStatus(for conversationId: UUID) {
-        logger.debug("Toggling pin status for conversation: \(conversationId.uuidString)")
-        persistenceService.togglePinStatus(for: conversationId)
-    }
-    
-    func deleteConversation(conversationID: UUID) {
-        persistenceService.deleteConversation(with: conversationID)
-        workflowExecutionStates.removeValue(forKey: conversationID)
-        workflowRunHistory.removeValue(forKey: conversationID)
-        WorkflowRunHistoryStore.shared.clearHistory(forConversation: conversationID)
-        if selectedConversationID == conversationID {
-            selectedConversationID = nil
-        }
-    }
-    
-    func deleteMultipleConversations(ids: Set<UUID>) {
-        guard !ids.isEmpty else { return }
-        for id in ids {
-            persistenceService.deleteConversation(with: id)
-            workflowExecutionStates.removeValue(forKey: id)
-            workflowRunHistory.removeValue(forKey: id)
-            WorkflowRunHistoryStore.shared.clearHistory(forConversation: id)
-        }
-        if let currentSelected = selectedConversationID, ids.contains(currentSelected) { selectedConversationID = nil }
-    }
-    
-    func renameConversation(conversationID: UUID, newTitle: String) {
-        guard let conversationSD = persistenceService.getConversation(withId: conversationID) else { return }
-        let trimmedTitle = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        conversationSD.userDefinedTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+        conversationManagementCoordinator.transferSelectedConversationToOverlay()
     }
 
-    // MARK: - Conversation Export (P1)
+    func togglePinStatus(for conversationId: UUID) {
+        conversationManagementCoordinator.togglePinStatus(for: conversationId)
+    }
+
+    func deleteConversation(conversationID: UUID) {
+        conversationManagementCoordinator.deleteConversation(conversationID: conversationID)
+    }
+
+    func deleteMultipleConversations(ids: Set<UUID>) {
+        conversationManagementCoordinator.deleteMultipleConversations(ids: ids)
+    }
+
+    func renameConversation(conversationID: UUID, newTitle: String) {
+        conversationManagementCoordinator.renameConversation(conversationID: conversationID, newTitle: newTitle)
+    }
 
     func exportConversation(conversationID: UUID) {
-        guard let conversationSD = persistenceService.getConversation(withId: conversationID) else {
-            logger.warning("Cannot export: conversation \(conversationID.uuidString) not found.")
-            return
-        }
-        let title = conversationSD.toStruct().displayTitle
-
-        Task {
-            let messages = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 10000)
-            await ConversationExporter.exportToFile(title: title, messages: messages)
-        }
+        conversationManagementCoordinator.exportConversation(conversationID: conversationID)
     }
 
     func toggleSidebar() { withAnimation(.easeInOut(duration: 0.2)) { isSidebarCollapsed.toggle() } }
@@ -1050,113 +521,29 @@ final class MainApplicationViewModel {
         }
     }
     
-    // MARK: - Web Search Configuration (Using UserDefaults)
-    
-    func toggleWebSearch() {
-        guard isWebSearchEnabled else { return }
-        isWebSearchActive.toggle()
-        logger.info("Web search active state toggled to: \(self.isWebSearchActive)")
-    }
-    
-    func saveAndEnableWebSearch(apiKey: String) {
-        UserDefaults.standard.set(apiKey, forKey: webSearchAPIKeyDefaultsKey)
-        self.webSearchAPIKey = apiKey
-        self.isWebSearchEnabled = true
-        self.isWebSearchActive = true
-        logger.info("Successfully saved web search API key to UserDefaults and enabled search.")
-    }
+    // MARK: - Scheduler Support (forwards to SchedulerCoordinator)
+    //
+    // Bodies live in `SchedulerCoordinator`. Kept as forwards because
+    // `SchedulerService` and the three ChatOps bridges call these directly
+    // on the VM.
 
-    func disableAndRemoveWebSearch() {
-        UserDefaults.standard.removeObject(forKey: webSearchAPIKeyDefaultsKey)
-        self.webSearchAPIKey = nil
-        self.isWebSearchEnabled = false
-        self.isWebSearchActive = false
-        logger.info("Successfully removed web search API key from UserDefaults and disabled search.")
-    }
-
-    // MARK: - Scheduler Support
-
-    /// Create a conversation for a scheduled task without selecting it in the UI.
+    @discardableResult
     func createConversationForScheduledTask(profileID: BackendProfileModel, title: String) -> UUID {
-        let newConversation = Conversation(
-            id: UUID(),
-            messages: [],
-            timestamp: Date(),
-            userDefinedTitle: title,
-            backendType: .none,
-            backendEntityId: profileID.id
-        )
-        persistenceService.addConversation(from: newConversation)
-        updateBackendForCurrentConversation(conversationID: newConversation.id, profileID: profileID.id)
-        logger.info("Created conversation for scheduled task: \(title) (\(newConversation.id.uuidString))")
-        return newConversation.id
+        schedulerCoordinator.createConversationForScheduledTask(profileID: profileID, title: title)
     }
 
-    /// Send a message for a scheduled task without modifying the UI's selected conversation.
-    /// Returns a summary of the response (first 100 chars).
     func sendScheduledMessage(
         prompt: String,
         config: BackendRequestConfig,
         conversationID: UUID,
         attachedFileURLs: [URL]
     ) async -> String {
-        guard persistenceService.getConversation(withId: conversationID) != nil else {
-            logger.error("[sendScheduledMessage] Conversation \(conversationID.uuidString) not found.")
-            return "Error: conversation not found."
-        }
-
-        // Build file items from URLs
-        let fileItems: [FileSystemItem] = attachedFileURLs.compactMap { url in
-            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-            var isDir: ObjCBool = false
-            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
-            return FileSystemItem(id: url, name: url.lastPathComponent, url: url, isDirectory: isDir.boolValue)
-        }
-
-        // Create user message
-        let userMessage = await createUserMessage(conversationID: conversationID, query: prompt, files: fileItems)
-        await persistenceService.addMessage(userMessage, toConversation: conversationID)
-
-        // Fetch history for context
-        let history = await persistenceService.fetchMessages(for: conversationID, offset: 0, limit: 50)
-
-        // Start stream and await completion.
-        // Use a box to break the forward-capture cycle: the closure captures
-        // `messageBox` (already declared), and we fill it after the call returns.
-        return await withCheckedContinuation { [weak self] continuation in
-            var messageBox: ChatMessage? = nil
-            let agentMessage = activeStreamManager.startMessageStream(
-                withConfig: config,
-                conversationID: conversationID,
-                userQuery: prompt,
-                history: history,
-                files: fileItems,
-                onComplete: { [weak self] in
-                    // Extract summary from the completed message
-                    let summary: String
-                    switch messageBox?.content {
-                    case .plainText(let text), .markdownText(let text):
-                        summary = String(text.prefix(100))
-                    case .error(_, let details):
-                        summary = "Error: \(details)"
-                    default:
-                        summary = "Response complete."
-                    }
-
-                    // Clear streaming state so Mac UI hides the banner
-                    self?.streamingMessageID = nil
-                    self?.streamingMessage = nil
-
-                    continuation.resume(returning: summary)
-                }
-            )
-            messageBox = agentMessage // Fill the box so the closure can read it
-
-            // Set streaming state so the Mac UI can display HITL banners
-            // (ask_user / tool confirmation) for remotely-triggered work.
-            self?.streamingMessageID = agentMessage.id
-            self?.streamingMessage = agentMessage
-        }
+        await schedulerCoordinator.sendScheduledMessage(
+            prompt: prompt,
+            config: config,
+            conversationID: conversationID,
+            attachedFileURLs: attachedFileURLs
+        )
     }
 }
 

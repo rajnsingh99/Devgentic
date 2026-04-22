@@ -33,7 +33,10 @@ struct XMLStructuredGenerator: CognitiveGenerator {
     1. Only one <tool_call> block per response unless explicitly running parallel calls.
     2. The JSON inside <arguments> must be valid and strictly use double quotes.
     3. Place your reasoning ONLY inside the <content> tag.
-    4. If the task is complete or you need to respond to the user, output your response in plain text WITHOUT any <tool_call> block.
+    4. To end the task, emit a single <tool_call> with <tool_name>final_answer</tool_name>
+       and <arguments>{"answer": "your complete response"}</arguments>. This is the ONLY
+       way to terminate — do NOT output plain text outside a <tool_call> block as a
+       termination signal.
     5. NEVER invent tool names. Use only tools from the TOOLS list.
     """
 

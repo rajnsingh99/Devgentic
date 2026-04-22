@@ -313,9 +313,9 @@ final class CognitiveParsePipelineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(result.toolCalls.count, 1, "Should recover via DeepXML fallback, not flat JSON")
     }
 
-    // MARK: - Bug 4: parseExhausted Flag
+    // MARK: - Parse Outcome Signal
 
-    func testParseExhausted_TotalFailure_FlagSet() {
+    func testParseOutcome_TotalFailure_Failed() {
         // Input that defeats ALL parse stages: contains "tool_calls" key (triggers drift
         // detector signals) but the JSON is completely broken so no tools can be extracted.
         // This forces the pipeline through Stage 1 (degraded) → Stage 2/3 (fail) → Stage 4 (fail).
@@ -328,39 +328,43 @@ final class CognitiveParsePipelineTests: XCTestCase {
         """
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 0)
-        XCTAssertTrue(result.parseExhausted, "parseExhausted should be true when all pipeline stages fail to extract tools")
+        if case .failed = result.parseOutcome {
+            // Expected
+        } else {
+            XCTFail("parseOutcome should be .failed when all pipeline stages fail; got \(result.parseOutcome)")
+        }
     }
 
-    func testParseExhausted_SuccessfulParse_FlagNotSet() {
+    func testParseOutcome_SuccessfulParse_Success() {
         let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
         let input = """
         {"content": "Listing.", "tool_calls": [{"name": "list_directory", "arguments": {"path": "/"}}]}
         """
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 1)
-        XCTAssertFalse(result.parseExhausted, "parseExhausted should be false when parse succeeds at Stage 1")
+        XCTAssertEqual(result.parseOutcome, .success)
     }
 
-    func testParseExhausted_PlainTextExit_FlagNotSet() {
+    func testParseOutcome_PlainTextExit_GenuineCompletion() {
         // Plain text conversational exit with no JSON structure and no tool signals.
-        // Stage 1 returns text as reasoning, classifyOutcome sees no signals → confident.
-        // Should NOT be marked as parseExhausted.
+        // Stage 1 returns text as reasoning, classifyConfidence sees no signals → confident.
+        // Pipeline returns `.genuineCompletion` since there's no parse failure.
         let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
         let input = "I have completed the task. Here are the results."
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 0)
-        XCTAssertFalse(result.parseExhausted, "Plain text exit should not be marked as parse exhaustion")
+        XCTAssertEqual(result.parseOutcome, .genuineCompletion)
     }
 
     // MARK: - Bug 3: Malformed Content Recovery Through Pipeline
 
-    // MARK: - Bug 5: Explicit Empty tool_calls Should NOT Trigger parseExhausted
+    // MARK: - Explicit Empty tool_calls Should Be GenuineCompletion, Not Failed
 
-    func testExplicitEmptyToolCalls_ClassifiedAsConfident() {
+    func testExplicitEmptyToolCalls_GenuineCompletion() {
         // Model genuinely signals completion with well-formed JSON + empty tool_calls.
-        // classifyOutcome must detect the explicit empty array and return confident,
+        // classifyConfidence must detect the explicit empty array and return confident,
         // preventing the pipeline from cascading through drift detection → Stage 4
-        // → parseExhausted = true → false suspectedFormatFailure.
+        // → .failed → false suspectedFormatFailure.
         let pipeline = CognitiveParsePipeline(expectedDialect: .heuristicJson)
         let input = """
         {
@@ -370,10 +374,10 @@ final class CognitiveParsePipelineTests: XCTestCase {
         """
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 0)
-        XCTAssertFalse(result.parseExhausted, "Explicit empty tool_calls array is a genuine completion — must NOT set parseExhausted")
+        XCTAssertEqual(result.parseOutcome, .genuineCompletion, "Explicit empty tool_calls array is a genuine completion — must NOT be .failed")
     }
 
-    func testExplicitEmptyToolCalls_WithWhitespace_StillConfident() {
+    func testExplicitEmptyToolCalls_WithWhitespace_StillGenuineCompletion() {
         // Same as above but with extra whitespace inside the empty array
         let pipeline = CognitiveParsePipeline(expectedDialect: .heuristicJson)
         let input = """
@@ -384,7 +388,7 @@ final class CognitiveParsePipelineTests: XCTestCase {
         """
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 0)
-        XCTAssertFalse(result.parseExhausted, "Empty tool_calls with whitespace should still be confident")
+        XCTAssertEqual(result.parseOutcome, .genuineCompletion, "Empty tool_calls with whitespace should still be genuineCompletion")
     }
 
     func testMalformedContent_ValidToolCalls_RecoveredThroughPipeline() {
@@ -400,6 +404,32 @@ final class CognitiveParsePipelineTests: XCTestCase {
         let result = pipeline.parse(raw: input)
         XCTAssertEqual(result.toolCalls.count, 1, "Pipeline should recover valid tool_calls despite malformed content field")
         XCTAssertEqual(result.toolCalls.first?.name, "fs_smart_search")
-        XCTAssertFalse(result.parseExhausted, "Should not be marked as exhausted since tools were recovered")
+        XCTAssertEqual(result.parseOutcome, .success, "Should be success since tools were recovered")
+    }
+
+    // MARK: - Iter-5 Regression: Wrong Schema Key Triggers Typed Failure
+
+    func testWrongSchemaKey_FunctionName_YieldsFailed() {
+        // The exact iter-5 shape: well-formed JSON with `function_name` instead of `name`.
+        // Before the refactor, this was classified as `.confident` with 0 tools and
+        // silently terminated the loop. With typed outcomes, it must surface as
+        // `.failed(.schemaKeyMismatch)` so the terminator retries with a corrective alert.
+        let pipeline = CognitiveParsePipeline(expectedDialect: .nativeJSON)
+        let input = """
+        {
+          "function_name": "final_summary",
+          "arguments": {
+            "summary": "Project analysis complete."
+          }
+        }
+        """
+        let result = pipeline.parse(raw: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        switch result.parseOutcome {
+        case .failed(.schemaKeyMismatch(_, let foundKeys, _)):
+            XCTAssertTrue(foundKeys.contains("function_name"), "Failure should name the bad key: got \(foundKeys)")
+        default:
+            XCTFail("Expected .failed(.schemaKeyMismatch), got \(result.parseOutcome)")
+        }
     }
 }

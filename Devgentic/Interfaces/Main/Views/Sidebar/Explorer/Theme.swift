@@ -111,6 +111,7 @@ struct ThemeDecorator: Theme {
     var streamingIndicator: Color { accentOverride ?? base.streamingIndicator }
     var chatGPTGradientTop: Color { base.chatGPTGradientTop }
     var chatGPTGradientBottom: Color { base.chatGPTGradientBottom }
+    var shadowColor: Color { base.shadowColor }
 
     // Tier 3 — Typography
     var fontLargeTitle: Font { base.fontLargeTitle }
@@ -280,6 +281,11 @@ protocol Theme {
     /// Bottom gradient stop for the main chat background.
     var chatGPTGradientBottom: Color { get }
 
+    /// Drop-shadow color for elevated surfaces (sidebar pane, popovers, cards).
+    /// Default is a dark-mode-friendly black@18%; light themes should override
+    /// to a softer value since pure black reads too heavy on pale backgrounds.
+    var shadowColor: Color { get }
+
     // ── Tier 3: Typography ───────────────────────────────────────────
 
     var fontLargeTitle: Font { get }
@@ -343,6 +349,7 @@ extension Theme {
     var streamingIndicator: Color { .blue }
     var chatGPTGradientTop: Color { Color(red: 0.15, green: 0.15, blue: 0.16) }
     var chatGPTGradientBottom: Color { Color(red: 0.1, green: 0.1, blue: 0.11) }
+    var shadowColor: Color { Color.black.opacity(0.18) }
 
     // ── Tier 3 Typography Defaults ───────────────────────────────────
 
@@ -532,6 +539,7 @@ extension AppThemes {
         var streamingIndicator: Color { Color(hex: "#0184bc") }
         var chatGPTGradientTop: Color { Color(hex: "#fafafa") }
         var chatGPTGradientBottom: Color { Color(hex: "#f0f0f0") }
+        var shadowColor: Color { Color.black.opacity(0.08) }
 
         // Syntax — One Light palette
         var syntaxTheme: SyntaxTheme {

@@ -194,6 +194,67 @@ struct OpenAILLMProvider: LLMProvider {
         return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
     }
 
+    // MARK: - Native-Turn Cognitive Step (G12)
+
+    /// Native-turn overload. Accepts provider-shape messages carrying structural
+    /// `tool_calls` / `tool` role entries produced by `OpenAIToolTurnAdapter`.
+    /// OpenAI's message format is already the canonical shape, so the body is
+    /// built identically to the legacy path — only the messages' Swift type differs.
+    func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": nativeMessages,
+            "stream": false
+        ]
+
+        applyGenerationParams(to: &body)
+
+        if let tools = tools, !tools.isEmpty {
+            body["tools"] = tools
+        }
+
+        var request = makeRequest()
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let choices = json?["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any] else {
+            throw LLMProviderError.invalidResponse("Missing message object in OpenAI response")
+        }
+
+        if let finishReason = firstChoice["finish_reason"] as? String, finishReason == "length" {
+            let limitDesc = maxTokens.map { String($0) } ?? "model default"
+            logger.warning("⚠️ OpenAI cognitive step truncated (finish_reason: length). Configured max_tokens: \(limitDesc).")
+        }
+
+        let content = message["content"] as? String ?? ""
+        let reasoningContent = message["reasoning_content"] as? String
+        var pendingTools: [PendingToolCall] = []
+
+        if let toolCalls = message["tool_calls"] as? [[String: Any]] {
+            for toolCall in toolCalls {
+                if let function = toolCall["function"] as? [String: Any],
+                   let toolName = function["name"] as? String {
+                    let id = toolCall["id"] as? String ?? UUID().uuidString
+                    var argumentsDict: [String: JSONValue] = [:]
+                    if let argsAsString = function["arguments"] as? String,
+                       let parsedDict = (try? JSONSerialization.jsonObject(with: argsAsString.data(using: .utf8) ?? Data())) as? [String: Any] {
+                        argumentsDict = parsedDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
+                    } else if let argsAsDict = function["arguments"] as? [String: Any] {
+                        argumentsDict = argsAsDict.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
+                    }
+                    pendingTools.append(PendingToolCall(id: id, name: toolName, arguments: argumentsDict))
+                }
+            }
+        }
+
+        let usage = json.flatMap { TokenUsage.fromOpenAI($0) }
+        return ModernCognitiveStep(reasoning: content, thought: reasoningContent, toolCalls: pendingTools, tokenUsage: usage)
+    }
+
     // MARK: - Streaming
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {

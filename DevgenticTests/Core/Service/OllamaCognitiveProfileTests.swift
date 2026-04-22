@@ -20,7 +20,8 @@ final class OllamaCognitiveProfileTests: XCTestCase {
         modelfile: String? = nil,
         family: String? = nil,
         families: [String]? = nil,
-        parameterSize: String? = nil
+        parameterSize: String? = nil,
+        capabilities: [String]? = nil
     ) -> OllamaShowResponse {
         let details = OllamaModelDetails(
             format: nil,
@@ -34,7 +35,8 @@ final class OllamaCognitiveProfileTests: XCTestCase {
             modelfile: modelfile,
             parameters: nil,
             template: template,
-            details: details
+            details: details,
+            capabilities: capabilities
         )
     }
 
@@ -316,5 +318,80 @@ final class OllamaCognitiveProfileTests: XCTestCase {
         )
         let profile = response.cognitiveProfile
         XCTAssertEqual(profile.capability, .parallelActions, "Template marker should promote past singleAction")
+    }
+
+    // MARK: - Authoritative capabilities field (Ollama 0.3.4+)
+
+    func testCapabilities_LacksTools_ForcesNone_EvenWithCapableFamily() {
+        // Server reports completion-only; family="qwen2" would otherwise fall through
+        // to parallelActions. The authoritative signal must win.
+        let response = makeResponse(
+            template: "{{ .Tools }}",
+            family: "qwen2",
+            capabilities: ["completion"]
+        )
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .none, "Missing 'tools' in /api/show capabilities must force .none")
+        XCTAssertEqual(profile.dialect, .heuristicJson)
+    }
+
+    func testCapabilities_IncludesTools_AllowsCapableClassification() {
+        // Server reports tool support; heuristic path should still classify correctly.
+        let response = makeResponse(
+            template: "{{ .Tools }}",
+            family: "qwen2",
+            capabilities: ["completion", "tools"]
+        )
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .parallelActions)
+        XCTAssertEqual(profile.dialect, .nativeJSON)
+    }
+
+    func testCapabilities_Absent_FallsThroughToHeuristic() {
+        // Older Ollama without the capabilities field — must not be forced to .none.
+        let response = makeResponse(
+            template: "{{ .Tools }}",
+            family: "qwen2",
+            capabilities: nil
+        )
+        let profile = response.cognitiveProfile
+        XCTAssertEqual(profile.capability, .parallelActions, "No capabilities field → heuristic path decides")
+    }
+
+    // MARK: - Reasoning-only override (deepseek-r1 family with qwen2 base)
+
+    func testReasoningOnly_DeepSeekR1_WithQwen2Family_ForcesNone() {
+        // The exact deepseek-r1:14b case: family reports as the tool-capable base (qwen2),
+        // but the model name carries the reasoning-only identity. Must force .none.
+        let response = makeResponse(
+            template: "{{ .Tools }}",
+            family: "qwen2",
+            capabilities: nil
+        )
+        let profile = response.cognitiveProfile(modelName: "deepseek-r1:14b")
+        XCTAssertEqual(profile.capability, .none, "deepseek-r1 name must force .none regardless of qwen2 family")
+        XCTAssertEqual(profile.dialect, .heuristicJson)
+    }
+
+    func testReasoningOnly_QwQ_ForcesNone() {
+        let response = makeResponse(template: "{{ .Tools }}", family: "qwen2")
+        let profile = response.cognitiveProfile(modelName: "qwq:32b")
+        XCTAssertEqual(profile.capability, .none)
+    }
+
+    func testReasoningOnly_Qwen3_NotBlocked() {
+        // qwen3 is BOTH thinking AND tool-capable — must NOT be forced to .none.
+        // This locks in the explicit exclusion from the reasoning-only pattern list.
+        let response = makeResponse(template: "{{ .Tools }}", family: "qwen3")
+        let profile = response.cognitiveProfile(modelName: "qwen3:14b")
+        XCTAssertEqual(profile.capability, .parallelActions, "qwen3 supports tools AND thinking — must not be force-denied")
+    }
+
+    func testReasoningOnly_DetectedViaFamilyEvenWithoutModelName() {
+        // If the runtime caller doesn't pass modelName, family detection still catches
+        // the base deepseek-r1 case (when Ollama reports family="deepseek-r1" directly).
+        let response = makeResponse(family: "deepseek-r1")
+        let profile = response.cognitiveProfile  // No modelName
+        XCTAssertEqual(profile.capability, .none)
     }
 }

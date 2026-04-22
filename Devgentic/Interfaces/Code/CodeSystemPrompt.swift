@@ -23,6 +23,27 @@ import Foundation
 
 enum CodeSystemPrompt {
 
+    /// System alert injected into working memory the moment the G6 reading gate
+    /// unlocks — tells the model that `update_project_context` is now available
+    /// and how to use it responsibly. This message was previously baked into
+    /// the static system prompt, which created a signal/availability mismatch:
+    /// the prompt told the model to call a tool the schema had filtered out.
+    /// Injecting on unlock keeps the prompt honest and the guidance just-in-time.
+    static let updateProjectContextUnlockAlert = """
+    The `update_project_context` tool is now available. Use it to persist \
+    project-level findings into `.devgentic/context.md`.
+
+    Update after:
+    - Discovering the project's architecture, module boundaries, or key abstractions.
+    - Learning naming conventions, indentation style, or recurring patterns.
+    - Identifying build / test / lint commands and known gotchas.
+    - Mapping entry points or important directories.
+
+    Do NOT include: conversation state, task progress, secrets, or anything obvious from directory listings alone.
+
+    Semantics: `update_project_context` REPLACES the file — include ALL relevant context, not just new findings. Re-read the current context (already in your prompt) before updating. Keep it concise.
+    """
+
     /// Generates the production system prompt optimized for the target provider.
     ///
     /// - Parameters:
@@ -92,9 +113,9 @@ enum CodeSystemPrompt {
 
         # Core Principles
 
-        **Read before edit.** Use `read_file` or `code_search` to understand existing code before modifying. Re-read a file if you last touched it more than a few turns ago — contents may have changed.
+        **Read before edit.** Use `read_file` or `code_search_text` to understand existing code before modifying. Re-read a file if you last touched it more than a few turns ago — contents may have changed.
 
-        **Understand before acting.** Start with `codebase_map` or `list_directory` for structure. Use `code_search`, `glob_files`, `find_definition` to locate relevant code. Never guess paths.
+        **Understand before acting.** Start with `codebase_map` or `list_directory` for structure. Use `code_search_text`, `code_search_symbol`, `code_search_files`, `glob_files`, `find_definition` to locate relevant code. Never guess paths.
 
         **Minimal, surgical changes.** Match existing style, naming, indentation. Don't refactor code that isn't related to the task. Don't add comments unless asked.
 
@@ -105,8 +126,15 @@ enum CodeSystemPrompt {
         # Tool Workflow
 
         - **Unknown codebase:** `codebase_map` → `file_overview` → `read_file` the key files.
-        - **Finding code:** `code_search` (regex content) for usages. `glob_files` for paths. `find_definition` for function/class/struct locations.
-        - **Editing:** `read_file` first → `edit_code` (include enough `old_string` context for uniqueness). `create_file` for new files.
+        - **Finding code:**
+          - `code_search_text` — loose regex/text search (case-insensitive) for keywords, TODOs, usages.
+          - `code_search_symbol` — exact match (case-sensitive, whole-word) for a specific identifier.
+          - `code_search_files` — list files that contain a pattern, filenames only.
+          - `glob_files` — find files by path pattern. `find_definition` — locate a symbol's declaration.
+        - **Editing:** `read_file` first →
+          - `edit_code_single` for a single change (include enough `old_string` context for uniqueness).
+          - `edit_code_batch` when several distinct regions of the same file must change atomically.
+          - `create_new_file` for a brand-new file. `overwrite_file` ONLY when intentionally replacing existing contents.
         - **Verifying:** `batch_command` for build / test / lint. `git_tool` for status / diff / blame.
 
         # Code Quality
@@ -122,17 +150,9 @@ enum CodeSystemPrompt {
 
         # Project Memory
 
-        A persistent context file lives at `.devgentic/context.md`. Its contents are injected into every message (see "Project Context" below, if present).
+        A persistent context file lives at `.devgentic/context.md`. Its contents are injected into every message (see "Project Context" below, if present). Read it before acting.
 
-        **Update `update_project_context` after:**
-        - Discovering the project's architecture, module boundaries, or key abstractions.
-        - Learning naming conventions, indentation style, or recurring patterns.
-        - Identifying build / test / lint commands and known gotchas.
-        - Mapping entry points or important directories.
-
-        **Do NOT include:** conversation state, task progress, secrets, or anything obvious from directory listings alone.
-
-        **Overwrite semantics:** `update_project_context` REPLACES the file — include all relevant context, not just new findings. Read the existing content (below) before updating. Keep it concise.
+        A tool for updating this file may become available once you've successfully examined the code — you'll be told directly when and how to use it. Until then, focus on exploration and edits.
 
         # Safety
 
@@ -215,10 +235,10 @@ enum CodeSystemPrompt {
 
         <core_principles>
           <principle name="read_before_edit">
-          Use `read_file` or `code_search` to understand existing code before modifying. Re-read a file if you last touched it more than a few turns ago — contents may have changed.
+          Use `read_file` or `code_search_text` to understand existing code before modifying. Re-read a file if you last touched it more than a few turns ago — contents may have changed.
           </principle>
           <principle name="understand_before_act">
-          Start with `codebase_map` or `list_directory` for structure. Use `code_search`, `glob_files`, `find_definition` to locate relevant code. Never guess paths.
+          Start with `codebase_map` or `list_directory` for structure. Use `code_search_text`, `code_search_symbol`, `code_search_files`, `glob_files`, `find_definition` to locate relevant code. Never guess paths.
           </principle>
           <principle name="minimal_surgical_changes">
           Match existing style, naming, indentation. Don't refactor code that isn't related to the task. Don't add comments unless asked.
@@ -233,8 +253,15 @@ enum CodeSystemPrompt {
 
         <tool_workflow>
         - Unknown codebase: codebase_map → file_overview → read_file the key files.
-        - Finding code: code_search (regex content) for usages. glob_files for paths. find_definition for function/class/struct locations.
-        - Editing: read_file first → edit_code (include enough old_string context for uniqueness). create_file for new files.
+        - Finding code:
+          * code_search_text — loose regex/text search (case-insensitive) for keywords, TODOs, usages.
+          * code_search_symbol — exact match (case-sensitive, whole-word) for a specific identifier.
+          * code_search_files — list files that contain a pattern, filenames only.
+          * glob_files for path patterns; find_definition for a symbol's declaration.
+        - Editing: read_file first →
+          * edit_code_single for a single change (include enough old_string context for uniqueness).
+          * edit_code_batch when several distinct regions of the same file must change atomically.
+          * create_new_file for a brand-new file; overwrite_file ONLY when intentionally replacing existing contents.
         - Verifying: batch_command for build / test / lint. git_tool for status / diff / blame.
         </tool_workflow>
 
@@ -259,20 +286,11 @@ enum CodeSystemPrompt {
 
         <project_memory>
           <description>
-          A persistent context file lives at `.devgentic/context.md`. Its contents are injected into every message (see <project_context> below, if present).
+          A persistent context file lives at `.devgentic/context.md`. Its contents are injected into every message (see <project_context> below, if present). Read it before acting.
           </description>
-          <when_to_update>
-          - After discovering architecture, module boundaries, or key abstractions.
-          - After learning naming conventions, indentation style, or recurring patterns.
-          - After identifying build / test / lint commands and known gotchas.
-          - After mapping entry points or important directories.
-          </when_to_update>
-          <what_not_to_include>
-          Conversation state, task progress, secrets, or anything obvious from directory listings alone.
-          </what_not_to_include>
-          <important>
-          `update_project_context` uses OVERWRITE semantics — include all relevant context, not just new findings. Read the existing content (below) before updating. Keep it concise.
-          </important>
+          <availability>
+          A tool for updating this file may become available once you've successfully examined the code — you'll be told directly when and how to use it. Until then, focus on exploration and edits.
+          </availability>
         </project_memory>
 
         <safety>

@@ -60,6 +60,11 @@ struct ToolLibraryView: View {
     @Binding var isSelectionMode: Bool
     @Binding var selectedToolIDs: Set<String>
 
+    /// Tool names to hide from the library. For Code profiles, this is the full
+    /// CodeToolPreset — the user never sees those rows, so they can't disable or
+    /// toggle them. Empty for other profile types.
+    var hiddenToolNames: Set<String> = []
+
     @Environment(MainViewRouter.self) private var router
     private var toolStore: UnifiedToolStore { UnifiedToolStore.shared }
     @Environment(\.appTheme) private var theme
@@ -449,16 +454,21 @@ struct ToolLibraryView: View {
     // MARK: - Computed Properties
 
     var totalToolCount: Int {
-        toolStore.sources.reduce(0) { $0 + $1.tools.count }
+        toolStore.sources.reduce(0) { acc, source in
+            acc + source.tools.filter { !hiddenToolNames.contains($0.name) }.count
+        }
     }
 
     var favoriteCount: Int {
         configuredTools.filter(\.isFavorite).count
     }
 
-    /// Groups built-in tools by sidebar category with counts.
+    /// Groups built-in tools by sidebar category with counts. Hidden tools are
+    /// excluded so the Code profile doesn't see per-category rows for preset tools.
     var builtInGroups: [(name: String, icon: String, count: Int)] {
-        let localTools = toolStore.sources.filter { $0.type == .local }.flatMap { $0.tools }
+        let localTools = toolStore.sources.filter { $0.type == .local }
+            .flatMap { $0.tools }
+            .filter { !hiddenToolNames.contains($0.name) }
         return BuiltInToolCategory.allGroups.compactMap { group in
             let count = localTools.filter { group.rawCategories.contains($0.category) }.count
             guard count > 0 else { return nil }
@@ -477,7 +487,7 @@ struct ToolLibraryView: View {
         switch selectedSidebar {
         case .all:
             for source in toolStore.sources {
-                for tool in source.tools {
+                for tool in source.tools where !hiddenToolNames.contains(tool.name) {
                     if matchesSearch(tool) {
                         rows.append(ToolTableRow(source: source, definition: tool))
                     }
@@ -486,7 +496,7 @@ struct ToolLibraryView: View {
         case .favorites:
             let favoriteNames = Set(configuredTools.filter(\.isFavorite).map { "\($0.sourceId)-\($0.name)" })
             for source in toolStore.sources {
-                for tool in source.tools {
+                for tool in source.tools where !hiddenToolNames.contains(tool.name) {
                     let compositeKey = "\(source.id)-\(tool.name)"
                     if favoriteNames.contains(compositeKey) && matchesSearch(tool) {
                         rows.append(ToolTableRow(source: source, definition: tool))
@@ -496,7 +506,7 @@ struct ToolLibraryView: View {
         case .localCategory(let groupName):
             guard let group = BuiltInToolCategory.allGroups.first(where: { $0.name == groupName }) else { break }
             for source in toolStore.sources where source.type == .local {
-                for tool in source.tools where group.rawCategories.contains(tool.category) {
+                for tool in source.tools where group.rawCategories.contains(tool.category) && !hiddenToolNames.contains(tool.name) {
                     if matchesSearch(tool) {
                         rows.append(ToolTableRow(source: source, definition: tool))
                     }
@@ -504,7 +514,7 @@ struct ToolLibraryView: View {
             }
         case .mcp(let id):
             for source in toolStore.sources where source.id == id {
-                for tool in source.tools {
+                for tool in source.tools where !hiddenToolNames.contains(tool.name) {
                     if matchesSearch(tool) {
                         rows.append(ToolTableRow(source: source, definition: tool))
                     }

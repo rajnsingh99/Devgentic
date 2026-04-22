@@ -20,25 +20,35 @@ struct InputToolbarView: View {
 
     let onOpenFilePicker: () -> Void
     let onNavigateToToolLibrary: (UUID) -> Void
+    /// Invoked when the user taps "Open folder..." in the folder popover.
     var onSelectFolder: (() -> Void)?
+    /// Invoked when the user picks one of the recent folders from the popover.
+    var onSelectRecentFolder: ((URL) -> Void)?
+    /// Invoked when the user taps "Select file..." in the folder popover (code mode only).
+    var onSelectCodeFile: (() -> Void)?
 
     @Binding var showingSchedulePopover: Bool
     @Binding var showingFullScheduleCreator: Bool
 
+    @Environment(CodeSessionManager.self) private var codeSessionManager
+    @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
 
     @State private var isPlusButtonHovering = false
     @State private var isToolsHovering = false
     @State private var isScheduleButtonHovering = false
     @State private var isFolderButtonHovering = false
+    @State private var showingFolderPopover = false
 
     var body: some View {
         HStack(spacing: 12) {
-            filePickerButton
-
             if interfaceMode == .code {
+                // Code mode gets a dedicated folder pill with its own "Select file..."
+                // entry in the popover — the generic paperclip would be redundant.
                 folderSelectorButton
+                codeToolManagerButton
             } else {
+                filePickerButton
                 toolManagerButton
                 scheduleButton
             }
@@ -76,6 +86,33 @@ struct InputToolbarView: View {
         }
     }
 
+    // MARK: - Tool Manager (Code mode)
+    //
+    // Lazily creates the code profile if needed, then routes to the same Tool Library.
+    // The library applies Code-specific locking (preset tools can toggle Ask/Auto but
+    // cannot be disabled) — handled in ToolLibraryContainerView / ToolLibraryView.
+
+    private var codeToolManagerButton: some View {
+        Button(action: {
+            let profileID = codeSessionManager.ensureCodeProfile()
+            // CodeSessionManager writes directly to the store; refresh the service's
+            // in-memory list so ToolLibraryContainerView's existence check finds the
+            // profile when it renders.
+            if !profileService.profiles.contains(where: { $0.id == profileID }) {
+                profileService.loadProfiles()
+            }
+            onNavigateToToolLibrary(profileID)
+        }) {
+            toolbarIcon(systemName: "hammer.fill", isHovering: isToolsHovering)
+        }
+        .buttonStyle(.plain)
+        .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isToolsHovering = hover } }
+        .help("Manage tools for the Code session")
+        .accessibilityLabel("Manage tools for the Code session")
+        .disabled(!isInputEnabled)
+        .opacity(isInputEnabled ? 1.0 : 0.5)
+    }
+
     // MARK: - Schedule (non-code modes)
 
     private var scheduleButton: some View {
@@ -104,17 +141,58 @@ struct InputToolbarView: View {
 
     @ViewBuilder
     private var folderSelectorButton: some View {
-        if let onSelectFolder {
-            Button(action: onSelectFolder) {
-                toolbarIcon(systemName: "folder.badge.gearshape", isHovering: isFolderButtonHovering)
+        if onSelectFolder != nil {
+            Button(action: { showingFolderPopover.toggle() }) {
+                folderPillLabel
             }
             .buttonStyle(.plain)
             .onHover { hover in withAnimation(.easeInOut(duration: 0.15)) { isFolderButtonHovering = hover } }
-            .help("Select project folder")
-            .accessibilityLabel("Select project folder")
+            .help(codeSessionManager.projectPath?.path ?? "Select project folder")
+            .accessibilityLabel(codeSessionManager.projectPath != nil
+                ? "Project folder: \(codeSessionManager.projectPath!.lastPathComponent)"
+                : "Select project folder")
             .disabled(!isInputEnabled)
             .opacity(isInputEnabled ? 1.0 : 0.5)
+            .popover(isPresented: $showingFolderPopover, arrowEdge: .bottom) {
+                FolderSelectorPopoverView(
+                    isPresented: $showingFolderPopover,
+                    onSelectRecent: { url in onSelectRecentFolder?(url) },
+                    onOpenFolder: { onSelectFolder?() },
+                    onSelectFile: { onSelectCodeFile?() }
+                )
+            }
         }
+    }
+
+    private var folderPillLabel: some View {
+        let hasFolder = codeSessionManager.projectPath != nil
+        let label = hasFolder
+            ? codeSessionManager.projectPath!.lastPathComponent
+            : "Select folder"
+        return HStack(spacing: 6) {
+            Image(systemName: "folder")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(hasFolder ? theme.primaryText : theme.secondaryText)
+            Text(label)
+                .font(theme.fontSubheadline.weight(.medium))
+                .foregroundColor(hasFolder ? theme.primaryText : theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(theme.secondaryText.opacity(0.8))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(isFolderButtonHovering ? theme.surfaceOverlay : Color.clear)
+        )
+        .overlay(
+            Capsule()
+                .stroke(theme.secondaryText.opacity(isFolderButtonHovering ? 0.3 : 0.15), lineWidth: 1)
+        )
+        .scaleEffect(isFolderButtonHovering ? 1.02 : 1.0)
     }
 
     // MARK: - Shared Icon Builder

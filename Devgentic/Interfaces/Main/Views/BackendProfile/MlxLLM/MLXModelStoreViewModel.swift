@@ -126,43 +126,43 @@ class MLXModelStoreViewModel {
     
     // MARK: - Initialization
 
-    @ObservationIgnored private var isObserving = true
+    @ObservationIgnored private var serviceObserver: ObservationStream?
 
     init(filterForTools: Bool = false) {
         self.filterForTools = filterForTools
         self.selectedCategory = filterForTools ? .installed : .all
-        observeServiceChanges()
+        setupObserver()
         refreshCategoryData()
     }
 
     deinit {
-        isObserving = false
+        // Releasing `serviceObserver` triggers `ObservationStream.deinit`,
+        // which flips its own `isActive` flag so any in-flight onChange task
+        // short-circuits instead of writing to a zombie self.
     }
 
     /// Bridges MLXModelService (@Observable) changes into this @Observable view model.
-    private func observeServiceChanges() {
-        guard isObserving else { return }
-        withObservationTracking {
-            // Touch all service properties we depend on -- this registers them for tracking
-            _ = service.availableModels
-            _ = service.installedModels
-            _ = service.isLoadingRemoteModels
-            _ = service.isDownloading
-            _ = service.downloadProgress
-            _ = service.currentDownloadName
-        } onChange: {
-            Task { @MainActor [weak self] in
-                guard let self, self.isObserving else { return }
+    private func setupObserver() {
+        serviceObserver = ObservationStream(
+            track: { [weak self] in
+                guard let self else { return }
+                _ = self.service.availableModels
+                _ = self.service.installedModels
+                _ = self.service.isLoadingRemoteModels
+                _ = self.service.isDownloading
+                _ = self.service.downloadProgress
+                _ = self.service.currentDownloadName
+            },
+            onChange: { [weak self] in
+                guard let self else { return }
                 // Mirror state from service
                 self.isLoading = self.service.isLoadingRemoteModels
                 self.isDownloading = self.service.isDownloading
                 self.downloadProgress = self.service.downloadProgress
                 self.currentDownloadName = self.service.currentDownloadName
                 self.applyFilterAndSort()
-                // Re-register observation for next change
-                self.observeServiceChanges()
             }
-        }
+        )
     }
     
     // MARK: - Logic
@@ -241,7 +241,11 @@ class MLXModelStoreViewModel {
                 }
                 
                 let lowerId = item.displayName.lowercased()
-                if lowerId.contains("reasoning") || lowerId.contains("chain-of-thought") || lowerId.contains("deepseek-r1") {
+                // Reasoning badge: check the centralized heuristics (catches qwq, magistral,
+                // gpt-oss, o1/o3/o4 families) plus the generic "reasoning" / "chain-of-thought"
+                // keywords users/publishers sometimes add to model names.
+                if ModelCapabilityHeuristics.isReasoningOnly(nameCandidates: item.displayName) ||
+                   lowerId.contains("reasoning") || lowerId.contains("chain-of-thought") {
                     caps.insert(.reasoning)
                 }
                 if lowerId.contains("coder") || lowerId.contains("code") || lowerId.contains("codellama") || lowerId.contains("qwen2.5-coder") {

@@ -196,11 +196,20 @@ enum StreamCollector {
         }
     }
 
-    /// Extracts all `.toolOutput` events from collected events.
+    /// Extracts all tool-output payloads (both success and failure) from collected events.
+    /// The legacy unified `.toolOutput` case was split into `.toolSucceeded` / `.toolFailed`;
+    /// this helper flattens both back into a single `[ToolOutput]` so call sites that assert
+    /// on counts + `isSuccess` semantics continue to work without changes.
     static func toolOutputs(from events: [AgentStreamEvent]) -> [ToolOutput] {
         events.compactMap { event -> ToolOutput? in
-            if case .toolOutput(let output, _) = event { return output }
-            return nil
+            switch event {
+            case .toolSucceeded(let output, _, _):
+                return output
+            case .toolFailed(let output, _, _, _):
+                return output
+            default:
+                return nil
+            }
         }
     }
 

@@ -86,7 +86,10 @@ struct OutputSanitizer: Sendable {
     ///
     /// Strips: `<episodic_memory>`, `<working_memory>`, `<negative_constraints>`,
     /// `<recent>`, `<turn>`, `<action>`, `<user_correction>`, `<params>`,
-    /// plus their closing tags and self-closing variants.
+    /// plus their closing tags and self-closing variants. Also strips orphan
+    /// markdown code fences (e.g. bare ` ```json `) — reasoning is short inline
+    /// text that rarely contains legitimate code blocks, and qwen-coder-style
+    /// models frequently leak an opener fence when emitting native tool calls.
     static func sanitizeForUI(_ text: String) -> String {
         guard !text.isEmpty else { return text }
         var result = text
@@ -116,6 +119,12 @@ struct OutputSanitizer: Sendable {
 
         // Also strip special token markers that may appear in thoughts
         result = stripSpecialTokenMarkers(result)
+
+        // Strip orphan markdown code fences — native-tool-calling models like
+        // qwen-coder often leak an opener (```json) when their trained format
+        // wraps tool calls in fences but the structured tool_calls are extracted
+        // out by the provider, leaving just the fence marker in reasoning text.
+        result = stripCodeFences(result)
 
         // Collapse multiple blank lines into one
         while result.contains("\n\n\n") {

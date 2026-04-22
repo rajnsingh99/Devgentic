@@ -6,8 +6,8 @@
 //
 //  A contextual floating bar that sits above non-chat content.
 //  Houses a back button on the left, optional center content
-//  (e.g., search bar), and view-specific action buttons on the
-//  right (e.g., Delete/Save for profiles).
+//  (e.g., search bar or title), and view-specific action buttons
+//  on the right (e.g., Delete/Save for profiles).
 //  Centered within the content column with rounded corners.
 //
 
@@ -17,40 +17,49 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     let center: CenterContent
     let trailing: TrailingContent
 
+    /// Optional override for the back-button action. When non-nil, consumers
+    /// own the full flow (e.g. show a "discard unsaved changes?" confirmation
+    /// and then call `router.goBack()` themselves). Defaults to `router.goBack()`.
+    let onBack: (() -> Void)?
+
     init(
+        onBack: (() -> Void)? = nil,
         @ViewBuilder center: () -> CenterContent,
         @ViewBuilder trailing: () -> TrailingContent
     ) {
+        self.onBack = onBack
         self.center = center()
         self.trailing = trailing()
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            // Back button — always present in Dynamic Island
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    router.goBack()
-                }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(.caption, weight: .bold))
-                    .foregroundColor(theme.accentColor)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        Circle()
-                            .fill(theme.accentColor.opacity(0.12))
-                    )
+            // Back button — always present, prominent style with hover.
+            // Disabled + dimmed when the navigation stack is empty so the
+            // affordance stays visible but clearly inert.
+            // Help text and VoiceOver label both show the target route
+            // ("Back to Chat", "Back to Settings") so users know where
+            // they're about to land before committing.
+            IslandIconButton(
+                symbol: "chevron.left",
+                style: .prominent,
+                help: backButtonLabel,
+                accessibilityLabel: backButtonLabel,
+                keyboardShortcut: KeyboardShortcut("[", modifiers: .command)
+            ) {
+                performBack()
             }
-            .buttonStyle(.plain)
+            .disabled(!router.canGoBack)
+            .contextMenu { backButtonContextMenu }
 
             Spacer()
 
-            // Optional center content (e.g., search bar)
+            // Optional center content (search bar, title, etc.)
             center
 
             Spacer()
@@ -60,14 +69,102 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        // MARK: Liquid Glass — capsule bar with glass treatment
-        .glassEffect(.regular, in: .capsule)
-        // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
-        // .background(Capsule().fill(theme.secondaryBackground).shadow(color: theme.primaryText.opacity(0.08), radius: 12, x: 0, y: 4))
-        // .overlay(Capsule().stroke(theme.surfaceOverlayStrong.opacity(0.4), lineWidth: 0.5))
-        .frame(maxWidth: 1000)
+        .modifier(IslandBackdropModifier(reduceTransparency: reduceTransparency, theme: theme))
+        .overlay(
+            // `surfaceOverlayStrong` is theme-contrasting (white-tint on dark themes,
+            // black-tint on light) so the edge stays legible on any wallpaper
+            // bleeding through the glass — unlike dividerColor, which can match
+            // the backdrop on some themes and disappear.
+            Capsule()
+                .strokeBorder(theme.surfaceOverlayStrong.opacity(0.7), lineWidth: 0.5)
+        )
+        .frame(maxWidth: ViewLayout.maxContentWidth)
         .padding(.horizontal, 20)
         .padding(.top, 12)
+        // Island slides down + fades in when the destination changes, matching
+        // the chat-to-detail swap animation driven by MainViewRouter.
+        .transition(.asymmetric(
+            insertion: .move(edge: .top).combined(with: .opacity),
+            removal: .opacity
+        ))
+    }
+
+    // MARK: - Back action
+
+    /// Dispatches to the consumer's `onBack` override when provided (e.g. for
+    /// unsaved-changes confirmation), otherwise runs the default router goBack.
+    private func performBack() {
+        if let onBack {
+            onBack()
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                router.goBack()
+            }
+        }
+    }
+
+    // MARK: - Back Button Label
+
+    /// Dynamic tooltip/VoiceOver label showing the destination we'd return to
+    /// ("Back to Chat", "Back to Settings"). Falls back to plain "Back" when
+    /// the stack is empty.
+    private var backButtonLabel: String {
+        if let previous = router.navigationStack.last {
+            return "Back to \(previous.displayName)"
+        }
+        return "Back"
+    }
+
+    // MARK: - Back Button Context Menu
+
+    /// Right-click on the back button to reveal shortcut destinations.
+    /// Mirrors browser back-button affordance: single step or jump to root.
+    @ViewBuilder
+    private var backButtonContextMenu: some View {
+        Button {
+            performBack()
+        } label: {
+            Label(backButtonLabel, systemImage: "chevron.left")
+        }
+        .disabled(!router.canGoBack)
+
+        if router.canGoBack && !router.isShowingChat {
+            // Only offer "Back to Chat" when chat isn't already the immediate
+            // parent — otherwise it duplicates the single-step back action.
+            if router.navigationStack.last != .chat {
+                Divider()
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        router.returnToChat()
+                    }
+                } label: {
+                    Label("Back to Chat", systemImage: "bubble.left.and.bubble.right")
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Backdrop Modifier
+
+/// Liquid Glass by default; switches to a solid themed capsule when the user has
+/// "Reduce Transparency" enabled in System Settings → Accessibility.
+private struct IslandBackdropModifier: ViewModifier {
+    let reduceTransparency: Bool
+    let theme: any Theme
+
+    func body(content: Content) -> some View {
+        if reduceTransparency {
+            content
+                .background(
+                    Capsule()
+                        .fill(theme.secondaryBackground)
+                        .shadow(color: theme.primaryText.opacity(0.08), radius: 12, x: 0, y: 4)
+                )
+        } else {
+            content.glassEffect(.regular, in: .capsule)
+        }
     }
 }
 
@@ -75,7 +172,11 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
 
 // Back + trailing only (no center) — used by profiles, prompts, etc.
 extension DynamicIslandBar where CenterContent == EmptyView {
-    init(@ViewBuilder trailing: () -> TrailingContent) {
+    init(
+        onBack: (() -> Void)? = nil,
+        @ViewBuilder trailing: () -> TrailingContent
+    ) {
+        self.onBack = onBack
         self.center = EmptyView()
         self.trailing = trailing()
     }
@@ -83,8 +184,137 @@ extension DynamicIslandBar where CenterContent == EmptyView {
 
 // Back only (no center, no trailing) — used by settings, scheduler
 extension DynamicIslandBar where CenterContent == EmptyView, TrailingContent == EmptyView {
-    init() {
+    init(onBack: (() -> Void)? = nil) {
+        self.onBack = onBack
         self.center = EmptyView()
         self.trailing = EmptyView()
+    }
+}
+
+// MARK: - Title Label Helper
+
+/// Title label for islands that have no search bar — used by Settings, Scheduler,
+/// Download Manager, User Profile. Replaces the hand-rolled `HStack + Image + Text`
+/// pattern that drifted across container views.
+struct IslandTitleLabel: View {
+
+    let title: String
+    var icon: String? = nil
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(.caption, weight: .bold))
+                    .imageScale(.medium)
+                    .foregroundColor(theme.accentColor)
+                    .accessibilityHidden(true)
+            }
+            Text(title)
+                .font(theme.fontSubheadline.weight(.semibold))
+                .foregroundColor(theme.primaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(title))
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+// MARK: - Title + Trailing Convenience
+
+extension DynamicIslandBar where CenterContent == IslandTitleLabel {
+    /// Island with a title label in the center and a trailing slot.
+    init(
+        title: String,
+        icon: String? = nil,
+        onBack: (() -> Void)? = nil,
+        @ViewBuilder trailing: () -> TrailingContent
+    ) {
+        self.onBack = onBack
+        self.center = IslandTitleLabel(title: title, icon: icon)
+        self.trailing = trailing()
+    }
+}
+
+extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingContent == EmptyView {
+    /// Island with just a title label — replaces bare `DynamicIslandBar()` calls
+    /// that previously left the capsule visually empty.
+    init(title: String, icon: String? = nil, onBack: (() -> Void)? = nil) {
+        self.onBack = onBack
+        self.center = IslandTitleLabel(title: title, icon: icon)
+        self.trailing = EmptyView()
+    }
+}
+
+// MARK: - Unsaved-changes back guard
+
+/// Attach to any detail-view container to block back-navigation when the
+/// editor has unsaved changes. Pass the result as `onBack:` to the island
+/// bar's initializer and this modifier handles the confirmation dialog +
+/// discard path.
+///
+/// Usage:
+/// ```
+/// @State private var showingBackAlert = false
+///
+/// body {
+///     VStack {
+///         DynamicIslandBar(onBack: handleBack) { ... }
+///         ...
+///     }
+///     .unsavedChangesBackGuard(
+///         isDirty: editBuffer.isDirty,
+///         showingAlert: $showingBackAlert,
+///         onDiscard: { editBuffer.revert() }
+///     )
+/// }
+///
+/// private func handleBack() {
+///     if editBuffer.isDirty { showingBackAlert = true }
+///     else { router.goBack() }
+/// }
+/// ```
+struct UnsavedChangesBackGuardModifier: ViewModifier {
+    let isDirty: Bool
+    @Binding var showingAlert: Bool
+    var onDiscard: () -> Void = {}
+
+    @Environment(MainViewRouter.self) private var router
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "Unsaved changes",
+            isPresented: $showingAlert,
+            titleVisibility: .visible
+        ) {
+            Button("Discard Changes", role: .destructive) {
+                onDiscard()
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    router.goBack()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You have unsaved edits. Discard to leave, or Cancel to keep editing.")
+        }
+    }
+}
+
+extension View {
+    func unsavedChangesBackGuard(
+        isDirty: Bool,
+        showingAlert: Binding<Bool>,
+        onDiscard: @escaping () -> Void = {}
+    ) -> some View {
+        modifier(UnsavedChangesBackGuardModifier(
+            isDirty: isDirty,
+            showingAlert: showingAlert,
+            onDiscard: onDiscard
+        ))
     }
 }

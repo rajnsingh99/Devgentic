@@ -27,6 +27,10 @@ final class PromptModel {
     /// SwiftData natively persists Codable arrays — replaces StringArrayTransformer.
     var tags: [String]?
 
+    /// Whether the user has pinned this prompt. Default `false` so SwiftData's
+    /// lightweight migration can backfill existing rows without a schema version bump.
+    var isPinned: Bool = false
+
     init(
         id: UUID = UUID(),
         title: String,
@@ -35,7 +39,8 @@ final class PromptModel {
         createdAt: Date = Date(),
         lastUsedAt: Date? = nil,
         isUserDefined: Bool,
-        tags: [String]? = nil
+        tags: [String]? = nil,
+        isPinned: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -45,6 +50,7 @@ final class PromptModel {
         self.lastUsedAt = lastUsedAt
         self.isUserDefined = isUserDefined
         self.tags = tags
+        self.isPinned = isPinned
     }
 }
 
@@ -61,7 +67,8 @@ extension PromptModel {
             createdAt: createdAt,
             lastUsedAt: lastUsedAt,
             isUserDefined: isUserDefined,
-            tags: tags
+            tags: tags,
+            isPinned: isPinned
         )
     }
 
@@ -74,5 +81,6 @@ extension PromptModel {
         lastUsedAt = prompt.lastUsedAt
         isUserDefined = prompt.isUserDefined
         tags = prompt.tags
+        isPinned = prompt.isPinned
     }
 }

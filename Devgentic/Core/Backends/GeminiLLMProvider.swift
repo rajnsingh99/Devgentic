@@ -226,6 +226,97 @@ struct GeminiLLMProvider: LLMProvider {
         return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
     }
 
+    // MARK: - Native-Turn Cognitive Step (G12)
+
+    /// Native-turn overload. Accepts Gemini-shape messages from `GeminiToolTurnAdapter`
+    /// (role "model"/"user", parts with functionCall/functionResponse) plus normalized
+    /// system/user turns with `parts: [{text}]`.
+    /// Extracts role:"system" entries into Gemini's top-level `systemInstruction` field.
+    func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        var contents: [[String: Any]] = []
+        var systemParts: [[String: Any]] = []
+        for msg in nativeMessages {
+            let role = (msg["role"] as? String) ?? "user"
+            if role == "system" {
+                if let parts = msg["parts"] as? [[String: Any]] {
+                    systemParts.append(contentsOf: parts)
+                } else if let text = msg["content"] as? String {
+                    // Fallback: canonical shape that wasn't normalized.
+                    systemParts.append(["text": text])
+                }
+            } else {
+                contents.append(msg)
+            }
+        }
+
+        var body: [String: Any] = ["contents": contents]
+
+        if !systemParts.isEmpty {
+            body["systemInstruction"] = ["parts": systemParts]
+        }
+
+        if let tools = tools, !tools.isEmpty {
+            body["tools"] = tools
+        }
+
+        if let generationConfig = buildGenerationConfig() {
+            body["generationConfig"] = generationConfig
+        }
+
+        body["thinking_config"] = ["include_thoughts": true]
+
+        let url = try buildURL(endpoint: ":generateContent", apiKey: config.apiKey)
+        var request = URLRequest(url: url, timeoutInterval: config.timeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let candidates = json?["candidates"] as? [[String: Any]],
+              let firstCandidate = candidates.first else {
+            throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
+        }
+
+        if let finishReason = firstCandidate["finishReason"] as? String {
+            if finishReason == "SAFETY" {
+                throw LLMProviderError.invalidResponse("Generation blocked by Gemini Safety Settings.")
+            }
+            if finishReason == "MAX_TOKENS" {
+                let limitDesc = maxOutputTokens.map { String($0) } ?? "model default"
+                logger.warning("⚠️ Gemini cognitive step truncated (finishReason: MAX_TOKENS). Configured maxOutputTokens: \(limitDesc).")
+            }
+        }
+
+        guard let content = firstCandidate["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]] else {
+            throw LLMProviderError.invalidResponse("Missing content parts in Gemini response.")
+        }
+
+        var textResponse = ""
+        var thinkingTrace = ""
+        var pendingTools: [PendingToolCall] = []
+
+        for part in parts {
+            if let text = part["text"] as? String {
+                textResponse += text
+            } else if let thought = part["thought"] as? String {
+                thinkingTrace += thought
+            } else if let functionCall = part["functionCall"] as? [String: Any],
+                      let name = functionCall["name"] as? String {
+                let args = functionCall["args"] as? [String: Any] ?? [:]
+                let jsonArgs = args.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
+                pendingTools.append(PendingToolCall(id: UUID().uuidString, name: name, arguments: jsonArgs))
+            }
+        }
+
+        let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
+        let usage = json.flatMap { TokenUsage.fromGemini($0) }
+
+        return ModernCognitiveStep(reasoning: textResponse, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+    }
+
     // MARK: - Bot Flow (Streaming)
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {

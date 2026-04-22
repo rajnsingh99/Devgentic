@@ -26,25 +26,10 @@ struct UserPersonalContainerView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Island bar with actions
-            DynamicIslandBar {
-                // Center: Title + status
-                HStack(spacing: 8) {
-                    Image(systemName: "person.text.rectangle.fill")
-                        .font(.system(.caption))
-                        .foregroundColor(theme.accentColor)
-                        .accessibilityHidden(true)
-
-                    Text("Your Profile")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded)) // Fixed size: intentional (rounded design heading)
-                        .foregroundColor(theme.primaryText)
-
-                    if let lastUpdated = service.lastUpdated {
-                        Text("· \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.system(.caption2))
-                            .foregroundColor(theme.tertiaryText)
-                    }
-                }
-            } trailing: {
+            DynamicIslandBar(
+                title: titleWithTimestamp,
+                icon: "person.text.rectangle.fill"
+            ) {
                 islandActionButtons
             }
 
@@ -71,87 +56,68 @@ struct UserPersonalContainerView: View {
         }
     }
 
+    // MARK: - Title Builder
+
+    private var titleWithTimestamp: String {
+        if let lastUpdated = service.lastUpdated {
+            return "Your Profile · \(lastUpdated.formatted(date: .abbreviated, time: .shortened))"
+        }
+        return "Your Profile"
+    }
+
     // MARK: - Island Action Buttons
 
     private var islandActionButtons: some View {
         HStack(spacing: 8) {
             if isEditing {
                 // --- Edit mode: Revert + Save ---
-                Button {
+                IslandPillButton(
+                    title: "Revert",
+                    style: .secondary,
+                    accessibilityLabel: "Revert profile edits",
+                    keyboardShortcut: .cancelAction
+                ) {
                     withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
-                } label: {
-                    Text("Revert")
-                        .font(.system(.caption, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(theme.surfaceOverlay))
                 }
-                .buttonStyle(.plain)
 
-                Button {
+                IslandPillButton(
+                    title: "Save",
+                    style: .success,
+                    accessibilityLabel: "Save profile",
+                    keyboardShortcut: .defaultAction
+                ) {
                     service.updateProfile(with: editableText)
                     withAnimation(.easeInOut(duration: 0.2)) { isEditing = false }
-                } label: {
-                    Text("Save")
-                        .font(.system(.caption, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(theme.successColor))
                 }
-                .buttonStyle(.plain)
             } else {
                 // --- View mode: Analyze + Export + Edit + More ---
-                Button {
+                IslandPillButton(
+                    title: service.isAnalyzing ? "Analyzing…" : "Analyze",
+                    icon: service.isAnalyzing ? nil : "sparkles",
+                    style: .subtle,
+                    accessibilityLabel: "Analyze recent conversations",
+                    isLoading: service.isAnalyzing
+                ) {
                     Task { await service.analyzeRecentConversations() }
-                } label: {
-                    HStack(spacing: 4) {
-                        if service.isAnalyzing {
-                            ProgressView()
-                                .controlSize(.mini)
-                        } else {
-                            Image(systemName: "sparkles")
-                                .font(.system(.caption2))
-                        }
-                        Text(service.isAnalyzing ? "Analyzing..." : "Analyze")
-                            .font(.system(.caption, weight: .medium))
-                    }
-                    .foregroundColor(theme.accentColor)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(theme.accentColor.opacity(0.12)))
                 }
-                .buttonStyle(.plain)
-                .disabled(service.isAnalyzing)
 
-                Button {
+                IslandIconButton(
+                    symbol: "square.and.arrow.up",
+                    help: "Export as Markdown",
+                    accessibilityLabel: "Export profile as Markdown"
+                ) {
                     exportDocument = MarkdownProfileDocument(content: service.profileMarkdown)
                     showExportDialog = true
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.system(.caption))
-                        .foregroundColor(theme.primaryText)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(theme.surfaceOverlay))
                 }
-                .buttonStyle(.plain)
-                .help("Export as Markdown")
-                .accessibilityLabel("Export as Markdown")
 
-                Button {
+                IslandPillButton(
+                    title: "Edit",
+                    style: .secondary,
+                    accessibilityLabel: "Edit profile"
+                ) {
                     editableText = service.profileMarkdown
                     withAnimation(.easeInOut(duration: 0.2)) { isEditing = true }
-                } label: {
-                    Text("Edit")
-                        .font(.system(.caption, weight: .medium))
-                        .foregroundColor(theme.primaryText)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(theme.surfaceOverlay))
                 }
-                .buttonStyle(.plain)
 
                 Menu {
                     Button(role: .destructive) {
@@ -161,14 +127,12 @@ struct UserPersonalContainerView: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(.caption, weight: .bold))
-                        .foregroundColor(theme.primaryText)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(theme.surfaceOverlay))
+                        .islandCircleAffordance()
                 }
                 .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
                 .fixedSize()
+                .help("More options")
                 .accessibilityLabel("More options")
             }
         }

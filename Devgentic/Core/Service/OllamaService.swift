@@ -36,7 +36,11 @@ struct LocalModel: Identifiable, Hashable {
     init(name: String, response: OllamaShowResponse) {
         self.name = name
         self.details = response.details
-        self.cognitiveProfile = response.cognitiveProfile
+        // Use the method form so reasoning-only detection can check against `name`
+        // itself — some distilled fine-tunes (e.g. deepseek-r1:14b) report a
+        // tool-capable base family (qwen2) but the model name preserves the
+        // reasoning-only identity.
+        self.cognitiveProfile = response.cognitiveProfile(modelName: name)
         self.supportsThinking = response.supportsThinking
         self.tags = Self.generateTags(from: response)
     }
@@ -158,8 +162,16 @@ class OllamaService {
         }
     }
 
-    /// Forces a server check regardless of cooldown. Use for explicit user-triggered refresh actions.
-    func forceCheckServerStatus() async {
+    /// Forces a server check regardless of cooldown. The `UserAction` parameter
+    /// is a proof-of-intent token: this method MUST only be called from explicit
+    /// user-interaction sites (refresh button, ⌘R shortcut). See `UserAction`.
+    ///
+    /// History: previously took no argument, which made it trivially misuseable
+    /// from VM `init()` — and was in fact misused, hammering the server on every
+    /// view recreation. Requiring a `UserAction` surfaces the intent at the
+    /// signature and logs the trigger string for traceability.
+    func forceCheckServerStatus(triggeredBy action: UserAction) async {
+        logger.info("forceCheckServerStatus triggered by \(action)")
         lastFailedCheckTime = nil
         await checkServerStatusAndUpdateModels()
     }
@@ -187,7 +199,7 @@ class OllamaService {
                         } catch {
                             logger.error("Failed to fetch details for model \(name): \(error.localizedDescription)")
                             // Even if details fail, we can create a model with no tags
-                            let emptyResponse = OllamaShowResponse(license: nil, modelfile: nil, parameters: nil, template: nil, details: nil)
+                            let emptyResponse = OllamaShowResponse(license: nil, modelfile: nil, parameters: nil, template: nil, details: nil, capabilities: nil)
                             return LocalModel(name: name, response: emptyResponse)
                         }
                     }

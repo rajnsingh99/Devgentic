@@ -17,6 +17,7 @@ struct ImageGenConfigDetailView: View {
     var onDelete: ((UUID) -> Void)? = nil
     @Environment(BackendProfileService.self) var profileService
     @Environment(ToastManager.self) private var toastManager
+    @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
     // Advanced config local state
@@ -28,8 +29,9 @@ struct ImageGenConfigDetailView: View {
     // Deletion State
     @State private var showingDeleteAlert = false
 
-    // Button Hover States
-    @State private var isDeleteHovered = false
+    // Unsaved-changes guard on back navigation.
+    @State private var showingBackAlert = false
+
 
     // MARK: - Convenience Accessors
 
@@ -112,7 +114,7 @@ struct ImageGenConfigDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar {
+            DynamicIslandBar(onBack: handleBackTap) {
                 actionButtons
             }
 
@@ -230,6 +232,21 @@ struct ImageGenConfigDetailView: View {
         .onChange(of: localAdvancedConfig) { _, _ in
             guard !isLoadingAdvancedConfig else { return }
             advancedSettingsBinding.wrappedValue = profileService.encodeConfig(from: localAdvancedConfig)
+        }
+        .unsavedChangesBackGuard(
+            isDirty: editBuffer.isDirty,
+            showingAlert: $showingBackAlert,
+            onDiscard: { editBuffer.revert() }
+        )
+    }
+
+    private func handleBackTap() {
+        if editBuffer.isDirty {
+            showingBackAlert = true
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                router.goBack()
+            }
         }
     }
 
@@ -363,24 +380,24 @@ struct ImageGenConfigDetailView: View {
     private var actionButtons: some View {
         HStack(spacing: 8) {
             if editBuffer.isDirty {
-                Button {
+                IslandPillButton(
+                    title: "Revert",
+                    style: .secondary,
+                    accessibilityLabel: "Revert unsaved changes",
+                    keyboardShortcut: .cancelAction
+                ) {
                     editBuffer.revert()
                     isLoadingAdvancedConfig = true
                     loadAdvancedConfig()
                     isLoadingAdvancedConfig = false
-                } label: {
-                    Text("Revert")
-                        .font(theme.fontCaption.weight(.medium))
                 }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.cancelAction)
-                .accessibilityLabel("Revert unsaved changes")
-                .foregroundColor(theme.primaryText)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(theme.surfaceOverlay))
 
-                Button {
+                IslandPillButton(
+                    title: "Save",
+                    style: .primary,
+                    accessibilityLabel: "Save profile changes",
+                    keyboardShortcut: .defaultAction
+                ) {
                     do {
                         try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
@@ -388,35 +405,17 @@ struct ImageGenConfigDetailView: View {
                     } catch {
                         toastManager.show(error.localizedDescription, style: .error)
                     }
-                } label: {
-                    Text("Save")
-                        .font(theme.fontCaption.weight(.semibold))
                 }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.defaultAction)
-                .accessibilityLabel("Save profile changes")
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(theme.accentColor))
             }
 
-            Button(role: .destructive) {
+            IslandIconButton(
+                symbol: "trash",
+                style: .destructive,
+                help: "Delete profile",
+                accessibilityLabel: "Delete this profile"
+            ) {
                 showingDeleteAlert = true
-            } label: {
-                Image(systemName: "trash")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(isDeleteHovered ? .white : theme.errorColor.opacity(0.8))
-                    .frame(width: 28, height: 28)
-                    .background(
-                        Circle()
-                            .fill(isDeleteHovered ? theme.errorColor : theme.errorColor.opacity(0.1))
-                    )
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Delete this profile")
-            .onHover { isDeleteHovered = $0 }
-            .animation(.easeInOut(duration: 0.15), value: isDeleteHovered)
         }
     }
 }

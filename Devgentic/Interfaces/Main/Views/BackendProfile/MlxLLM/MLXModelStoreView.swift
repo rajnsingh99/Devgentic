@@ -222,10 +222,9 @@ struct MLXModelStoreContent: View {
                     }
                 }
 
-                // MARK: - Download Status Banner
-                if viewModel.isDownloading {
-                    downloadBanner
-                }
+                // Global banner intentionally omitted — per-row
+                // `ModelDownloadStatusView` handles inline progress and the
+                // Downloads sidebar surfaces any active pull cross-backend.
             }
         }
     }
@@ -431,24 +430,34 @@ struct ModelCardView: View {
                         )
                     }
                 } else {
-                    Button {
-                        let verdict = fitAssessment.verdict
-                        if verdict == .risky || verdict == .incompatible {
-                            showingFitAdvisory = true
-                        } else {
-                            viewModel.downloadModel(model)
+                    // Shared status view routes through DownloadCoordinator
+                    // (idempotent — shortcuts to "already installed" toast
+                    // if the filesystem scan lied). Fit advisory still gates
+                    // the actual pull via onDownloadRequested.
+                    ModelDownloadStatusView(
+                        backend: .mlx,
+                        modelIdentifier: model.id,
+                        displayName: model.displayName,
+                        isInstalled: false,
+                        onDownloadRequested: {
+                            let verdict = fitAssessment.verdict
+                            if verdict == .risky || verdict == .incompatible {
+                                showingFitAdvisory = true
+                            } else {
+                                // Must route through DownloadCoordinator
+                                // (not `viewModel.downloadModel` directly) so
+                                // the pre-seed HF size fetch fires — without
+                                // it the bridge has no total bytes, the
+                                // speed sampler can't compute a rate, and
+                                // the UI is stuck on "calculating…".
+                                Task { @MainActor in
+                                    _ = await DownloadCoordinator.startMLXDownloadIfNeeded(
+                                        repoId: model.id
+                                    )
+                                }
+                            }
                         }
-                    } label: {
-                        if viewModel.isDownloading && viewModel.currentDownloadName == model.id {
-                            ProgressView().controlSize(.small).frame(width: 60)
-                        } else {
-                            Text("Get").fontWeight(.medium).frame(minWidth: 60)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.regular)
-                    .tint(theme.accentColor)
-                    .disabled(viewModel.isDownloading && viewModel.currentDownloadName != model.id)
+                    )
                 }
             }
         }
@@ -471,7 +480,13 @@ struct ModelCardView: View {
                 assessment: fitAssessment,
                 onDownloadAnyway: {
                     showingFitAdvisory = false
-                    viewModel.downloadModel(model)
+                    // Same reason as the main Download button above —
+                    // must go through DownloadCoordinator for pre-seed.
+                    Task { @MainActor in
+                        _ = await DownloadCoordinator.startMLXDownloadIfNeeded(
+                            repoId: model.id
+                        )
+                    }
                 },
                 onDismiss: {
                     showingFitAdvisory = false

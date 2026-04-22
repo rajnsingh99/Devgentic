@@ -224,78 +224,16 @@ struct NativeHistoryConverter {
 
     // MARK: - Assistant Content Builder
 
-    /// Builds the assistant message content, including compact tool summaries
-    /// when tools were executed during the turn.
+    /// Builds the assistant message content — **prose response text only**.
+    ///
+    /// Prior iterations of this function prepended `[Used: tool(args) → result]`
+    /// summaries before the response. Models reliably mimic this format in their
+    /// next response, inventing fake `[Used:]` markers and fabricating tool
+    /// outputs. Tool-execution context now lives in the system-prompt's
+    /// `<episodic_memory>` XML (built by `EpisodicHistoryFormatter`), so this
+    /// function keeps the assistant turn clean of anything resembling a
+    /// structural tool call.
     private static func buildAssistantContent(from message: ChatMessage) -> String {
-        let responseText = message.content.textContent ?? ""
-
-        // Extract completed tool executions
-        var toolSummaries: [String] = []
-        for event in message.timelineEvents {
-            if case .toolExecution(let data) = event, !data.isExecuting {
-                let summary = buildToolSummary(data)
-                toolSummaries.append(summary)
-            }
-        }
-
-        if toolSummaries.isEmpty {
-            return responseText
-        }
-
-        // Prepend compact tool summary before the response text
-        let toolBlock = toolSummaries.joined(separator: "\n")
-        if responseText.isEmpty {
-            return toolBlock
-        }
-        return toolBlock + "\n\n" + responseText
-    }
-
-    /// Builds a compact one-line summary of a tool execution.
-    /// e.g. "[Used: search_files(pattern=*.py, path=/tmp) → 3 results found]"
-    /// e.g. "[Failed: delete_file(path=/tmp/cache) → Permission denied]"
-    private static func buildToolSummary(_ data: ToolExecutionData) -> String {
-        let success = data.isSuccess ?? false
-        let prefix = success ? "Used" : "Failed"
-
-        // Parse params for compact display
-        let paramsDisplay: String
-        if let paramsDict = parseParamsCompact(data.params), !paramsDict.isEmpty {
-            paramsDisplay = "(" + paramsDict.map { "\($0.key)=\($0.value)" }.joined(separator: ", ") + ")"
-        } else {
-            paramsDisplay = ""
-        }
-
-        // Truncate output for compact summary
-        let outputDisplay: String
-        if let output = data.output {
-            let truncated = output.count > 100 ? String(output.prefix(97)) + "..." : output
-            outputDisplay = " → " + truncated.replacingOccurrences(of: "\n", with: " ")
-        } else {
-            outputDisplay = ""
-        }
-
-        return "[\(prefix): \(data.name)\(paramsDisplay)\(outputDisplay)]"
-    }
-
-    /// Parses JSON params string into a compact key-value dictionary.
-    private static func parseParamsCompact(_ jsonString: String) -> [String: String]? {
-        guard !jsonString.isEmpty,
-              let data = jsonString.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-
-        var result: [String: String] = [:]
-        for (key, value) in obj {
-            switch value {
-            case let str as String:
-                result[key] = str.count > 50 ? String(str.prefix(47)) + "..." : str
-            case let num as NSNumber:
-                result[key] = "\(num)"
-            default:
-                break
-            }
-        }
-        return result
+        message.content.textContent ?? ""
     }
 }

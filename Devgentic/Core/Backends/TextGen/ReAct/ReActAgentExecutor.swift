@@ -84,17 +84,36 @@ actor ReActAgentExecutor: Executor {
                     let toolMediator = ToolExecutionMediator()
                     let terminationEvaluator = EpisodeTerminationEvaluator()
 
+                    // --- G12: Native-Turn State Machine ---
+                    // When the generator is NativeStructuredGenerator we own a growing
+                    // conversation-turns array across iterations instead of re-compiling
+                    // working memory into a user message each turn. On iter 1 the array
+                    // is seeded from PromptBuilder (system + history + kickoff user);
+                    // each subsequent iter appends `assistant(tool_calls) → tool(result)`
+                    // turns produced by the provider-specific `ToolTurnAdapter`.
+                    // For MLX / dialect generators this stays nil — those keep the
+                    // legacy `<working_memory>` user-message path.
+                    let nativeGenerator: NativeStructuredGenerator? = input.generatorStrategy as? NativeStructuredGenerator
+                    var liveConversationTurns: [[String: Any]] = []
+
                     // --- G6: Reading-Tool Gate ---
                     // `update_project_context` is hidden from the tool schema until the agent
-                    // has successfully invoked a content-reading tool twice. Prevents weak
-                    // local models from speculatively writing project memory on turn 2 before
-                    // they've read any actual source. Tools that only scan structure
-                    // (codebase_map, list_directory, glob_files) don't qualify — only tools
-                    // that return real file content do.
+                    // has successfully invoked grounding tools. Prevents weak local models
+                    // from speculatively writing project memory before they've explored.
+                    // `codebase_map` counts because on the Code interface it returns a rich
+                    // structural survey that substantively grounds the model — excluding it
+                    // was causing exploration-heavy queries ("Analyse the project") to burn
+                    // extra iterations bouncing off the gate.
                     var readingToolSuccessCount = 0
-                    let readingToolNames: Set<String> = ["read_file", "find_definition", "code_search", "file_overview"]
+                    let readingToolNames: Set<String> = [
+                        "read_file", "find_definition", "code_search", "file_overview", "codebase_map"
+                    ]
                     let gatedToolNames: Set<String> = ["update_project_context"]
-                    let readingGateThreshold = 2
+                    // Small-tier models (≤14B — e.g. qwen2.5-coder:14b) thrash against a
+                    // threshold of 2 because they tend to start with one structural tool and
+                    // immediately want to persist. Lower the bar for them; medium/large
+                    // models keep the stricter default.
+                    let readingGateThreshold: Int = (input.modelTier == .small) ? 1 : 2
                     var readingGateLoggedUnlock = false
 
                     // --- Start Episode ---
@@ -191,7 +210,23 @@ actor ReActAgentExecutor: Executor {
                             taskDescription: input.workflowContext?.taskDescription,
                             promptLayerConfig: input.workflowContext != nil ? .workflow : .agent
                         )
-                        
+
+                        // G12: Seed native conversation turns on iter 1. System prompt and
+                        // history are built via PromptBuilder (no working_memory), normalized
+                        // to the provider's shape, then the kickoff user message carrying the
+                        // original query is appended. Subsequent iterations only APPEND
+                        // assistant/tool turns — the prefix stays byte-stable.
+                        if currentIteration == 1, let nativeGen = nativeGenerator {
+                            let canonicalMessages = nativeGen.compileMessages(from: context)
+                            liveConversationTurns = canonicalMessages.map { nativeGen.toolTurnAdapter.normalizeCanonical(message: $0) }
+                            liveConversationTurns.append(
+                                nativeGen.toolTurnAdapter.normalizeCanonical(
+                                    message: ["role": "user", "content": input.userInput]
+                                )
+                            )
+                            logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns)")
+                        }
+
                         try Task.checkCancellation()
 
                         // --- Memory Pressure Check ---
@@ -208,11 +243,13 @@ actor ReActAgentExecutor: Executor {
                             // model toward synthesis rather than continued exploration.
                             // This is a soft signal — the agent can still call tools if needed.
                             if utilization >= 1.0 {
-                                memoryStrategy.recordSystemAlert(
-                                    msg: "Working memory is full. Older observations have been evicted. "
-                                       + "Prioritize synthesizing a final answer from available context "
-                                       + "rather than calling additional tools."
-                                )
+                                let memoryAlert = "Working memory is full. Older observations have been evicted. "
+                                    + "Prioritize synthesizing a final answer from available context "
+                                    + "rather than calling additional tools."
+                                memoryStrategy.recordSystemAlert(msg: memoryAlert)
+                                if let adapter = nativeGenerator?.toolTurnAdapter {
+                                    liveConversationTurns.append(adapter.systemAlertTurn(message: memoryAlert))
+                                }
                             }
                         }
 
@@ -229,11 +266,22 @@ actor ReActAgentExecutor: Executor {
                             logger.info("📝 Compiled Scratchpad Length: \(context.compiledScratchpad.count) chars. Budget utilization: \(String(format: "%.0f", utilization * 100))%.")
                             
                             let genStart = Date()
-                            step = try await input.generatorStrategy.generateCognitiveStep(
-                                model: spyModel,
-                                context: context,
-                                iteration: currentIteration
-                            )
+                            if let nativeGen = nativeGenerator {
+                                // G12 native path: thread the growing turn array through the provider.
+                                step = try await nativeGen.generateNativeStep(
+                                    model: spyModel,
+                                    nativeMessages: liveConversationTurns,
+                                    availableTools: availableToolsThisIteration,
+                                    iteration: currentIteration
+                                )
+                            } else {
+                                // Legacy path (MLX, dialect generators): rebuilds messages from context each iter.
+                                step = try await input.generatorStrategy.generateCognitiveStep(
+                                    model: spyModel,
+                                    context: context,
+                                    iteration: currentIteration
+                                )
+                            }
                             let genDuration = Date().timeIntervalSince(genStart)
 
                             // G12 instrumentation: per-iter latency + scratchpad growth delta.
@@ -278,6 +326,9 @@ actor ReActAgentExecutor: Executor {
 
                             case .parseRetry(let systemAlert, let attemptCount, let maxAttempts):
                                 memoryStrategy.recordSystemAlert(msg: systemAlert)
+                                if let adapter = nativeGenerator?.toolTurnAdapter {
+                                    liveConversationTurns.append(adapter.systemAlertTurn(message: systemAlert))
+                                }
                                 continuation.yield(.warning(category: .parseFailure, message: "Invalid JSON output. Retrying (\(attemptCount)/\(maxAttempts))..."))
                                 await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                                 continue cognitiveLoop
@@ -321,6 +372,31 @@ actor ReActAgentExecutor: Executor {
                                 continuation.yield(.executionFinished(outcome: .failed, reason: reason))
                                 continuation.finish()
                                 return
+
+                            case .capabilityFailure(let reason):
+                                // Hard capability gap — emit as `.error` so the UI renders a
+                                // distinct error card instead of mixing the message into
+                                // streaming prose where it looks like agent output.
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: .providerCapabilityMissing,
+                                    origin: "ReActAgentExecutor.retryStrategy.capabilityFailure",
+                                    message: reason,
+                                    context: ["iteration": "\(currentIteration)"]
+                                )
+                                await TraceRecorder.shared.emitAgentError(
+                                    span: input.traceContext,
+                                    error: classified,
+                                    iteration: currentIteration
+                                )
+                                if !input.suppressEpisodeManagement {
+                                    sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
+                                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                                    logState.info("💾 Auto-Patched Active Episode to: FAILED (capability)")
+                                }
+                                continuation.yield(.error(reason))
+                                continuation.yield(.executionFinished(outcome: .failed, reason: reason))
+                                continuation.finish()
+                                return
                             }
                         }
                         
@@ -358,13 +434,52 @@ actor ReActAgentExecutor: Executor {
                         case .completed(let finalThought):
                             executionSummary.finalAgentThought = finalThought
                             break cognitiveLoop
-                        case .suspectedFormatFailure:
-                            // The LLM described tool usage in prose but didn't produce structured tool calls.
-                            // Inject a corrective system alert and retry the generation.
-                            let alert = "CRITICAL: Your last response described tool usage in plain text but did not include a structured tool call. You MUST respond with a valid JSON object containing a `tool_calls` array. Do NOT describe tool calls in prose — actually invoke them."
-                            memoryStrategy.recordSystemAlert(msg: alert)
-                            continuation.yield(.warning(category: .formatCorrection, message: "Format correction: model described tool intent without structured output. Retrying..."))
-                            logger.warning("🔄 Suspected format failure. Injecting corrective alert and retrying iteration \(currentIteration).")
+                        case .suspectedFormatFailure(let originalReason, _):
+                            // Typed parse failure — build a reason-specific corrective alert
+                            // so the model gets targeted feedback (e.g. "unknown tool name,
+                            // did you mean X?" vs "your JSON had syntax errors"). The old
+                            // generic "describe tool calls in prose" message is preserved
+                            // as the fallback inside `ParseFailureReason.modelCorrectiveAlert`
+                            // when the failure shape is `.proseDescribedIntent`.
+                            //
+                            // If the model called a tool name that belongs to the gated set
+                            // (see G6 reading-gate), promote `.unknownToolName → .gatedTool`
+                            // so the UI chip and model alert both explain "locked, read N
+                            // more files" instead of an alarming "Unknown tool" hallucination
+                            // claim. The tool exists — it's just not available yet.
+                            let reason: ParseFailureReason = {
+                                if case .unknownToolName(let attempted, _) = originalReason,
+                                   gatedToolNames.contains(attempted),
+                                   readingToolSuccessCount < readingGateThreshold {
+                                    let remaining = max(0, readingGateThreshold - readingToolSuccessCount)
+                                    let noun = remaining == 1 ? "file" : "files"
+                                    let hint = "Read \(remaining) more source \(noun) (e.g. `read_file`, `file_overview`, `codebase_map`) to unlock it"
+                                    return .gatedTool(attempted: attempted, unlockHint: hint)
+                                }
+                                return originalReason
+                            }()
+
+                            let toolNames = availableToolsThisIteration.map(\.name)
+                            let modelAlert = reason.modelCorrectiveAlert(availableToolNames: toolNames)
+                            memoryStrategy.recordSystemAlert(msg: modelAlert)
+                            if let adapter = nativeGenerator?.toolTurnAdapter {
+                                liveConversationTurns.append(adapter.systemAlertTurn(message: modelAlert))
+                            }
+
+                            // Gated tools get a quieter chip — it's a policy lock, not a
+                            // format correction. Other failure shapes retain the existing
+                            // "Format correction (…)" prefix so regressions are obvious.
+                            let warningMessage: String
+                            if case .gatedTool = reason {
+                                warningMessage = reason.uiChipLabel
+                            } else {
+                                warningMessage = "Format correction (\(reason.uiChipLabel)): retrying iteration \(currentIteration)."
+                            }
+                            continuation.yield(.warning(
+                                category: .formatCorrection,
+                                message: warningMessage
+                            ))
+                            logger.warning("🔄 Suspected format failure [\(reason.uiChipLabel)]. Injecting typed corrective alert and retrying iteration \(currentIteration).")
                             continue cognitiveLoop
                         case .proceed:
                             break
@@ -396,6 +511,16 @@ actor ReActAgentExecutor: Executor {
                         if !readingGateLoggedUnlock && readingToolSuccessCount >= readingGateThreshold {
                             readingGateLoggedUnlock = true
                             logger.info("🔓 Reading gate unlocked (\(readingToolSuccessCount)/\(readingGateThreshold) successful reading tools) — gated tools now available: \(gatedToolNames.sorted().joined(separator: ", "))")
+
+                            // Tell the model the tool is now available and how to use it.
+                            // Previously this guidance lived in the system prompt (causing
+                            // the model to attempt the call while the gate was still closed).
+                            memoryStrategy.recordSystemAlert(msg: CodeSystemPrompt.updateProjectContextUnlockAlert)
+                            if let adapter = nativeGenerator?.toolTurnAdapter {
+                                liveConversationTurns.append(adapter.systemAlertTurn(
+                                    message: CodeSystemPrompt.updateProjectContextUnlockAlert
+                                ))
+                            }
                         }
 
                         // --- Terminal Signal Fast-Exit (final_answer) ---
@@ -428,6 +553,37 @@ actor ReActAgentExecutor: Executor {
                         // Commit observations to memory strategy
                         for obs in observations {
                             memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
+                        }
+
+                        // G12: Extend native conversation turns with this iter's assistant(tool_calls)
+                        // + tool(result) exchange. Observations are sorted to match the order of the
+                        // model's original tool_calls (Gemini matches functionResponse → functionCall
+                        // by position) and truncated via the memory strategy so a huge tool output
+                        // doesn't blow past the per-entry cap that the scratchpad path already enforces.
+                        // Reasoning is sanitized — same policy as the legacy recordReasoning path —
+                        // so leaked markdown fences / tool-call prose don't pollute the conversation.
+                        if let nativeGen = nativeGenerator {
+                            let orderedObservations = sortObservationsByToolCallOrder(
+                                observations: observations,
+                                toolCalls: step.toolCalls
+                            )
+                            let truncatedObservations = orderedObservations.map { obs in
+                                obs.withResult(memoryStrategy.truncatedResult(for: obs.result))
+                            }
+                            let sanitizedReasoning: String? = {
+                                guard !step.reasoning.isEmpty, step.reasoning != step.thought else { return nil }
+                                let s = OutputSanitizer.sanitizeForUI(step.reasoning)
+                                return s.isEmpty ? nil : s
+                            }()
+                            liveConversationTurns.append(
+                                nativeGen.toolTurnAdapter.assistantTurn(
+                                    toolCalls: step.toolCalls,
+                                    reasoning: sanitizedReasoning
+                                )
+                            )
+                            liveConversationTurns.append(
+                                contentsOf: nativeGen.toolTurnAdapter.toolResultTurns(observations: truncatedObservations)
+                            )
                         }
 
                         // Wire ask_user responses to latestClarification for prompt injection
@@ -472,6 +628,9 @@ actor ReActAgentExecutor: Executor {
                             //           strike.
                             continuation.yield(.warning(category: .circuitBreaker, message: uiMessage))
                             memoryStrategy.recordSystemAlert(msg: modelAlert)
+                            if let adapter = nativeGenerator?.toolTurnAdapter {
+                                liveConversationTurns.append(adapter.systemAlertTurn(message: modelAlert))
+                            }
                         case .proceed, .intervene:
                             break
                         }
@@ -482,7 +641,11 @@ actor ReActAgentExecutor: Executor {
                             case .skipAndContinue:
                                 // Log the failure but let the agent continue reasoning
                                 continuation.yield(.thought("⚠️ Tool failures detected — skipping and continuing."))
-                                memoryStrategy.recordSystemAlert(msg: "Previous tool calls failed: \(abortReason). Continue with available information.")
+                                let skipAlert = "Previous tool calls failed: \(abortReason). Continue with available information."
+                                memoryStrategy.recordSystemAlert(msg: skipAlert)
+                                if let adapter = nativeGenerator?.toolTurnAdapter {
+                                    liveConversationTurns.append(adapter.systemAlertTurn(message: skipAlert))
+                                }
                                 circuitBreaker.resetCountersOnSuccess()
                                 // Don't abort — fall through to next iteration
 
@@ -490,7 +653,11 @@ actor ReActAgentExecutor: Executor {
                                 // Inject a fallback hint and let the agent try a different approach
                                 continuation.yield(.thought("⚠️ Tool failures detected — trying alternative approach."))
                                 let userMessage = input.errorRecovery.fallbackMessage ?? ErrorRecovery.defaultFallbackMessage
-                                memoryStrategy.recordSystemAlert(msg: "Tools are failing repeatedly: \(abortReason). \(userMessage)")
+                                let fallbackAlert = "Tools are failing repeatedly: \(abortReason). \(userMessage)"
+                                memoryStrategy.recordSystemAlert(msg: fallbackAlert)
+                                if let adapter = nativeGenerator?.toolTurnAdapter {
+                                    liveConversationTurns.append(adapter.systemAlertTurn(message: fallbackAlert))
+                                }
                                 circuitBreaker.resetCountersOnSuccess()
                                 // Don't abort — fall through to next iteration
 
@@ -696,6 +863,48 @@ actor ReActAgentExecutor: Executor {
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
-    
+
+}
+
+// MARK: - G12 Native-Turn Helpers
+
+/// Reorders observations to match the positional order of the assistant's original
+/// `PendingToolCall`s. Gemini matches `functionResponse` parts back to `functionCall`
+/// parts by position (no tool_call_id), so an out-of-order `TaskGroup` completion would
+/// produce wrong correspondence. Claude and OpenAI match by id — this is defensive and
+/// cheap, so we sort uniformly regardless of provider.
+fileprivate func sortObservationsByToolCallOrder(
+    observations: [ToolObservation],
+    toolCalls: [PendingToolCall]
+) -> [ToolObservation] {
+    let idToIndex: [String: Int] = Dictionary(
+        uniqueKeysWithValues: toolCalls.enumerated().map { ($0.element.id, $0.offset) }
+    )
+    return observations.sorted { lhs, rhs in
+        let lIndex = idToIndex[lhs.toolCallId] ?? Int.max
+        let rIndex = idToIndex[rhs.toolCallId] ?? Int.max
+        return lIndex < rIndex
+    }
+}
+
+fileprivate extension ToolObservation {
+    /// Returns a copy with the `result` field replaced. Used on the native-turn path
+    /// to swap in the `WorkingMemoryStrategy`-truncated result before serializing into
+    /// `tool_result` turns — keeps per-entry budget policy in one place.
+    func withResult(_ newResult: String) -> ToolObservation {
+        ToolObservation(
+            stepId: stepId,
+            toolCallId: toolCallId,
+            toolName: toolName,
+            result: newResult,
+            summary: summary,
+            isSuccess: isSuccess,
+            params: params,
+            output: output,
+            artifacts: artifacts,
+            isTerminalSignal: isTerminalSignal,
+            terminalKind: terminalKind
+        )
+    }
 }
 

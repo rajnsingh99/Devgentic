@@ -135,7 +135,7 @@ struct AdvancedPromptEditorView: View {
     @Environment(\.appTheme) private var theme
     
     // State for supporting components
-    @State private var promptLibraryVM = PromptLibraryViewModel()
+    @State private var promptLibraryVM = PromptEditViewModel()
     @State private var showingSavePopover: Bool = false
     @State private var showingGuide: Bool = false
     
@@ -252,8 +252,8 @@ struct AdvancedPromptEditorView: View {
                 Spacer()
 
                 Button(action: {
-                    promptLibraryVM.prepareForCreateNewPrompt()
-                    promptLibraryVM.editablePromptText = localText
+                    promptLibraryVM.loadCreateDraft()
+                    promptLibraryVM.text = localText
                     showingSavePopover = true
                 }) {
                     Label("Save to Library", systemImage: "plus.square.on.square")
@@ -311,7 +311,7 @@ struct TokenizingTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var configuredTools: [Tool]
     var theme: Theme
-    var promptLibraryVM: PromptLibraryViewModel
+    var promptLibraryVM: PromptEditViewModel
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)

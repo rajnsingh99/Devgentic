@@ -19,13 +19,13 @@ struct SettingsDetailContainerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar()
+            DynamicIslandBar(title: category.rawValue, icon: category.iconName)
 
             ScrollView {
                 category.destination
                     .environment(mainViewModel)
                     .padding(24)
-                    .frame(maxWidth: 1000)
+                    .frame(maxWidth: ViewLayout.maxContentWidth)
                     .frame(maxWidth: .infinity)
             }
         }

@@ -135,7 +135,8 @@ enum PromptBuilder {
         isNativeFlow: Bool = false,
         layerConfig: PromptLayerConfig = .agent,
         userMessagePrefix: String? = nil,
-        wrapping: PromptWrapping = .xml
+        wrapping: PromptWrapping = .xml,
+        includeWorkingMemory: Bool = true
     ) -> [[String: String]] {
 
         // =====================================================================
@@ -181,11 +182,17 @@ enum PromptBuilder {
             }
         }
 
-        // Layer 7: CONTEXT — Episodic memory (configurable, 3-path injection)
+        // Layer 7: CONTEXT — Episodic memory (embedded in system prompt for all flows).
+        //
+        // Hybrid history strategy: episodic XML lives in the system prompt so the
+        // model treats it as developer-supplied context, not as prior assistant
+        // output to mimic. Native flows also get prose-only user/assistant turn
+        // pairs appended below — those carry natural chat flow, while the XML
+        // here carries tool-execution context. Keeping the two channels separate
+        // prevents the "[Used: tool(...) → result]" mimicry loop we saw when
+        // tool summaries were baked into assistant turns.
         if layerConfig.includeEpisodicMemory {
-            if let history = context.recentHistory, !history.isEmpty,
-               context.nativeHistoryTurns == nil, !isNativeFlow {
-                // Non-native: embed in system prompt (episodic XML has its own tags)
+            if let history = context.recentHistory, !history.isEmpty {
                 systemContent += "\n\n\(history)"
             }
         }
@@ -219,27 +226,31 @@ enum PromptBuilder {
 
         var messages: [[String: String]] = [["role": "system", "content": systemContent]]
 
-        // History messages (native flows, when episodic memory is enabled)
+        // History messages: prose-only user/assistant turn pairs carry conversation
+        // flow for native providers. Tool-execution context is already embedded in
+        // the system prompt's episodic XML above — these turns no longer contain
+        // `[Used: tool(...) → result]` summaries.
         if layerConfig.includeEpisodicMemory {
             if let turns = context.nativeHistoryTurns, !turns.isEmpty {
-                // Native: real turn-by-turn history as user/assistant message pairs
                 messages.append(contentsOf: turns)
-            } else if let history = context.recentHistory, !history.isEmpty, isNativeFlow {
-                // Native episodic fallback: XML as user message
-                messages.append(["role": "user", "content": history])
             }
         }
 
-        // User message: optional prefix (workflow <input>, bot query) + working memory
+        // User message: optional prefix (workflow <input>, bot query) + working memory.
+        // The native-turn path (G12) passes `includeWorkingMemory: false` so the
+        // scratchpad isn't re-injected every iteration — observations flow instead
+        // through `assistant(tool_calls) → tool(result)` turns managed by the executor.
         var userContent = ""
         if let prefix = userMessagePrefix {
             userContent += prefix
         }
 
-        let scratchpad = context.compiledScratchpad
-        if !scratchpad.isEmpty && scratchpad != "No actions taken yet." {
-            if !userContent.isEmpty { userContent += "\n\n" }
-            userContent += wrapping.section("working_memory", content: scratchpad)
+        if includeWorkingMemory {
+            let scratchpad = context.compiledScratchpad
+            if !scratchpad.isEmpty && scratchpad != "No actions taken yet." {
+                if !userContent.isEmpty { userContent += "\n\n" }
+                userContent += wrapping.section("working_memory", content: scratchpad)
+            }
         }
 
         if !userContent.isEmpty {
@@ -262,7 +273,8 @@ extension CognitiveGenerator {
         isNativeFlow: Bool = false,
         layerConfig: PromptLayerConfig = .agent,
         userMessagePrefix: String? = nil,
-        wrapping: PromptWrapping = .xml
+        wrapping: PromptWrapping = .xml,
+        includeWorkingMemory: Bool = true
     ) -> [[String: String]] {
         PromptBuilder.buildStandardMessages(
             context: context,
@@ -270,7 +282,8 @@ extension CognitiveGenerator {
             isNativeFlow: isNativeFlow,
             layerConfig: layerConfig,
             userMessagePrefix: userMessagePrefix,
-            wrapping: wrapping
+            wrapping: wrapping,
+            includeWorkingMemory: includeWorkingMemory
         )
     }
 }

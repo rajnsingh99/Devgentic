@@ -19,13 +19,15 @@ struct JsonStructuredGenerator: CognitiveGenerator {
 
     let dialectRules: String? = """
     CRITICAL TERMINATION RULE:
-    If you have fully answered the user's request OR cannot proceed, you MUST output:
+    When you have fully answered the user's request OR cannot proceed further, you MUST
+    call the `final_answer` tool with your complete response in the `answer` field:
     {
-      "content": "I have found the information and am ready to respond.",
-      "tool_name": null,
-      "arguments": null
+      "content": "Composing the final response.",
+      "tool_name": "final_answer",
+      "arguments": { "answer": "Your complete response to the user as markdown." }
     }
-    Do NOT output tool_name: null if you still need to execute an action.
+    This is the ONLY way to end a task. Do NOT output conversational text outside the JSON,
+    and do NOT use null `tool_name` or an empty response as a termination signal.
 
     CRITICAL RULES:
     1. 'content' is a REQUIRED field. Do not omit it.

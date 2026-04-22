@@ -8,6 +8,8 @@
 //  Refactored on 27/08/25 to remove redundant NewChatTabView.
 //  Refactored on 27/08/25 to improve UI to match modern standards.
 //  Refactored on 28/08/25 to slim down the sidebar for a cleaner aesthetic.
+//  Refactored on 21/04/26 — selectedTab persisted via @AppStorage, shadow
+//  themed, user-resizable via drag handle on trailing edge.
 //
 
 import SwiftUI
@@ -15,13 +17,22 @@ import os
 
 // MARK: - Main Sidebar Container View
 struct VSCodifiedSidebarContainerView: View {
-    
-    @State private var selectedTab: SidebarTab? = .conversations
+
+    /// Persists across launches — previously `@State` reset the tab to
+    /// `.conversations` every cold start.
+    @AppStorage("sidebar.selectedTab") private var selectedTabRawValue: String = SidebarTab.conversations.rawValue
+
     @Binding var isSidebarVisible: Bool
     @Binding var sidebarWidth: CGFloat
-    
-    private let fixedSidebarWidth: CGFloat = 320
+
+    private let defaultSidebarWidth: CGFloat = 320
+    private let minSidebarWidth: CGFloat = 240
+    private let maxSidebarWidth: CGFloat = 520
     private let activityBarWidth: CGFloat = 50
+
+    // Drag-resize state
+    @State private var isResizing: Bool = false
+    @State private var resizeStartWidth: CGFloat = 320
 
     @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(\.appTheme) private var theme
@@ -31,12 +42,25 @@ struct VSCodifiedSidebarContainerView: View {
         self._sidebarWidth = sidebarWidth
     }
 
+    /// Computed binding that bridges `@AppStorage` String ↔ `SidebarTab?`.
+    /// Empty rawValue → nil (Home state); a valid case → that tab.
+    private var selectedTabBinding: Binding<SidebarTab?> {
+        Binding(
+            get: { selectedTabRawValue.isEmpty ? nil : SidebarTab(rawValue: selectedTabRawValue) },
+            set: { selectedTabRawValue = $0?.rawValue ?? "" }
+        )
+    }
+
+    private var selectedTab: SidebarTab? {
+        selectedTabRawValue.isEmpty ? nil : SidebarTab(rawValue: selectedTabRawValue)
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // Detached Floating Sidebar Unit
             HStack(spacing: 0) {
                 // Activity Bar (Leftmost icon strip)
-                ActivityBarView(selectedTab: $selectedTab, isSidebarVisible: $isSidebarVisible)
+                ActivityBarView(selectedTab: selectedTabBinding, isSidebarVisible: $isSidebarVisible)
                     .frame(width: activityBarWidth, alignment: .center)
                     .frame(maxHeight: .infinity)
 
@@ -47,9 +71,10 @@ struct VSCodifiedSidebarContainerView: View {
                         .frame(width: 1)
                         .padding(.vertical, 16)
 
-                    // Sidebar Content Pane
-                    SideBarPaneView(selectedTab: $selectedTab, sidebarWidth: $sidebarWidth)
+                    // Sidebar Content Pane + Drag Handle
+                    SideBarPaneView(selectedTab: selectedTabBinding, sidebarWidth: $sidebarWidth)
                         .frame(width: sidebarWidth)
+                        .overlay(alignment: .trailing) { resizeHandle }
                         .transition(.asymmetric(
                             insertion: .move(edge: .leading).combined(with: .opacity),
                             removal: .move(edge: .leading).combined(with: .opacity)
@@ -60,7 +85,7 @@ struct VSCodifiedSidebarContainerView: View {
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(theme.secondaryBackground)
-                    .shadow(color: Color.black.opacity(0.18), radius: 15, x: 0, y: 6)
+                    .shadow(color: theme.shadowColor, radius: 15, x: 0, y: 6)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -79,7 +104,47 @@ struct VSCodifiedSidebarContainerView: View {
             }
         }
         .onAppear {
-            self.sidebarWidth = fixedSidebarWidth
+            // Seed width on first launch if the persisted value is missing/invalid
+            if sidebarWidth < minSidebarWidth {
+                sidebarWidth = defaultSidebarWidth
+            }
         }
+    }
+
+    // MARK: - Resize Handle
+
+    /// A 4pt-wide invisible hit-target on the pane's trailing edge. The user
+    /// drags it to resize; width is clamped to `[minSidebarWidth, maxSidebarWidth]`.
+    /// The handle lights up subtly while hovered/dragging so there's a visible
+    /// affordance without adding permanent chrome.
+    private var resizeHandle: some View {
+        Rectangle()
+            .fill(isResizing ? theme.accentColor.opacity(0.4) : Color.clear)
+            .contentShape(Rectangle())
+            .frame(width: 6)
+            .frame(maxHeight: .infinity)
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !isResizing {
+                            isResizing = true
+                            resizeStartWidth = sidebarWidth
+                        }
+                        let proposed = resizeStartWidth + value.translation.width
+                        sidebarWidth = min(max(proposed, minSidebarWidth), maxSidebarWidth)
+                    }
+                    .onEnded { _ in
+                        isResizing = false
+                    }
+            )
+            .accessibilityLabel("Sidebar resize handle")
+            .accessibilityHint("Drag to resize the sidebar")
     }
 }

@@ -2,9 +2,18 @@
 //  NativeJSONParser.swift
 //  Devgentic
 //
-//  Step 3.1: Fast-path parser for the .nativeJSON dialect.
-//  Target: Strict JSON arrays natively output by capable models.
-//  Uses JSONDecoder to map the raw response directly into a ModernCognitiveStep.
+//  Stage 1 primary parser for the `.nativeJSON` dialect — prompted-text flows
+//  where the model was instructed to emit `{"content": "...", "tool_calls": [...]}`.
+//
+//  Strictly a fast-path decoder: accepts the canonical native array schema
+//  and returns an empty step otherwise. Recovery (heuristic schemas, drift
+//  detection, tool-name resolution) is owned by `CognitiveParsePipeline`'s
+//  later stages — this parser does NOT internally fall back to
+//  `HeuristicCognitiveParser` because doing so would bypass the pipeline's
+//  `parseOutcome` tracking.
+//
+//  Transport-native flows (Claude/OpenAI/Gemini/Ollama-native) bypass this
+//  parser entirely; their provider wrappers extract tool calls directly.
 //
 //  Created by Raj Singh on 06/03/26.
 //
@@ -15,8 +24,8 @@ import OSLog
 private let logger = DGLogger(category: "NativeJSONParser")
 
 /// Parses responses where the model emits a well-formed JSON object
-/// containing a `content` field and a `tool_calls` array (OpenAI-compatible format).
-/// Falls back to `HeuristicCognitiveParser` for structural variance.
+/// containing a `content` field and a `tool_calls` array.
+/// On failure, returns an empty step — the pipeline's Stage 2/3/4 take it from there.
 struct NativeJSONParser: CognitiveParserProtocol {
 
     private struct NativeArraySchema: Decodable {
@@ -45,7 +54,7 @@ struct NativeJSONParser: CognitiveParserProtocol {
             return ModernCognitiveStep(reasoning: rawResponse, toolCalls: [])
         }
 
-        // Fast path: direct decode of the native array schema
+        // Fast path: direct decode of the canonical native array schema
         if let decoded = try? JSONDecoder().decode(NativeArraySchema.self, from: data) {
             let pending = decoded.tool_calls.map {
                 PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
@@ -54,8 +63,13 @@ struct NativeJSONParser: CognitiveParserProtocol {
             return ModernCognitiveStep(reasoning: decoded.content, toolCalls: pending)
         }
 
-        // Fallback: delegate to heuristic parser for structural variance
-        logger.warning("NativeJSONParser: Fast-path failed. Raw Response: \(rawResponse). Delegating to HeuristicCognitiveParser.")
-        return HeuristicCognitiveParser.parseLegacyResponse(rawResponse)
+        // Fast-path miss. Return an empty step so the pipeline's subsequent stages
+        // (drift detection → heuristic recovery) can take over with proper
+        // `parseOutcome` tracking. Log the input verbatim (capped) so we can
+        // diagnose parse regressions without attaching a debugger — the pipeline
+        // only reports "Stage 1 confident tools=0" which hides WHAT the input was.
+        let preview = cleanText.count > 600 ? String(cleanText.prefix(600)) + "…[+\(cleanText.count - 600) chars]" : cleanText
+        logger.info("NativeJSONParser: Fast-path miss — yielding to pipeline stages 2+. Input: \(preview)")
+        return ModernCognitiveStep(reasoning: "", toolCalls: [])
     }
 }

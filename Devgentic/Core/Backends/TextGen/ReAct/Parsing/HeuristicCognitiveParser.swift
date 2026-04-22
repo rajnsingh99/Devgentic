@@ -100,6 +100,13 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
                 logger.info("✅ [JSONParser] Recovered reasoning from markdown-field format.")
                 return recovered
             }
+
+            // No JSON braces found AND no markdown-field format AND no lenient recovery.
+            // Text is either empty or pure prose. Let the pipeline's inferFailureReason
+            // classify it — we pass no parseOutcome override so the default derivation
+            // (`toolCalls.isEmpty → .genuineCompletion`) applies. The pipeline's Stage 2+
+            // will override with `.failed(...)` if drift signals exist; otherwise empty
+            // tool calls + no signals is treated as a text-only completion.
             return ModernCognitiveStep(reasoning: rawText, toolCalls: [])
         }
 
@@ -161,10 +168,49 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             logger.info("✅ [JSONParser] Lenient extraction succeeded.")
             return lenient
         }
-        
+
         logger.error("❌ [JSONParser] All parsing strategies exhausted. JSON was: \(sanitized.prefix(500))")
-        // Fallback: If JSON is totally broken, treat it as a conversational exit
-        return ModernCognitiveStep(reasoning: rawText, toolCalls: [])
+
+        // All schemas rejected the JSON despite it being structurally well-formed
+        // (extractOutermostJSON succeeded). This is the iter-5-shape failure: valid
+        // braces but wrong keys (e.g. `function_name` instead of `name`). Mark it
+        // as a typed schema-key-mismatch so the pipeline/terminator route to
+        // `.suspectedFormatFailure` instead of silently treating empty toolCalls
+        // as `.genuineCompletion`.
+        let foundKeys = extractTopLevelKeys(from: sanitized)
+        let reason: ParseFailureReason = .schemaKeyMismatch(
+            expectedKeys: ["name", "arguments", "tool_calls", "content"],
+            foundKeys: foundKeys,
+            rawSnippet: String(sanitized.prefix(200))
+        )
+        return ModernCognitiveStep(
+            reasoning: rawText,
+            toolCalls: [],
+            parseOutcome: .failed(reason)
+        )
+    }
+
+    /// Extracts the top-level object keys from a JSON-ish string via lightweight regex.
+    /// Used to build typed `.schemaKeyMismatch` failure reasons when the object is
+    /// syntactically valid but the keys don't match any known schema.
+    private static func extractTopLevelKeys(from json: String) -> [String] {
+        let pattern = #"\"([A-Za-z_][A-Za-z0-9_]*)\"\s*:"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let nsString = json as NSString
+        let matches = regex.matches(in: json, range: NSRange(location: 0, length: nsString.length))
+        let keys = matches.compactMap { match -> String? in
+            guard let range = Range(match.range(at: 1), in: json) else { return nil }
+            return String(json[range])
+        }
+        // Deduplicate while preserving order; top 10 is plenty for diagnostics.
+        var seen = Set<String>()
+        var unique: [String] = []
+        for k in keys where !seen.contains(k) {
+            seen.insert(k)
+            unique.append(k)
+            if unique.count >= 10 { break }
+        }
+        return unique
     }
 
     // MARK: - Brace-Depth JSON Extraction
@@ -194,6 +240,19 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             }
             prevChar = char
         }
+
+        // Brace-balance recovery: model opened braces but the scan ended with unclosed
+        // depth. Common on Q4-quantized local models emitting longer `final_answer`
+        // payloads where the outer `}` gets dropped. Append the missing closers and
+        // let the downstream decode attempt validate. Bounded cap keeps pathological
+        // inputs from producing arbitrary-length payloads. Skip when still inside a
+        // string span — unterminated string quotes aren't fixable by brace-balancing.
+        if let start = startIndex, depth > 0, depth <= 4, !inString {
+            let reconstructed = String(text[start...]) + String(repeating: "}", count: depth)
+            logger.info("🔧 [JSONParser] Brace-balance recovery: appended \(depth) closing brace(s) to salvage unbalanced JSON.")
+            return reconstructed
+        }
+
         return nil
     }
 
@@ -250,7 +309,61 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             scalar.value >= 0x20 || scalar == "\n" || scalar == "\r" || scalar == "\t"
         }.map { String($0) }.joined()
 
+        // 7. Escape raw whitespace control characters that leaked INSIDE string values.
+        //    Quantized models (qwen-coder Q4_K_M in particular) sometimes emit a literal LF
+        //    inside a JSON string value instead of the two-char sequence `\n`. JSON is strict —
+        //    raw LF/CR/TAB inside a `"..."` span is invalid and breaks JSONDecoder. This step
+        //    walks the string once, tracks string/escape state, and rewrites raw control
+        //    chars only when they appear inside a string span. Valid JSON is untouched
+        //    (valid JSON never has these chars unescaped inside strings).
+        result = escapeRawControlsInsideStrings(result)
+
         return result
+    }
+
+    /// Replaces raw LF/CR/TAB characters that appear inside JSON string values with their
+    /// escape sequences. Leaves identical characters between tokens (whitespace) untouched.
+    /// Honors backslash escapes so `\"` inside a string doesn't prematurely close it.
+    private static func escapeRawControlsInsideStrings(_ json: String) -> String {
+        var result: [Character] = []
+        result.reserveCapacity(json.count + 16)
+        var inString = false
+        var justSawEscape = false
+
+        for char in json {
+            if justSawEscape {
+                // Previous char was `\` — this char is part of the escape sequence, append as-is.
+                result.append(char)
+                justSawEscape = false
+                continue
+            }
+            if char == "\\" && inString {
+                result.append(char)
+                justSawEscape = true
+                continue
+            }
+            if char == "\"" {
+                inString.toggle()
+                result.append(char)
+                continue
+            }
+            if inString {
+                switch char {
+                case "\n":
+                    result.append("\\"); result.append("n")
+                case "\r":
+                    result.append("\\"); result.append("r")
+                case "\t":
+                    result.append("\\"); result.append("t")
+                default:
+                    result.append(char)
+                }
+            } else {
+                result.append(char)
+            }
+        }
+
+        return String(result)
     }
 
     /// Replaces Python-style literals with their JSON equivalents.

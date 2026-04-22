@@ -16,7 +16,12 @@ enum SuggestionNavigationDirection { case up, down }
 
 struct ChatInputAreaView: View {
 
-    @State private var inputViewModel = ChatInputViewModel()
+    /// VM is app-scoped via DevgenticApp environment injection. Previously this
+    /// was `@State private var inputViewModel = ChatInputViewModel()`, which
+    /// caused a fresh VM on every ChatInputAreaView recreation — re-requesting
+    /// mic permission, re-subscribing to WhisperKit loading state, and stacking
+    /// `setupMainDelegateObservers()` chains on the MainApplicationViewModel.
+    @Environment(ChatInputViewModel.self) private var inputViewModel
 
     @Binding var showContextArea: Bool
     @Binding var activeContextFilePath: String?
@@ -95,8 +100,12 @@ struct ChatInputAreaView: View {
     }
 
     var body: some View {
+        // Shadow the environment VM with a @Bindable local so `$inputViewModel.foo`
+        // binding syntax keeps working exactly as it did with `@State`.
+        @Bindable var inputViewModel = inputViewModel
+
         VStack(alignment: .leading, spacing: 0) {
-            
+
             // PROMPT SUGGESTIONS (Driven by VM State)
             if inputViewModel.promptSuggestionState.isShowing {
                 PromptSuggestionView(
@@ -217,7 +226,11 @@ struct ChatInputAreaView: View {
     }
 
     private var editorAndPlaceholderArea: some View {
-        ZStack(alignment: .topLeading) {
+        // Shadow the environment VM with a @Bindable local so `$inputViewModel.*`
+        // binding syntax works inside this computed property scope.
+        @Bindable var inputViewModel = inputViewModel
+
+        return ZStack(alignment: .topLeading) {
             CustomTextEditor(
                 text: $inputViewModel.userInput,
                 onCommit: { attributedString in
@@ -239,11 +252,23 @@ struct ChatInputAreaView: View {
                             backendConfiguration.selectedProfileID = codeID
                         }
                     }
+                    // Chat / Workflow modes: intercept if no backend profile is
+                    // selected so the user isn't silently stuck (previously the
+                    // send just logged a warning and nothing happened). Mirrors
+                    // the code-mode model/folder picker pattern.
+                    if mainViewModel.interfaceMode == .chat || mainViewModel.interfaceMode == .workflow {
+                        if backendConfiguration.selectedProfileID == nil {
+                            logger.info("[\(mainViewModel.interfaceMode.rawValue)] Send intercepted — no backend selected, opening picker")
+                            showingBackendSelectorPopup = true
+                            return
+                        }
+                    }
                     if let config = backendConfiguration.getRequestConfig() {
                         self.onSendMessage(attributedString, config)
                         self.inputViewModel.userInput = ""
                     } else {
                         logger.warning("Commit triggered but no backend profile is selected.")
+                        showingBackendSelectorPopup = true
                     }
                 },
                 minHeight: textEditorMinHeight,
@@ -306,6 +331,19 @@ struct ChatInputAreaView: View {
         .focused(isInputFocused)
         .disabled(!isInputEnabled)
         .opacity(isInputEnabled ? 1.0 : 0.6)
+        // When an external caller (prompt library "Use in Chat") stages text,
+        // the VM flips `pendingInputFocusRequest` so this editor grabs focus
+        // on the next render. The reset is deferred one runloop tick so it
+        // doesn't fire back into SwiftUI's update cycle inside the same
+        // frame — which would cause extra `updateNSView` passes that can
+        // race the text-binding sync-back and wipe inserted content.
+        .onChange(of: inputViewModel.pendingInputFocusRequest) { _, newValue in
+            guard newValue else { return }
+            isInputFocused.wrappedValue = true
+            DispatchQueue.main.async {
+                inputViewModel.pendingInputFocusRequest = false
+            }
+        }
     }
 
     private var placeholderText: String {
@@ -342,6 +380,8 @@ struct ChatInputAreaView: View {
                     router.navigate(to: .toolLibrary(profileID: profileID))
                 },
                 onSelectFolder: mainViewModel.interfaceMode == .code ? { openCodeFolderPicker() } : nil,
+                onSelectRecentFolder: mainViewModel.interfaceMode == .code ? { url in applyCodeFolderSelection(url) } : nil,
+                onSelectCodeFile: mainViewModel.interfaceMode == .code ? { openCodeFilePicker() } : nil,
                 showingSchedulePopover: $showingSchedulePopover,
                 showingFullScheduleCreator: $showingFullScheduleCreator
             )
@@ -483,19 +523,84 @@ struct ChatInputAreaView: View {
         openPanel.prompt = "Select Project Folder"
         openPanel.message = "Choose a folder for your Code session."
 
-        let csm = codeSessionManager
-        openPanel.begin { [weak explorerViewModel] response in
+        openPanel.begin { response in
             if response == .OK, let url = openPanel.url {
                 Task { @MainActor in
-                    // Update the Explorer sidebar to show this folder
-                    explorerViewModel?.selectedRootURL = url
-                    explorerViewModel?.loadDirectoryContents(for: url)
-                    // Update Code session config (triggers context.md bootstrap)
-                    csm.updateProjectPath(url)
+                    applyCodeFolderSelection(url)
                 }
             }
         }
     }
+
+    /// Applies a project folder selection — whether from NSOpenPanel or the Recent list.
+    /// Updates the Explorer sidebar and triggers context.md bootstrap + recents tracking.
+    @MainActor
+    private func applyCodeFolderSelection(_ url: URL) {
+        explorerViewModel.selectedRootURL = url
+        explorerViewModel.loadDirectoryContents(for: url)
+        codeSessionManager.updateProjectPath(url)
+    }
+
+    /// Code-mode file attachment picker. Hard-whitelists docs/code/images so the
+    /// user can't attach video or unsupported binaries — we'd fail to extract them
+    /// and waste a round-trip.
+    private func openCodeFilePicker() {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.allowsMultipleSelection = true
+        openPanel.prompt = "Attach Files"
+        openPanel.message = "Attach documents, code, or images."
+        openPanel.allowedContentTypes = Self.codeInterfaceAllowedFileTypes
+
+        openPanel.begin { response in
+            guard response == .OK else { return }
+            let urls = openPanel.urls
+            var fileItems: [FileSystemItem] = []
+            for url in urls {
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                      !isDirectory.boolValue else { continue }
+                fileItems.append(FileSystemItem(
+                    id: url,
+                    name: url.lastPathComponent,
+                    url: url,
+                    isDirectory: false
+                ))
+            }
+            if !fileItems.isEmpty {
+                DispatchQueue.main.async {
+                    inputViewModel.addAttachedFiles(fileItems: fileItems)
+                }
+            }
+        }
+    }
+
+    /// UTTypes accepted by `openCodeFilePicker`: broad buckets (images, source code,
+    /// plain text, PDF) plus explicit per-extension entries for document formats
+    /// supported by DocumentExtractionRegistry and code extensions UTType may not
+    /// recognize on all OS versions (md, yaml, kt, etc.).
+    private static let codeInterfaceAllowedFileTypes: [UTType] = {
+        var types: [UTType] = [.image, .sourceCode, .text, .plainText, .pdf]
+
+        // Document formats FileProcessor can extract text from.
+        let docExtensions = DocumentExtractionRegistry.shared.allSupportedExtensions
+        // Code extensions that aren't always caught by UTType.sourceCode.
+        let extraCodeExtensions: Set<String> = [
+            "swift", "kt", "kts", "scala", "rs", "go", "rb", "php", "lua", "r",
+            "md", "markdown", "yaml", "yml", "toml", "hcl", "tf", "dockerfile",
+            "gradle", "properties", "gitignore", "sh", "pl", "pm"
+        ]
+
+        for ext in docExtensions.union(extraCodeExtensions) {
+            if let utType = UTType(filenameExtension: ext) {
+                types.append(utType)
+            }
+        }
+        // Deduplicate while preserving first-seen order.
+        var seen = Set<String>()
+        return types.filter { seen.insert($0.identifier).inserted }
+    }()
 
     private func confirmSuggestionSelection() {
         if inputViewModel.fileSuggestionState.isShowing {

@@ -78,9 +78,14 @@ final class MockWebSearchService: WebSearchServiceProtocol {
 
 final class MockPromptService: PromptServiceProtocol {
     var prompts: [DevPrompt] = []
+    var usageRecords: [UUID] = []
 
     func getAllPrompts() -> [DevPrompt] {
         return prompts
+    }
+
+    func recordUsage(of prompt: DevPrompt) {
+        usageRecords.append(prompt.id)
     }
 }
 

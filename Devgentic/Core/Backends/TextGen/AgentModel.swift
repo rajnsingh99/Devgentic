@@ -63,7 +63,7 @@ enum TerminalKind: Sendable, Codable, Equatable {
 
 struct APISpyModel: LLMProvider {
     let inner: any LLMProvider
-    
+
     var modelName: String { inner.modelName }
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
@@ -76,6 +76,14 @@ struct APISpyModel: LLMProvider {
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         return try await inner.generateCognitiveStep(messages: messages, tools: tools)
+    }
+
+    /// G12: forward the native-turn overload to the inner provider. Without this
+    /// explicit forward, the protocol's default fallback runs — which coerces
+    /// `tool_calls` arrays into Swift description strings via `"\(value)"` and
+    /// breaks the native-turn request shape before it ever reaches the real provider.
+    func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        return try await inner.generateCognitiveStep(nativeMessages: nativeMessages, tools: tools)
     }
 }
 
@@ -104,18 +112,24 @@ struct ModernCognitiveStep: Sendable {
     /// `nil` when the provider doesn't report usage (e.g. mid-stream) or parsing failed.
     let tokenUsage: TokenUsage?
 
-    /// Set by `CognitiveParsePipeline` when ALL parse stages (primary, drift, fallback,
-    /// heuristic) failed to extract tool calls. When `true` and `toolCalls` is empty,
-    /// the termination evaluator should treat this as a format failure — not a genuine
-    /// agent completion — and retry with a corrective system alert.
-    let parseExhausted: Bool
+    /// The verdict rendered by the parser/validator about this response.
+    /// Drives the terminator's completion vs. retry decision and, on failure,
+    /// carries the typed reason used to build a targeted corrective alert.
+    ///
+    /// Invariants:
+    ///   - `.success`            ⇒ `toolCalls` is non-empty
+    ///   - `.genuineCompletion`  ⇒ `toolCalls` is empty, no parse error
+    ///   - `.failed(reason)`     ⇒ `toolCalls` is empty, retry with reason-specific alert
+    let parseOutcome: ParseOutcome
 
-    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseExhausted: Bool = false) {
+    init(reasoning: String, thought: String? = nil, toolCalls: [PendingToolCall] = [], tokenUsage: TokenUsage? = nil, parseOutcome: ParseOutcome? = nil) {
         self.reasoning = reasoning
         self.thought = thought
         self.toolCalls = toolCalls
         self.tokenUsage = tokenUsage
-        self.parseExhausted = parseExhausted
+        // Default derivation: non-empty tool calls ⇒ success; empty ⇒ genuineCompletion.
+        // Callers that detected a parse failure must pass `.failed(reason)` explicitly.
+        self.parseOutcome = parseOutcome ?? (toolCalls.isEmpty ? .genuineCompletion : .success)
     }
 }
 
@@ -468,6 +482,12 @@ struct AgentInput: Sendable {
     // The Trace Context for distributed observability
     let traceContext: TraceContext
 
+    /// Model tier derived from `LLMProviderConfig.modelMetadata?.tier`. Executors
+    /// use this to tune iteration gates / thresholds for weaker models. Nil when
+    /// the upstream config couldn't classify the model (cloud models without
+    /// metadata default to medium behaviour at the call site).
+    let modelTier: ModelTier?
+
     /// Resolved input: multimodal if available, text fallback otherwise.
     var resolvedPayload: Payload {
         userPayload ?? [.text(userInput)]
@@ -495,7 +515,8 @@ struct AgentInput: Sendable {
         nativeHistoryTurns: [[String: String]]? = nil,
         suppressEpisodeManagement: Bool = false,
         workflowContext: WorkflowExecutionContext? = nil,
-        traceContext: TraceContext
+        traceContext: TraceContext,
+        modelTier: ModelTier? = nil
     ) {
         self.userInput = userInput
         self.userPayload = userPayload
@@ -521,6 +542,7 @@ struct AgentInput: Sendable {
         self.suppressEpisodeManagement = suppressEpisodeManagement
         self.workflowContext = workflowContext
         self.traceContext = traceContext
+        self.modelTier = modelTier
     }
 }
 

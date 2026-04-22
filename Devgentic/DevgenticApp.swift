@@ -33,6 +33,8 @@ struct DevgenticApp: App {
                 ChatMessageSD.self,
                 AttachedTextFileSD.self,
                 AttachedImageFileSD.self,
+                // Cross-launch download history (Ollama / MLX / Whisper)
+                DownloadRecord.self,
             ])
             let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let storeURL = appSupportURL.appendingPathComponent("DevgenticSD.store")
@@ -43,6 +45,12 @@ struct DevgenticApp: App {
             MCPToolStore.shared.configureContainer(container)
             PromptStore.shared.configureContainer(container)
             ChatPersistenceStore.shared.configureContainer(container)
+            // Download-history store is configured on the main actor; do it
+            // eagerly via Task so reconcileOrphans runs as soon as possible.
+            Task { @MainActor in
+                DownloadHistoryStore.shared.configureContainer(container)
+                DownloadHistoryStore.shared.reconcileOrphans()
+            }
             return container
         } catch {
             fatalError("Failed to create SwiftData ModelContainer: \(error)")
@@ -57,6 +65,16 @@ struct DevgenticApp: App {
     @State private var backendProfileService = BackendProfileService()
     @State private var toastManager = ToastManager()
     @State private var codeSessionManager = CodeSessionManager()
+    /// Owns long-lived destination view models (Ollama/MLX stores) so their
+    /// state survives the re-creation cascade caused by
+    /// `MainApplicationView`'s `if !router.isShowingChat { destinationView }` gate.
+    @State private var destinationCoordinator = DestinationCoordinator()
+    /// App-scoped so `ChatInputAreaView` recreations (driven by outer SwiftUI
+    /// identity churn that isn't trivial to fully eliminate) don't keep firing
+    /// `ChatInputViewModel.init()` — which logs, requests mic permission, and
+    /// re-subscribes WhisperKit. See `setupMainDelegateObservers()`'s idempotency
+    /// guard which makes repeated `.onAppear` wiring safe.
+    @State private var chatInputViewModel = ChatInputViewModel()
 
     init() {
         let persistence = ChatPersistenceStore.shared
@@ -119,6 +137,8 @@ struct DevgenticApp: App {
                 .environment(backendProfileService)
                 .environment(toastManager)
                 .environment(codeSessionManager)
+                .environment(destinationCoordinator)
+                .environment(chatInputViewModel)
                 .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in

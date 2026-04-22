@@ -3,154 +3,139 @@
 //  Devgentic
 //
 //  Created by Raj Singh on 10/05/25.
+//  Converted to sheet semantics + PromptEditViewModel on 2026-04-21.
 //
 
 import SwiftUI
 
 struct CreateEditPromptView: View {
-    @Environment(PromptLibraryViewModel.self) var viewModel
-    @Environment(\.dismiss) var dismiss // To close the sheet
+    @Environment(PromptEditViewModel.self) var viewModel
+    @Environment(\.dismiss) var dismiss
+    @Environment(\.appTheme) private var theme
 
-    // Available categories - can be dynamic later
-    private let categories = ["General", "Development", "Productivity", "Creativity", "Writing", "Education", "Research", "Marketing", "Custom"]
-    
-    // To give focus to the title field when the view appears
+    @State private var showingDiscardAlert: Bool = false
     @FocusState private var isTitleFocused: Bool
 
     var body: some View {
         @Bindable var viewModel = viewModel
+
         VStack(spacing: 0) {
-            // MARK: - Header
-            Text(viewModel.promptToEdit == nil ? "Create New Prompt" : "Edit Prompt")
+            Text(viewModel.isCreating ? "Create New Prompt" : "Edit Prompt")
                 .font(.title2)
                 .fontWeight(.semibold)
                 .padding()
-            
+
             Divider()
 
-            // MARK: - Form Fields
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 20) {
-                // --- Title Row ---
                 GridRow(alignment: .center) {
                     Text("Title")
                         .gridColumnAlignment(.trailing)
-                    
-                    TextField("Enter a clear and concise title", text: $viewModel.editablePromptTitle)
+
+                    TextField("Enter a clear and concise title", text: $viewModel.title)
                         .textFieldStyle(.roundedBorder)
                         .focused($isTitleFocused)
                 }
-                
-                // --- Category Row ---
+
                 GridRow(alignment: .center) {
                     Text("Category")
                         .gridColumnAlignment(.trailing)
-                    
-                    Picker("Category", selection: $viewModel.editablePromptCategory) {
-                        ForEach(categories, id: \.self) { category in
-                            Text(category).tag(category)
+
+                    Picker("Category", selection: $viewModel.category) {
+                        ForEach(PromptCategory.allCases) { category in
+                            Text(category.displayName).tag(category)
                         }
                     }
                     .pickerStyle(.menu)
-                    .labelsHidden() // Hide the default picker label
+                    .labelsHidden()
                 }
 
-                // --- Prompt Text Row ---
                 GridRow(alignment: .top) {
                     Text("Prompt Text")
                         .gridColumnAlignment(.trailing)
                         .padding(.top, 8)
-                    
-                    TextEditor(text: $viewModel.editablePromptText)
+
+                    TextEditor(text: $viewModel.text)
                         .font(.body)
                         .frame(minHeight: 150, maxHeight: 400)
                         .padding(5)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                                .stroke(theme.dividerColor.opacity(0.6), lineWidth: 1)
                         )
                 }
-                
-                // --- Tags Row ---
+
                 GridRow(alignment: .center) {
                     Text("Tags")
                         .gridColumnAlignment(.trailing)
-                    
-                    TextField("Comma-separated, e.g., coding, python", text: $viewModel.editablePromptTagsString)
+
+                    TextField("Comma-separated, e.g., coding, python", text: $viewModel.tagsString)
                         .textFieldStyle(.roundedBorder)
                         .help("Use commas to separate multiple tags.")
+                }
+
+                GridRow(alignment: .center) {
+                    Text("Pin")
+                        .gridColumnAlignment(.trailing)
+
+                    Toggle(isOn: $viewModel.isPinned) {
+                        Text("Pinned to top of sidebar")
+                            .font(.callout)
+                    }
+                    .toggleStyle(.switch)
                 }
             }
             .padding(20)
 
             Spacer()
-            
+
             Divider()
 
-            // MARK: - Action Buttons
             HStack {
                 Button("Cancel") {
-                    dismiss()
+                    attemptDismiss()
                 }
                 .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
-                Button(viewModel.promptToEdit == nil ? "Create Prompt" : "Save Changes") {
-                    viewModel.savePromptFromSheet()
+                Button(viewModel.isCreating ? "Create Prompt" : "Save Changes") {
+                    _ = viewModel.save()
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(viewModel.editablePromptTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                          viewModel.editablePromptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!viewModel.canSave)
                 .keyboardShortcut(.defaultAction)
             }
             .padding()
         }
         .onAppear {
-            // If no prompt is being edited (i.e., creating new), and category is empty, set default
-            if viewModel.promptToEdit == nil && viewModel.editablePromptCategory.isEmpty {
-                viewModel.editablePromptCategory = "General"
-            }
-            // Focus the title field automatically
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // Defer one run-loop tick via Task.sleep — SwiftUI's sheet-appear
+            // animation sometimes drops focus set during `.onAppear`'s sync
+            // pass. 50ms is enough to land after the animation tick without a
+            // visible flicker. Replaces the old 100ms DispatchQueue workaround.
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(50))
                 isTitleFocused = true
             }
         }
+        .confirmationDialog(
+            "Discard unsaved changes?",
+            isPresented: $showingDiscardAlert,
+            titleVisibility: .visible
+        ) {
+            Button("Discard Changes", role: .destructive) { dismiss() }
+            Button("Keep Editing", role: .cancel) {}
+        } message: {
+            Text("Your edits to this prompt have not been saved.")
+        }
     }
-}
 
-// MARK: - Preview
-struct CreateEditPromptView_Previews: PreviewProvider {
-    static func configuredViewModel(isEditing: Bool) -> PromptLibraryViewModel {
-        let vm = PromptLibraryViewModel()
-        if isEditing {
-            let examplePrompt = DevPrompt.examplePrompts.first ?? DevPrompt(title: "Test Edit", text: "Editing this prompt.", category: "Testing", isUserDefined: true, tags: ["edit", "test"])
-            if PromptService.shared.getPrompt(withId: examplePrompt.id) == nil {
-                 PromptService.shared.addPrompt(examplePrompt)
-            }
-            vm.prepareToEditPrompt(examplePrompt)
+    private func attemptDismiss() {
+        if viewModel.isDirty {
+            showingDiscardAlert = true
         } else {
-            vm.prepareForCreateNewPrompt()
-        }
-        return vm
-    }
-
-    static var previews: some View {
-        Group {
-            CreateEditPromptView()
-                .environment(configuredViewModel(isEditing: false))
-                .previewDisplayName("Create New Prompt")
-                .frame(width: 550, height: 500)
-
-            CreateEditPromptView()
-                .environment(configuredViewModel(isEditing: true))
-                .previewDisplayName("Edit Prompt")
-                .frame(width: 550, height: 500)
-        }
-        .onAppear {
-             if PromptService.shared.prompts.isEmpty {
-                 DevPrompt.examplePrompts.forEach { PromptService.shared.addPrompt($0) }
-             }
+            dismiss()
         }
     }
 }

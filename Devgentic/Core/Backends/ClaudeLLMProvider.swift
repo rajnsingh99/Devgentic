@@ -245,6 +245,84 @@ struct ClaudeLLMProvider: LLMProvider {
         return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
     }
 
+    // MARK: - Native-Turn Cognitive Step (G12)
+
+    /// Native-turn overload. Accepts provider-shape messages from `ClaudeToolTurnAdapter`
+    /// which may contain `content` arrays of `tool_use` / `tool_result` blocks, plus
+    /// canonical `{role, content: string}` messages from PromptBuilder.
+    /// Extracts `role: "system"` messages into Claude's top-level `system` field.
+    func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        var systemPrompt = ""
+        var anthropicMessages: [[String: Any]] = []
+        for msg in nativeMessages {
+            let role = (msg["role"] as? String) ?? "user"
+            if role == "system" {
+                if !systemPrompt.isEmpty { systemPrompt += "\n\n" }
+                systemPrompt += (msg["content"] as? String) ?? ""
+            } else {
+                anthropicMessages.append(msg)
+            }
+        }
+
+        let effectiveMaxTokens = extendedThinking ? max(maxTokens, thinkingBudget + 1024) : maxTokens
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": anthropicMessages,
+            "max_tokens": effectiveMaxTokens
+        ]
+        applyGenerationParams(to: &body)
+
+        if extendedThinking {
+            body["thinking"] = ["type": "enabled", "budget_tokens": thinkingBudget]
+        }
+        if !systemPrompt.isEmpty {
+            body["system"] = systemPrompt
+        }
+        if let tools = tools, !tools.isEmpty {
+            body["tools"] = tools
+        }
+
+        var request = makeRequest()
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+        if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
+            logger.warning("⚠️ Anthropic cognitive step truncated (stop_reason: max_tokens). Effective max_tokens: \(effectiveMaxTokens).")
+        }
+
+        guard let contentBlocks = json?["content"] as? [[String: Any]] else {
+            throw LLMProviderError.invalidResponse("Missing content blocks in Anthropic response.")
+        }
+
+        var reasoning = ""
+        var thinkingTrace = ""
+        var pendingTools: [PendingToolCall] = []
+
+        for block in contentBlocks {
+            let type = block["type"] as? String ?? ""
+            if type == "text" {
+                reasoning += (block["text"] as? String ?? "")
+            } else if type == "thinking" {
+                thinkingTrace += (block["thinking"] as? String ?? "")
+            } else if type == "tool_use" {
+                let id = block["id"] as? String ?? UUID().uuidString
+                let name = block["name"] as? String ?? "unknown_tool"
+                let input = block["input"] as? [String: Any] ?? [:]
+                let arguments = input.reduce(into: [String: JSONValue]()) { result, pair in result[pair.key] = JSONValue(pair.value) ?? .null }
+                pendingTools.append(PendingToolCall(id: id, name: name, arguments: arguments))
+            }
+        }
+
+        let finalReasoning = reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalThought = thinkingTrace.isEmpty ? nil : thinkingTrace
+        let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
+
+        return ModernCognitiveStep(reasoning: finalReasoning, thought: finalThought, toolCalls: pendingTools, tokenUsage: usage)
+    }
+
     // MARK: - Bot Flow (Streaming)
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {

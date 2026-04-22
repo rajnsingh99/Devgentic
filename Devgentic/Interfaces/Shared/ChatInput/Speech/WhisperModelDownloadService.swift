@@ -36,6 +36,17 @@ final class WhisperModelDownloadService {
     /// Non-nil when the most recent download failed. Cleared on next download start.
     private(set) var downloadError: String?
 
+    /// Bytes downloaded so far for the current pull, mirrored from the
+    /// `Progress` object WhisperKit hands the progress callback. Nil when
+    /// Progress hasn't emitted a usable value yet (e.g. during the initial
+    /// handshake where `totalUnitCount` is -1).
+    private(set) var downloadCompletedBytes: Int64?
+
+    /// Total bytes the Progress object reports for the current pull. Nil
+    /// until Progress settles on a real total (can happen a second or two
+    /// after the download starts).
+    private(set) var downloadTotalBytes: Int64?
+
     /// Non-nil when the most recent delete failed. Cleared on next delete.
     private(set) var deleteError: String?
 
@@ -141,6 +152,8 @@ final class WhisperModelDownloadService {
         downloadProgress = 0
         downloadingModelId = modelId
         downloadError = nil
+        downloadCompletedBytes = nil
+        downloadTotalBytes = nil
 
         downloadTask = Task { [weak self] in
             guard let self else { return }
@@ -157,6 +170,15 @@ final class WhisperModelDownloadService {
                             ? Double(progress.completedUnitCount) / Double(progress.totalUnitCount)
                             : 0
                         self.downloadProgress = fraction
+                        // Expose raw byte counts for DownloadManager's
+                        // speed sampler. Progress can emit -1 for total
+                        // during handshake; filter that.
+                        self.downloadCompletedBytes = progress.completedUnitCount >= 0
+                            ? progress.completedUnitCount
+                            : nil
+                        self.downloadTotalBytes = progress.totalUnitCount > 0
+                            ? progress.totalUnitCount
+                            : nil
                     }
                 }
 
@@ -210,6 +232,8 @@ final class WhisperModelDownloadService {
         downloadProgress = 0
         downloadingModelId = nil
         downloadError = nil
+        downloadCompletedBytes = nil
+        downloadTotalBytes = nil
     }
 
     // MARK: - Delete

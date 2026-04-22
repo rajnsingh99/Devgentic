@@ -326,49 +326,47 @@ struct ConversationSidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
 
-            SidebarHeaderView(
-                title: sidebarTitle,
-                buttonTitle: newButtonTitle,
-                systemImage: "plus",
-                shortcut: "⌘N",
-                onAction: {
-                    // Workflow + Code both need full reset (deselect clears profile + code session).
-                    // Chat just creates a new empty conversation.
-                    if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
-                        viewModel.deselectConversationAndShowWelcome()
-                    } else {
-                        viewModel.startNewConversation()
-                    }
-                }
-            )
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
-            SidebarSearchBarView(searchPlaceholder, text: $searchText)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 10)
-
-            // MARK: - Filter Chips
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(ConversationFilter.allCases, id: \.self) { filter in
-                        CategoryChip(
-                            title: filter.rawValue,
-                            isSelected: selectedFilter == filter,
-                            action: { selectedFilter = filter }
-                        )
-                    }
-                }
-                .padding(.horizontal, 12)
-            }
-            .padding(.bottom, 10)
-
             if isSelectionMode {
-                batchSelectionToolbar
+                batchHeaderRow
                     .transition(.move(edge: .top).combined(with: .opacity))
+            } else {
+                SidebarHeaderView(
+                    title: sidebarTitle,
+                    buttonTitle: newButtonTitle,
+                    systemImage: "plus",
+                    shortcut: "⌘N",
+                    onAction: {
+                        // Workflow + Code both need full reset (deselect clears profile + code session).
+                        // Chat just creates a new empty conversation.
+                        if viewModel.interfaceMode == .workflow || viewModel.interfaceMode == .code {
+                            viewModel.deselectConversationAndShowWelcome()
+                        } else {
+                            viewModel.startNewConversation()
+                        }
+                    }
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+                SidebarSearchBarView(searchPlaceholder, text: $searchText)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)
+
+                // MARK: - Filter Chips
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(ConversationFilter.allCases, id: \.self) { filter in
+                            CategoryChip(
+                                title: filter.rawValue,
+                                isSelected: selectedFilter == filter,
+                                action: { selectedFilter = filter }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                }
+                .padding(.bottom, 10)
             }
 
             if filteredConversationCount == 0 && searchText.isEmpty {
@@ -592,52 +590,87 @@ struct ConversationSidebarView: View {
     private var pinnedConversations: [ConversationSD] { partitioned.pinned }
     private var dateGroupedSections: [DateSection] { partitioned.dateSections }
 
-    // MARK: - Batch Selection Components
+    // MARK: - Batch Selection Header
+    //
+    // Mirrors the PromptLibrarySidebarView pattern (2026-04-21): in selection
+    // mode the normal title/search/chip chrome is hidden and replaced by
+    // `[Cancel] [N selected] [Select All / Deselect All] [Delete]`. Keeps the
+    // sidebar header slot used for exactly one purpose at a time.
     @ViewBuilder
-    private var batchSelectionToolbar: some View {
-        HStack {
-            Button(role: .destructive) {
-                deleteSelectedConversations()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "trash")
-                        .font(.system(.caption, weight: .semibold))
-                    Text("Delete (\(selectedConversationIDs.count))")
-                        .font(.system(.caption, weight: .bold))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(theme.errorColor.opacity(0.1))
-                .foregroundColor(theme.errorColor)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .disabled(selectedConversationIDs.isEmpty)
+    private var batchHeaderRow: some View {
+        HStack(spacing: 10) {
+            BatchHeaderTextButton(
+                title: "Cancel",
+                tint: theme.secondaryText,
+                action: { cancelSelectionMode() }
+            )
+            .keyboardShortcut(.cancelAction)
+            .accessibilityLabel("Cancel batch selection")
 
             Spacer()
 
+            Text("\(selectedConversationIDs.count) selected")
+                .font(theme.fontBody.weight(.semibold))
+                .foregroundColor(theme.primaryText)
+
+            Spacer()
+
+            BatchHeaderTextButton(
+                title: selectedConversationIDs == visibleConversationIDs ? "Deselect All" : "Select All",
+                tint: theme.accentColor,
+                action: { toggleSelectAllVisible() }
+            )
+            .help(selectedConversationIDs == visibleConversationIDs ? "Clear selection" : "Select all visible conversations")
+
             Button {
-                cancelSelectionMode()
+                deleteSelectedConversations()
             } label: {
-                Text("Cancel")
-                    .font(.system(.caption, weight: .medium))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(theme.surfaceOverlay)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                HStack(spacing: 4) {
+                    Image(systemName: "trash")
+                        .font(.system(.caption, weight: .semibold))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(theme.errorColor.opacity(0.15))
+                .foregroundColor(theme.errorColor)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
+            .disabled(selectedConversationIDs.isEmpty)
+            .opacity(selectedConversationIDs.isEmpty ? 0.5 : 1)
+            .keyboardShortcut(.delete, modifiers: [.command])
+            .help("Delete selected (⌘⌫)")
+            .accessibilityLabel("Delete \(selectedConversationIDs.count) selected conversations")
         }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(theme.surfaceOverlay)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
-                )
-        )
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
+    }
+
+    /// Flattens the current partition (pinned + all date sections) into a
+    /// set of IDs for Select-All semantics. Honors the filter chip — when
+    /// `.pinned` is selected only pinned rows are visible, so only pinned
+    /// IDs go into the set.
+    private var visibleConversationIDs: Set<UUID> {
+        let p = partitioned
+        var ids = Set(p.pinned.map(\.id))
+        if selectedFilter == .all {
+            for section in p.dateSections {
+                for convo in section.conversations {
+                    ids.insert(convo.id)
+                }
+            }
+        }
+        return ids
+    }
+
+    private func toggleSelectAllVisible() {
+        if selectedConversationIDs == visibleConversationIDs {
+            selectedConversationIDs.removeAll()
+            if selectedConversationIDs.isEmpty { cancelSelectionMode() }
+        } else {
+            selectedConversationIDs = visibleConversationIDs
+        }
     }
 
     private func deleteSelectedConversations() {

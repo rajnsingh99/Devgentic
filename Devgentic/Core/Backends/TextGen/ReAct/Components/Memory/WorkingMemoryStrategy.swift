@@ -34,8 +34,22 @@ protocol WorkingMemoryStrategy: Sendable {
     /// Strategies without a budget concept should return 0.0.
     var budgetUtilization: Double { get }
 
+    /// Applies the strategy's per-entry cap to a raw tool output string. Used by the
+    /// native-turn path, which serializes tool results directly into provider messages
+    /// and needs the same budget policy as `recordObservation`'s stored results —
+    /// without going through the full scratchpad compile pipeline.
+    ///
+    /// Default implementation returns the input unchanged (strategies without a cap
+    /// concept). `WindowedLinearMemory` overrides to apply its `perEntryCap`.
+    func truncatedResult(for raw: String) -> String
+
     /// Resets the memory.
     mutating func clear()
+}
+
+extension WorkingMemoryStrategy {
+    /// Default: no truncation. Strategies that track a budget should override.
+    func truncatedResult(for raw: String) -> String { raw }
 }
 
 // MARK: - Memory Budget Configuration
@@ -446,6 +460,16 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
 
     mutating func clear() {
         entries.removeAll()
+    }
+
+    /// Applies the same per-entry cap logic used by `recordObservation`. Exposed so the
+    /// native-turn path can truncate tool_result content consistently without going
+    /// through `compileForPrompt`'s full render pipeline.
+    func truncatedResult(for raw: String) -> String {
+        let suffixLen = Self.truncationSuffix.count
+        guard raw.count > config.perEntryCap else { return raw }
+        let prefixLen = max(0, config.perEntryCap - suffixLen)
+        return String(raw.prefix(prefixLen)) + Self.truncationSuffix
     }
 
     // MARK: - Helpers

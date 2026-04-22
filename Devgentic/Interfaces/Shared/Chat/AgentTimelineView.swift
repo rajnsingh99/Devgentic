@@ -13,16 +13,41 @@ struct AgentTimelineView: View {
 
     @Environment(\.appTheme) private var theme
 
+    /// Optional text of the final content shown below the timeline. Used to
+    /// deduplicate narrative events that would otherwise repeat the same text.
+    /// Populated from `ChatMessage.content.textContent` in the message-based init.
+    private let finalContentText: String?
+
+    /// Optional streaming context that drives the bottom progress footer (pulsing icon +
+    /// live elapsed + final token count). Populated only by the message-based init —
+    /// workflow per-node timelines have their own indicators and leave this nil.
+    private let streamingContext: StreamingContext?
+
+    /// When true, `.thought`/`.reasoning` nodes render as a muted compact row —
+    /// appropriate when the bubble shows its final answer separately. Workflow
+    /// per-node views keep this false because their "thought" often *is* the
+    /// node's final output and should stay full scale.
+    private let compactReasoning: Bool
+
     /// Initialize from a ChatMessage (existing usage in chat bubbles).
     init(message: ChatMessage) {
         self.events = message.timelineEvents
         self.isStreaming = message.isStreaming
+        self.finalContentText = message.currentAgentContent?.textContent ?? message.content.textContent
+        self.streamingContext = StreamingContext(
+            startedAt: message.timestamp,
+            isStreaming: message.isStreaming
+        )
+        self.compactReasoning = true
     }
 
     /// Initialize from raw timeline events (used by workflow per-node detail views).
     init(events: [TimelineEvent], isStreaming: Bool = false) {
         self.events = events
         self.isStreaming = isStreaming
+        self.finalContentText = nil
+        self.streamingContext = nil
+        self.compactReasoning = false
     }
 
     var body: some View {
@@ -30,11 +55,20 @@ struct AgentTimelineView: View {
         // (typically < 30) — cheap enough that caching isn't worth the @State-in-body
         // hazard that an earlier implementation hit. SwiftUI's Identifiable diff handles
         // the ForEach efficiently across updates.
-        let nodes = Self.buildGroupedNodes(from: events, isStreaming: isStreaming)
-        if !nodes.isEmpty {
+        let nodes = Self.buildGroupedNodes(
+            from: events,
+            isStreaming: isStreaming,
+            finalContentText: finalContentText
+        )
+        let showFooter = streamingContext?.shouldDisplay ?? false
+        if !nodes.isEmpty || showFooter {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(nodes) { node in
-                    TimelineNodeGroupView(node: node)
+                    TimelineNodeGroupView(node: node, compactReasoning: compactReasoning)
+                }
+                if let ctx = streamingContext, ctx.shouldDisplay {
+                    StreamingTimelineFooter(context: ctx)
+                        .transition(.opacity)
                 }
             }
             .padding(.vertical, 8)
@@ -45,11 +79,16 @@ struct AgentTimelineView: View {
     /// Homogeneous / heterogeneous tool runs of size 2+ collapse into `.actionGroup`.
     /// Single tools render as `.action` (no collapsible header).
     /// `ask_user` always renders as `.action` (interactive moments shouldn't hide in a group).
-    static func buildGroupedNodes(from events: [TimelineEvent], isStreaming: Bool) -> [TimelineNode] {
+    static func buildGroupedNodes(
+        from events: [TimelineEvent],
+        isStreaming: Bool,
+        finalContentText: String? = nil
+    ) -> [TimelineNode] {
         var events = events
 
-        // Deduplication: if not streaming and last event is narrative (thought/reasoning),
-        // hide it — it usually duplicates the final outcome shown immediately below.
+        // Deduplication pass 1: if not streaming and last event is narrative
+        // (thought/reasoning), hide it — it usually duplicates the final outcome
+        // shown immediately below.
         if !isStreaming, let last = events.last {
             switch last {
             case .thought, .reasoning:
@@ -58,6 +97,35 @@ struct AgentTimelineView: View {
                 break
             }
         }
+
+        // Deduplication pass 2: strip any narrative event whose text exactly
+        // matches the final content. Catches the single-iter genuine-completion
+        // case where the model's reasoning IS the final answer — without this,
+        // the same 60-character response appears twice (once in the timeline,
+        // once as the bubble's main content). Pass 1's "last event" rule doesn't
+        // catch it because a trailing `.thought("Composing final response…")`
+        // gets emitted after the reasoning.
+        if !isStreaming,
+           let finalText = finalContentText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !finalText.isEmpty {
+            events.removeAll { event in
+                switch event {
+                case .thought(_, let text), .reasoning(_, let text):
+                    return text.trimmingCharacters(in: .whitespacesAndNewlines) == finalText
+                default:
+                    return false
+                }
+            }
+        }
+
+        // Pass 3: Merge consecutive short-status thoughts into one row. System-level
+        // infrastructure progress ("Connecting to Ollama…", "Model loaded…",
+        // "Preparing agent tools…") is emitted as individual `.thought` events,
+        // each short (< 100 chars, no newlines). Left alone, these stack as 3+
+        // separate rows dominating the top of every bubble. Merged, they become
+        // one compact progress line joined with " · ". Real model narratives are
+        // long / multiline and fall outside this rule.
+        events = collapseShortStatusRuns(events)
 
         var nodes: [TimelineNode] = []
         var pendingActions: [TimelineEvent] = []
@@ -110,6 +178,51 @@ struct AgentTimelineView: View {
         flushActions()
         return nodes
     }
+
+    /// Collapses runs of ≥2 short-status `.thought` / `.reasoning` events into a
+    /// single event whose text joins the items with " · ". Events outside the
+    /// run pass through untouched. See call site for rationale.
+    private static func collapseShortStatusRuns(_ events: [TimelineEvent]) -> [TimelineEvent] {
+        var out: [TimelineEvent] = []
+        var run: [(id: UUID, text: String)] = []
+
+        func flush() {
+            guard !run.isEmpty else { return }
+            if run.count == 1 {
+                out.append(.thought(id: run[0].id, text: run[0].text))
+            } else {
+                let merged = run.map(\.text).joined(separator: " · ")
+                out.append(.thought(id: run[0].id, text: merged))
+            }
+            run.removeAll()
+        }
+
+        for event in events {
+            let shortStatus: (UUID, String)? = {
+                switch event {
+                case .thought(let id, let text) where isShortStatusText(text):
+                    return (id, text)
+                case .reasoning(let id, let text) where isShortStatusText(text):
+                    return (id, text)
+                default:
+                    return nil
+                }
+            }()
+            if let s = shortStatus {
+                run.append(s)
+            } else {
+                flush()
+                out.append(event)
+            }
+        }
+        flush()
+        return out
+    }
+
+    private static func isShortStatusText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count <= 100 && !trimmed.contains("\n")
+    }
 }
 
 // MARK: - Models
@@ -138,6 +251,10 @@ enum TimelineNode: Identifiable {
 
 struct TimelineNodeGroupView: View {
     let node: TimelineNode
+    /// When true, thought/reasoning nodes render in a muted compact row.
+    /// See `AgentTimelineView.compactReasoning` for the rationale.
+    var compactReasoning: Bool = false
+
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded: Bool = true
@@ -145,12 +262,23 @@ struct TimelineNodeGroupView: View {
     var body: some View {
         switch node {
         case .thought(_, let text):
-            Text(text)
-                .font(theme.fontBody)
-                .foregroundColor(theme.primaryText.opacity(0.9))
-                .lineSpacing(3)
-                .padding(.horizontal, 4)
-                .fixedSize(horizontal: false, vertical: true)
+            // Chat/code bubbles render the final answer as separate main content
+            // below the timeline, so any thought that survives dedup is *interim*
+            // reasoning between tool calls. Models like qwen-coder emit full-response-
+            // sized narratives before each tool call ("Project Analysis Summary…"
+            // with h1s and bullet lists), which visually competes with the real
+            // final answer. InterimReasoningRow de-emphasises these so the final
+            // answer stays the clear focus.
+            //
+            // Workflow per-node views (compactReasoning == false) keep the full
+            // markdown — their "thought" often IS the node's output.
+            if compactReasoning {
+                InterimReasoningRow(text: text)
+            } else {
+                WorkflowMarkdownView(text: text)
+                    .padding(.horizontal, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
         case .capabilityMilestone(_, let kind, let detail):
             CapabilityMilestoneRow(kind: kind, detail: detail)
@@ -163,7 +291,10 @@ struct TimelineNodeGroupView: View {
                 .padding(.horizontal, 4)
 
         case .actionGroup(let actions):
-            VStack(alignment: .leading, spacing: 6) {
+            // Tight inner spacing (2pt) so the rail connects visually to the
+            // chevron above. The outer timeline VStack still provides 10pt
+            // separation between this group and sibling nodes.
+            VStack(alignment: .leading, spacing: 2) {
                 // Group header — click toggles the collapsible detail list.
                 Button {
                     if reduceMotion {
@@ -191,12 +322,30 @@ struct TimelineNodeGroupView: View {
                 .buttonStyle(.plain)
 
                 if isExpanded {
+                    // Rail is rendered as an overlay on the children VStack so it
+                    // physically can't exceed the VStack's intrinsic height. An
+                    // earlier HStack-with-Rectangle approach let the rail stretch
+                    // into whatever vertical space the parent bubble offered —
+                    // showing a long hanging tail past the last child whenever
+                    // the bubble was taller than the timeline content.
+                    //
+                    // • `.padding(.leading, 22)` reserves rail space (8pt rail x
+                    //   + 1pt width + 13pt gutter).
+                    // • `.overlay(alignment: .leading)` pins the rail to the VStack's
+                    //   left edge and height — it starts at y=0 (top of first row)
+                    //   and ends at y=height (bottom of last row), no tail.
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(actions) { action in
                             ActionDetailView(event: action)
                         }
                     }
-                    .padding(.leading, 14)
+                    .padding(.leading, 22)
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(theme.tertiaryText.opacity(0.35))
+                            .frame(width: 1)
+                            .padding(.leading, 8)
+                    }
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
             }
@@ -445,6 +594,163 @@ struct WarningRow: View {
     }
 }
 
+// MARK: - Interim Reasoning Row
+
+/// Compact display for `.thought`/`.reasoning` nodes inside a chat/code bubble.
+/// Strips heading markers (so `# Summary` doesn't render as an H1 competing with
+/// the final answer), renders at a muted scale, and collapses anything over a
+/// few lines behind a "Show more" toggle.
+struct InterimReasoningRow: View {
+    let text: String
+
+    @Environment(\.appTheme) private var theme
+    @State private var isExpanded = false
+
+    private static let collapsedLineLimit = 3
+    private static let expandThresholdChars = 220
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "sparkle")
+                .font(.system(size: 10))
+                .foregroundColor(theme.tertiaryText)
+                .frame(width: 14, alignment: .center)
+                .padding(.top, 3)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(flattenedText)
+                    .font(.system(size: 12))
+                    .foregroundColor(theme.secondaryText)
+                    .lineLimit(isExpanded ? nil : Self.collapsedLineLimit)
+                    .multilineTextAlignment(.leading)
+                    .textSelection(.enabled)
+                    // NB: no `.fixedSize(vertical: true)` — it overrides `lineLimit`
+                    // by forcing the text to reserve space for every line of content.
+
+                if needsExpandToggle {
+                    Button(isExpanded ? "Show less" : "Show more") {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isExpanded.toggle()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(theme.accentColor.opacity(0.75))
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    /// Flattens markdown for compact display: drops heading markers, list
+    /// bullets (dash / star / numbered), inline emphasis (`**bold**`, `__bold__`,
+    /// `*italic*`), and collapses blank lines so the row reads as a single muted
+    /// paragraph rather than a full document. Inline code (backticks) is kept —
+    /// file paths / identifiers inside them carry meaning.
+    private var flattenedText: String {
+        var out: [String] = []
+        for raw in text.components(separatedBy: .newlines) {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { continue }
+
+            // Strip leading heading markers (#, ##, ###…).
+            while line.hasPrefix("#") { line.removeFirst() }
+            line = line.trimmingCharacters(in: .whitespaces)
+
+            // Strip a single leading dash/star/plus list marker.
+            for marker in ["- ", "* ", "+ "] where line.hasPrefix(marker) {
+                line.removeFirst(marker.count)
+                break
+            }
+
+            // Strip a leading numbered-list marker like "1. " or "12) ".
+            line = Self.stripNumberedListMarker(line)
+
+            // Strip bold/italic emphasis — keep backticks.
+            line = line.replacingOccurrences(of: "**", with: "")
+            line = line.replacingOccurrences(of: "__", with: "")
+
+            line = line.trimmingCharacters(in: .whitespaces)
+            if !line.isEmpty { out.append(line) }
+        }
+        return out.joined(separator: " · ")
+    }
+
+    private static func stripNumberedListMarker(_ line: String) -> String {
+        // Match digits followed by '.' or ')' and a space, e.g. "1. foo" or "12) bar".
+        var idx = line.startIndex
+        while idx < line.endIndex, line[idx].isNumber {
+            idx = line.index(after: idx)
+        }
+        guard idx > line.startIndex, idx < line.endIndex,
+              line[idx] == "." || line[idx] == ")" else { return line }
+        let afterPunct = line.index(after: idx)
+        guard afterPunct < line.endIndex, line[afterPunct] == " " else { return line }
+        return String(line[line.index(after: afterPunct)...])
+    }
+
+    private var needsExpandToggle: Bool {
+        flattenedText.count > Self.expandThresholdChars
+    }
+}
+
+// MARK: - Streaming Footer
+
+/// Snapshot of the fields needed to render the streaming progress footer.
+/// Carved out so the footer can be fed from a ChatMessage today or any other
+/// source (workflow, scheduled run) later without changing the view contract.
+struct StreamingContext {
+    let startedAt: Date
+    let isStreaming: Bool
+
+    /// Footer is a progress indicator — it only appears while the response is
+    /// still streaming. Once streaming ends, the bubble's existing `TokenUsageBadge`
+    /// carries the final token + duration summary, so the footer hides to avoid
+    /// a duplicate "done" display or a stale ticking timer next to old messages.
+    var shouldDisplay: Bool { isStreaming }
+}
+
+/// Bottom-of-timeline progress indicator modelled on Claude Code's streaming chip:
+/// pulsing sparkle + live elapsed time. Token count lives in the bubble's
+/// TokenUsageBadge once the response completes; we don't duplicate it here.
+struct StreamingTimelineFooter: View {
+    let context: StreamingContext
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "sparkle")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(theme.streamingIndicator.opacity(0.95))
+                .symbolEffect(.pulse, options: .repeating, isActive: context.isStreaming)
+
+            // TimelineView re-renders once per second while visible and stops
+            // when off-screen — cheaper than a Timer and auto-cleans on removal.
+            TimelineView(.periodic(from: context.startedAt, by: 1.0)) { timeline in
+                Text(Self.formatElapsed(from: context.startedAt, to: timeline.date))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.secondaryText)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 4)
+        .padding(.top, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Streaming, \(Self.formatElapsed(from: context.startedAt, to: Date()))")
+    }
+
+    private static func formatElapsed(from start: Date, to now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        if seconds < 60 { return "\(seconds)s" }
+        let minutes = seconds / 60
+        let remaining = seconds % 60
+        return remaining == 0 ? "\(minutes)m" : "\(minutes)m \(remaining)s"
+    }
+}
+
 // MARK: - Tool Arg Formatter
 
 /// Extracts display-ready verb, object label, and primary argument for a tool invocation.
@@ -476,18 +782,27 @@ enum ToolArgFormatter {
     /// The primary argument to surface in the row — filename for fs ops, query for searches,
     /// command prefix for shell, question for ask_user, etc. Empty string means "no useful label".
     static func primaryLabel(tool: String, params: String) -> String {
+        // `final_answer` is a terminal signal — its `answer` arg is rendered as the
+        // assistant's final message directly below this chip. Surfacing the answer
+        // text in the chip duplicates it and leaks raw markdown (`###`, `**`, etc.)
+        // into a non-rendering label. Keep the chip terse — just the "Final" verb.
+        if tool == "final_answer" {
+            return ""
+        }
+
         guard let dict = parseParams(params), !dict.isEmpty else { return "" }
 
         switch tool {
-        case "read_file", "write_file", "edit_file", "fs_read_metadata", "fs_watch_folder":
+        case "read_file", "write_file", "edit_file", "edit_code", "create_file",
+             "file_overview", "fs_read_metadata", "fs_watch_folder":
             if let p = firstString(dict, keys: ["path", "file_path"]) {
                 return basename(p)
             }
-        case "list_directory", "fs_smart_search", "fs_organize_batch":
+        case "list_directory", "fs_smart_search", "fs_organize_batch", "codebase_map":
             if let p = firstString(dict, keys: ["path", "directory", "dir"]) {
                 return shortPath(p)
             }
-        case "grep", "grep_search", "ripgrep":
+        case "grep", "grep_search", "ripgrep", "code_search", "glob_files":
             if let q = firstString(dict, keys: ["pattern", "query", "regex"]) {
                 return truncate(q, 50)
             }
@@ -495,7 +810,7 @@ enum ToolArgFormatter {
             if let q = firstString(dict, keys: ["query", "q"]) {
                 return truncate(q, 50)
             }
-        case "run_shell", "execute_shell", "bash", "shell":
+        case "run_shell", "execute_shell", "bash", "shell", "batch_command":
             if let cmd = firstString(dict, keys: ["command", "cmd", "script"]) {
                 return truncate(cmd, 50)
             }
@@ -510,6 +825,24 @@ enum ToolArgFormatter {
         case "recall_conversation_history":
             if let q = firstString(dict, keys: ["query", "topic"]) {
                 return truncate(q, 50)
+            }
+        case "git_tool":
+            if let a = firstString(dict, keys: ["action", "operation", "command"]) {
+                return a
+            }
+        case "find_definition":
+            if let s = firstString(dict, keys: ["symbol", "name", "identifier"]) {
+                return truncate(s, 40)
+            }
+        case "diff_files":
+            // Surface both filenames joined so "Diffed foo.swift ↔ bar.swift" reads at a glance.
+            let a = firstString(dict, keys: ["file_a", "file_path_a", "path_a"])
+            let b = firstString(dict, keys: ["file_b", "file_path_b", "path_b"])
+            switch (a, b) {
+            case (let a?, let b?): return "\(basename(a)) ↔ \(basename(b))"
+            case (let a?, nil):    return basename(a)
+            case (nil, let b?):    return basename(b)
+            default:               break
             }
         default:
             break
@@ -533,6 +866,8 @@ enum ToolArgFormatter {
         "read_file":                   "Read",
         "write_file":                  "Wrote",
         "edit_file":                   "Edited",
+        "edit_code":                   "Edited",
+        "create_file":                 "Created",
         "list_directory":              "Explored",
         "fs_smart_search":             "Searched",
         "fs_read_metadata":            "Inspected",
@@ -542,19 +877,29 @@ enum ToolArgFormatter {
         "run_shell":                   "Ran",
         "bash":                        "Ran",
         "shell":                       "Ran",
+        "batch_command":               "Ran",
         "grep":                        "Searched",
         "grep_search":                 "Searched",
         "ripgrep":                     "Searched",
+        "code_search":                 "Searched",
+        "glob_files":                  "Found",
         "web_search":                  "Searched",
         "ask_user":                    "Asked",
         "call_agent":                  "Delegated",
-        "recall_conversation_history": "Recalled"
+        "recall_conversation_history": "Recalled",
+        "git_tool":                    "Git",
+        "find_definition":             "Located",
+        "file_overview":               "Analyzed",
+        "codebase_map":                "Mapped",
+        "diff_files":                  "Diffed"
     ]
 
     private static let objectOverrides: [String: (singular: String, plural: String)] = [
         "read_file":        ("file", "files"),
         "write_file":       ("file", "files"),
         "edit_file":        ("file", "files"),
+        "edit_code":        ("file", "files"),
+        "create_file":      ("file", "files"),
         "list_directory":   ("directory", "directories"),
         "fs_smart_search":  ("search", "searches"),
         "fs_read_metadata": ("file", "files"),
@@ -562,12 +907,20 @@ enum ToolArgFormatter {
         "run_shell":        ("command", "commands"),
         "bash":             ("command", "commands"),
         "shell":            ("command", "commands"),
+        "batch_command":    ("command", "commands"),
         "grep":             ("search", "searches"),
         "grep_search":      ("search", "searches"),
         "ripgrep":          ("search", "searches"),
+        "code_search":      ("match", "matches"),
+        "glob_files":       ("match", "matches"),
         "web_search":       ("search", "searches"),
         "ask_user":         ("question", "questions"),
-        "call_agent":       ("agent", "agents")
+        "call_agent":       ("agent", "agents"),
+        "git_tool":         ("operation", "operations"),
+        "find_definition":  ("symbol", "symbols"),
+        "file_overview":    ("file", "files"),
+        "codebase_map":     ("codebase", "codebases"),
+        "diff_files":       ("diff", "diffs")
     ]
 
     // MARK: - Helpers

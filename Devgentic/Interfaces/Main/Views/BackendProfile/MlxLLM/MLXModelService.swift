@@ -239,7 +239,13 @@ class MLXModelService {
         }
         
         // 2. Reasoning (Chain of Thought)
-        if tags.contains("reasoning") || tags.contains("chain-of-thought") || lowerId.contains("deepseek-r1") || lowerId.contains("reasoning") {
+        // Centralized reasoning-family detection via `ModelCapabilityHeuristics`
+        // (catches deepseek-r1, qwq, magistral, gpt-oss, o1/o3/o4) plus the
+        // generic Hugging Face tags and the "reasoning" keyword some publishers
+        // add to their model id.
+        if tags.contains("reasoning") || tags.contains("chain-of-thought") ||
+           lowerId.contains("reasoning") ||
+           ModelCapabilityHeuristics.isReasoningOnly(nameCandidates: id) {
             caps.insert(.reasoning)
         }
         
@@ -285,18 +291,39 @@ class MLXModelService {
     private func getSizeForModel(repoId: String) async -> (String, String?) {
         let urlString = "https://huggingface.co/api/models/\(repoId)?blobs=true"
         guard let url = URL(string: urlString) else { return (repoId, nil) }
-        
+
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let detail = try JSONDecoder().decode(HFModelDetail.self, from: data)
             let totalBytes = detail.siblings.compactMap { $0.size }.reduce(0, +)
-            
+
             let formatter = ByteCountFormatter()
             formatter.allowedUnits = [.useGB, .useMB]
             formatter.countStyle = .file
             return (repoId, formatter.string(fromByteCount: Int64(totalBytes)))
         } catch {
             return (repoId, nil)
+        }
+    }
+
+    /// Public counterpart to `getSizeForModel` that returns the raw byte
+    /// total instead of a formatted string. Used by `DownloadCoordinator`
+    /// to pre-seed `DownloadRecord.fileSizeBytes` before kicking off an
+    /// MLX pull, so the speed/ETA display has an authoritative denominator
+    /// from the first progress tick onward. Returns nil on any error
+    /// (unknown repo, network issue, malformed response) — the download
+    /// still proceeds, the UI just falls back to "— MB/s".
+    func getTotalBytesForModel(repoId: String) async -> Int64? {
+        let urlString = "https://huggingface.co/api/models/\(repoId)?blobs=true"
+        guard let url = URL(string: urlString) else { return nil }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let detail = try JSONDecoder().decode(HFModelDetail.self, from: data)
+            let totalBytes = detail.siblings.compactMap { $0.size }.reduce(0, +)
+            return totalBytes > 0 ? Int64(totalBytes) : nil
+        } catch {
+            logger.warning("HF size fetch failed for \(repoId): \(error.localizedDescription)")
+            return nil
         }
     }
     

@@ -388,7 +388,21 @@ final class ActiveStreamManager {
                         }
                         
                     case .error(let errorMsg):
+                        // Surface the failure as a distinct error card in the bubble
+                        // instead of leaving it buried in streaming prose. Without this,
+                        // capability/system failures render as plain text that mimics
+                        // the agent's own output and misleads users into thinking the
+                        // run is still in progress.
                         logger.error("Stream Error Event: \(errorMsg)")
+                        agentMessage.content = MessageContent.error(
+                            title: "Execution Failed",
+                            details: errorMsg
+                        )
+                        agentMessage.invalidateMarkdownCache()
+                        if let agentResponse = agentMessage.agentResponse,
+                           agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
+                            agentMessage.agentResponse?.variants[agentResponse.selectedVariantIndex].content = agentMessage.content
+                        }
 
                     case .warning(let category, let message, _, let sourceNodeID):
                         agentMessage.thinkingHeadline = "⚠️ \(message)"

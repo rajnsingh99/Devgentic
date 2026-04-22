@@ -30,7 +30,9 @@ struct MLXNativeStructuredGenerator: CognitiveGenerator {
     RULES:
     1. 'content' is REQUIRED and should contain your logical "Thought".
     2. 'tool_calls' is an array. You can call multiple tools if they are independent.
-    3. If no tool is needed, 'tool_calls' should be an empty array [].
+    3. To end a task, call the `final_answer` tool with your complete response in the
+       `answer` argument. This is the ONLY way to terminate — do NOT return an empty
+       `tool_calls` array or conversational prose as a termination signal.
     4. Ensure STRICT JSON syntax. No markdown fences.
     5. Use exact tool names from the TOOLS list.
     """
@@ -81,7 +83,9 @@ struct MLXNativeStructuredGenerator: CognitiveGenerator {
         let pipeline = CognitiveParsePipeline(
             expectedDialect: .heuristicJson,
             modelId: model.modelName,
-            iteration: iteration
+            iteration: iteration,
+            knownToolNames: Set(context.availableTools.map(\.name)),
+            registeredTools: context.availableTools
         )
         return pipeline.parse(raw: responseText)
     }

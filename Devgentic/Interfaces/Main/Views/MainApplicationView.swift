@@ -20,8 +20,8 @@ struct MainApplicationView: View {
 
     @FocusState private var isInputFocused: Bool
     
-    @State private var isSidebarVisible: Bool = true
-    @State private var currentSidebarPaneWidth: CGFloat = 300
+    @AppStorage("sidebar.isVisible") private var isSidebarVisible: Bool = true
+    @AppStorage("sidebar.paneWidth") private var currentSidebarPaneWidth: Double = 320
     @State private var showModePicker: Bool = true
     #if canImport(AppKit) && !targetEnvironment(macCatalyst)
     @State private var scrollDirectionMonitor: Any?
@@ -30,7 +30,16 @@ struct MainApplicationView: View {
     private let activityBarWidth: CGFloat = 50
     private let sidebarGap: CGFloat = 12
     private var totalSidebarWidth: CGFloat {
-        (isSidebarVisible ? currentSidebarPaneWidth : 0) + activityBarWidth + (sidebarGap * 1.5)
+        (isSidebarVisible ? CGFloat(currentSidebarPaneWidth) : 0) + activityBarWidth + (sidebarGap * 1.5)
+    }
+
+    /// Binding that bridges the `Double` stored in `@AppStorage` to the
+    /// `CGFloat` expected by `VSCodifiedSidebarContainerView`.
+    private var sidebarPaneWidthCGFloat: Binding<CGFloat> {
+        Binding(
+            get: { CGFloat(currentSidebarPaneWidth) },
+            set: { currentSidebarPaneWidth = Double($0) }
+        )
     }
 
     private let inputAreaCornerRadius: CGFloat = 12
@@ -63,7 +72,7 @@ struct MainApplicationView: View {
             
             VSCodifiedSidebarContainerView(
                 isSidebarVisible: $isSidebarVisible,
-                sidebarWidth: $currentSidebarPaneWidth
+                sidebarWidth: sidebarPaneWidthCGFloat
             )
             .frame(width: totalSidebarWidth)
             .zIndex(1)

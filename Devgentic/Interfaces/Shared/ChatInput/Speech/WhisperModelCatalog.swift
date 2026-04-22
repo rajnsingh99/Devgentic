@@ -13,20 +13,32 @@ struct WhisperModelInfo: Identifiable {
     let displayName: String  // e.g. "Base (English)"
     let size: String         // e.g. "~142 MB"
 
+    /// Approximate total bytes on disk after download. Used by
+    /// `DownloadCoordinator` to pre-seed `DownloadRecord.fileSizeBytes`
+    /// so the download-speed sampler has a real byte total to work with —
+    /// WhisperKit's `Progress` callback reports file counts (not bytes),
+    /// which rounds to ~0 B/s when fed straight into the sampler.
+    let estimatedBytes: Int64
+
     var isEnglishOnly: Bool { id.hasSuffix(".en") }
 }
 
 /// Single source of truth for the list of available WhisperKit models.
 enum WhisperModelCatalog {
     static let availableModels: [WhisperModelInfo] = [
-        WhisperModelInfo(id: "tiny",       displayName: "Tiny (Multilingual)",    size: "~75 MB"),
-        WhisperModelInfo(id: "tiny.en",    displayName: "Tiny (English)",         size: "~75 MB"),
-        WhisperModelInfo(id: "base",       displayName: "Base (Multilingual)",    size: "~142 MB"),
-        WhisperModelInfo(id: "base.en",    displayName: "Base (English)",         size: "~142 MB"),
-        WhisperModelInfo(id: "small",      displayName: "Small (Multilingual)",   size: "~466 MB"),
-        WhisperModelInfo(id: "small.en",   displayName: "Small (English)",        size: "~466 MB"),
-        WhisperModelInfo(id: "medium",     displayName: "Medium (Multilingual)",  size: "~1.5 GB"),
-        WhisperModelInfo(id: "medium.en",  displayName: "Medium (English)",       size: "~1.5 GB"),
-        WhisperModelInfo(id: "large-v3",   displayName: "Large v3 (Multilingual)", size: "~3 GB"),
+        WhisperModelInfo(id: "tiny",       displayName: "Tiny (Multilingual)",    size: "~75 MB",  estimatedBytes: 78_643_200),
+        WhisperModelInfo(id: "tiny.en",    displayName: "Tiny (English)",         size: "~75 MB",  estimatedBytes: 78_643_200),
+        WhisperModelInfo(id: "base",       displayName: "Base (Multilingual)",    size: "~142 MB", estimatedBytes: 148_897_792),
+        WhisperModelInfo(id: "base.en",    displayName: "Base (English)",         size: "~142 MB", estimatedBytes: 148_897_792),
+        WhisperModelInfo(id: "small",      displayName: "Small (Multilingual)",   size: "~466 MB", estimatedBytes: 488_636_416),
+        WhisperModelInfo(id: "small.en",   displayName: "Small (English)",        size: "~466 MB", estimatedBytes: 488_636_416),
+        WhisperModelInfo(id: "medium",     displayName: "Medium (Multilingual)",  size: "~1.5 GB", estimatedBytes: 1_610_612_736),
+        WhisperModelInfo(id: "medium.en",  displayName: "Medium (English)",       size: "~1.5 GB", estimatedBytes: 1_610_612_736),
+        WhisperModelInfo(id: "large-v3",   displayName: "Large v3 (Multilingual)", size: "~3 GB",  estimatedBytes: 3_221_225_472),
     ]
+
+    /// Lookup helper for the coordinator's pre-seed path.
+    static func estimatedBytes(for modelId: String) -> Int64? {
+        availableModels.first { $0.id == modelId }?.estimatedBytes
+    }
 }

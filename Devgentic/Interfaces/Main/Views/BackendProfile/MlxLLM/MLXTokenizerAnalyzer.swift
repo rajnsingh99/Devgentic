@@ -160,8 +160,19 @@ enum MLXTokenizerAnalyzer {
         let capability: ModelCognitiveCapability
         let detectionReason: String
 
+        // Tier 0: Reasoning-only fine-tunes — force .none regardless of tokenizer signals.
+        // Distilled reasoning models (DeepSeek-R1-Distill-Llama-*, QwQ, magistral) often
+        // inherit tool tokens from their base architecture but have had tool calling
+        // stripped by the fine-tune. Without this gate, the family-fallback at Tier 2
+        // would misclassify them as parallelActions. We check both the display name AND
+        // the true origin name from config.json's `_name_or_path` because either can
+        // preserve the reasoning-only identity while the other masquerades as the base.
+        if ModelCapabilityHeuristics.isReasoningOnly(nameCandidates: modelName, originalModelName) {
+            detectionReason = "Reasoning-only pattern matched — forcing .none"
+            capability = .none
+        }
         // Tier 1: Explicitly fine-tuned for parallel arrays
-        if hasSpecialToolTokens || hasParallelTemplate {
+        else if hasSpecialToolTokens || hasParallelTemplate {
             detectionReason = "Detected parallel tool signatures in tokenizer"
             capability = .parallelActions
         }

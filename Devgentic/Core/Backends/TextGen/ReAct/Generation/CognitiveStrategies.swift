@@ -17,14 +17,20 @@ protocol CognitiveProfileFactory {
 /// Factory for cloud providers that natively support JSON Schema and Tool Arrays (e.g., OpenAI).
 struct CloudNativeProfileFactory: CognitiveProfileFactory {
     func createGenerator() -> any CognitiveGenerator {
-        return NativeStructuredGenerator(toolAdapter: NativeJSONSchemaAdapter())
+        return NativeStructuredGenerator(
+            toolAdapter: NativeJSONSchemaAdapter(),
+            toolTurnAdapter: OpenAIToolTurnAdapter()
+        )
     }
 }
 
 /// Factory for Ollama instances running modern models with native tool support.
 struct OllamaNativeProfileFactory: CognitiveProfileFactory {
     func createGenerator() -> any CognitiveGenerator {
-        return NativeStructuredGenerator(toolAdapter: NativeJSONSchemaAdapter())
+        return NativeStructuredGenerator(
+            toolAdapter: NativeJSONSchemaAdapter(),
+            toolTurnAdapter: OllamaToolTurnAdapter()
+        )
     }
 }
 

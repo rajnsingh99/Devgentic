@@ -135,6 +135,44 @@ struct SidebarSearchBarView: View {
     }
 }
 
+// MARK: - Batch Header Text Button
+
+/// Text-only toolbar button used by sidebar batch-selection headers
+/// (Prompt Library, Conversations, etc.). Adds a subtle pill-shaped hover
+/// fill so the tap target is discoverable instead of looking like static
+/// caption text. Tint is parameterized so a secondary "Cancel" reads as
+/// muted while a primary "Select All" picks up the accent color.
+struct BatchHeaderTextButton: View {
+    let title: String
+    let tint: Color
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(.caption, weight: .medium))
+                .foregroundColor(tint)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isHovered ? theme.surfaceOverlay : Color.clear)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(isHovered ? theme.surfaceOverlayStrong.opacity(0.5) : Color.clear, lineWidth: 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.12), value: isHovered)
+    }
+}
+
 // MARK: - Sidebar Empty State (Optional Shared)
 struct SidebarEmptyStateView: View {
     let title: LocalizedStringKey

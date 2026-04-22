@@ -30,7 +30,13 @@ struct OllamaShowResponse: Codable {
     let parameters: String?
     let template: String?
     let details: OllamaModelDetails?
-    
+    /// Authoritative capability list reported by Ollama 0.3.4+.
+    /// When present and missing `"tools"`, the server WILL return HTTP 400 if
+    /// we pass the `tools` parameter — that's the signal we use to force
+    /// `capability = .none` in `cognitiveProfile(modelName:)`. Absent on older
+    /// Ollama releases; in that case the heuristic fallback path runs.
+    let capabilities: [String]?
+
     /// Evaluates the model's true capabilities by inspecting the template, family, and modelfile.
     /// This dictates the cognitive tier of the model. (Backward-compatible accessor.)
     var cognitiveCapability: ModelCognitiveCapability {
@@ -70,8 +76,64 @@ struct OllamaShowResponse: Codable {
         return false
     }
 
-    /// Returns the full CognitiveProfile (capability + dialect) by inspecting the Ollama Go template.
+    /// Backward-compatible computed property — delegates to `cognitiveProfile(modelName:)`
+    /// with an empty model name. Callers that have the model name available should prefer
+    /// the method form because it enables reasoning-only detection for distilled fine-tunes
+    /// (deepseek-r1 family reports family="qwen2" which would otherwise bypass the gate).
     var cognitiveProfile: CognitiveProfile {
+        cognitiveProfile(modelName: "")
+    }
+
+    /// Returns the full CognitiveProfile (capability + dialect) for this Ollama model.
+    ///
+    /// Resolution priority:
+    /// 1. **Authoritative `capabilities` field** (Ollama 0.3.4+). When present and lacking
+    ///    `"tools"`, forces `.none` — the server will reject any tools-param request
+    ///    with HTTP 400, so no heuristic override should second-guess this.
+    /// 2. **Reasoning-only pattern match** against name + family + families. Catches
+    ///    distilled fine-tunes like deepseek-r1:14b whose reported family is the
+    ///    tool-capable BASE architecture (qwen2) even though the fine-tune stripped
+    ///    tool calling.
+    /// 3. **Existing template/family heuristics**. Unchanged — handles the common case
+    ///    where the model genuinely supports tools and Ollama hasn't shipped the
+    ///    capabilities field yet.
+    ///
+    /// - Parameter modelName: The Ollama model identifier (e.g. `"deepseek-r1:14b"`).
+    ///   Pass `""` if unavailable — reasoning-only detection will still run against
+    ///   family/families, but will miss distilled fine-tunes that hide behind a base family.
+    func cognitiveProfile(modelName: String) -> CognitiveProfile {
+        let metadata = buildMetadata()
+        let familyStr = details?.family?.lowercased() ?? ""
+        let familiesArr = details?.families?.map { $0.lowercased() } ?? []
+
+        // Priority 1: Authoritative capabilities field (Ollama 0.3.4+).
+        // Absence of "tools" is a HARD deny — any tools-param request will 400.
+        if let caps = capabilities {
+            if !caps.contains("tools") {
+                logger.info("cognitiveProfile: /api/show capabilities=\(caps) lacks 'tools' — forcing .none (authoritative)")
+                return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata)
+            }
+            // Otherwise tools IS supported — fall through to dialect detection below.
+        }
+
+        // Priority 2: Reasoning-only pattern match. Handles older Ollama (no capabilities
+        // field) and distilled fine-tunes where the family reports as the tool-capable
+        // base architecture. `isReasoningOnly` checks model name, family, AND families —
+        // whichever source preserves the reasoning-only identity.
+        if ModelCapabilityHeuristics.isReasoningOnly(
+            in: [modelName, familyStr] + familiesArr
+        ) {
+            logger.info("cognitiveProfile: reasoning-only pattern matched for name='\(modelName)' family='\(familyStr)' — forcing .none")
+            return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata)
+        }
+
+        // Priority 3: Existing template/family heuristics.
+        return computeHeuristicProfile(metadata: metadata)
+    }
+
+    /// Heuristic capability + dialect detection from template, modelfile, and family.
+    /// Runs only after the authoritative and reasoning-only gates have passed.
+    private func computeHeuristicProfile(metadata: ModelMetadata) -> CognitiveProfile {
         let templateStr = template?.lowercased() ?? ""
         let modelfileStr = modelfile?.lowercased() ?? ""
         let familyStr = details?.family?.lowercased() ?? ""
@@ -148,11 +210,17 @@ struct OllamaShowResponse: Codable {
             dialect = .heuristicJson
         }
 
-        // --- METADATA DETECTION ---
+        return CognitiveProfile(capability: capability, dialect: dialect, metadata: metadata)
+    }
+
+    /// Populates `ModelMetadata` from the `/api/show` details. Extracted so both
+    /// the short-circuit paths (capabilities-authoritative, reasoning-only) and the
+    /// heuristic path produce fully-populated metadata instead of defaulting the
+    /// tier/quant/family fields to nil when the model is force-classified as `.none`.
+    private func buildMetadata() -> ModelMetadata {
         var metadata = ModelMetadata(tier: .small) // Default
 
         if let detailObj = details {
-            // 1. Detect Tier from parameter size — use ModelFitAdvisor's parser for consistent handling
             if let billions = ModelFitAdvisor.parseParameterCount(detailObj.parameterSize) {
                 if billions < 4 { metadata.tier = .tiny }
                 else if billions < 15 { metadata.tier = .small }
@@ -166,7 +234,7 @@ struct OllamaShowResponse: Codable {
             metadata.parameterCount = detailObj.parameterSize
         }
 
-        return CognitiveProfile(capability: capability, dialect: dialect, metadata: metadata)
+        return metadata
     }
 }
 

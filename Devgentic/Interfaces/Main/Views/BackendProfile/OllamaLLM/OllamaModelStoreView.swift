@@ -70,7 +70,7 @@ struct OllamaModelStoreContent: View {
                         Spacer()
 
                         Button {
-                            viewModel.refresh()
+                            viewModel.refresh(triggeredBy: .ollamaRefreshButton)
                         } label: {
                             Image(systemName: "arrow.clockwise")
                                 .font(.body)
@@ -130,15 +130,18 @@ struct OllamaModelStoreContent: View {
                                 .stroke(theme.dividerColor, lineWidth: 1)
                         )
 
-                        // Contextual Pull Button
+                        // Contextual "Pull by name" affordance — replaces the
+                        // old standalone Button with the shared status view,
+                        // which handles in-progress / installed / available
+                        // states uniformly and writes to DownloadHistoryStore
+                        // via DownloadCoordinator.
                         if viewModel.displayedModels.isEmpty && !viewModel.searchText.isEmpty {
-                            Button {
-                                viewModel.downloadModel(name: viewModel.searchText)
-                            } label: {
-                                Label("Pull Model", systemImage: "arrow.down.circle.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(theme.accentColor)
+                            ModelDownloadStatusView(
+                                backend: .ollama,
+                                modelIdentifier: viewModel.searchText,
+                                displayName: viewModel.searchText,
+                                isInstalled: viewModel.displayedModels.contains { $0.name == viewModel.searchText }
+                            )
                         }
                     }
                 }
@@ -165,14 +168,11 @@ struct OllamaModelStoreContent: View {
                     }
                 }
 
-                // Floating Download Banner
-                if viewModel.isDownloading {
-                    VStack {
-                        Spacer()
-                        downloadBanner
-                            .padding(.bottom, 20)
-                    }
-                }
+                // Global in-flight banner intentionally omitted — the
+                // Downloads sidebar already surfaces all active downloads
+                // cross-backend, and `ModelDownloadStatusView` shows per-row
+                // progress inline. The old floating banner here duplicated
+                // that UX.
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -211,7 +211,7 @@ struct OllamaModelStoreContent: View {
             }
             
             Button("Refresh Connection") {
-                viewModel.refresh()
+                viewModel.refresh(triggeredBy: .ollamaRefreshButton)
             }
             .buttonStyle(.bordered)
             .padding(.top, 8)

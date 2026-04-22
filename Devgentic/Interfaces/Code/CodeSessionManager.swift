@@ -30,6 +30,13 @@ final class CodeSessionManager {
     private(set) var baseURL: String? = nil
     private(set) var projectPath: URL? = nil
 
+    /// Most-recently-used project folders. Persisted across launches so the folder
+    /// selector can suggest them without re-running NSOpenPanel.
+    private(set) var recentProjectPaths: [URL] = []
+
+    /// Max entries kept in `recentProjectPaths`. Older entries drop off the tail.
+    private static let maxRecentPaths = 8
+
     /// Providers that support agentic tool use in Code mode.
     static let supportedProviders: [ApiProvider] = [.ollama, .mlx, .anthropic, .openAI, .google]
 
@@ -74,6 +81,7 @@ final class CodeSessionManager {
     // MARK: - Private
 
     private static let profileIDKey = "devgentic.codeProfileID"
+    private static let recentPathsKey = "devgentic.codeRecentProjectPaths"
     private static let legacyConfigKey = "devgentic.codeSessionConfig"
     private static let devgenticDirName = ".devgentic"
     private static let projectMemoryFileName = ".devgentic/context.md"
@@ -85,6 +93,9 @@ final class CodeSessionManager {
     init() {
         // Clean up legacy CodeSessionConfig from UserDefaults
         UserDefaults.standard.removeObject(forKey: Self.legacyConfigKey)
+
+        // Restore cached recent project paths
+        loadRecentProjectPaths()
 
         // Restore profile ID
         if let uuidString = UserDefaults.standard.string(forKey: Self.profileIDKey),
@@ -103,8 +114,10 @@ final class CodeSessionManager {
             logger.info("CodeSessionManager initialized — no existing code profile")
         }
 
-        // If a project path was restored, bootstrap memory.
-        if projectPath != nil {
+        // If a project path was restored, bootstrap memory and ensure it's in recents
+        // (covers first launch after this feature ships for existing users).
+        if let restored = projectPath {
+            rememberRecentPath(restored)
             bootstrapProjectMemory()
         }
     }
@@ -229,7 +242,32 @@ final class CodeSessionManager {
             try? BackendProfileStore.shared.saveProfile(profile)
         }
 
+        rememberRecentPath(url)
         bootstrapProjectMemory()
+    }
+
+    // MARK: - Recent Project Paths
+
+    /// Move-to-front an entry in `recentProjectPaths`, dropping missing folders and
+    /// capping the list. Persists to UserDefaults.
+    private func rememberRecentPath(_ url: URL) {
+        let standardized = url.standardizedFileURL
+        var updated = recentProjectPaths.filter { $0.standardizedFileURL != standardized }
+        updated.insert(standardized, at: 0)
+        // Drop entries whose folders no longer exist on disk (user moved/deleted them).
+        updated = updated.filter { FileManager.default.fileExists(atPath: $0.path) }
+        if updated.count > Self.maxRecentPaths {
+            updated = Array(updated.prefix(Self.maxRecentPaths))
+        }
+        recentProjectPaths = updated
+        UserDefaults.standard.set(updated.map(\.path), forKey: Self.recentPathsKey)
+    }
+
+    private func loadRecentProjectPaths() {
+        guard let raw = UserDefaults.standard.array(forKey: Self.recentPathsKey) as? [String] else { return }
+        recentProjectPaths = raw
+            .map { URL(fileURLWithPath: $0).standardizedFileURL }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     /// Refreshes the code profile's instructions with the latest system prompt + project memory.
@@ -267,7 +305,7 @@ final class CodeSessionManager {
         }
 
         agentConfig.instructions = instructions
-        agentConfig.tools = CodeToolPreset.defaultTools
+        agentConfig.tools = Self.mergePresetTools(preset: CodeToolPreset.defaultTools, existing: agentConfig.tools)
         agentConfig.projectPath = projectPathStr
 
         profile.details = .code(agentConfig)
@@ -319,6 +357,46 @@ final class CodeSessionManager {
         if let path = agentConfig.projectPath, !path.isEmpty, path != "/" {
             self.projectPath = URL(fileURLWithPath: path)
         }
+    }
+
+    // MARK: - Tool Merge
+    //
+    // The Code profile's tools list is rewritten on every send via
+    // `refreshInstructionsOnProfile()`. Naively replacing it with
+    // `CodeToolPreset.defaultTools` would nuke two kinds of user choices:
+    //   1. Auto/Ask toggles the user set on preset tools via the Tool Library.
+    //   2. Additional tools the user added (non-preset built-ins, MCP servers).
+    // The merge preserves both: preset tools stay in the list (user can't disable
+    // them), carrying over the user's requiresConfirmation / favorite / timeout
+    // fields; user-added tools outside the preset are appended unchanged.
+
+    private static func mergePresetTools(preset: [Tool], existing: [Tool]) -> [Tool] {
+        func key(_ tool: Tool) -> String { "\(tool.sourceId)-\(tool.name)" }
+        let existingByKey = Dictionary(uniqueKeysWithValues: existing.map { (key($0), $0) })
+        let presetKeys = Set(preset.map(key))
+
+        var merged: [Tool] = []
+
+        // 1. Preset tools — always present, carry over user preferences when set.
+        for presetTool in preset {
+            if let user = existingByKey[key(presetTool)] {
+                var carried = presetTool
+                carried.requiresConfirmation = user.requiresConfirmation
+                carried.isFavorite = user.isFavorite
+                carried.timeout = user.timeout
+                carried.timeoutMessage = user.timeoutMessage
+                merged.append(carried)
+            } else {
+                merged.append(presetTool)
+            }
+        }
+
+        // 2. User-added tools that aren't in the preset — append in original order.
+        for tool in existing where !presetKeys.contains(key(tool)) {
+            merged.append(tool)
+        }
+
+        return merged
     }
 
     // MARK: - Project Memory Lifecycle

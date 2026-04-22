@@ -41,6 +41,15 @@ enum ToolRecoveryHints {
         Hint(toolName: "edit_code",      errorSubstring: "old_string matches",          suggestions: ["read_file"]),
         Hint(toolName: "edit_code",      errorSubstring: "old_string not found",        suggestions: ["read_file", "code_search"]),
 
+        // edit_code_single / edit_code_batch (Code interface splits) — mirror edit_code's patterns,
+        // but suggest search tools that are actually in the Code preset (code_search_text / _symbol).
+        Hint(toolName: "edit_code_single", errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "codebase_map"]),
+        Hint(toolName: "edit_code_single", errorSubstring: "matches",                  suggestions: ["read_file"]),
+        Hint(toolName: "edit_code_single", errorSubstring: "old_string not found",     suggestions: ["read_file", "code_search_text"]),
+        Hint(toolName: "edit_code_batch",  errorSubstring: "File not found",           suggestions: ["list_directory", "glob_files", "codebase_map"]),
+        Hint(toolName: "edit_code_batch",  errorSubstring: "matches",                  suggestions: ["read_file"]),
+        Hint(toolName: "edit_code_batch",  errorSubstring: "old_string not found",     suggestions: ["read_file", "code_search_text"]),
+
         // file_overview — same path-recovery pattern as read_file.
         Hint(toolName: "file_overview",  errorSubstring: "File not found",              suggestions: ["list_directory", "glob_files", "codebase_map"]),
 
@@ -56,10 +65,17 @@ enum ToolRecoveryHints {
         // create_file — already-exists is a signal to read current content before overwriting.
         Hint(toolName: "create_file",    errorSubstring: "File already exists",         suggestions: ["read_file"]),
 
+        // create_new_file — strict-new variant. Already-exists means the agent should read
+        // current contents and decide between edit_code_single or explicit overwrite_file.
+        Hint(toolName: "create_new_file", errorSubstring: "File already exists",        suggestions: ["read_file", "overwrite_file", "edit_code_single"]),
+
         // Exploration/search tools that take a path argument — always fall back to list_directory
         // (never suggest the tool itself; that would loop).
         Hint(toolName: "codebase_map",   errorSubstring: "does not exist",              suggestions: ["list_directory"]),
         Hint(toolName: "code_search",    errorSubstring: "does not exist",              suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "code_search_text",   errorSubstring: "does not exist",          suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "code_search_symbol", errorSubstring: "does not exist",          suggestions: ["list_directory", "codebase_map"]),
+        Hint(toolName: "code_search_files",  errorSubstring: "does not exist",          suggestions: ["list_directory", "codebase_map"]),
         Hint(toolName: "glob_files",     errorSubstring: "does not exist",              suggestions: ["list_directory", "codebase_map"]),
         Hint(toolName: "find_definition", errorSubstring: "does not exist",             suggestions: ["list_directory", "codebase_map"]),
 
@@ -115,13 +131,18 @@ enum ToolRecoveryHints {
     /// Short, action-phrase descriptors rendered alongside each suggestion.
     /// Kept separate from the registry so the same description can be reused across hints.
     private static let toolDescriptors: [String: String] = [
-        "list_directory":  "list files in a specific directory",
-        "glob_files":      "find files by pattern (e.g. '**/*.java')",
-        "codebase_map":    "see the full project tree",
-        "code_search":     "regex-search content across the codebase",
-        "read_file":       "read the file's current contents",
-        "file_overview":   "get line count + top-level symbols without loading full content",
-        "preview_file":    "read just the first/last N lines"
+        "list_directory":     "list files in a specific directory",
+        "glob_files":         "find files by pattern (e.g. '**/*.java')",
+        "codebase_map":       "see the full project tree",
+        "code_search":        "regex-search content across the codebase",
+        "code_search_text":   "loose regex/text search (case-insensitive) across the codebase",
+        "code_search_symbol": "exact whole-word, case-sensitive symbol lookup",
+        "code_search_files":  "list files that contain a pattern (filenames only)",
+        "read_file":          "read the file's current contents",
+        "file_overview":      "get line count + top-level symbols without loading full content",
+        "preview_file":       "read just the first/last N lines",
+        "edit_code_single":   "apply a single search-and-replace edit",
+        "overwrite_file":     "replace an existing file's contents (destructive)"
     ]
 
     // MARK: - Enrichment

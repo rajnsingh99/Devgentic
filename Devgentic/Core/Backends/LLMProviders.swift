@@ -43,6 +43,24 @@ protocol LLMProvider: Sendable {
         tools: [[String: Any]]?
     ) async throws -> ModernCognitiveStep
 
+    // MARK: - Native-Turn Overload (G12 Refactor)
+
+    /// Generates a cognitive step from a native-turn message array that carries
+    /// provider-specific structural content (tool_calls arrays, tool_use blocks,
+    /// functionCall parts). Used by the native-turn path which threads a growing
+    /// `assistant(tool_calls) → tool(result)` conversation across ReAct iterations,
+    /// instead of re-serializing working memory as a user message each turn.
+    ///
+    /// Default implementation downgrades each message to `{role, content: String}`
+    /// by coercing the `content` field to a string — safe fallback for providers
+    /// that haven't yet implemented the native path, but drops any structural
+    /// tool-call content. Native-tool providers (Ollama, OpenAI, Claude, Gemini)
+    /// should override to pass the rich messages through directly.
+    func generateCognitiveStep(
+        nativeMessages: [[String: Any]],
+        tools: [[String: Any]]?
+    ) async throws -> ModernCognitiveStep
+
     // MARK: - Multimodal Overloads (Phase 6)
 
     /// Generates a complete response from multimodal ProviderMessages.
@@ -63,6 +81,36 @@ extension LLMProvider {
     func generateCognitiveStep(payload: [ProviderMessage], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let legacyMessages = payload.map { $0.toLegacyDict() }
         return try await generateCognitiveStep(messages: legacyMessages, tools: tools)
+    }
+
+    /// Default fallback — coerces native messages to legacy `[[String: String]]`.
+    /// Loses any structural tool-call content. Native-tool providers override.
+    ///
+    /// Non-string values (tool_calls arrays, content-block arrays, nested dicts) are
+    /// JSON-encoded rather than `String(describing:)`-ed, so the downstream legacy
+    /// path still receives valid JSON fragments as string content. This is a fallback
+    /// shape, not the intended path — providers that actually handle native turns
+    /// should override this method.
+    func generateCognitiveStep(
+        nativeMessages: [[String: Any]],
+        tools: [[String: Any]]?
+    ) async throws -> ModernCognitiveStep {
+        let legacy: [[String: String]] = nativeMessages.map { msg in
+            var out: [String: String] = [:]
+            for (key, value) in msg {
+                if let str = value as? String {
+                    out[key] = str
+                } else if JSONSerialization.isValidJSONObject(value),
+                          let data = try? JSONSerialization.data(withJSONObject: value),
+                          let encoded = String(data: data, encoding: .utf8) {
+                    out[key] = encoded
+                } else {
+                    out[key] = "\(value)"
+                }
+            }
+            return out
+        }
+        return try await generateCognitiveStep(messages: legacy, tools: tools)
     }
 }
 
@@ -106,6 +154,13 @@ enum LLMProviderError: LocalizedError {
     /// Thrown when an Ollama model rejects `think: true` with HTTP 400.
     /// Caught by `BackendOrchestrationService` to auto-disable + retry transparently.
     case thinkingUnsupported(modelName: String)
+    /// Thrown when an Ollama model rejects the `tools` parameter with HTTP 400
+    /// ("does not support tools"). Reasoning-only models (deepseek-r1, o1 family)
+    /// land here. The retry strategy routes this to an immediate abort — there's
+    /// no format correction that can fix a capability gap, so burning the retry
+    /// budget is just latency. User-facing message suggests switching profile
+    /// type or model.
+    case toolsUnsupported(modelName: String)
 
     var errorDescription: String? {
         switch self {
@@ -117,6 +172,8 @@ enum LLMProviderError: LocalizedError {
             return "Unsupported provider: \(name)"
         case .thinkingUnsupported(let modelName):
             return "'\(modelName)' does not support extended thinking."
+        case .toolsUnsupported(let modelName):
+            return "\(modelName) doesn't support tool calling. Use this model in a Bot profile for chat or switch to a tool-capable model."
         }
     }
     

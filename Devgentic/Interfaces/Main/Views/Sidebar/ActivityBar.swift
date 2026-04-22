@@ -84,9 +84,29 @@ struct ActivityBarButton: View {
         return selectedTab == tab && isSidebarVisible
     }
 
-    /// Shows a badge dot on the downloads tab when downloads are active.
+    /// Shows a badge dot on a tab to signal attention-worthy state:
+    /// active downloads, or a prompt-library load error. Rendered as a
+    /// small accent-color dot in the top-right (see `.overlay` below).
     private var showBadge: Bool {
-        tab == .downloads && downloadManager.hasActiveDownloads
+        switch tab {
+        case .downloads:
+            return downloadManager.hasActiveDownloads
+        case .promptLibrary:
+            return PromptService.shared.loadState.isError
+        default:
+            return false
+        }
+    }
+
+    /// Tint for the badge — errors use `errorColor`, activity uses `accentColor`.
+    /// Keeps the dot visually meaningful at a glance.
+    private var badgeColor: Color {
+        switch tab {
+        case .promptLibrary where PromptService.shared.loadState.isError:
+            return theme.errorColor
+        default:
+            return theme.accentColor
+        }
     }
 
     var body: some View {
@@ -122,7 +142,7 @@ struct ActivityBarButton: View {
         .overlay(alignment: .topTrailing) {
             if showBadge {
                 Circle()
-                    .fill(theme.accentColor)
+                    .fill(badgeColor)
                     .frame(width: 8, height: 8)
                     .offset(x: 2, y: -2)
                     .transition(.scale.combined(with: .opacity))
