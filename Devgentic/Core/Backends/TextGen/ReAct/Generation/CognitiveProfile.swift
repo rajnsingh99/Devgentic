@@ -70,6 +70,88 @@ enum ModelDialect: String, Codable, CaseIterable, Identifiable, Hashable {
     /// Used with MLXNativeStructuredGenerator / JsonStructuredGenerator.
     case heuristicJson = "Heuristic JSON"
 
+    /// Qwen/Hermes native format: single JSON object per `<tool_call>` wrapper,
+    /// with `name` key first, then `arguments`. Multiple blocks = parallel calls.
+    /// Covers Qwen2.5/3 Instruct, Hermes-2-Pro, Hermes-3, and structurally identical
+    /// fine-tunes. Detected via `ChatTemplateFingerprinter` on the Jinja template.
+    /// Emits `<tool_call>\n{"name": "...", "arguments": {...}}\n</tool_call>`.
+    case qwenHermesToolCall = "Qwen/Hermes Tool Call"
+
+    /// Llama-3.1 / 3.2 / 3.3 native JSON format.
+    /// Covers `meta-llama/Llama-3.1-*-Instruct`, `Llama-3.2-*-Instruct`, `Llama-3.3-*-Instruct`.
+    /// Emits `{"name": "...", "parameters": {...}}` — uses `parameters` key (NOT `arguments`).
+    /// Template ENFORCES single-call-only (raises exception for multi-call).
+    /// Optional `<|python_tag|>` prefix, terminates with `<|eot_id|>` or `<|eom_id|>`.
+    case llama3JsonSingle = "Llama 3 JSON (Single Call)"
+
+    /// Mistral family, tokenizer v3 (Tekken): JSON array of tool calls wrapped in marker.
+    /// Covers Mistral-7B-Instruct-v0.3, Mistral-Nemo, Mixtral-8x22B, Mistral-Small-2409,
+    /// Ministral-8B, Pixtral-Large, older Devstral. Older format (pre-2025-03).
+    /// Emits `[TOOL_CALLS] [{"name": "...", "arguments": {...}, "id": "xxxxxxxxx"}]</s>`.
+    case mistralV3Array = "Mistral v3 (Array)"
+
+    /// Mistral family, tokenizer v11 (2025+): flat marker+name+ARGS syntax.
+    /// Covers Mistral-Small-3.1-24B+, Devstral-Small-2505/2507+, Mistral-Medium-2025+.
+    /// Parallel calls = multiple `[TOOL_CALLS]...[ARGS]...` blocks concatenated.
+    /// Emits `[TOOL_CALLS]list_directory[ARGS]{"path":"/"}`.
+    case mistralV11Flat = "Mistral v11 (Flat)"
+
+    /// Phi-4-mini Instruct + Fireworks Firefunction-v2.
+    /// Emits `functools[{"name":"X","arguments":{...}}, ...]` — JSON array after
+    /// literal `functools[` marker. Structurally similar to Mistral v3 array shape
+    /// but with a different marker.
+    case phiFunctoolsBracket = "Phi functools[]"
+
+    /// DeepSeek-V3 / DeepSeek-R1 native format. Uses full-width Unicode pipes `｜`
+    /// (U+FF5C) and `▁` (U+2581) in token markers. Emits tool name via `<|tool▁sep|>`
+    /// then JSON args in a `\`\`\`json ... \`\`\`` code fence, wrapped in
+    /// `<|tool▁calls▁begin|>...<|tool▁call▁end|><|tool▁calls▁end|>`.
+    case deepseekV3JsonFence = "DeepSeek V3 (JSON Fence)"
+
+    /// Pythonic function-call list format. Used by small Llama 3.2 variants
+    /// (1B / 3B Instruct), Salesforce xLAM-2, Team-ACE ToolACE-8B, Llama 4 pythonic.
+    /// Emits `[func_name(arg1="val1", arg2=42), func2(...)]` — Python expression
+    /// syntax (NOT JSON). Parsing requires kwarg extraction + Python-literal handling.
+    case pythonicBracketList = "Pythonic Bracket List"
+
+    /// IBM Granite 3.0 / 3.1 / 3.2 / 3.3 — JSON array wrapped in tool-call marker.
+    /// 3.0 uses `<|tool_call|>` with ASCII pipes; 3.1+ uses `<tool_call>` without.
+    /// Both emit the same body shape: `[{"name":"...","arguments":{...}}, ...]`.
+    /// One parser handles both markers.
+    case graniteLegacyArray = "Granite 3.x (Array)"
+
+    /// IBM Granite 4.0 — single-object `<tool_call>{"name":..., "arguments":...}</tool_call>`
+    /// identical in shape to Qwen/Hermes native. Parser is routed to QwenHermesJsonParser.
+    /// Distinguished from Qwen at the fingerprint layer (Granite-specific role markers).
+    case granite4ToolCall = "Granite 4.x"
+
+    /// Cohere Command-R / Command-R+ — Action-prefixed markdown directive with
+    /// fenced JSON list using `tool_name` + `parameters` keys (unique to Cohere).
+    /// Emits `Action: \`\`\`json\n[{"tool_name":"...","parameters":{...}}]\n\`\`\``.
+    case commandRAction = "Command-R Action"
+
+    /// Cohere Command-R7B (Dec 2024+) and likely Command-A — token-delimited
+    /// `<|START_ACTION|>[...]<|END_ACTION|>` with `tool_call_id`/`tool_name`/`parameters`.
+    /// Explicit `tool_call_id` field is distinctive vs older Command-R.
+    case commandR7BAction = "Command-R7B Action"
+
+    /// Qwen3-Coder (30B-A3B, 480B-A35B, etc.) — deep XML format:
+    /// `<tool_call><function=NAME><parameter=KEY>value</parameter>...</function></tool_call>`.
+    /// Fundamentally different from Qwen2.5/3 base (which uses JSON in wrapper).
+    /// Parameter values type-coerced from schema (string/int/float/bool/JSON).
+    case qwen3CoderDeepXml = "Qwen3-Coder Deep XML"
+
+    /// DeepSeek V3.1 — flat variant: name followed by JSON args, NO code fence.
+    /// Emits `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>name<｜tool▁sep｜>{args}<｜tool▁call▁end|><｜tool▁calls▁end|>`.
+    /// Same full-width Unicode token markers as V3 but dropped the code fence rendering.
+    case deepseekV31Flat = "DeepSeek V3.1 (Flat)"
+
+    /// DeepSeek V3.2 — brand new `<｜DSML｜...>` XML namespace replacing the old
+    /// begin/end/sep sentinels. Emits `<｜DSML｜function_calls><｜DSML｜invoke name="X">
+    /// <｜DSML｜parameter name="Y" string="true">value</｜DSML｜parameter></｜DSML｜invoke>
+    /// </｜DSML｜function_calls>`. Per-parameter typing via `string="true"` attribute.
+    case deepseekV32Dsml = "DeepSeek V3.2 (DSML)"
+
     var id: String { rawValue }
 }
 

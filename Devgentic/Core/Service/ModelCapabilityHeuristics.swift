@@ -72,4 +72,53 @@ enum ModelCapabilityHeuristics {
             return lowered.contains { $0.contains(pattern) }
         }
     }
+
+    /// Model-name substrings identifying families whose instruction-tuned variants
+    /// support native tool calling. Used for remote-catalog classification where
+    /// we can't read `tokenizer_config.json` for chat-template inspection.
+    ///
+    /// Kept deliberately broad — false positives (e.g. a base non-instruct variant
+    /// shown under "Tool Use") are less harmful than false negatives (popular
+    /// tool-capable models like Qwen2.5 hidden entirely).
+    ///
+    /// NOT included: Gemma 1/2 (limited tool support), ancient Mistral-7B-v0.1/v0.2,
+    /// base (non-instruct) models. Callers should AND-combine with
+    /// `!isReasoningOnly(...)` to exclude reasoning-only distills.
+    static let toolCapableFamilyPatterns: [String] = [
+        // Explicit tool-use indicators
+        "tool", "function", "hermes", "firefunction", "gorilla", "nexusraven",
+        // Qwen 2.5+ and Qwen 3 support tool calls natively
+        "qwen2.5", "qwen-2.5", "qwen3", "qwen-3",
+        // Llama 3.1+ supports tool calls; 3.0 does not
+        "llama-3.1", "llama3.1", "llama-3.2", "llama3.2", "llama-3.3", "llama3.3",
+        // Mistral: Nemo, Small v2+, Large, Ministral, Mixtral 8x22B, v0.3 instruct
+        "mistral-nemo", "mistral-small", "mistral-large", "ministral",
+        "mixtral-8x22b", "mistral-7b-instruct-v0.3",
+        // Phi 3.5+ and Phi 4
+        "phi-3.5", "phi3.5", "phi-4", "phi4",
+        // Cohere Command-R / R+
+        "command-r", "command_r", "commandr",
+        // IBM Granite 3+
+        "granite-3", "granite3",
+        // Mistral Devstral
+        "devstral",
+        // THUDM GLM-4+
+        "glm-4", "glm4", "glm-4.5", "glm4.5",
+        // DeepSeek V2+ (V2/V3/Coder-V2) — reasoning-only variants filtered separately
+        "deepseek-v2", "deepseek-v3", "deepseek-coder-v2",
+        // Moonshot Kimi K2+
+        "kimi-k2", "kimi2",
+        // Yi 1.5 Large
+        "yi-1.5-34b", "yi-large",
+    ]
+
+    /// Returns `true` if the model name suggests a tool-capable family.
+    /// Combines substring matches from `toolCapableFamilyPatterns` with explicit
+    /// exclusion of reasoning-only distills (since those inherit base names like
+    /// `deepseek-r1-distill-qwen-7b` but don't support tool use).
+    static func isLikelyToolCapable(modelId: String) -> Bool {
+        let lower = modelId.lowercased()
+        if isReasoningOnly(nameCandidates: modelId) { return false }
+        return toolCapableFamilyPatterns.contains { lower.contains($0) }
+    }
 }

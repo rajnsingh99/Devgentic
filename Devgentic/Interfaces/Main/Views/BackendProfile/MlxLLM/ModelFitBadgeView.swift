@@ -9,9 +9,13 @@ import SwiftUI
 
 /// A compact badge that displays the model fit verdict with color coding.
 /// Reusable across MLX and Ollama model stores and pickers.
+///
+/// Styled to match `CapabilityBadge` — subtle neutral capsule with the verdict
+/// color expressed only as a small leading dot, so stacks of badges stay calm
+/// and the truly-critical verdicts (risky/incompatible) still read clearly.
 struct ModelFitBadgeView: View {
     let assessment: ModelFitAssessment
-    /// Compact mode shows only the icon + verdict. Full mode adds the RAM estimate.
+    /// Compact mode shows only the verdict label. Full mode shows the RAM estimate.
     var compact: Bool = false
 
     @Environment(\.appTheme) private var theme
@@ -26,29 +30,19 @@ struct ModelFitBadgeView: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: assessment.verdict.systemImage)
-                .font(.caption2)
+        HStack(spacing: 5) {
+            Circle()
+                .fill(badgeColor)
+                .frame(width: 6, height: 6)
 
-            if compact {
-                Text(assessment.verdict.rawValue)
-                    .font(.caption2)
-                    .fontWeight(.medium)
-            } else {
-                Text("\(assessment.formattedEstimatedRAM)")
-                    .font(.caption2)
-                    .fontWeight(.medium)
-            }
+            Text(compact ? assessment.verdict.rawValue : assessment.formattedEstimatedRAM)
+                .font(.caption2)
+                .foregroundColor(theme.primaryText.opacity(0.85))
         }
-        .foregroundColor(badgeColor)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(badgeColor.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .stroke(badgeColor.opacity(0.3), lineWidth: 1)
-        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(theme.surfaceOverlay)
+        .clipShape(Capsule())
         .help(assessment.explanation)
     }
 }

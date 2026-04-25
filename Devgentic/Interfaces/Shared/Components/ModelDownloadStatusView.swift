@@ -43,6 +43,15 @@ struct ModelDownloadStatusView: View {
     @Environment(\.appTheme) private var theme
 
     @State private var showingRedownloadAlert: Bool = false
+    @State private var showingCancelAlert: Bool = false
+
+    /// MLX cancel path must wait for the in-flight HubApi task to observe
+    /// cancellation and then delete the partial folder — during that window
+    /// we show a "Cleaning up…" indicator instead of a frozen progress bar.
+    /// Other backends cancel atomically and don't need this state.
+    private var isCleaningUpCancel: Bool {
+        backend == .mlx && MLXModelService.shared.isCancellingDownload
+    }
 
     init(
         backend: ModelBackendType,
@@ -128,36 +137,68 @@ struct ModelDownloadStatusView: View {
         // the sampler publishes a new MB/s value, ~1-2× per second.
         let snapshot = DownloadManager.shared.activeSpeeds[record.id]
         return VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                ProgressView(value: record.progress)
-                    .progressViewStyle(.linear)
-                    .tint(backend.tintColor)
-                    .frame(width: 100)
-
-                Text("\(Int(record.progress * 100))%")
-                    .font(.system(.caption2, weight: .bold).monospacedDigit())
-                    .foregroundColor(backend.tintColor)
-                    .frame(minWidth: 32, alignment: .trailing)
-
-                Button {
-                    DownloadManager.shared.cancelDownload(record)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(.caption))
+            if isCleaningUpCancel {
+                // Post-cancel cleanup: HubApi task is winding down and we're
+                // about to delete the partial folder. Replace the progress
+                // bar with a spinner so the user doesn't think it's stuck.
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Cleaning up…")
+                        .font(.caption)
                         .foregroundColor(theme.secondaryText)
                 }
-                .buttonStyle(.plain)
-                .help("Cancel download")
-                .accessibilityLabel("Cancel download of \(displayName)")
-            }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView(value: record.progress)
+                        .progressViewStyle(.linear)
+                        .tint(backend.tintColor)
+                        .frame(width: 100)
 
-            Text(DownloadSpeedFormatter.compactLine(snapshot: snapshot))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundColor(theme.tertiaryText)
-                .lineLimit(1)
+                    Text("\(Int(record.progress * 100))%")
+                        .font(.system(.caption2, weight: .bold).monospacedDigit())
+                        .foregroundColor(backend.tintColor)
+                        .frame(minWidth: 32, alignment: .trailing)
+
+                    Button {
+                        showingCancelAlert = true
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(.caption))
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel download")
+                    .accessibilityLabel("Cancel download of \(displayName)")
+                }
+
+                Text(DownloadSpeedFormatter.compactLine(snapshot: snapshot))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(theme.tertiaryText)
+                    .lineLimit(1)
+            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(displayName), downloading, \(Int(record.progress * 100)) percent, \(DownloadSpeedFormatter.compactLine(snapshot: snapshot))")
+        .alert("Cancel Download?", isPresented: $showingCancelAlert) {
+            Button("Cancel Download", role: .destructive) {
+                DownloadManager.shared.cancelDownload(record)
+            }
+            Button("Keep Downloading", role: .cancel) { }
+        } message: {
+            Text(cancelAlertMessage)
+        }
+    }
+
+    /// Backend-specific cancel confirmation copy. MLX leaves partial files on
+    /// disk (HubApi writes `config.json` early), so we tell the user those
+    /// will be removed. Ollama/Whisper cancel atomically — generic copy.
+    private var cancelAlertMessage: String {
+        switch backend {
+        case .mlx:
+            return "The in-progress download of '\(displayName)' will be stopped and any partial files removed from disk."
+        case .ollama, .whisper:
+            return "The in-progress download of '\(displayName)' will be stopped."
+        }
     }
 
     private var installedView: some View {

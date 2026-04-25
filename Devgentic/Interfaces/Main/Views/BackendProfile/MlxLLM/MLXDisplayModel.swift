@@ -56,6 +56,9 @@ struct MLXDisplayModel: Identifiable, Hashable {
     
     var organization: String {
         // "mlx-community/Llama-3.2-3B" -> "mlx-community"
-        return id.components(separatedBy: "/").first ?? "Unknown"
+        // "bodega-raptor-90m" (no slash) -> "" — avoid duplicating displayName,
+        // since .first and .last on a 1-element split return the same string.
+        let parts = id.components(separatedBy: "/")
+        return parts.count > 1 ? parts[0] : ""
     }
 }

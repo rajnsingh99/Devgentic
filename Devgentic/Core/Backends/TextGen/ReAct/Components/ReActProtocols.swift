@@ -35,7 +35,14 @@ protocol CognitiveSafetyGuarding: Sendable {
     
     /// Records the result of a tool execution and checks for consecutive failure limits.
     mutating func recordToolResult(isSuccess: Bool) -> CircuitBreakerAction
-    
+
+    /// Records a user-denied tool permission specifically. User denials produce a
+    /// binding "do not retry" constraint — we abort more aggressively (2 consecutive)
+    /// than general tool failures (3 consecutive). Models (especially Q4-quantized)
+    /// reliably ignore the "do not retry this exact action" directive in scratchpad,
+    /// so the circuit breaker is the actual enforcement.
+    mutating func recordDenial() -> CircuitBreakerAction
+
     /// Evaluates the loop state when the agent asks for user clarification (prevents endless questioning).
     mutating func evaluateAskUser() -> CircuitBreakerAction
     

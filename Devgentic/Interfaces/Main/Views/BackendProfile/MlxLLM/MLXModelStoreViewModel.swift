@@ -11,6 +11,8 @@ import SwiftUI
 @Observable @MainActor
 class MLXModelStoreViewModel {
 
+    @ObservationIgnored private let logger = DGLogger(category: "MLXModelStore")
+
     let filterForTools: Bool
 
     // MARK: - Inputs (View Actions)
@@ -87,13 +89,19 @@ class MLXModelStoreViewModel {
             }
         }
         
-        var apiTag: String? {
+        /// Client-side capability to filter on for this category.
+        /// We deliberately avoid forwarding capability tags to the HF filter because
+        /// `filter=mlx,tool-use` is ANDed server-side — which eliminates most popular
+        /// MLX models (Qwen2.5, Llama-3.x, etc.) since their authors rarely add the
+        /// `tool-use` / `reasoning` HF tag. Instead, we fetch all MLX models and
+        /// classify via `MLXDisplayModel.capabilities` (set by `classifyCapabilities`).
+        var clientCapability: MLXModelCapability? {
             switch self {
             case .all, .installed: return nil
-            case .reasoning: return "reasoning"
-            case .toolUse: return "tool-use"
-            case .coding: return "code"
-            case .vision: return "vision"
+            case .reasoning: return .reasoning
+            case .toolUse: return .toolUse
+            case .coding: return .coding
+            case .vision: return .vision
             }
         }
     }
@@ -173,15 +181,27 @@ class MLXModelStoreViewModel {
         if selectedCategory == .installed {
             // Default installed tab to most-recent-first
             if sortOption == .popularity { sortOption = .recent }
+            logger.info("Refresh: category=installed — scanning local models")
             service.refreshInstalledModels()
+            // The scan is debounced: if the last scan was <2s ago, it returns
+            // without touching `installedModels`, so the observer never fires
+            // and `displayedModels` would keep showing the prior tab's content.
+            // Force a re-filter so the installed cards render immediately.
+            applyFilterAndSort()
         } else {
             let search = (isRemoteSearchEnabled && !searchText.isEmpty) ? searchText : nil
-            
+            logger.info("Refresh: category=\(self.selectedCategory.rawValue) search=\(search ?? "<none>") clientCapability=\(self.selectedCategory.clientCapability?.rawValue ?? "<none>")")
+
+            // Clear stale cards from the prior tab so the loading UI shows
+            // instead of (incorrectly) rendering the previous category's
+            // models until the remote fetch completes.
+            displayedModels = []
+
             Task {
                 await service.fetchRemoteModels(
                     limit: pageSize,
                     offset: 0,
-                    tags: selectedCategory.apiTag != nil ? [selectedCategory.apiTag!] : nil,
+                    tags: nil,
                     search: search,
                     append: false
                 )
@@ -202,16 +222,17 @@ class MLXModelStoreViewModel {
     
     func loadMore() {
         guard selectedCategory != .installed else { return }
-        
+
         currentPage += 1
         let offset = currentPage * pageSize
         let search = (isRemoteSearchEnabled && !searchText.isEmpty) ? searchText : nil
-        
+        logger.info("LoadMore: page=\(self.currentPage) offset=\(offset) search=\(search ?? "<none>") currentAvailable=\(self.service.availableModels.count)")
+
         Task {
             await service.fetchRemoteModels(
                 limit: pageSize,
                 offset: offset,
-                tags: selectedCategory.apiTag != nil ? [selectedCategory.apiTag!] : nil,
+                tags: nil,
                 search: search,
                 append: true
             )
@@ -279,8 +300,19 @@ class MLXModelStoreViewModel {
             
         } else {
             sourceModels = remote
+
+            // Filter remote results by category capability (client-side).
+            // HF's server-side tag filter is too restrictive (authors rarely add
+            // `tool-use`/`reasoning` tags), so we rely on `classifyCapabilities`
+            // heuristics baked into `MLXDisplayModel.capabilities`.
+            // NOTE: no log here — `applyFilterAndSort` is invoked on every
+            // observer tick (including per-model size updates), so logging
+            // would emit 30+ lines per fetch.
+            if let cap = category.clientCapability {
+                sourceModels = sourceModels.filter { $0.capabilities.contains(cap) }
+            }
         }
-        
+
         // 2. Filter by Search Text (Local Mode)
         if !query.isEmpty && !isRemoteSearchEnabled {
             sourceModels = sourceModels.filter { model in

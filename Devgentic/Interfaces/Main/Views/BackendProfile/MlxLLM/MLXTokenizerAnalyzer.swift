@@ -196,12 +196,21 @@ enum MLXTokenizerAnalyzer {
         }
 
         // --- DIALECT DECISION ---
+        //
+        // Priority order:
+        //   1. ChatTemplateFingerprinter on the extracted Jinja template (ground truth).
+        //   2. Special-token heuristics (legacy path, pre-fingerprinter).
+        //   3. Capability-based default (nativeJSON for parallel, heuristicJson otherwise).
 
         let dialect: ModelDialect
 
         if capability == .none {
             // Dialect is irrelevant for no-tool models; use prompted flat JSON as a safe default
             dialect = .heuristicJson
+        } else if let template = extractedChatTemplate,
+                  let fingerprinted = ChatTemplateFingerprinter.detect(chatTemplate: template) {
+            // Layer 1: Jinja template fingerprinting is ground truth — overrides token heuristics.
+            dialect = fingerprinted
         } else if hasMistralXMLSignal {
             // Model uses <tool_call>...</tool_call> or [AVAILABLE_TOOLS] XML wrapping
             dialect = .mistralXML

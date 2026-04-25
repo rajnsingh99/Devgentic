@@ -37,8 +37,28 @@ struct MLXLLMProvider: LLMProvider {
         self.generationConfig = advancedConfig ?? .default()
     }
 
+    /// When the chat template's `{% if tools %}` branch fires, it prepends a large
+    /// `<tools>...</tools>` block of JSON schemas to the system message. Recent-token
+    /// repetition penalty at configured levels (1.20-1.30 for small Q4 models) can then
+    /// distort the first-token sampling distribution enough to favor EOS — observed as
+    /// "47s prefill, zero tokens emitted" failures. Capping at 1.15 for the native-tools
+    /// path is a safe operating point: still penalizes degenerate loops, doesn't starve
+    /// the model of initial tokens.
+    private static let nativeToolsMaxRepPenalty: Float = 1.15
+
+    /// Resolves the effective repetition penalty for a given call, reducing it when
+    /// native tool schemas are being injected via chat template.
+    private func effectiveRepPenalty(nativeToolsPresent: Bool) -> Float {
+        let configured = Float(generationConfig.repetitionPenalty)
+        guard nativeToolsPresent else { return configured }
+        return min(configured, Self.nativeToolsMaxRepPenalty)
+    }
+
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         var fullText = ""
+
+        let nativeToolsPresent = (tools?.isEmpty == false)
+        let repPenalty = effectiveRepPenalty(nativeToolsPresent: nativeToolsPresent)
 
         let stream = await MLXService.shared.streamChat(
             messages: messages,
@@ -46,7 +66,7 @@ struct MLXLLMProvider: LLMProvider {
             maxTokens: generationConfig.maxTokens,
             temperature: Float(generationConfig.temperature),
             topP: Float(generationConfig.topP),
-            repetitionPenalty: Float(generationConfig.repetitionPenalty),
+            repetitionPenalty: repPenalty,
             repetitionContextSize: generationConfig.repetitionContextSize,
             chatTemplateSource: chatTemplateSource,
             stopSequences: stopSequences
@@ -64,6 +84,8 @@ struct MLXLLMProvider: LLMProvider {
         let config = generationConfig
         let templateSource = chatTemplateSource
         let stops = stopSequences
+        let nativeToolsPresent = (tools?.isEmpty == false)
+        let repPenalty = effectiveRepPenalty(nativeToolsPresent: nativeToolsPresent)
 
         return AsyncThrowingStream { continuation in
             Task {
@@ -74,7 +96,7 @@ struct MLXLLMProvider: LLMProvider {
                         maxTokens: config.maxTokens,
                         temperature: Float(config.temperature),
                         topP: Float(config.topP),
-                        repetitionPenalty: Float(config.repetitionPenalty),
+                        repetitionPenalty: repPenalty,
                         repetitionContextSize: config.repetitionContextSize,
                         chatTemplateSource: templateSource,
                         stopSequences: stops

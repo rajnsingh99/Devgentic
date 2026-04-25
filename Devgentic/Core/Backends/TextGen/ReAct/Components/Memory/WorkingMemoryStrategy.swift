@@ -383,6 +383,11 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         }
 
         // Render recent entries at full fidelity.
+        //
+        // Prompt-render DOES NOT include `(id: <UUID>)` — small-capacity models
+        // (Q4 3B/8B) parrot the UUID into subsequent tool-call content, polluting
+        // write_file args and other downstream operations. The toolCallId stays in
+        // memory for log correlation and debugging; just not surfaced to the model.
         for entry in recentEntries {
             switch entry {
             case .observation(let obs):
@@ -390,11 +395,11 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
                 if let firstSeen = seenFirstStep[key] {
                     // G10: This exact (tool, output) already appeared at Step `firstSeen`.
                     // Surface the redundancy explicitly instead of re-rendering the full output.
-                    protectedLines.append("- [Step \(obs.stepId)] \(obs.toolName) (id: \(obs.toolCallId)) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call, output omitted)")
+                    protectedLines.append("- [Step \(obs.stepId)] \(obs.toolName) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call, output omitted)")
                 } else {
                     seenFirstStep[key] = obs.stepId
                     let artifactNote = obs.artifactCount > 0 ? " [\(obs.artifactCount) artifact(s)]" : ""
-                    protectedLines.append("- [Step \(obs.stepId)] \(obs.toolName) (id: \(obs.toolCallId)):\n\(obs.result)\(artifactNote)")
+                    protectedLines.append("- [Step \(obs.stepId)] \(obs.toolName):\n\(obs.result)\(artifactNote)")
                 }
             case .reasoning(let rec):
                 protectedLines.append("- [Step \(rec.stepId) thought]\n\(rec.text)")

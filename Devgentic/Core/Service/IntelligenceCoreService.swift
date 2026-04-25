@@ -118,8 +118,13 @@ actor IntelligenceCoreService {
         logger.notice("[IC Load] BEGIN — Model: \(self.selectedModelName), Caller: \(caller.rawValue)")
         logger.info("[IC Load] Pre-load memory — System: \(preMemory.available), GPU: \(preMemory.gpuCache)")
 
-        let config = ModelConfiguration(directory: localPath)
-        let container = try await MLXLMCommon.loadModelContainer(configuration: config)
+        // mlx-swift-lm 3.x: `loadModelContainer(from:using:)` replaces the old
+        // `loadModelContainer(configuration:)`. The tokenizer loader is our own bridge
+        // backed by swift-transformers' AutoTokenizer (see MLXTokenizerBridge.swift).
+        let container = try await MLXLMCommon.loadModelContainer(
+            from: localPath,
+            using: HuggingFaceTokenizerLoader()
+        )
         self.modelContainer = container
         self.currentCaller = caller
         self.loadTimestamp = Date()

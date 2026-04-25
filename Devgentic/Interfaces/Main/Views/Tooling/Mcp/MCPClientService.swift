@@ -167,9 +167,9 @@ final class MCPClientService {
         
         return result.content.map { contentPart -> String in
             switch contentPart {
-            case .text(let text): return text
-            case .image(_, _, _): return "[Image Output]"
-            case .resource(_): return "[Resource Output]"
+            case .text(let payload): return payload.text
+            case .image: return "[Image Output]"
+            case .resource: return "[Resource Output]"
             @unknown default: return "[Unknown Output]"
             }
         }.joined(separator: "\n")

@@ -28,6 +28,12 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     let maxConsecutiveToolFailures: Int
     let maxRepetitiveActions: Int
 
+    /// User denials are a HARD constraint ("do not retry") that small-capacity models
+    /// routinely ignore even when the directive appears in scratchpad. A dedicated
+    /// counter with a tighter cap catches denial-retry loops before they waste
+    /// iterations on HITL round-trips the user already rejected.
+    private let maxConsecutiveDenials: Int = 2
+
     init(maxConsecutiveToolFailures: Int = 3,
          maxRepetitiveActions: Int = 3,
          maxConsecutiveAskUser: Int = 3,
@@ -39,10 +45,11 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         self.maxConsecutiveIdle = maxConsecutiveIdle
         self.maxToolRetries = maxToolRetries
     }
-    
+
     // MARK: - State Tracking
-    
+
     private(set) var consecutiveToolFailures = 0
+    private(set) var consecutiveDenials = 0
     private(set) var clarificationFriction = 0
     private(set) var consecutiveAskUserCalls = 0
     private(set) var consecutiveIdleSteps = 0
@@ -84,27 +91,55 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     mutating func recordToolResult(isSuccess: Bool) -> CircuitBreakerAction {
         if isSuccess {
             consecutiveToolFailures = 0
+            consecutiveDenials = 0
             return .proceed
         }
-        
+
         consecutiveToolFailures += 1
-        
+
         // Capture local copies to avoid mutating 'self' escaping in OSLog autoclosure
         let currentFailures = consecutiveToolFailures
         let maxFailures = maxConsecutiveToolFailures
-        
+
         if currentFailures >= maxFailures {
             logger.warning("🚫 Consecutive tool failure limit (\(maxFailures)) reached. Aborting.")
             return .abort(reason: "Reached \(maxFailures) consecutive tool failures without recovery.")
         }
-        
+
         let totalAttempts = recentInvocations.values.reduce(0, +)
         let allFailed = recentInvocations.values.allSatisfy { $0 >= 1 } && totalAttempts >= 2 && !hallucinatedTools.isEmpty
-        
+
         if allFailed {
             return .intervene(systemMessage: "All tool attempts have failed. Consider returning tool_name: null to explain what tools are needed.")
         }
-        
+
+        return .proceed
+    }
+
+    /// Records a user-denied tool call. Unlike general failures (3-strike cap), denials
+    /// get a tighter 2-strike cap because the user has explicitly rejected the action —
+    /// a second consecutive denial is strong evidence the model is ignoring the constraint.
+    /// Each denial also counts toward the general failure counter so the existing 3-strike
+    /// path still fires for mixed denial+failure patterns.
+    mutating func recordDenial() -> CircuitBreakerAction {
+        consecutiveDenials += 1
+        consecutiveToolFailures += 1
+
+        let currentDenials = consecutiveDenials
+        let denialLimit = maxConsecutiveDenials
+
+        if currentDenials >= denialLimit {
+            logger.warning("🚫 Consecutive user-denial limit (\(denialLimit)) reached. Aborting.")
+            return .abort(reason: "User denied \(currentDenials) consecutive tool calls. Halting to respect the denial constraint.")
+        }
+
+        // Fall through to the general failure check — mixed denial+failure patterns
+        // still hit the 3-strike limit from recordToolResult's perspective.
+        if consecutiveToolFailures >= maxConsecutiveToolFailures {
+            logger.warning("🚫 Consecutive tool failure limit (\(maxConsecutiveToolFailures)) reached (including denials). Aborting.")
+            return .abort(reason: "Reached \(maxConsecutiveToolFailures) consecutive tool failures without recovery.")
+        }
+
         return .proceed
     }
     

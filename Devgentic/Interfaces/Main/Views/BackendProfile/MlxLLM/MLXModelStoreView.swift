@@ -192,12 +192,20 @@ struct MLXModelStoreContent: View {
 
                 } else {
                     ScrollView {
-                        LazyVStack(spacing: 12) {
-                            ForEach(viewModel.displayedModels) { model in
-                                ModelCardView(model: model, viewModel: viewModel)
+                        VStack(spacing: 0) {
+                            LazyVGrid(
+                                columns: [
+                                    GridItem(.flexible(), spacing: 12),
+                                    GridItem(.flexible(), spacing: 12)
+                                ],
+                                spacing: 12
+                            ) {
+                                ForEach(viewModel.displayedModels) { model in
+                                    ModelCardView(model: model, viewModel: viewModel)
+                                }
                             }
 
-                            // PAGINATION BUTTON
+                            // PAGINATION BUTTON — full-width below the grid
                             if viewModel.selectedCategory != .installed && !viewModel.displayedModels.isEmpty {
                                 Button {
                                     viewModel.loadMore()
@@ -283,6 +291,7 @@ struct ModelCardView: View {
     var viewModel: MLXModelStoreViewModel
     @State private var showingDeleteAlert = false
     @State private var showingFitAdvisory = false
+    @State private var showingCancelAlert = false
     @State private var isHovered = false
     @AppStorage(AppSettings.coreIntelligenceModelKey) private var coreIntelligenceModel: String = ""
     @Environment(\.appTheme) private var theme
@@ -298,22 +307,142 @@ struct ModelCardView: View {
         ModelFitAdvisor.assess(metadata: nil, diskSizeString: model.size, modelName: model.id)
     }
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            // Icon — unified 44x44, controlBackground, continuous corner
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(theme.controlBackground)
-                    .frame(width: 44, height: 44)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
-                    )
+    /// The active download record for this model, if one exists. When non-nil,
+    /// the card switches to a simplified layout (name + circular progress) so
+    /// the progress UI doesn't overlap the org label / metadata / badge row.
+    private var activeDownloadRecord: DownloadRecord? {
+        DownloadManager.shared.activeRecord(backend: .mlx, modelIdentifier: model.id)
+    }
 
-                Image(systemName: "cube.fill")
-                    .font(.title2)
-                    .foregroundColor(theme.accentColor)
+    /// Actions render as a floating top-right overlay so the badge row can use
+    /// the full card width. We keep them visible when installed, and fade in on
+    /// hover for the idle-remote case — which was the common offender for
+    /// horizontal-space waste. Downloads use a dedicated layout, not the overlay.
+    private var showActionsOverlay: Bool {
+        isHovered || isInstalled
+    }
+
+    @ViewBuilder
+    private var actionsView: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            if isInstalled {
+                if viewModel.selectedCategory == .installed {
+                    // Set as Intelligence Core
+                    if coreIntelligenceModel == model.id {
+                        HStack(spacing: 5) {
+                            Image(systemName: "cpu.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.purple)
+                            Text("Intelligence Core")
+                                .font(.caption2)
+                                .foregroundColor(theme.primaryText.opacity(0.85))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(theme.surfaceOverlay)
+                        .clipShape(Capsule())
+                    } else {
+                        Button {
+                            coreIntelligenceModel = model.id
+                        } label: {
+                            Label("Set as IC", systemImage: "cpu")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("Set as Intelligence Core model")
+                    }
+
+                    // DELETE BUTTON
+                    Button(role: .destructive) {
+                        showingDeleteAlert = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .foregroundColor(isHovered ? theme.errorColor : theme.secondaryText)
+                            .padding(8)
+                            .background(isHovered ? theme.errorColor.opacity(0.1) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete Model")
+                    .alert("Delete Model?", isPresented: $showingDeleteAlert) {
+                        Button("Delete", role: .destructive) {
+                            viewModel.deleteModel(model)
+                        }
+                        Button("Cancel", role: .cancel) { }
+                    } message: {
+                        Text("Are you sure you want to delete '\(model.displayName)'? This will permanently remove the files from your disk.")
+                    }
+                } else {
+                    // INSTALLED BADGE (In other tabs)
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(theme.successColor)
+                        Text("Installed")
+                            .font(.caption2)
+                            .foregroundColor(theme.primaryText.opacity(0.85))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(theme.surfaceOverlay)
+                    .clipShape(Capsule())
+                }
+            } else {
+                // Shared status view routes through DownloadCoordinator
+                // (idempotent — shortcuts to "already installed" toast
+                // if the filesystem scan lied). Fit advisory still gates
+                // the actual pull via onDownloadRequested.
+                ModelDownloadStatusView(
+                    backend: .mlx,
+                    modelIdentifier: model.id,
+                    displayName: model.displayName,
+                    isInstalled: false,
+                    onDownloadRequested: {
+                        let verdict = fitAssessment.verdict
+                        if verdict == .risky || verdict == .incompatible {
+                            showingFitAdvisory = true
+                        } else {
+                            // Must route through DownloadCoordinator
+                            // (not `viewModel.downloadModel` directly) so
+                            // the pre-seed HF size fetch fires — without
+                            // it the bridge has no total bytes, the
+                            // speed sampler can't compute a rate, and
+                            // the UI is stuck on "calculating…".
+                            Task { @MainActor in
+                                _ = await DownloadCoordinator.startMLXDownloadIfNeeded(
+                                    repoId: model.id
+                                )
+                            }
+                        }
+                    }
+                )
             }
+        }
+    }
+
+    /// Shared icon (44×44 rounded rectangle with the accent "cube" glyph).
+    /// Used by both the standard and downloading layouts.
+    private var cardIcon: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.controlBackground)
+                .frame(width: 44, height: 44)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(theme.surfaceOverlayStrong, lineWidth: 1)
+                )
+
+            Image(systemName: "cube.fill")
+                .font(.title2)
+                .foregroundColor(theme.accentColor)
+        }
+    }
+
+    /// Standard card layout — used when no download is in progress.
+    private var standardCard: some View {
+        HStack(alignment: .top, spacing: 14) {
+            cardIcon
 
             VStack(alignment: .leading, spacing: 6) {
                 // Name + Organization
@@ -346,7 +475,7 @@ struct ModelCardView: View {
                 .font(.caption)
                 .foregroundColor(theme.secondaryText)
 
-                // Badges + Fit
+                // Badges + Fit — full card width now that actions overlay
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(Array(model.capabilities), id: \.self) { cap in
@@ -360,105 +489,60 @@ struct ModelCardView: View {
                 }
             }
 
-            Spacer(minLength: 16)
+            Spacer(minLength: 0)
+        }
+        .overlay(alignment: .topTrailing) {
+            actionsView
+                .opacity(showActionsOverlay ? 1 : 0)
+                .allowsHitTesting(showActionsOverlay)
+                .animation(.easeOut(duration: 0.15), value: showActionsOverlay)
+        }
+    }
 
-            // Actions
-            VStack(alignment: .trailing, spacing: 8) {
-                if isInstalled {
-                    if viewModel.selectedCategory == .installed {
-                        // Set as Intelligence Core
-                        if coreIntelligenceModel == model.id {
-                            HStack(spacing: 4) {
-                                Image(systemName: "cpu.fill")
-                                Text("Intelligence Core")
-                            }
-                            .font(.caption2)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.purple)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.purple.opacity(0.1))
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        } else {
-                            Button {
-                                coreIntelligenceModel = model.id
-                            } label: {
-                                Label("Set as IC", systemImage: "cpu")
-                                    .font(.caption2)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .help("Set as Intelligence Core model")
-                        }
+    /// Simplified layout shown while a download is in progress. Strips metadata
+    /// and badges to keep the card calm; the circular progress indicator
+    /// replaces the progress bar and doubles as the cancel control on hover.
+    private func downloadingCard(record: DownloadRecord) -> some View {
+        let isCleaningUp = MLXModelService.shared.isCancellingDownload
+        let snapshot = DownloadManager.shared.activeSpeeds[record.id]
 
-                        // DELETE BUTTON
-                        Button(role: .destructive) {
-                            showingDeleteAlert = true
-                        } label: {
-                            Image(systemName: "trash")
-                                .foregroundColor(isHovered ? theme.errorColor : theme.secondaryText)
-                                .padding(8)
-                                .background(isHovered ? theme.errorColor.opacity(0.1) : Color.clear)
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Delete Model")
-                        .alert("Delete Model?", isPresented: $showingDeleteAlert) {
-                            Button("Delete", role: .destructive) {
-                                viewModel.deleteModel(model)
-                            }
-                            Button("Cancel", role: .cancel) { }
-                        } message: {
-                            Text("Are you sure you want to delete '\(model.displayName)'? This will permanently remove the files from your disk.")
-                        }
-                    } else {
-                        // INSTALLED BADGE (In other tabs)
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                            Text("Installed")
-                        }
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                        .foregroundColor(.green)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(theme.successColor.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .stroke(theme.successColor.opacity(0.3), lineWidth: 1)
-                        )
-                    }
-                } else {
-                    // Shared status view routes through DownloadCoordinator
-                    // (idempotent — shortcuts to "already installed" toast
-                    // if the filesystem scan lied). Fit advisory still gates
-                    // the actual pull via onDownloadRequested.
-                    ModelDownloadStatusView(
-                        backend: .mlx,
-                        modelIdentifier: model.id,
-                        displayName: model.displayName,
-                        isInstalled: false,
-                        onDownloadRequested: {
-                            let verdict = fitAssessment.verdict
-                            if verdict == .risky || verdict == .incompatible {
-                                showingFitAdvisory = true
-                            } else {
-                                // Must route through DownloadCoordinator
-                                // (not `viewModel.downloadModel` directly) so
-                                // the pre-seed HF size fetch fires — without
-                                // it the bridge has no total bytes, the
-                                // speed sampler can't compute a rate, and
-                                // the UI is stuck on "calculating…".
-                                Task { @MainActor in
-                                    _ = await DownloadCoordinator.startMLXDownloadIfNeeded(
-                                        repoId: model.id
-                                    )
-                                }
-                            }
-                        }
-                    )
-                }
+        return HStack(alignment: .center, spacing: 14) {
+            cardIcon
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.displayName)
+                    .font(.headline)
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text(isCleaningUp ? "Cleaning up…" : DownloadSpeedFormatter.compactLine(snapshot: snapshot))
+                    .font(.caption2)
+                    .foregroundColor(theme.tertiaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            if isCleaningUp {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 44, height: 44)
+            } else {
+                MLXDownloadProgressCircle(
+                    progress: record.progress,
+                    onCancelRequested: { showingCancelAlert = true }
+                )
+            }
+        }
+    }
+
+    var body: some View {
+        Group {
+            if let record = activeDownloadRecord {
+                downloadingCard(record: record)
+            } else {
+                standardCard
             }
         }
         .padding(14)
@@ -492,6 +576,16 @@ struct ModelCardView: View {
                     showingFitAdvisory = false
                 }
             )
+        }
+        .alert("Cancel Download?", isPresented: $showingCancelAlert) {
+            Button("Cancel Download", role: .destructive) {
+                if let record = activeDownloadRecord {
+                    DownloadManager.shared.cancelDownload(record)
+                }
+            }
+            Button("Keep Downloading", role: .cancel) { }
+        } message: {
+            Text("The in-progress download of '\(model.displayName)' will be stopped and any partial files removed from disk.")
         }
     }
 }

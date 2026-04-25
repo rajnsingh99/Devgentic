@@ -550,9 +550,20 @@ actor ReActAgentExecutor: Executor {
                             break cognitiveLoop
                         }
 
-                        // Commit observations to memory strategy
+                        // Commit observations to memory strategy.
+                        // User-denied tool calls ALSO get promoted to a system alert so the
+                        // "do not retry" directive renders at the end of the scratchpad
+                        // (high-attention position) instead of buried in the observation list.
+                        // Detection is via the canonical denial string produced by
+                        // `ToolExecutionResult.userDenied`.
                         for obs in observations {
                             memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
+
+                            if !obs.isSuccess && obs.result.hasPrefix("System Security: User explicitly denied") {
+                                memoryStrategy.recordSystemAlert(
+                                    msg: "User DENIED tool '\(obs.toolName)' with the attempted arguments. DO NOT retry this exact action — either choose a different tool, finalize with what you have, or explain the limitation."
+                                )
+                            }
                         }
 
                         // G12: Extend native conversation turns with this iter's assistant(tool_calls)
@@ -598,13 +609,21 @@ actor ReActAgentExecutor: Executor {
                         for obs in observations {
                             let isSuccess = obs.isSuccess
                             executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: isSuccess)
-                            
-                            let resultAction = circuitBreaker.recordToolResult(isSuccess: isSuccess)
+
+                            // Route user denials to the dedicated 2-strike denial counter.
+                            // Any other failure goes through the general 3-strike tool-failure
+                            // counter. Denials still increment the general counter too, so
+                            // mixed denial+failure patterns hit the 3-strike limit normally.
+                            let isDenial = !isSuccess && obs.result.hasPrefix("System Security: User explicitly denied")
+                            let resultAction: CircuitBreakerAction = isDenial
+                                ? circuitBreaker.recordDenial()
+                                : circuitBreaker.recordToolResult(isSuccess: isSuccess)
+
                             if case .abort(let reason) = resultAction {
                                 shouldAbort = true
                                 abortReason = reason
                             }
-                            
+
                             if !isSuccess {
                                 circuitBreaker.recordHallucination(obs.toolName)
                             }

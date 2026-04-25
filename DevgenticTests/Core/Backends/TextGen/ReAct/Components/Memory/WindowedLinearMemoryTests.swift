@@ -334,10 +334,12 @@ final class WindowedLinearMemoryTests: XCTestCase {
         }
 
         let compiled = memory.compileForPrompt()
-        // All 3 are in the recent window — no dedup
-        XCTAssertTrue(compiled.contains("(id: c1)"))
-        XCTAssertTrue(compiled.contains("(id: c2)"))
-        XCTAssertTrue(compiled.contains("(id: c3)"))
+        // All 3 are in the recent window — no dedup.
+        // Step markers (not UUIDs) are the prompt-visible identifier — UUIDs stay internal
+        // for log correlation but are omitted from model-facing render.
+        XCTAssertTrue(compiled.contains("[Step 1]"))
+        XCTAssertTrue(compiled.contains("[Step 2]"))
+        XCTAssertTrue(compiled.contains("[Step 3]"))
         XCTAssertFalse(compiled.contains("failed 3x"))
     }
 

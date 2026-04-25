@@ -30,6 +30,36 @@ struct ParserFactory {
             return ReActMarkdownParser()
         case .heuristicJson:
             return HeuristicCognitiveParser()
+        case .qwenHermesToolCall:
+            return QwenHermesJsonParser()
+        case .llama3JsonSingle:
+            return Llama3JsonParser()
+        case .mistralV3Array:
+            return MistralV3Parser()
+        case .mistralV11Flat:
+            return MistralV11Parser()
+        case .phiFunctoolsBracket:
+            return PhiFunctoolsParser()
+        case .deepseekV3JsonFence:
+            return DeepSeekV3Parser()
+        case .pythonicBracketList:
+            return PythonicListParser()
+        case .graniteLegacyArray:
+            return GraniteLegacyParser()
+        case .granite4ToolCall:
+            // Granite 4 emits `<tool_call>{JSON}</tool_call>` — identical shape to Qwen/Hermes.
+            // Reuse the existing parser rather than duplicating logic.
+            return QwenHermesJsonParser()
+        case .commandRAction:
+            return CommandRActionParser()
+        case .commandR7BAction:
+            return CommandR7BActionParser()
+        case .qwen3CoderDeepXml:
+            return Qwen3CoderDeepXMLParser()
+        case .deepseekV31Flat:
+            return DeepSeekV31Parser()
+        case .deepseekV32Dsml:
+            return DeepSeekV32Parser()
         }
     }
 

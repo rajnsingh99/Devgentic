@@ -327,8 +327,17 @@ struct CognitiveParsePipeline: Sendable {
     /// through heuristic recovery.
     private func isJsonDialect(_ dialect: ModelDialect) -> Bool {
         switch dialect {
-        case .nativeJSON, .heuristicJson: return true
-        case .mistralXML, .reactMarkdown: return false
+        case .nativeJSON, .heuristicJson, .qwenHermesToolCall, .llama3JsonSingle,
+             .mistralV3Array, .phiFunctoolsBracket, .deepseekV3JsonFence,
+             .graniteLegacyArray, .granite4ToolCall, .commandRAction, .commandR7BAction,
+             .deepseekV31Flat:
+            // All have JSON object/array at the core; heuristic recovery is a useful fallback.
+            return true
+        case .mistralXML, .reactMarkdown, .mistralV11Flat, .pythonicBracketList,
+             .qwen3CoderDeepXml, .deepseekV32Dsml:
+            // Marker-delimited / structural XML / Python syntax — no pure JSON at core.
+            // Heuristic JSON recovery won't help — drift detector handles degraded states.
+            return false
         }
     }
 

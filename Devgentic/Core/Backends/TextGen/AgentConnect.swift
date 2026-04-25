@@ -755,21 +755,84 @@ class AgentConnect: @unchecked Sendable {
                 
             case .parallelActions:
                 // Ollama: API layer abstracts the model's native format — always use NativeStructuredGenerator.
-                // MLX: No intermediary API — must match the model's trained output dialect.
-                //   Mistral-family models output XML (<tool_call> blocks), all others output JSON arrays.
-                let strategyName: String
-                if llmConfig.apiProvider == .mlx && cognitiveProfile.dialect == .mistralXML {
-                    strategyName = "XMLNativeStructuredGenerator"
-                    logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
-                    return XMLNativeStructuredGenerator()
-                } else if llmConfig.apiProvider == .mlx {
-                    strategyName = "MLXNativeStructuredGenerator"
-                    logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
-                    return MLXNativeStructuredGenerator()
+                // MLX: No intermediary API — must match the model's trained output dialect via chat_template.
+                //
+                // Native-template dialects all share one generator (NativeToolTemplateGenerator)
+                // parameterized by `(expectedDialect, triggerSuffix, logTag)`. The dialect-specific
+                // parsing lives in the parser (routed via CognitiveParsePipeline).
+                if llmConfig.apiProvider == .mlx {
+                    switch cognitiveProfile.dialect {
+                    case .qwenHermesToolCall:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[QwenHermes] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.qwenHermes()
+
+                    case .llama3JsonSingle:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[Llama3] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.llama3Json()
+
+                    case .mistralV3Array:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[MistralV3] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.mistralV3()
+
+                    case .mistralV11Flat:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[MistralV11] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.mistralV11()
+
+                    case .phiFunctoolsBracket:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[PhiFunctools] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.phiFunctools()
+
+                    case .deepseekV3JsonFence:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[DeepSeekV3] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.deepseekV3()
+
+                    case .pythonicBracketList:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[Pythonic] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.pythonic()
+
+                    case .graniteLegacyArray:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[GraniteLegacy] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.graniteLegacy()
+
+                    case .granite4ToolCall:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[Granite4] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.granite4()
+
+                    case .commandRAction:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[CommandR] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.commandR()
+
+                    case .commandR7BAction:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[CommandR7B] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.commandR7B()
+
+                    case .qwen3CoderDeepXml:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[Qwen3Coder] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.qwen3Coder()
+
+                    case .deepseekV31Flat:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[DeepSeekV31] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.deepseekV31()
+
+                    case .deepseekV32Dsml:
+                        logger.info("🧩 Resolved Generator Strategy: NativeToolTemplateGenerator[DeepSeekV32] for model: \(llmConfig.modelName)")
+                        return NativeToolTemplateGenerator.deepseekV32()
+
+                    case .mistralXML:
+                        // Legacy hybrid-XML path — pre-dates the native-template refactor.
+                        // Retained for models misclassified as mistralXML before the fingerprinter
+                        // could route them more precisely. Emits <tool_call><content>/<tool_name>/<arguments>.
+                        logger.info("🧩 Resolved Generator Strategy: XMLNativeStructuredGenerator for model: \(llmConfig.modelName)")
+                        return XMLNativeStructuredGenerator()
+
+                    case .nativeJSON, .heuristicJson, .reactMarkdown:
+                        // Models without a native chat_template tools branch — use prompt-injection.
+                        logger.info("🧩 Resolved Generator Strategy: MLXNativeStructuredGenerator for model: \(llmConfig.modelName)")
+                        return MLXNativeStructuredGenerator()
+                    }
                 } else {
-                    strategyName = "NativeStructuredGenerator"
-                    logger.info("🧩 Resolved Generator Strategy: \(strategyName) for model: \(llmConfig.modelName)")
                     // Ollama-native path uses the Ollama-shaped turn adapter (dict args).
+                    logger.info("🧩 Resolved Generator Strategy: NativeStructuredGenerator for model: \(llmConfig.modelName)")
                     return NativeStructuredGenerator(
                         toolAdapter: NativeJSONSchemaAdapter(),
                         toolTurnAdapter: OllamaToolTurnAdapter()
@@ -1164,7 +1227,7 @@ class AgentConnect: @unchecked Sendable {
         Type: \(profile.profileType.rawValue) (BotFlow: \(isBotFlow))
         Provider: \(config.apiProvider.rawValue)
         Model: \(config.modelName)
-        Base URL: \(config.baseURL ?? "Default")
+        Base URL: \(baseURLDisplay(config))
         Capabilities: \(config.cognitiveCapability.rawValue) (Dialect: \(effectiveDialect(config)))
         Metadata: \(metadata)
         Advanced Options: \(advConfig)
@@ -1175,24 +1238,32 @@ class AgentConnect: @unchecked Sendable {
         logger.notice("\(logMsg)")
     }
 
-    /// Returns the dialect that is actually used by the generator strategy,
-    /// not the raw value stored in ProviderConfig. For `parallelActions` local
-    /// models the stored dialect is ignored (they always use native JSON),
-    /// so logging it verbatim is misleading during debugging.
+    /// Returns the dialect label used in the startup config log. Cloud providers always
+    /// speak native JSON; local providers (MLX/Ollama) route by the dialect stored on
+    /// ProviderConfig, so we surface that value directly. `.none` capability has no
+    /// dialect in play — it runs through the heuristic JSON fallback.
     private func effectiveDialect(_ config: ProviderConfig) -> String {
         switch config.apiProvider {
         case .anthropic, .google, .openAI:
             return "Native JSON (Cloud)"
         case .mlx, .ollama:
             switch config.cognitiveCapability {
-            case .parallelActions:
-                return "Native JSON (Parallel)"
-            case .singleAction:
+            case .parallelActions, .singleAction:
                 return config.modelDialect.rawValue
             case .none:
                 return "Heuristic JSON (Prompted)"
             }
         }
+    }
+
+    /// Returns a display string for the configured base URL. MLX runs in-process and
+    /// has no endpoint, so showing an Ollama-default URL for MLX profiles is misleading
+    /// during triage.
+    private func baseURLDisplay(_ config: ProviderConfig) -> String {
+        if config.apiProvider == .mlx {
+            return "In-Process (MLX)"
+        }
+        return config.baseURL ?? "Default"
     }
 
 }

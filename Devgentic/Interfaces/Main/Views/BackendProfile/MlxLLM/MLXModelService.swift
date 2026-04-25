@@ -128,6 +128,23 @@ class MLXModelService {
                     let modelDir = fileURL.deletingLastPathComponent()
                     let parentDir = modelDir.deletingLastPathComponent()
 
+                    // Completeness check: a folder with only `config.json` and no
+                    // weights is a partial/aborted download (HubApi writes config
+                    // early). Ignore those so they don't show up as "Installed".
+                    let contents = (try? fileManager.contentsOfDirectory(
+                        at: modelDir,
+                        includingPropertiesForKeys: nil,
+                        options: [.skipsHiddenFiles]
+                    )) ?? []
+                    let hasWeights = contents.contains { url in
+                        let ext = url.pathExtension.lowercased()
+                        return ext == "safetensors" || ext == "npz" || ext == "bin" || ext == "gguf"
+                    }
+                    guard hasWeights else {
+                        logger.debug("Skipping incomplete download at \(modelDir.lastPathComponent) — no weights file present")
+                        continue
+                    }
+
                     var displayName = modelDir.lastPathComponent
 
                     // Reconstruct clean names from nested folders
@@ -188,12 +205,19 @@ class MLXModelService {
             urlString += "&search=\(encodedSearch)"
         }
         
-        guard let url = URL(string: urlString) else { return }
-        
+        guard let url = URL(string: urlString) else {
+            logger.error("HF fetch: failed to construct URL from \(urlString)")
+            await MainActor.run { self.isLoadingRemoteModels = false }
+            return
+        }
+
+        logger.info("HF fetch → \(url.absoluteString) (append=\(append))")
+
         do {
             let (data, _) = try await URLSession.shared.data(from: url)
             let rawModels = try JSONDecoder().decode([HFRawModel].self, from: data)
-            
+            logger.info("HF fetch ← received \(rawModels.count) models")
+
             // Map raw JSON to our smart Domain Model
             let displayModels = rawModels.map { raw -> MLXDisplayModel in
                 let caps = self.classifyCapabilities(tags: raw.tags ?? [], pipeline: raw.pipeline_tag, id: raw.id)
@@ -207,23 +231,30 @@ class MLXModelService {
                     description: nil
                 )
             }
-            
+
             await MainActor.run {
                 if append {
                     let newUnique = displayModels.filter { new in
                         !self.availableModels.contains(where: { $0.id == new.id })
                     }
                     self.availableModels.append(contentsOf: newUnique)
+                    self.logger.info("HF fetch append: +\(newUnique.count) new (\(displayModels.count - newUnique.count) dupes) → total=\(self.availableModels.count)")
+                    if newUnique.isEmpty && !displayModels.isEmpty {
+                        self.logger.warning("HF pagination returned only duplicates at offset=\(offset) — likely end of result set")
+                    } else if displayModels.isEmpty {
+                        self.logger.warning("HF pagination returned 0 models at offset=\(offset) — end of result set")
+                    }
                 } else {
                     self.availableModels = displayModels
+                    self.logger.info("HF fetch replace: total=\(self.availableModels.count)")
                 }
                 self.isLoadingRemoteModels = false
             }
-            
+
             await fetchSizes(for: displayModels.map { $0.id })
-            
+
         } catch {
-            logger.error("Failed to fetch remote models: \(error.localizedDescription)")
+            logger.error("HF fetch failed: \(error.localizedDescription) (url=\(url.absoluteString))")
             await MainActor.run { self.isLoadingRemoteModels = false }
         }
     }
@@ -250,7 +281,12 @@ class MLXModelService {
         }
         
         // 3. Tool Use / Function Calling
-        if tags.contains("tool-use") || tags.contains("function-calling") || lowerId.contains("hermes") || lowerId.contains("tool") {
+        // Explicit HF tags take priority, then fall back to family-name heuristics
+        // covering modern tool-capable families (Qwen2.5+, Llama-3.1+, Mistral Nemo/Small/
+        // Large, Phi-3.5+, Command-R, Granite, Devstral, GLM-4, DeepSeek V2/V3, Kimi K2, etc.).
+        // Reasoning-only distills are excluded by `isLikelyToolCapable`.
+        if tags.contains("tool-use") || tags.contains("function-calling") ||
+           ModelCapabilityHeuristics.isLikelyToolCapable(modelId: id) {
             caps.insert(.toolUse)
         }
         
@@ -341,17 +377,16 @@ class MLXModelService {
         
         downloadTask = Task {
             do {
-                let config = ModelConfiguration(id: repoId)
-                
-                _ = try await MLXLMCommon.downloadModel(
-                    hub: hub,
-                    configuration: config
-                ) { progress in
+                // mlx-swift-lm 3.x dropped `MLXLMCommon.downloadModel`. Download directly via
+                // swift-transformers' `HubApi.snapshot` which gives us the same progress callback
+                // and destination-directory contract. Empty `matching: []` downloads everything
+                // in the repo (weights, tokenizer, config JSONs) — mirrors the old default.
+                _ = try await hub.snapshot(from: repoId) { progress in
                     Task { @MainActor in
                         self.downloadProgress = progress.fractionCompleted
                     }
                 }
-                
+
                 logger.notice("Download finished successfully.")
                 self.forceRefreshInstalledModels()
                 self.isDownloading = false
@@ -370,12 +405,76 @@ class MLXModelService {
         }
     }
     
+    /// True while a cancelled download's partial files are being removed from disk.
+    /// UI observes this to show a "Cleaning up…" indicator, since the scanner
+    /// would otherwise misidentify the orphaned `config.json` as "Installed".
+    var isCancellingDownload: Bool = false
+
+    /// Resolve the on-disk folder that HubApi writes into for a given repo id.
+    /// Layout: `<modelsDirectory>/<author>/<name>/` (e.g. `mlx-community/Qwen2.5-3B…`).
+    /// Returns nil for malformed repo ids.
+    private func partialDownloadFolder(for repoId: String) -> URL? {
+        let components = repoId.components(separatedBy: "/")
+        guard components.count == 2,
+              !components[0].isEmpty,
+              !components[1].isEmpty else { return nil }
+        return modelsDirectory
+            .appendingPathComponent(components[0])
+            .appendingPathComponent(components[1])
+    }
+
+    /// Remove a partial-download folder from disk so the scanner doesn't
+    /// misidentify it as installed. No-op if the folder doesn't exist.
+    /// Idempotent — safe to call before starting a fresh download too.
+    func removePartialDownload(repoId: String) {
+        guard let folder = partialDownloadFolder(for: repoId) else { return }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: folder.path) else { return }
+        do {
+            try fm.removeItem(at: folder)
+            logger.notice("🗑️ Removed partial download folder: \(folder.lastPathComponent)")
+        } catch {
+            logger.error("Failed to remove partial download \(folder.path): \(error.localizedDescription)")
+        }
+    }
+
     func cancelDownload() {
         guard let task = downloadTask else { return }
-        logger.notice("Cancelling current download...")
+        let modelName = currentDownloadName
+
+        logger.notice("Cancelling download: \(modelName)")
         task.cancel()
         downloadTask = nil
-        isDownloading = false
+        isCancellingDownload = true
+
+        // Wait for the in-flight task to observe cancellation (so it stops
+        // writing new files), then delete the partial folder on disk. If we
+        // skipped this step, HubApi's `config.json` would remain and the
+        // filesystem scan would misidentify the canceled model as installed.
+        Task { [weak self] in
+            _ = await task.value
+            await MainActor.run {
+                guard let self else { return }
+
+                // Corner case: user restarted the download for the SAME repo
+                // while we were awaiting cleanup. Don't delete the folder the
+                // new task is writing to, and don't stomp its state flags.
+                let newTaskForSameRepo = self.downloadTask != nil && self.currentDownloadName == modelName
+
+                if !modelName.isEmpty && !newTaskForSameRepo {
+                    self.removePartialDownload(repoId: modelName)
+                }
+
+                if self.downloadTask == nil {
+                    self.isDownloading = false
+                    self.downloadProgress = 0.0
+                    self.currentDownloadName = ""
+                    self.errorMessage = nil
+                    self.forceRefreshInstalledModels()
+                }
+                self.isCancellingDownload = false
+            }
+        }
     }
     
     func deleteModel(_ item: MLXModelItem) {

@@ -63,19 +63,23 @@ actor MLXService {
         _ = unloadModel()
         
         do {
-            // 2. Configure for local loading
-            let config = ModelConfiguration(directory: directory)
-            
-            // 3. Load weights and tokenizer (This is the heavy operation)
-            let container = try await MLXLMCommon.loadModelContainer(configuration: config)
-            
+            // mlx-swift-lm 3.x: `loadModelContainer(from:using:)` replaces the old
+            // `loadModelContainer(configuration:)` API. The `using:` parameter is a
+            // `TokenizerLoader` that knows how to build an `MLXLMCommon.Tokenizer`
+            // from the model folder. We inject our own loader (backed by
+            // swift-transformers' `AutoTokenizer`) via `TokenizerBridge`.
+            let container = try await MLXLMCommon.loadModelContainer(
+                from: directory,
+                using: HuggingFaceTokenizerLoader()
+            )
+
             self.modelContainer = container
             self.currentModelDirectory = directory
             self.lastModelDirectory = directory
 
             logger.notice("Successfully loaded MLX model: \(directory.lastPathComponent)")
             self.logMemoryStats(label: "Post-Load")
-            
+
         } catch {
             logger.error("Failed to load MLX model: \(error.localizedDescription)")
             // Ensure state is clean on failure
@@ -91,8 +95,8 @@ actor MLXService {
         cancelIdleTimer()
         
         // 1. VISUALIZATION STEP 1: Initial State
-        let activeBefore = MLX.GPU.activeMemory
-        let cacheBefore = MLX.GPU.cacheMemory
+        let activeBefore = MLX.Memory.activeMemory
+        let cacheBefore = MLX.Memory.cacheMemory
         let totalBefore = activeBefore + cacheBefore
         
         logger.notice("🔻 [Unload Start] Active: \(ByteCountFormatter.string(fromByteCount: Int64(activeBefore), countStyle: .memory)) | Cache: \(ByteCountFormatter.string(fromByteCount: Int64(cacheBefore), countStyle: .memory))")
@@ -104,17 +108,17 @@ actor MLXService {
             
             // 3. VISUALIZATION STEP 2: Intermediate State (Swift Release)
             // At this point, Active should drop, but Cache should spike as buffers are recycled.
-            let activeIntermediate = MLX.GPU.activeMemory
-            let cacheIntermediate = MLX.GPU.cacheMemory
+            let activeIntermediate = MLX.Memory.activeMemory
+            let cacheIntermediate = MLX.Memory.cacheMemory
             logger.debug("🔸 [Ref Released] Active: \(ByteCountFormatter.string(fromByteCount: Int64(activeIntermediate), countStyle: .memory)) | Cache: \(ByteCountFormatter.string(fromByteCount: Int64(cacheIntermediate), countStyle: .memory)) (Memory moved to cache)")
             
             // 4. FORCE MLX GPU CACHE CLEAR
             // This tells Metal to return the memory to the OS immediately.
-            MLX.GPU.clearCache()
+            MLX.Memory.clearCache()
             
             // 5. VISUALIZATION STEP 3: Final State
-            let activeAfter = MLX.GPU.activeMemory
-            let cacheAfter = MLX.GPU.cacheMemory
+            let activeAfter = MLX.Memory.activeMemory
+            let cacheAfter = MLX.Memory.cacheMemory
             let totalAfter = activeAfter + cacheAfter
             
             let freedBytes = totalBefore - totalAfter
@@ -128,9 +132,9 @@ actor MLXService {
             ]
         } else {
             // Even if modelContainer was nil, force clear artifacts
-            let cacheBeforeClear = MLX.GPU.cacheMemory
-            MLX.GPU.clearCache()
-            let cacheAfterClear = MLX.GPU.cacheMemory
+            let cacheBeforeClear = MLX.Memory.cacheMemory
+            MLX.Memory.clearCache()
+            let cacheAfterClear = MLX.Memory.cacheMemory
             let freed = cacheBeforeClear - cacheAfterClear
             
             if freed > 0 {
@@ -139,7 +143,7 @@ actor MLXService {
             
             return [
                 "freedBytes": freed,
-                "activeMemory": MLX.GPU.activeMemory,
+                "activeMemory": MLX.Memory.activeMemory,
                 "cacheMemory": cacheAfterClear
             ]
         }
@@ -208,22 +212,45 @@ actor MLXService {
 
                     let stream = try await container.perform { context -> AsyncStream<Generation> in
                         // A. Apply Chat Template & Tokenize
+                        //
+                        // mlx-swift-lm 3.x removed `hasChatTemplate` and the
+                        // `applyChatTemplate(chatTemplate: .literal(...))` overload from its
+                        // `Tokenizer` protocol. Primary path uses the embedded template;
+                        // fallback drops to the bridge's upstream swift-transformers tokenizer
+                        // which still has the richer API needed for literal-template override.
                         let sendableMessages = wrappedMessages.value.map { $0 as [String: any Sendable] }
-                        let mlxTools: [[String: any Sendable]]? = wrappedTools.value?.compactMap { $0 as? [String: any Sendable] }
+                        let mlxTools: [[String: any Sendable]]? = wrappedTools.value?.map { dict in
+                            dict.mapValues { Self.bridgeToSendable($0) }
+                        }
+                        let toolCount = mlxTools?.count ?? 0
+                        if toolCount > 0 {
+                            logger.info("🔧 [Tools] Injecting \(toolCount) tool schema(s) into chat template")
+                        }
 
                         let promptTokens: [Int]
-                        if context.tokenizer.hasChatTemplate {
+                        do {
                             promptTokens = try context.tokenizer.applyChatTemplate(
                                 messages: sendableMessages,
                                 tools: mlxTools
                             )
-                        } else {
-                            // Fallback: The tokenizer lacks a built-in chat template.
-                            // Use the two-layer strategy stored in ChatTemplateSource:
+                            logger.info("🎯 [Template] embedded render OK — prompt tokens=\(promptTokens.count), tools=\(toolCount)")
+                        } catch MLXLMCommon.TokenizerError.missingChatTemplate {
+                            // Fallback: tokenizer has no embedded chat template. Drop down to the
+                            // upstream swift-transformers API (exposed via TokenizerBridge.upstream)
+                            // to render using our stored ChatTemplateSource:
                             //   Layer 1 (.extracted): Raw Jinja from tokenizer_config.json — author's own template.
                             //   Layer 2 (.familyFallback): Hardcoded template matched to the model's token family.
+                            logger.warning("⚠️ [Template] No embedded chat_template — falling back to ChatTemplateSource")
+                            guard let bridge = context.tokenizer as? TokenizerBridge else {
+                                logger.error("❌ [Template] Tokenizer is not TokenizerBridge — cannot run fallback")
+                                throw NSError(
+                                    domain: "MLXService", code: 500,
+                                    userInfo: [NSLocalizedDescriptionKey: "Tokenizer fallback path requires TokenizerBridge; got \(type(of: context.tokenizer))."]
+                                )
+                            }
                             let fallback = Self.resolveFallbackTemplate(from: chatTemplateSource)
-                            promptTokens = try context.tokenizer.applyChatTemplate(
+                            logger.info("📝 [Template] Using fallback source=\(String(describing: chatTemplateSource)) (\(fallback.count) chars)")
+                            promptTokens = try bridge.upstream.applyChatTemplate(
                                 messages: sendableMessages,
                                 chatTemplate: .literal(fallback),
                                 addGenerationPrompt: true,
@@ -231,6 +258,7 @@ actor MLXService {
                                 maxLength: nil,
                                 tools: mlxTools
                             )
+                            logger.info("✅ [Template] fallback render OK — prompt tokens=\(promptTokens.count), tools=\(toolCount)")
                         }
                         
                         // B. Create LMInput
@@ -362,11 +390,29 @@ actor MLXService {
                 }
                 
                 // 2. Inference is complete (success or failure). Start the idle timer.
-                await self.startIdleTimer()
+                self.startIdleTimer()
             }
         }
     }
     
+    // MARK: - Sendable Bridge
+
+    /// Recursively projects a JSON-compatible `Any` into a concrete `Sendable` type.
+    /// Tool schemas only contain JSON primitives (String/Int/Double/Bool/Array/Dict),
+    /// all of which are Sendable. Anything else is stringified as a defensive fallback.
+    private nonisolated static func bridgeToSendable(_ value: Any) -> any Sendable {
+        switch value {
+        case let v as String: return v
+        case let v as Bool: return v
+        case let v as Int: return v
+        case let v as Double: return v
+        case let v as [Any]: return v.map { bridgeToSendable($0) }
+        case let v as [String: Any]: return v.mapValues { bridgeToSendable($0) }
+        case is NSNull: return NSNull()
+        default: return String(describing: value)
+        }
+    }
+
     // MARK: - Fallback Chat Templates (Two-Layer Strategy)
 
     /// Resolves the correct fallback Jinja template from the stored `ChatTemplateSource`.
@@ -524,8 +570,8 @@ actor MLXService {
     // MARK: - Diagnostics
     
     private func logMemoryStats(label: String) {
-        let active = ByteCountFormatter.string(fromByteCount: Int64(MLX.GPU.activeMemory), countStyle: .memory)
-        let cache = ByteCountFormatter.string(fromByteCount: Int64(MLX.GPU.cacheMemory), countStyle: .memory)
+        let active = ByteCountFormatter.string(fromByteCount: Int64(MLX.Memory.activeMemory), countStyle: .memory)
+        let cache = ByteCountFormatter.string(fromByteCount: Int64(MLX.Memory.cacheMemory), countStyle: .memory)
         logger.debug("[\(label)] MLX Memory - Active: \(active), Cache: \(cache)")
     }
     

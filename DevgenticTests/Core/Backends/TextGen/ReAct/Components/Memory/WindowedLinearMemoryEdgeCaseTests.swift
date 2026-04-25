@@ -224,7 +224,10 @@ final class WindowedLinearMemoryEdgeCaseTests: XCTestCase {
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("evicted"), "Should evict some entries")
-        XCTAssertTrue(compiled.contains("(id: c10)"), "Most recent should always survive")
+        // NOTE: `(id: UUID)` was intentionally removed from the rendered prompt —
+        // small-capacity models parrot the UUID into tool-call content. Verify survival
+        // via the step marker (which remains in the prompt for model reasoning).
+        XCTAssertTrue(compiled.contains("[Step 10]"), "Most recent entry should always survive in the recent window")
     }
 
     // MARK: - Single Observation: No Split, No Separator
@@ -234,9 +237,9 @@ final class WindowedLinearMemoryEdgeCaseTests: XCTestCase {
         memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: "data", artifacts: [])
 
         let compiled = memory.compileForPrompt()
-        XCTAssertTrue(compiled.contains("[Step 1]"))
-        XCTAssertFalse(compiled.contains("---"))
-        XCTAssertTrue(compiled.contains("(id: c1)"), "Single entry should be in recent window with full ID")
+        XCTAssertTrue(compiled.contains("[Step 1]"), "Single entry should render with step marker")
+        XCTAssertFalse(compiled.contains("---"), "Single entry shouldn't trigger recent/old separator")
+        XCTAssertFalse(compiled.contains("(id: c1)"), "UUID suffix is intentionally omitted from rendered prompt")
     }
 
     // MARK: - Clear Then Reuse

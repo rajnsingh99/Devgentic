@@ -89,28 +89,62 @@ struct FormatDriftDetector: Sendable {
     // MARK: - Probe Construction
 
     private static func buildProbeList(excluding dialect: ModelDialect, knownToolNames: Set<String> = []) -> [any FormatProbe] {
-        var probes: [any FormatProbe] = [
-            PythonicTagProbe(),      // 1. Most distinctive — unique token
-            DeepXMLProbe(),          // 2. Qwen-Coder specific tags
-            BracketHashProbe(),      // 3. Devstral specific
-            YAMLInXMLProbe(),        // 4. Requires both XML + YAML signal
-            GenericToolsXMLProbe()   // 5. <tools>/<tool> wrappers (Qwen3, generic)
-        ]
+        var probes: [any FormatProbe] = []
 
-        // Only add standard XML probe if primary dialect is NOT already MistralXML
-        if dialect != .mistralXML {
+        // Skip PythonicTagProbe when primary is .llama3JsonSingle — the Llama3 parser
+        // natively strips `<|python_tag|>` markers before JSON decoding.
+        if dialect != .llama3JsonSingle {
+            probes.append(PythonicTagProbe())     // 1. Most distinctive — unique token
+        }
+
+        // Skip DeepXMLProbe (matches <function=NAME> + <parameter=KEY>) when primary
+        // IS Qwen3-Coder — that's exactly its native shape.
+        if dialect != .qwen3CoderDeepXml {
+            probes.append(DeepXMLProbe())         // 2. Qwen-Coder specific tags
+        }
+
+        probes.append(BracketHashProbe())         // 3. Devstral legacy specific
+        probes.append(YAMLInXMLProbe())           // 4. Requires both XML + YAML signal
+        probes.append(GenericToolsXMLProbe())     // 5. <tools>/<tool> wrappers (Qwen3, generic)
+
+        // StandardXMLProbe catches `<tool_call>...</tool_call>` drift. Skip for all
+        // dialects whose primary parser owns that wrapper shape.
+        let dialectsOwningToolCallWrapper: Set<ModelDialect> = [
+            .mistralXML, .qwenHermesToolCall, .graniteLegacyArray,
+            .granite4ToolCall, .qwen3CoderDeepXml
+        ]
+        if !dialectsOwningToolCallWrapper.contains(dialect) {
             probes.append(StandardXMLProbe())
         }
 
-        // Only add ReAct markdown probe if primary is NOT already ReActMarkdown
+        // Only add ReAct markdown probe if primary is NOT already ReActMarkdown.
         if dialect != .reactMarkdown {
             probes.append(ReActMarkdownProbe())
         }
 
-        probes.append(FunctionCallTagProbe())   // 8. <functioncall>...</functioncall> (more specific — fixed tag name)
+        probes.append(FunctionCallTagProbe())   // 8. <functioncall>...</functioncall>
         probes.append(GorillaFunctionProbe())   // 9. <<function>>name(args)
-        probes.append(DynamicToolTagProbe(knownToolNames: knownToolNames))  // 10. <tool_name>{JSON}</tool_name> (Mistral native — least specific XML)
-        probes.append(ArrayInversionProbe())    // 11. JSON array starting with [
+
+        // Skip DynamicToolTagProbe for dialects whose primary output contains
+        // `<tool_call>{JSON}</tool_call>` — the probe's structural pattern
+        // `<([a-z][a-z0-9_]*)>\s*\{...\}\s*</\1>` falsely matches `tool_call` tag.
+        let dialectsOwningDynamicToolTag: Set<ModelDialect> = [
+            .qwenHermesToolCall, .granite4ToolCall
+        ]
+        if !dialectsOwningDynamicToolTag.contains(dialect) {
+            probes.append(DynamicToolTagProbe(knownToolNames: knownToolNames))
+        }
+
+        // ArrayInversionProbe matches `[... "name" ...]` — this IS the primary shape for
+        // all array-format dialects. Skip the probe for them — primary parsers own it.
+        let dialectsOwningJsonArray: Set<ModelDialect> = [
+            .mistralV3Array, .phiFunctoolsBracket, .graniteLegacyArray,
+            .commandRAction, .commandR7BAction
+        ]
+        if !dialectsOwningJsonArray.contains(dialect) {
+            probes.append(ArrayInversionProbe())    // 11. JSON array starting with [
+        }
+
         probes.append(FlatJSONLeakageProbe())   // 12. Least specific — broad string match
 
         return probes
