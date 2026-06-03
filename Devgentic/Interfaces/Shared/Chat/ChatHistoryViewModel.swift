@@ -34,6 +34,16 @@ final class ChatHistoryViewModel {
     @ObservationIgnored private let initialPageSize = 20
     @ObservationIgnored private let subsequentPageSize = 10
 
+    // Monotonic counter bumped on every `loadConversation` entry. Each in-flight
+    // load captures its own epoch and refuses to write results if a newer load
+    // has started while it was awaiting persistence — guards against any caller
+    // that doesn't cancel the previous task (e.g. fire-and-forget Task closures).
+    @ObservationIgnored private var loadEpoch: UInt64 = 0
+
+    // Tracks the in-flight task spawned by `toggleUserMessagesFilter` so rapid
+    // toggles cancel the prior reload instead of racing it.
+    @ObservationIgnored private var filterTask: Task<Void, Never>?
+
     var isSending: Bool = false
     var isUserMessagesOnlyFilterActive: Bool = false
 
@@ -189,57 +199,54 @@ final class ChatHistoryViewModel {
     }
     
     func openMessageInCodeViewer(message: ChatMessage, selectedSnippet: CodeSnippet? = nil) {
-        DispatchQueue.main.async {
-            var allSnippets: [CodeSnippet] = []
+        var allSnippets: [CodeSnippet] = []
 
-            switch message.content {
-            case .codeBlock(let lang, let codeContent):
-                allSnippets = [CodeSnippet(language: lang, code: codeContent)]
-                
-            case .markdownText(let text):
-                let extractedInfos = CodeSnippetExtractor.extract(from: text)
-                
-                allSnippets = extractedInfos.map { info in
-                    var snippet = CodeSnippet(language: info.language, code: info.code)
-                    
-                    if let fileName = info.potentialFileName {
-                        if let sourceMessage = self.findMessageWithSourceFile(named: fileName) {
-                            if let sourceFile = sourceMessage.attachedTextFiles?.first(where: { $0.name == fileName }) {
-                                snippet.sourceMessageID = sourceMessage.id
-                                snippet.sourceFileID = sourceFile.id
-                                logger.info("✅ Successfully linked snippet for '\(fileName)' to source file ID \(sourceFile.id.uuidString).")
-                            }
-                        } else {
-                            logger.warning("⚠️ Could not find any user message with attached file named '\(fileName)'.")
+        switch message.content {
+        case .codeBlock(let lang, let codeContent):
+            allSnippets = [CodeSnippet(language: lang, code: codeContent)]
+
+        case .markdownText(let text):
+            let extractedInfos = CodeSnippetExtractor.extract(from: text)
+
+            allSnippets = extractedInfos.map { info in
+                var snippet = CodeSnippet(language: info.language, code: info.code)
+
+                if let fileName = info.potentialFileName {
+                    if let sourceMessage = self.findMessageWithSourceFile(named: fileName) {
+                        if let sourceFile = sourceMessage.attachedTextFiles?.first(where: { $0.name == fileName }) {
+                            snippet.sourceMessageID = sourceMessage.id
+                            snippet.sourceFileID = sourceFile.id
+                            logger.info("✅ Successfully linked snippet for '\(fileName)' to source file ID \(sourceFile.id.uuidString).")
                         }
+                    } else {
+                        logger.warning("⚠️ Could not find any user message with attached file named '\(fileName)'.")
                     }
-                    return snippet
                 }
-                
-            default:
-                allSnippets = []
+                return snippet
             }
 
-            guard !allSnippets.isEmpty else {
-                logger.info("No code snippets found in the message to open in viewer.")
-                return
-            }
-            
-            let codeBlockLineLimit = 50
-            let largeSnippets = allSnippets.filter {
-                $0.code.components(separatedBy: .newlines).count > codeBlockLineLimit
-            }
-            
-            let snippetsToShow = !largeSnippets.isEmpty ? largeSnippets : allSnippets
-
-            var initialIndex = 0
-            if let selected = selectedSnippet, let index = snippetsToShow.firstIndex(of: selected) {
-                initialIndex = index
-            }
-
-            logger.info("Opening message in code viewer. Snippets to show: \(snippetsToShow.count), Selected index: \(initialIndex)")
-            self.codeViewerContent = (snippets: snippetsToShow, currentIndex: initialIndex)
+        default:
+            allSnippets = []
         }
+
+        guard !allSnippets.isEmpty else {
+            logger.info("No code snippets found in the message to open in viewer.")
+            return
+        }
+
+        let largeSnippets = allSnippets.filter {
+            $0.code.components(separatedBy: .newlines).count > ChatUIConstants.codeBlockLineLimit
+        }
+
+        let snippetsToShow = !largeSnippets.isEmpty ? largeSnippets : allSnippets
+
+        var initialIndex = 0
+        if let selected = selectedSnippet, let index = snippetsToShow.firstIndex(of: selected) {
+            initialIndex = index
+        }
+
+        logger.info("Opening message in code viewer. Snippets to show: \(snippetsToShow.count), Selected index: \(initialIndex)")
+        self.codeViewerContent = (snippets: snippetsToShow, currentIndex: initialIndex)
     }
     
     private func findMessageWithSourceFile(named fileName: String) -> ChatMessage? {
@@ -258,6 +265,9 @@ final class ChatHistoryViewModel {
     // MARK: - Paginated Message Loading
 
     func loadConversation(id: UUID?) async {
+        loadEpoch &+= 1
+        let myEpoch = loadEpoch
+
         guard let selectedID = id else {
             currentChatMessages = []
             return
@@ -275,6 +285,13 @@ final class ChatHistoryViewModel {
             let persistedMessages = await persistenceService.fetchMessages(for: selectedID, offset: 0, limit: initialPageSize)
 
             try Task.checkCancellation()
+
+            // A newer load started while we awaited persistence — discard our
+            // result so we don't overwrite the newer task's UI state.
+            guard myEpoch == loadEpoch else {
+                logger.info("Stale load discarded for \(selectedID.uuidString) (epoch \(myEpoch), current: \(self.loadEpoch)).")
+                return
+            }
 
             let activeStreamingMessages = activeStreamManager.activeStreams.values
                 .filter { $0.conversationId == selectedID }
@@ -303,7 +320,12 @@ final class ChatHistoryViewModel {
             logger.info("Conversation load for \(selectedID.uuidString) was cancelled.")
         }
 
-        self.isInitiallyLoadingConversation = false
+        // Only the latest load gets to flip the loading flag off — prevents a
+        // stale straggler from briefly clearing the spinner while a newer load
+        // is still in flight.
+        if myEpoch == loadEpoch {
+            self.isInitiallyLoadingConversation = false
+        }
     }
 
 
@@ -337,7 +359,8 @@ final class ChatHistoryViewModel {
 
     func toggleUserMessagesFilter() {
         isUserMessagesOnlyFilterActive.toggle()
-        Task {
+        filterTask?.cancel()
+        filterTask = Task {
             await loadConversation(id: currentChatMessages.first?.conversationId)
         }
     }

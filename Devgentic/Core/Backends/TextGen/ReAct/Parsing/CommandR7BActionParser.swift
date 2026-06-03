@@ -160,13 +160,15 @@ struct CommandR7BActionParser: CognitiveParserProtocol {
            let end = text.range(of: "<|END_THINKING|>"),
            start.upperBound < end.lowerBound {
             let thinking = String(text[start.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !thinking.isEmpty { return thinking }
+            let filtered = ReasoningQualityFilter.filter(thinking)
+            if !filtered.isEmpty { return filtered }
         }
         // Fallback: prose before <|START_ACTION|>.
         if let range = text.range(of: Self.actionBegin) {
             let before = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !before.isEmpty { return before }
+            let filtered = ReasoningQualityFilter.filter(before)
+            if !filtered.isEmpty { return filtered }
         }
-        return "Executing tool calls..."
+        return ""
     }
 }

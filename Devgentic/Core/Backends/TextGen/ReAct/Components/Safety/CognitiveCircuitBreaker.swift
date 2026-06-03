@@ -179,6 +179,17 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             }
         let fingerprint = components.joined(separator: ";;")
 
+        // Increment the global per-tool frequency tally UNCONDITIONALLY before any
+        // early-return paths run. Previously the increment lived after the
+        // iteration-level checks, so when `.proceedWithWarning` returned (current
+        // == limit - 1), this iteration's contribution to the global counter was
+        // skipped. A model that alternated combos to evade the iteration-level
+        // fingerprint, then returned to a previously-warned pattern, could escape
+        // the global cap because the warning iteration's count was missing.
+        for key in components {
+            globalToolFrequency[key, default: 0] += 1
+        }
+
         // --- Check 1: Iteration-level fingerprint (existing) ---
         if fingerprint == lastIterationFingerprint {
             consecutiveIdenticalIterations += 1
@@ -230,9 +241,10 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         // Tracks individual tool+args+output across ALL iterations. A model that
         // alternates [read_file] and [read_file, list_directory] evades the
         // iteration fingerprint but each read_file call is still identical.
+        // The increment already happened at the top of this method; here we
+        // only check whether any key has hit the cap.
         for key in components {
-            globalToolFrequency[key, default: 0] += 1
-            let count = globalToolFrequency[key]!
+            let count = globalToolFrequency[key, default: 0]
             if count >= maxGlobalToolRepetitions {
                 let toolName = key.components(separatedBy: "|").first ?? "unknown"
                 logger.warning("🔁 Global repetition limit: '\(toolName)' executed \(count) times with identical args+output. Aborting.")

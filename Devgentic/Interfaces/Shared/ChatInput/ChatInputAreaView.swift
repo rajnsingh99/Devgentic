@@ -45,7 +45,6 @@ struct ChatInputAreaView: View {
     @State private var editorTextView: CustomTextEditor.CustomNSTextView? = nil
     @State private var selectedProfile: BackendProfileModel?
     @State private var showingSchedulePopover = false
-    @State private var showingFullScheduleCreator = false
 
     // MARK: - Layout Constants
     private let textEditorMinHeight: CGFloat = 32
@@ -194,9 +193,6 @@ struct ChatInputAreaView: View {
         .animation(.spring(), value: inputViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
         .fixedSize(horizontal: false, vertical: true)
-        .sheet(isPresented: $showingFullScheduleCreator) {
-            CreateScheduledTaskView(prefillPrompt: inputViewModel.userInput)
-        }
     }
     
     private func updateSelectedProfile(profileID: UUID?) {
@@ -383,7 +379,13 @@ struct ChatInputAreaView: View {
                 onSelectRecentFolder: mainViewModel.interfaceMode == .code ? { url in applyCodeFolderSelection(url) } : nil,
                 onSelectCodeFile: mainViewModel.interfaceMode == .code ? { openCodeFilePicker() } : nil,
                 showingSchedulePopover: $showingSchedulePopover,
-                showingFullScheduleCreator: $showingFullScheduleCreator
+                currentConversationID: mainViewModel.selectedConversationID,
+                onCustomSchedule: {
+                    router.navigateToNewTask(
+                        prefillPrompt: inputViewModel.userInput,
+                        prefillConversationID: mainViewModel.selectedConversationID
+                    )
+                }
             )
 
             Spacer()

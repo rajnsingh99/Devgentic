@@ -21,6 +21,7 @@ struct CodeNodeInspectorView: View {
 
     @State private var template: String = "{{ input }}"
     @State private var outputVariable: String = ""
+    @State private var joinMode: JoinMode = .all
     @State private var showGuide: Bool = false
 
     // MARK: - Body
@@ -34,6 +35,7 @@ struct CodeNodeInspectorView: View {
                     guideCard
                     templateCard
                     outputVariableCard
+                    JoinModeCard(joinMode: $joinMode)
                 }
                 .padding(24)
             }
@@ -55,8 +57,11 @@ struct CodeNodeInspectorView: View {
                 .foregroundColor(theme.primaryText)
             Text("\u{00B7}")
                 .foregroundColor(theme.tertiaryText)
-            Text(node.displayName)
+            // Inline-editable node label. Matches the rename pattern in the
+            // agent profile editor — type to rename, no separate edit mode.
+            TextField("Node Name", text: $node.displayName)
                 .font(theme.fontCaption)
+                .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
             Button {
@@ -260,6 +265,7 @@ struct CodeNodeInspectorView: View {
     // MARK: - Helpers
 
     private func loadFromNode() {
+        joinMode = node.nodeConfig?.joinMode ?? .all
         guard case .code(let config) = node.kind else { return }
         template = config.template
         outputVariable = config.outputVariable ?? ""
@@ -271,6 +277,11 @@ struct CodeNodeInspectorView: View {
             outputVariable: outputVariable.isEmpty ? nil : outputVariable
         )
         node.kind = .code(config)
+
+        // Persist fan-in behaviour on the shared per-node config.
+        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+        node.nodeConfig?.joinMode = joinMode
+
         dismiss()
     }
 }

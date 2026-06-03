@@ -4,9 +4,15 @@
 //
 //  Created by Raj Singh on 11/04/26.
 //
-//  Horizontal scrollable strip of workflow node cards + a Final Outcome card.
-//  Header and run picker are handled by the parent title bar.
-//  Tapping a card selects it and renders its full detail in the output area below.
+//  Horizontal pipeline view: agent cards interleaved with status-aware
+//  connectors, terminating in the Final Outcome card. Each connector takes its
+//  appearance from the *upstream* card's status (since upstream completion is
+//  what unlocks the downstream input).
+//
+//  When the parent passes layout-aware display data, this view shows the entire
+//  pipeline (including pending placeholder cards) on the very first frame —
+//  matching the wireframe where Agent 1 + Final Outcome are visible before any
+//  node has actually run.
 //
 
 import SwiftUI
@@ -18,9 +24,13 @@ struct WorkflowOutcomeStripView: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 12) {
-                // Node cards
-                ForEach(displayData.nodeResults) { nodeData in
+            HStack(alignment: .center, spacing: 0) {
+                ForEach(Array(displayData.nodeResults.enumerated()), id: \.element.id) { index, nodeData in
+                    if index > 0 {
+                        WorkflowConnectorView(
+                            upstreamStatus: displayData.nodeResults[index - 1].status
+                        )
+                    }
                     WorkflowOutcomeCardView(
                         nodeData: nodeData,
                         isSelected: selectedNodeID == nodeData.nodeID,
@@ -32,13 +42,10 @@ struct WorkflowOutcomeStripView: View {
                     )
                 }
 
-                // Running placeholder for nodes not yet started
-                if displayData.isLive && displayData.isRunning && displayData.completedNodes < displayData.totalNodes {
-                    runningPlaceholder
-                }
-
-                // Final Outcome card
                 if !displayData.nodeResults.isEmpty {
+                    WorkflowConnectorView(
+                        upstreamStatus: displayData.nodeResults.last?.status ?? .pending
+                    )
                     WorkflowFinalOutcomeCardView(
                         displayData: displayData,
                         isSelected: selectedNodeID == nil,
@@ -50,42 +57,16 @@ struct WorkflowOutcomeStripView: View {
                     )
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 18)
         }
-        .frame(minHeight: 200, maxHeight: 280)
+        .frame(minHeight: 220, maxHeight: 240)
+        .background(stripBackground)
     }
 
-    // MARK: - Running Placeholder
-
-    private var runningPlaceholder: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                ProgressView()
-                    .controlSize(.mini)
-                Text("Running...")
-                    .font(theme.fontCaption.weight(.medium))
-                    .foregroundColor(theme.secondaryText)
-            }
-            .padding(.top, 10)
-            .padding(.horizontal, 10)
-
-            Spacer()
-
-            RoundedRectangle(cornerRadius: 4)
-                .fill(theme.surfaceOverlay)
-                .frame(width: 100, height: 8)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 10)
-        }
-        .frame(width: 200)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.controlBackground)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(theme.surfaceOverlayStrong.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                )
-        )
+    /// Subtle dotted background matching the wireframe's "canvas-like" feel.
+    private var stripBackground: some View {
+        Rectangle()
+            .fill(theme.secondaryBackground.opacity(0.35))
     }
 }

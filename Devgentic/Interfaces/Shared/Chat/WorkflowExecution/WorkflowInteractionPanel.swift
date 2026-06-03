@@ -78,6 +78,7 @@ private struct WorkflowInteractionCard: View {
         case .code:       return .cyan
         case .gate:       return .red
         case .trigger:    return .gray
+        case .action:     return .teal
         }
     }
 
@@ -89,6 +90,7 @@ private struct WorkflowInteractionCard: View {
         case .code:       return "chevron.left.forwardslash.chevron.right"
         case .gate:       return "hand.raised"
         case .trigger:    return "bolt"
+        case .action:     return "bolt.horizontal.fill"
         }
     }
 
@@ -278,6 +280,7 @@ private struct WorkflowInteractionCard: View {
         case .code: return "Code"
         case .loop: return "Loop"
         case .trigger: return "Trigger"
+        case .action: return "Action"
         }
     }
 }

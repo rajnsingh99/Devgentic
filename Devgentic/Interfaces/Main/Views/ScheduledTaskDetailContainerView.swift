@@ -4,9 +4,11 @@
 //
 //  Created by Raj Singh on 19/03/26.
 //
-//  Wraps CreateScheduledTaskView for display in the main content area.
-//  Looks up the task by ID from SchedulerService and provides it
-//  for editing, with DynamicIslandBar for back navigation.
+//  In-window destination for editing an existing scheduled task.
+//  Looks up the task by ID; if missing (deleted out from under us),
+//  shows a "not found" placeholder. Otherwise hands off to
+//  CreateScheduledTaskView, which owns its own DynamicIslandBar
+//  + card-based layout (matches AgentConfigDetailView).
 //
 
 import SwiftUI
@@ -20,20 +22,15 @@ struct ScheduledTaskDetailContainerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            DynamicIslandBar(
-                title: task?.displayName ?? "Edit Task",
-                icon: "clock.badge"
+        if let task = task {
+            CreateScheduledTaskView(
+                existingTask: task,
+                prefillPrompt: nil
             )
+        } else {
+            VStack(spacing: 0) {
+                DynamicIslandBar(title: "Edit Task", icon: "clock.badge")
 
-            if let task = task {
-                ScrollView {
-                    CreateScheduledTaskView(existingTask: task)
-                        .padding(24)
-                        .frame(maxWidth: ViewLayout.maxContentWidth)
-                        .frame(maxWidth: .infinity)
-                }
-            } else {
                 ContentNotFoundView(
                     icon: "clock.badge.exclamationmark",
                     title: "Task Not Found",

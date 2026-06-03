@@ -130,24 +130,144 @@ struct MCPConfiguration: Codable {
 }
 
 /// A unified server definition that works for both local and remote servers.
+///
+/// **Secret-handling contract.** Nothing in this struct holds secret material.
+/// - For local-process servers, `envKeys` lists the names of env vars the
+///   server expects; their values live in Keychain at `MCPSecretScope.envValue(key:)`
+///   for the source's UUID.
+/// - For remote servers, `auth` describes the authentication shape; the actual
+///   token / key / OAuth bundle lives in Keychain under the matching scope.
+///
+/// Callers materialize secrets at use time via `MCPRuntimeSecrets.materialize(...)`.
 struct ServerDefinition: Codable, Hashable {
     // Properties for Local Process
     let command: String?
     let args: [String]?
-    let env: [String: String]?
-    
+
+    /// Names of env vars this server expects. Values are stored in Keychain
+    /// (per source) at `MCPSecretScope.envValue(key:)`. Empty `nil` means none.
+    let envKeys: [String]?
+
     // Properties for Remote URL
     let url: String?
-    let authentication: [String: String]?
 
-    /// A single, flexible initializer that provides default nil values for all optional properties.
-    /// This allows us to create a ServerDefinition for either a local or remote type without causing compiler errors.
-    init(command: String? = nil, args: [String]? = nil, env: [String: String]? = nil, url: String? = nil, authentication: [String: String]? = nil) {
+    /// How the remote server authenticates this client. The corresponding
+    /// secret (if any) lives in Keychain. Defaults to `.none` for new entries
+    /// and for legacy data prior to the secrets migration.
+    let auth: MCPAuthenticationScheme
+
+    init(
+        command: String? = nil,
+        args: [String]? = nil,
+        envKeys: [String]? = nil,
+        url: String? = nil,
+        auth: MCPAuthenticationScheme = .none
+    ) {
         self.command = command
         self.args = args
-        self.env = env
+        self.envKeys = envKeys
         self.url = url
-        self.authentication = authentication
+        self.auth = auth
+    }
+
+    // MARK: - Codable (forward-compatible)
+
+    /// Custom decode so older persisted JSON (no `auth` field) still loads as
+    /// `auth = .none`. Migration takes care of promoting legacy `authentication`
+    /// payloads up-front; this just guards against any blob that slips through.
+    private enum CodingKeys: String, CodingKey {
+        case command, args, envKeys, url, auth
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.command = try container.decodeIfPresent(String.self, forKey: .command)
+        self.args = try container.decodeIfPresent([String].self, forKey: .args)
+        self.envKeys = try container.decodeIfPresent([String].self, forKey: .envKeys)
+        self.url = try container.decodeIfPresent(String.self, forKey: .url)
+        self.auth = try container.decodeIfPresent(MCPAuthenticationScheme.self, forKey: .auth) ?? .none
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(command, forKey: .command)
+        try container.encodeIfPresent(args, forKey: .args)
+        try container.encodeIfPresent(envKeys, forKey: .envKeys)
+        try container.encodeIfPresent(url, forKey: .url)
+        try container.encode(auth, forKey: .auth)
+    }
+}
+
+/// Pre-Phase-1 persisted shape. Used only by the secrets migration path —
+/// reads legacy blobs, lifts secrets into Keychain, re-encodes as
+/// `ServerDefinition`. Do not use for new code.
+struct LegacyServerDefinition: Codable {
+    let command: String?
+    let args: [String]?
+    let env: [String: String]?
+    let url: String?
+    let authentication: [String: String]?
+}
+
+/// Runtime secret bundle passed into `MCPClientService.connect`. Carries the
+/// env-var values and auth header that the session needs but which are never
+/// persisted inside `ServerDefinition`. Two construction paths:
+///
+/// 1. **Form-driven (test connection / save):** the Add/Edit form holds env
+///    values and auth tokens in @State; build directly from form data.
+/// 2. **Persisted-source (tool call reconnect):** materialize from Keychain
+///    via the source's UUID and its `ServerDefinition`.
+struct MCPRuntimeSecrets: Sendable {
+    var env: [String: String] = [:]
+    /// The fully-formed authorization header to attach to remote requests, or
+    /// nil for local / unauthenticated transports.
+    var authorizationHeader: (name: String, value: String)? = nil
+}
+
+extension MCPRuntimeSecrets {
+
+    /// Build a runtime-secrets bundle by reading the configured secrets out of
+    /// Keychain. Used by the tool-execution reconnect path, where we have a
+    /// `sourceID` + persisted `ServerDefinition` but no live form state.
+    @MainActor
+    static func materialize(for sourceID: UUID, definition: ServerDefinition) -> MCPRuntimeSecrets {
+        var bundle = MCPRuntimeSecrets()
+
+        // Env vars: read each key's value out of Keychain. Missing values are
+        // skipped silently — the user may have removed the secret since the
+        // server was added; ShellProcess will surface the failure if the
+        // server requires it.
+        if let keys = definition.envKeys {
+            for key in keys {
+                if let value = MCPSecretStore.shared.retrieve(.envValue(key: key), sourceID: sourceID) {
+                    bundle.env[key] = value
+                }
+            }
+        }
+
+        // Auth header for remote transports.
+        switch definition.auth {
+        case .none:
+            break
+        case .bearer:
+            if let token = MCPSecretStore.shared.retrieve(.bearerToken, sourceID: sourceID) {
+                bundle.authorizationHeader = ("Authorization", "Bearer \(token)")
+            }
+        case .apiKeyHeader(let headerName):
+            if let value = MCPSecretStore.shared.retrieve(.apiKeyHeaderValue, sourceID: sourceID) {
+                bundle.authorizationHeader = (headerName, value)
+            }
+        case .oauth:
+            // Read the OAuth credential bundle out of Keychain and attach its
+            // (possibly stale) access token. Refresh-on-401 happens one layer
+            // up in `DynamicMCPTool` once Phase 4 lands; for now a stale
+            // token will surface as a 401 from the transport.
+            if let oauthBundle = MCPOAuthCoordinator.loadBundle(sourceID: sourceID) {
+                bundle.authorizationHeader = ("Authorization", "Bearer \(oauthBundle.accessToken)")
+            }
+        }
+
+        return bundle
     }
 }
 

@@ -9,6 +9,15 @@
 
 import Foundation
 
+/// Distinguishes between agent-tuned defaults (low temp, fixed seed, tight sampling
+/// for structured tool calls) and chat-tuned defaults (warmer temp, no fixed seed,
+/// looser sampling for conversational use). Passed into `OllamaSettingsView` so the
+/// "Apply Optimal" menu produces the right preset for the host profile.
+enum OllamaConfigDefaultProfile {
+    case agent
+    case chat
+}
+
 /// A Codable struct that represents the advanced configuration options for the Ollama API.
 struct OllamaAdvancedConfig: Codable, Hashable {
     
@@ -85,6 +94,31 @@ struct OllamaAdvancedConfig: Codable, Hashable {
         }
     }
     
+    /// Returns the recommended config for this model + host profile combination.
+    /// Maps the codebase-wide 5-tier `ModelTier` (from `CognitiveProfile.swift`,
+    /// captured by `OllamaConnect.buildMetadata` from `/api/show.details.parameter_size`)
+    /// into Ollama's 3-tier preset vocabulary, then dispatches to either the
+    /// agent-tuned `preset(for:)` or chat-tuned `botPreset(for:)` based on
+    /// the host profile. Mirrors `MLXAdvancedConfig.recommended(for:)` shape
+    /// with the agent-vs-chat dispatch added.
+    ///
+    /// The 3-tier preset vocabulary predates the 5-tier system; tier mapping is
+    /// inlined here (rather than a helper) so the switch's pattern-match resolves
+    /// against the global `ModelTier` cleanly without colliding with the nested
+    /// `OllamaAdvancedConfig.ModelTier`. small/medium collapse into smallMedium;
+    /// large/ultra collapse into large.
+    static func recommended(for metadata: ModelMetadata, profile: OllamaConfigDefaultProfile) -> OllamaAdvancedConfig {
+        let presetTier: ModelTier   // resolves to OllamaAdvancedConfig.ModelTier (inner)
+        switch metadata.tier {       // metadata.tier is the GLOBAL ModelTier (outer)
+        case .tiny:                   presetTier = .tiny
+        case .small, .medium:         presetTier = .smallMedium
+        case .large, .ultra:          presetTier = .large
+        }
+        return profile == .agent
+            ? .preset(for: presetTier)
+            : .botPreset(for: presetTier)
+    }
+
     /// Returns a preset optimized for conversational bot use (higher creativity, no fixed seed).
     static func botPreset(for tier: ModelTier) -> OllamaAdvancedConfig {
         switch tier {

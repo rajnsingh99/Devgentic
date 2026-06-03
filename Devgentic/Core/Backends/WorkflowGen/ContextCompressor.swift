@@ -171,6 +171,113 @@ enum ContextCompressor {
         return body
     }
 
+    // MARK: - Artifact Passing (Workflow media/file handoff)
+
+    /// Maximum characters of extracted document text to inline into a downstream
+    /// node's input. Separate from the node-output budget so a large attached PDF
+    /// can't crowd out the upstream nodes' actual responses.
+    static let maxArtifactTextChars: Int = 4000
+
+    /// Maximum number of artifacts enumerated in the manifest. Bounds the manifest
+    /// section so a node fanned-in from many media-producing branches can't emit an
+    /// unbounded file list into the prompt; overflow is summarised as a count.
+    static let maxManifestEntries: Int = 25
+
+    /// Renders a compact, human/agent-readable manifest of upstream artifacts.
+    ///
+    /// Each line names the kind, label, mime type, and a resolvable locator (disk
+    /// path or remote URL) so a downstream agent with file/HTTP tools can act on it.
+    /// Returns an empty string when there are no artifacts. Cheap and synchronous —
+    /// safe to call from prompt-build time. Capped at `maxManifestEntries` lines.
+    static func renderArtifactManifest(_ artifacts: [MediaArtifact]) -> String {
+        guard !artifacts.isEmpty else { return "" }
+
+        var lines: [String] = artifacts.prefix(maxManifestEntries).enumerated().map { index, artifact in
+            let label = artifact.label
+                ?? Self.locatorName(for: artifact.reference)
+                ?? "untitled"
+            let locator = Self.locatorDescription(for: artifact.reference)
+            return "\(index + 1). [\(artifact.kind.rawValue)] \"\(label)\" (\(artifact.mimeType)) — \(locator)"
+        }
+        if artifacts.count > maxManifestEntries {
+            lines.append("…and \(artifacts.count - maxManifestEntries) more file(s).")
+        }
+
+        return """
+        The following file(s) were produced by upstream steps and are available to you:
+        \(lines.joined(separator: "\n"))
+        """
+    }
+
+    /// Extracts and concatenates the text of `.document` artifacts (PDF, DOCX, XLSX,
+    /// CSV, PPTX, RTF, plain text) via `FileProcessorService`, so a downstream text
+    /// model can read attached documents even without native file support.
+    ///
+    /// Only `.document` artifacts backed by a resolvable disk path are extracted —
+    /// images/audio/video can't be turned into text (they surface via the manifest
+    /// and, later, native multimodal input). Output is bounded by `budget`.
+    /// Returns the concatenated text plus a typed list of documents that couldn't be
+    /// retrieved (via the throwing `readFileContentOrThrow`, preserving the real
+    /// cause). Report-and-skip: the caller traces/surfaces the failures and the node
+    /// continues with whatever extracted (this is enrichment, not a hard dependency).
+    static func extractDocumentText(
+        from artifacts: [MediaArtifact],
+        budget: Int = maxArtifactTextChars,
+        fileProcessor: FileProcessorService
+    ) async -> (text: String, failures: [FileRetrievalError]) {
+        let documents = artifacts.filter { $0.kind == .document }
+        guard !documents.isEmpty, budget > 0 else { return ("", []) }
+
+        // Even per-document share (floored) so the first document can't consume the
+        // entire budget and starve the rest — two attached PDFs each get a fair cut.
+        // Unused share is left on the table rather than reallocated, keeping the
+        // total bounded by `budget`.
+        let perDocBudget = max(500, budget / documents.count)
+
+        var sections: [String] = []
+        var failures: [FileRetrievalError] = []
+        var used = 0
+
+        for artifact in documents {
+            guard used < budget else { break }
+            guard case .diskPath(let url) = artifact.reference else { continue }
+
+            do {
+                let text = try await fileProcessor.readFileContentOrThrow(for: url, maxSize: perDocBudget)
+                guard !text.isEmpty else { continue }
+                let name = artifact.label ?? url.lastPathComponent
+                let clipped = text.count > perDocBudget
+                    ? truncateAtBoundary(text, maxLength: perDocBudget) + "\n[... document truncated ...]"
+                    : text
+                sections.append("--- \(name) ---\n\(clipped)")
+                used += clipped.count
+            } catch let retrievalError as FileRetrievalError {
+                failures.append(retrievalError)
+            } catch {
+                failures.append(.readFailed(path: url.path, underlying: error.localizedDescription))
+            }
+        }
+
+        return (sections.joined(separator: "\n\n"), failures)
+    }
+
+    /// Best-effort display name from a media reference (file name for disk/remote).
+    private static func locatorName(for reference: MediaReference) -> String? {
+        switch reference {
+        case .diskPath(let url), .remoteURL(let url): return url.lastPathComponent
+        case .ephemeralData: return nil
+        }
+    }
+
+    /// Resolvable locator string for the manifest.
+    private static func locatorDescription(for reference: MediaReference) -> String {
+        switch reference {
+        case .diskPath(let url): return url.path
+        case .remoteURL(let url): return url.absoluteString
+        case .ephemeralData(let data): return "<in-memory data, \(data.count) bytes>"
+        }
+    }
+
     // MARK: - Boundary-Aware Truncation
 
     /// Truncates text at the nearest sentence or word boundary before `maxLength`.

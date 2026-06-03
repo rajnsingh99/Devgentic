@@ -130,15 +130,55 @@ extension View {
 // MARK: - Settings View
 
 /// Switches on the provider to render the correct settings view bound to the config manager.
+///
+/// `modelMetadata` is optional and threaded through to provider-specific settings
+/// views that derive parameter bounds from model characteristics (currently only
+/// MLX uses it; cloud and Ollama settings rely on provider-defined ranges).
 struct ProviderAdvancedSettingsView: View {
     @Bindable var configManager: ProviderAdvancedConfigManager
     let provider: ApiProvider
     @Binding var thinkingEnabled: Bool
+    /// Active model metadata (context window, tier, quantization, family) used by
+    /// MLX and Ollama settings to derive bounds for token-count fields.
+    /// Default-nil so callers that don't have the value handy stay compiling.
+    let modelMetadata: ModelMetadata?
+    /// Active model name. Used as a secondary fallback to
+    /// `KnownModelContextWindows.lookup` when `modelMetadata.contextWindow` is
+    /// nil — common for Ollama profiles where `/api/show.details` populates
+    /// tier/quant but not the context window itself.
+    let modelName: String?
+    /// Whether this view is hosted in an Agent or Bot config. Drives which
+    /// "Apply Optimal" preset the Ollama view uses (strict agent vs warm chat).
+    /// No default — every callsite must specify so a Bot profile never silently
+    /// inherits agent-strict defaults from a forgotten parameter.
+    let defaultProfile: OllamaConfigDefaultProfile
+
+    init(
+        configManager: ProviderAdvancedConfigManager,
+        provider: ApiProvider,
+        thinkingEnabled: Binding<Bool>,
+        modelMetadata: ModelMetadata? = nil,
+        modelName: String? = nil,
+        defaultProfile: OllamaConfigDefaultProfile
+    ) {
+        self.configManager = configManager
+        self.provider = provider
+        self._thinkingEnabled = thinkingEnabled
+        self.modelMetadata = modelMetadata
+        self.modelName = modelName
+        self.defaultProfile = defaultProfile
+    }
 
     var body: some View {
         switch provider {
         case .ollama:
-            OllamaSettingsView(config: $configManager.localOllamaConfig, thinkingEnabled: $thinkingEnabled)
+            OllamaSettingsView(
+                config: $configManager.localOllamaConfig,
+                thinkingEnabled: $thinkingEnabled,
+                modelMetadata: modelMetadata,
+                modelName: modelName,
+                defaultProfile: defaultProfile
+            )
         case .google:
             GeminiSettingsView(config: $configManager.localGeminiConfig)
         case .anthropic:
@@ -146,7 +186,11 @@ struct ProviderAdvancedSettingsView: View {
         case .openAI:
             OpenAISettingsView(config: $configManager.localOpenAIConfig)
         case .mlx:
-            MLXSettingsView(config: $configManager.localMlxConfig)
+            MLXSettingsView(
+                config: $configManager.localMlxConfig,
+                modelMetadata: modelMetadata,
+                modelName: modelName
+            )
         }
     }
 }

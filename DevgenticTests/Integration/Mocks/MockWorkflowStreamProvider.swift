@@ -72,6 +72,7 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String?,
+        userPayload: Payload?,
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {

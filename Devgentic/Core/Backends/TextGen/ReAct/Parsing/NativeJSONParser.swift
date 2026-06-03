@@ -60,7 +60,10 @@ struct NativeJSONParser: CognitiveParserProtocol {
                 PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
             }
             logger.info("NativeJSONParser: Fast-path succeeded. \(pending.count) tool call(s).")
-            return ModernCognitiveStep(reasoning: decoded.content, toolCalls: pending)
+            return ModernCognitiveStep(
+                reasoning: ReasoningQualityFilter.filter(decoded.content),
+                toolCalls: pending
+            )
         }
 
         // Fast-path miss. Return an empty step so the pipeline's subsequent stages

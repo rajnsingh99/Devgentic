@@ -24,6 +24,7 @@ struct ConditionNodeInspectorView: View {
     @State private var llmPrompt: String = ""
     @State private var llmModelName: String? = nil
     @State private var passthroughContent: Bool = true
+    @State private var joinMode: JoinMode = .all
     @State private var installedModels: [MLXModelItem] = []
     @State private var showGuide: Bool = false
 
@@ -42,6 +43,7 @@ struct ConditionNodeInspectorView: View {
                     patternRulesCard
                     staticFallbackCard
                     aiClassifierCard
+                    JoinModeCard(joinMode: $joinMode)
                 }
                 .padding(24)
             }
@@ -66,8 +68,11 @@ struct ConditionNodeInspectorView: View {
                 .foregroundColor(theme.primaryText)
             Text("\u{00B7}")
                 .foregroundColor(theme.tertiaryText)
-            Text(node.displayName)
+            // Inline-editable node label — same pattern as the agent profile
+            // editor's identity-header rename.
+            TextField("Node Name", text: $node.displayName)
                 .font(theme.fontCaption)
+                .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
             Button {
@@ -564,6 +569,7 @@ struct ConditionNodeInspectorView: View {
     }
 
     private func loadFromNode() {
+        joinMode = node.nodeConfig?.joinMode ?? .all
         guard case .condition(let config) = node.kind else { return }
         rules = config.rules
         fallbackLabel = config.fallbackLabel
@@ -605,6 +611,11 @@ struct ConditionNodeInspectorView: View {
         config.llmModelName = llmModelName
         config.passthroughContent = passthroughContent
         node.kind = .condition(config)
+
+        // Persist fan-in behaviour on the shared per-node config.
+        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+        node.nodeConfig?.joinMode = joinMode
+
         dismiss()
     }
 }

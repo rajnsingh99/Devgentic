@@ -165,8 +165,8 @@ struct DeepSeekV31Parser: CognitiveParserProtocol {
         }
         if let range = text.range(of: Self.callBeginMarker) {
             let before = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return before.isEmpty ? "Executing tool calls..." : before
+            return ReasoningQualityFilter.filter(before)
         }
-        return "Executing tool calls..."
+        return ""
     }
 }

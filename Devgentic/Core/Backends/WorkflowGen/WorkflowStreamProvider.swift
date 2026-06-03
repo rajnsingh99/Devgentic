@@ -22,12 +22,15 @@ protocol WorkflowStreamProvider: Sendable {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String?,
+        userPayload: Payload?,
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<AgentStreamEvent, Error>
 
     /// Workflow-aware streaming — bypasses RAG, history, and compaction.
-    /// Uses `WorkflowCognitiveGenerator` to produce clean task+input prompts.
+    /// Uses the same generator/parser the agent or bot path would; per-node
+    /// workflow context is threaded through `SemanticContext.workflowContext`
+    /// so every dialect inherits workflow behavior automatically.
     func streamWorkflowNodeResponse(
         for profile: BackendProfileModel,
         workflowContext: WorkflowExecutionContext,
@@ -35,6 +38,13 @@ protocol WorkflowStreamProvider: Sendable {
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<AgentStreamEvent, Error>
+
+    /// Resolves a persisted tool reference (native or MCP) to an invokable,
+    /// type-erased `AgentTool` — or nil if it can't be resolved (tool removed,
+    /// MCP server offline). Used by **Action nodes** to call a tool directly and
+    /// deterministically, with no LLM in the loop. A default returns nil so mocks
+    /// don't have to implement it.
+    func resolveWorkflowTool(_ tool: Tool, conversationID: UUID) async -> AgentTool?
 }
 
 // MARK: - Default Backward-Compatible Bridge
@@ -59,14 +69,38 @@ extension WorkflowStreamProvider {
             chatHistory: [],
             conversationID: conversationID,
             ragContext: nil,
+            userPayload: nil,
             traceContext: traceContext,
             onTraceUpdate: onTraceUpdate
         )
+    }
+
+    /// Default: no tool resolution (mocks/tests). Production `AgentConnect` overrides.
+    func resolveWorkflowTool(_ tool: Tool, conversationID: UUID) async -> AgentTool? {
+        nil
     }
 }
 
 // MARK: - AgentConnect Conformance
 
-/// AgentConnect already implements the exact method signature.
-/// This retroactive conformance enables it as the production stream provider.
-extension AgentConnect: WorkflowStreamProvider {}
+/// AgentConnect already implements the streaming signatures; this adds the
+/// production tool-resolution path for Action nodes, reusing the same native/MCP
+/// resolution the agent pipeline uses.
+extension AgentConnect: WorkflowStreamProvider {
+    func resolveWorkflowTool(_ tool: Tool, conversationID: UUID) async -> AgentTool? {
+        // Native first (fixed-source built-in tools), then MCP (server-backed).
+        // `requiresConfirmation: false` — workflow actions are pre-approved at
+        // design time; gate genuinely risky ones behind a Gate node instead.
+        if let native = resolveNativeTool(
+            toolName: tool.name,
+            conversationID: conversationID,
+            requiresConfirmation: false,
+            timeout: tool.timeout,
+            timeoutMessage: tool.timeoutMessage
+        ) {
+            return native
+        }
+        let sources = await UnifiedToolStore.shared.sources
+        return resolveMCPTool(toolConfig: tool, availableSources: sources)
+    }
+}

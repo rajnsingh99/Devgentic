@@ -112,6 +112,9 @@ final class WorkflowCanvasState {
         case .trigger:
             // Chevron
             return CGSize(width: 120, height: 50)
+        case .action:
+            // Integration card (similar footprint to profile)
+            return CGSize(width: 200, height: 76)
         }
     }
 
@@ -398,6 +401,9 @@ final class WorkflowCanvasState {
             return config.outputPortLabels
         case .profile:
             return ["", "error"]
+        case .action:
+            // Default flow + an error port so tool failures can route downstream.
+            return ["", "error"]
         default:
             return [] // Structural nodes use single default port
         }
@@ -447,7 +453,22 @@ final class WorkflowCanvasState {
     private func revalidate() {
         validationIssues = WorkflowValidator.validate(
             layout: currentLayout(),
-            profileMap: resolvedProfileMap
+            profileMap: resolvedProfileMap,
+            availableToolSources: UnifiedToolStore.shared.sources
         )
+    }
+
+    /// Workflow variable names known statically (Code-node output variables).
+    /// Surfaced in the Action inspector's binding editor for `{{ var.x }}` hints.
+    var knownVariableNames: [String] {
+        var names = Set<String>()
+        for node in nodes {
+            if case .code(let config) = node.kind,
+               let v = config.outputVariable,
+               !v.trimmingCharacters(in: .whitespaces).isEmpty {
+                names.insert(v)
+            }
+        }
+        return names.sorted()
     }
 }

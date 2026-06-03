@@ -30,6 +30,7 @@ struct LoopNodeInspectorView: View {
     @State private var exitOp: ConditionOp = .contains
     @State private var exitValue: String = ""
     @State private var exitVariableName: String = ""
+    @State private var joinMode: JoinMode = .all
     @State private var showGuide: Bool = false
 
     // MARK: - Body
@@ -44,6 +45,7 @@ struct LoopNodeInspectorView: View {
                     bodyWorkflowCard
                     iterationsCard
                     exitConditionCard
+                    JoinModeCard(joinMode: $joinMode)
                 }
                 .padding(24)
             }
@@ -65,8 +67,11 @@ struct LoopNodeInspectorView: View {
                 .foregroundColor(theme.primaryText)
             Text("\u{00B7}")
                 .foregroundColor(theme.tertiaryText)
-            Text(node.displayName)
+            // Inline-editable node label — same pattern as the agent profile
+            // editor's identity-header rename.
+            TextField("Node Name", text: $node.displayName)
                 .font(theme.fontCaption)
+                .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
             Button {
@@ -364,6 +369,7 @@ struct LoopNodeInspectorView: View {
     }
 
     private func loadFromNode() {
+        joinMode = node.nodeConfig?.joinMode ?? .all
         guard case .loop(let config) = node.kind else { return }
         maxIterations = config.maxIterations
         bodyWorkflowID = config.bodyWorkflowID
@@ -395,6 +401,11 @@ struct LoopNodeInspectorView: View {
             exitCondition: exitCondition
         )
         node.kind = .loop(config)
+
+        // Persist fan-in behaviour on the shared per-node config.
+        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+        node.nodeConfig?.joinMode = joinMode
+
         dismiss()
     }
 }

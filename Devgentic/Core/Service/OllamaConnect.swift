@@ -36,6 +36,17 @@ struct OllamaShowResponse: Codable {
     /// `capability = .none` in `cognitiveProfile(modelName:)`. Absent on older
     /// Ollama releases; in that case the heuristic fallback path runs.
     let capabilities: [String]?
+    /// Architectural metadata block returned only when `/api/show` is called
+    /// with `verbose: true`. Carries GGUF metadata keys like
+    /// `{family}.context_length`, `general.parameter_count`, etc. Nil when
+    /// `verbose` was omitted or the Ollama version doesn't support it.
+    /// Consumed by `buildMetadata()` to populate `ModelMetadata.contextWindow`.
+    let modelInfo: [String: JSONValue]?
+
+    enum CodingKeys: String, CodingKey {
+        case license, modelfile, parameters, template, details, capabilities
+        case modelInfo = "model_info"
+    }
 
     /// Evaluates the model's true capabilities by inspecting the template, family, and modelfile.
     /// This dictates the cognitive tier of the model. (Backward-compatible accessor.)
@@ -106,12 +117,17 @@ struct OllamaShowResponse: Codable {
         let familyStr = details?.family?.lowercased() ?? ""
         let familiesArr = details?.families?.map { $0.lowercased() } ?? []
 
+        // Vision modality is independent of tool capability — a vision model may not do
+        // tools, and a tool model may not do vision — so it's computed once here and
+        // threaded into every return path below (incl. the `.none` short-circuits).
+        let modalities = Self.detectVisionModalities(capabilities: capabilities, details: details)
+
         // Priority 1: Authoritative capabilities field (Ollama 0.3.4+).
         // Absence of "tools" is a HARD deny — any tools-param request will 400.
         if let caps = capabilities {
             if !caps.contains("tools") {
                 logger.info("cognitiveProfile: /api/show capabilities=\(caps) lacks 'tools' — forcing .none (authoritative)")
-                return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata)
+                return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities)
             }
             // Otherwise tools IS supported — fall through to dialect detection below.
         }
@@ -124,11 +140,27 @@ struct OllamaShowResponse: Codable {
             in: [modelName, familyStr] + familiesArr
         ) {
             logger.info("cognitiveProfile: reasoning-only pattern matched for name='\(modelName)' family='\(familyStr)' — forcing .none")
-            return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata)
+            return CognitiveProfile(capability: .none, dialect: .heuristicJson, metadata: metadata, modalities: modalities)
         }
 
         // Priority 3: Existing template/family heuristics.
-        return computeHeuristicProfile(metadata: metadata)
+        var profile = computeHeuristicProfile(metadata: metadata)
+        profile.modalities = modalities
+        return profile
+    }
+
+    /// Vision-input detection for an Ollama model, in priority order:
+    /// 1. AUTHORITATIVE — the `/api/show` `capabilities` array contains `"vision"`
+    ///    (Ollama ~0.3.4+; the same array we already trust for tool-capability gating).
+    /// 2. FALLBACK (older daemons with no `capabilities` field) — a bundled CLIP vision
+    ///    projector reported in `details.families` (`OllamaModelDetails.supportsVision`).
+    /// When `capabilities` IS present but lacks `"vision"`, that's an authoritative NO —
+    /// we do NOT fall back (avoids a false positive from a stray projector entry).
+    static func detectVisionModalities(capabilities: [String]?, details: OllamaModelDetails?) -> SupportedModalities {
+        if let caps = capabilities {
+            return caps.contains("vision") ? .visionCapable : .textOnly
+        }
+        return (details?.supportsVision == true) ? .visionCapable : .textOnly
     }
 
     /// Heuristic capability + dialect detection from template, modelfile, and family.
@@ -234,7 +266,35 @@ struct OllamaShowResponse: Codable {
             metadata.parameterCount = detailObj.parameterSize
         }
 
+        // Extract context window from GGUF model_info when available
+        // (Ollama returns this only when /api/show is called with verbose: true).
+        // Drives the UI's `numCtx` upper bound and the runtime memory-budget
+        // calculation in AgentConnect.
+        metadata.contextWindow = inferredContextWindow
+
         return metadata
+    }
+
+    /// Extracts the context length from `model_info[*.context_length]`. GGUF
+    /// metadata uses the architecture name as a prefix (e.g.
+    /// `llama.context_length` for Llama models, `mistral.context_length` for
+    /// Mistral). Tries the family-prefixed key first; falls back to a
+    /// suffix scan for non-standard architectures or multi-family models
+    /// where `details.family` doesn't match the GGUF architecture identifier.
+    /// Returns nil when `model_info` is missing (older Ollama, non-verbose
+    /// response) or no `*.context_length` key is present.
+    private var inferredContextWindow: Int? {
+        guard let info = modelInfo else { return nil }
+        let family = details?.family?.lowercased() ?? ""
+        // 1. Exact family-prefixed key
+        if !family.isEmpty, let v = info["\(family).context_length"]?.intValue, v > 0 {
+            return v
+        }
+        // 2. Fallback: any key ending in `.context_length`
+        for (key, value) in info where key.hasSuffix(".context_length") {
+            if let v = value.intValue, v > 0 { return v }
+        }
+        return nil
     }
 }
 
@@ -310,13 +370,18 @@ struct OllamaConnect {
     }
 
     static func fetchModelDetails(name: String, baseURL: String) async throws -> OllamaShowResponse {
+        // `verbose: true` requests the GGUF `model_info` block in addition to
+        // the basic fields. Used to extract `{family}.context_length` for
+        // populating `ModelMetadata.contextWindow`. Older Ollama versions
+        // (pre-0.3.x) silently ignore the param — `model_info` simply stays
+        // nil in the decoded response and we fall back to the catalog/default.
         let (data, response) = try await performRequest(
             endpoint: "/api/show",
             method: "POST",
             baseURL: baseURL,
-            payload: ["name": name]
+            payload: ["name": name, "verbose": true]
         )
-        
+
         guard (200..<300).contains(response.statusCode) else {
             throw URLError(.badServerResponse)
         }

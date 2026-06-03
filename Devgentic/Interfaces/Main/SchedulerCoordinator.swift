@@ -139,7 +139,7 @@ final class SchedulerCoordinator {
                     switch messageBox?.content {
                     case .plainText(let text), .markdownText(let text):
                         summary = String(text.prefix(100))
-                    case .error(_, let details):
+                    case .error(_, let details, _, _):
                         summary = "Error: \(details)"
                     default:
                         summary = "Response complete."

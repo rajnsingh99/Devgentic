@@ -69,9 +69,9 @@ struct ToolLibraryView: View {
     private var toolStore: UnifiedToolStore { UnifiedToolStore.shared }
     @Environment(\.appTheme) private var theme
 
-    // Sheet state
-    @State private var isPresentingAddView = false
-    @State private var sourceToEdit: ToolSource? = nil
+    /// Source the user just clicked "Report Issue..." on. Drives the bug-
+    /// report sheet's `.sheet(item:)` binding.
+    @State private var bugReportSource: ToolSource? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -87,30 +87,11 @@ struct ToolLibraryView: View {
             // RIGHT: Tool list
             toolDetailView
         }
-        .frame(maxWidth: 1000)
+        .frame(maxWidth: 1100)
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 20)
-        // Sheets
-        .sheet(isPresented: $isPresentingAddView) {
-            AddMCPServerView(
-                onToolAdded: { serverName, serverDefinition, tools -> Bool in
-                    if MCPToolStore.shared.sources.contains(where: { $0.serverName.caseInsensitiveCompare(serverName) == .orderedSame }) {
-                        return false
-                    }
-                    MCPToolStore.shared.addTool(serverName: serverName, serverDefinition: serverDefinition, newTools: tools)
-                    return true
-                }
-            )
-        }
-        .sheet(item: $sourceToEdit) { source in
-            AddMCPServerView(
-                existingSource: source,
-                onToolUpdated: { id, serverName, serverDefinition, tools in
-                    UnifiedToolStore.shared.updateTool(id: id, serverName: serverName, serverDefinition: serverDefinition, newTools: tools)
-                    Task { await MCPClientService.shared.disconnect(sourceId: id) }
-                    sourceToEdit = nil
-                }
-            )
+        .sheet(item: $bugReportSource) { source in
+            MCPBugReportSheet(source: source)
         }
     }
 
@@ -177,7 +158,7 @@ struct ToolLibraryView: View {
                             Text("No MCP servers")
                                 .font(.caption)
                                 .foregroundColor(theme.secondaryText)
-                            Button("Add Server") { isPresentingAddView = true }
+                            Button("Add Server") { router.navigate(to: .addMCPServer) }
                                 .font(.caption2)
                                 .buttonStyle(.borderless)
                         }
@@ -211,7 +192,10 @@ struct ToolLibraryView: View {
                             .tag(SidebarSelection.mcp(source.id))
                             .contextMenu {
                                 Button("Edit Configuration...") {
-                                    sourceToEdit = source
+                                    router.navigate(to: .editMCPServer(sourceID: source.id))
+                                }
+                                Button("Report Issue...") {
+                                    bugReportSource = source
                                 }
                                 Divider()
                                 Button("Remove Server", role: .destructive) {
@@ -550,7 +534,7 @@ struct ToolLibraryView: View {
                 .foregroundColor(theme.secondaryText)
 
             if searchText.isEmpty && !isLocalCategorySelected {
-                Button("Add MCP Server") { isPresentingAddView = true }
+                Button("Add MCP Server") { router.navigate(to: .addMCPServer) }
                     .buttonStyle(.bordered)
             }
         }

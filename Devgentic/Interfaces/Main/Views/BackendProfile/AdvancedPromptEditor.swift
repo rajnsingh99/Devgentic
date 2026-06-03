@@ -11,22 +11,41 @@ import Combine
 
 // MARK: - Window Manager
 
-/// Manages a floating, detached NSWindow for the advanced prompt editor.
-class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
-    static let shared = AdvancedPromptWindowManager()
+/// Manages a single floating NSWindow for the advanced prompt editor. One
+/// instance per consuming view (NOT a singleton) so multiple call sites
+/// can keep their own editor open without trampling each other's
+/// unsaved-changes callbacks. `@MainActor` because every NSWindow API
+/// must be touched on the main thread.
+@MainActor
+final class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
     private var window: NSWindow?
-    
-    /// Callbacks to communicate with the SwiftUI view
+
+    /// Callbacks to communicate with the SwiftUI view. Set by
+    /// `AdvancedPromptEditorView.onAppear` for the editor that owns this
+    /// instance — and ONLY that editor, because manager instances aren't
+    /// shared.
     var checkChanges: (() -> Bool)?
     var saveChanges: (() -> Void)?
     var discardChanges: (() -> Void)?
 
     /// Spawns or brings the editor window to the front.
-    func showEditor(text: Binding<String>, agentName: String, configuredTools: Binding<[Tool]>, theme: Theme) {
+    func showEditor(
+        text: Binding<String>,
+        agentName: String,
+        configuredTools: Binding<[Tool]>,
+        themeManager: ThemeManager
+    ) {
+        let theme = themeManager.currentTheme
+
         if let existingWindow = window, existingWindow.isVisible {
             existingWindow.contentView = NSHostingView(
-                rootView: AdvancedPromptEditorView(text: text, agentName: agentName, configuredTools: configuredTools)
-                    .environment(\.appTheme, theme)
+                rootView: AdvancedPromptEditorHost(
+                    themeManager: themeManager,
+                    manager: self,
+                    text: text,
+                    agentName: agentName,
+                    configuredTools: configuredTools
+                )
             )
             existingWindow.title = "System Instructions: \(agentName)"
             existingWindow.backgroundColor = NSColor(theme.primaryBackground)
@@ -34,9 +53,14 @@ class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
             return
         }
 
-        let editorView = AdvancedPromptEditorView(text: text, agentName: agentName, configuredTools: configuredTools)
-            .environment(\.appTheme, theme)
-        
+        let editorView = AdvancedPromptEditorHost(
+            themeManager: themeManager,
+            manager: self,
+            text: text,
+            agentName: agentName,
+            configuredTools: configuredTools
+        )
+
         let newWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 750, height: 600),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -49,7 +73,7 @@ class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         newWindow.isReleasedWhenClosed = false
         newWindow.contentView = NSHostingView(rootView: editorView)
         newWindow.level = .floating
-        
+
         newWindow.isOpaque = false
         newWindow.backgroundColor = NSColor(theme.primaryBackground).withAlphaComponent(0.98)
         newWindow.delegate = self
@@ -57,43 +81,82 @@ class AdvancedPromptWindowManager: NSObject, NSWindowDelegate {
         self.window = newWindow
         newWindow.makeKeyAndOrderFront(nil)
     }
-    
+
     func closeWindow() {
         window?.close()
         window = nil
     }
 
+    /// Updates the floating window's title without rebuilding the content
+    /// view (so the editor keeps focus). No-op when the window isn't open —
+    /// callers can fire this on every name keystroke without checks.
+    func updateTitle(agentName: String) {
+        guard let window, window.isVisible else { return }
+        window.title = "System Instructions: \(agentName)"
+    }
+
     // MARK: - NSWindowDelegate
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if checkChanges?() == true {
-            let alert = NSAlert()
-            alert.messageText = "Unsaved Changes"
-            alert.informativeText = "You have unsaved changes in the system instructions. Would you like to save them before closing?"
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Cancel")
-            alert.addButton(withTitle: "Don't Save")
-            
-            let response = alert.runModal()
-            if response == .alertFirstButtonReturn { // Save
-                saveChanges?()
-                return true
-            } else if response == .alertSecondButtonReturn { // Cancel
-                return false
-            } else { // Don't Save
-                discardChanges?()
-                return true
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // NSWindowDelegate calls happen on the main thread but aren't
+        // typed @MainActor — hop explicitly so the actor checker is happy.
+        MainActor.assumeIsolated {
+            if checkChanges?() == true {
+                let alert = NSAlert()
+                alert.messageText = "Unsaved Changes"
+                alert.informativeText = "You have unsaved changes in the system instructions. Would you like to save them before closing?"
+                alert.addButton(withTitle: "Save")
+                alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Don't Save")
+
+                let response = alert.runModal()
+                if response == .alertFirstButtonReturn { // Save
+                    saveChanges?()
+                    return true
+                } else if response == .alertSecondButtonReturn { // Cancel
+                    return false
+                } else { // Don't Save
+                    discardChanges?()
+                    return true
+                }
             }
+            return true
         }
-        return true
     }
-    
-    func windowWillClose(_ notification: Notification) {
-        window = nil
-        // Reset callbacks
-        checkChanges = nil
-        saveChanges = nil
-        discardChanges = nil
+
+    nonisolated func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            window = nil
+            // Reset callbacks
+            checkChanges = nil
+            saveChanges = nil
+            discardChanges = nil
+        }
+    }
+}
+
+// MARK: - Themed Host
+
+/// Wrapper that watches the @Observable ThemeManager and re-applies the
+/// `\.appTheme` environment whenever the active theme changes — keeping
+/// the floating-window editor in lockstep with the parent app's theme
+/// (the host's `body` re-evaluates when `themeManager.currentTheme` flips).
+private struct AdvancedPromptEditorHost: View {
+    @Bindable var themeManager: ThemeManager
+    var manager: AdvancedPromptWindowManager
+    @Binding var text: String
+    var agentName: String
+    @Binding var configuredTools: [Tool]
+
+    var body: some View {
+        AdvancedPromptEditorView(
+            manager: manager,
+            text: $text,
+            agentName: agentName,
+            configuredTools: $configuredTools
+        )
+        .environment(\.appTheme, themeManager.currentTheme)
+        .preferredColorScheme(themeManager.currentTheme.colorScheme)
     }
 }
 
@@ -129,6 +192,11 @@ class PromptMentionState {
 // MARK: - Editor UI
 
 struct AdvancedPromptEditorView: View {
+    /// Manager that owns the floating window — callbacks (checkChanges,
+    /// saveChanges, discardChanges) are set on THIS instance so unsaved-
+    /// changes prompts target the right document, even when multiple
+    /// editors are open across the app.
+    var manager: AdvancedPromptWindowManager
     @Binding var text: String
     var agentName: String
     @Binding var configuredTools: [Tool]
@@ -216,7 +284,7 @@ struct AdvancedPromptEditorView: View {
                                 Circle()
                                     .stroke(theme.dividerColor, lineWidth: 0.5)
                             )
-                            .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+                            .shadow(color: theme.shadowColor, radius: 4, x: 0, y: 2)
                     }
                     .buttonStyle(.plain)
                     .padding(.top, 16)
@@ -244,7 +312,8 @@ struct AdvancedPromptEditorView: View {
             // Footer
             HStack {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
+                    .foregroundColor(theme.successColor)
+                    .accessibilityHidden(true)
                 Text("Changes sync automatically to the main window.")
                     .font(theme.fontCaption)
                     .foregroundColor(theme.secondaryText)
@@ -280,28 +349,29 @@ struct AdvancedPromptEditorView: View {
             .background(theme.secondaryBackground)
         }
         .frame(minWidth: 500, minHeight: 400)
-        .preferredColorScheme(theme.id == "one_light" ? .light : (theme.id == "midnight" ? .dark : (theme.id == "dracula" ? .dark : nil)))
         .onAppear {
             // Initialize local state from the binding
             localText = text
             localTools = configuredTools
-            
+
             initialText = text
             initialTools = configuredTools
-            
-            // Set up Window Manager callbacks
-            AdvancedPromptWindowManager.shared.checkChanges = { hasUnsavedChanges }
-            AdvancedPromptWindowManager.shared.saveChanges = { saveAndClose() }
-            AdvancedPromptWindowManager.shared.discardChanges = { AdvancedPromptWindowManager.shared.closeWindow() }
+
+            // Wire up unsaved-changes callbacks on the manager that owns
+            // THIS editor's window — never the global singleton, so two
+            // editors open simultaneously can't trample each other.
+            manager.checkChanges = { hasUnsavedChanges }
+            manager.saveChanges = { saveAndClose() }
+            manager.discardChanges = { [weak manager] in manager?.closeWindow() }
         }
     }
-    
+
     private func saveAndClose() {
         // Explicitly sync back to parent bindings
         text = localText
         configuredTools = localTools
-        
-        AdvancedPromptWindowManager.shared.closeWindow()
+
+        manager.closeWindow()
     }
 }
 

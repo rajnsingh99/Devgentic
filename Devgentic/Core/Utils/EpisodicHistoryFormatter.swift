@@ -20,6 +20,7 @@
 //      <recent>
 //        <turn status="completed|failed|cancelled" goal="..." recency="1 turn ago">
 //          <outcome>Truncated agent response</outcome>
+//          <termination>Reason for forced termination (e.g. circuit-breaker abort)</termination>
 //          <action tool="tool_name" status="success|failed|denied">
 //            <params key="value" .../>
 //            <error>Error reason (150 char max)</error>
@@ -28,6 +29,13 @@
 //        </turn>
 //      </recent>
 //    </episodic_memory>
+//
+//  Status authority: when `ChatMessage.terminalOutcome` is set (modern rows), it
+//  overrides action-derived turn status. This catches the case where every tool
+//  call technically succeeded but the executor force-terminated the run via
+//  circuit breaker or iteration exhaustion. Without the override, those turns
+//  appear as `status="completed"` in the next turn's prompt, falsely teaching
+//  the model that the looping pattern was acceptable.
 //
 //  Ghost Protocol: Failed tool names are collected in SessionGraph.negativeConstraints
 //  and injected into the system prompt to prevent retry within the session.
@@ -86,6 +94,99 @@ struct EpisodicHistoryFormatter {
             }
         }
         return result
+    }
+
+    // MARK: - Tool Action Classification
+
+    /// Structured classification of a single tool execution, derived from
+    /// `ToolExecutionData.failureCategory` (modern) with a conservative fallback
+    /// for legacy persisted data that pre-dates the category field. Shared
+    /// between `buildGraph` (SessionGraph) and `pairTurns` (XML emitters) so
+    /// both paths classify the same tool failure identically — no more string
+    /// matching on output text in one path and structured enums in the other.
+    private struct ActionClassification {
+        let status: ActionStatus
+        let errorReason: String?
+        let userCorrection: String?
+        let producesHardConstraint: Bool
+    }
+
+    private static func classify(_ data: ToolExecutionData) -> ActionClassification {
+        let success = data.isSuccess ?? false
+        if success {
+            return ActionClassification(
+                status: .success,
+                errorReason: nil,
+                userCorrection: nil,
+                producesHardConstraint: false
+            )
+        }
+
+        let truncatedOutput = data.output.map { truncate($0, maxLength: 150) }
+
+        if let category = data.failureCategory {
+            return ActionClassification(
+                status: category.actionStatus,
+                errorReason: truncatedOutput,
+                userCorrection: category == .userDenied ? "User denied: \(data.name)" : nil,
+                producesHardConstraint: category.producesHardConstraint
+            )
+        }
+
+        // Legacy persisted data without a category — conservative fallback:
+        // treat as a generic failure, record detail, but do NOT ban the tool.
+        return ActionClassification(
+            status: .failed,
+            errorReason: truncatedOutput,
+            userCorrection: nil,
+            producesHardConstraint: false
+        )
+    }
+
+    // MARK: - Turn Status Authority
+
+    /// Returns an authoritative turn status when `terminalOutcome` provides one.
+    /// `.failed` and `.cancelled` override action-derived status (those cases lose
+    /// signal otherwise — e.g. a circuit-breaker abort where every tool call
+    /// technically succeeded). `.completed` returns nil so action-level logic can
+    /// still classify partial successes correctly. Nil terminal outcome (legacy
+    /// rows) also returns nil and the caller falls back to action-level derivation.
+    private static func authoritativeStatus(from terminalOutcome: ExecutionOutcome?) -> String? {
+        guard let outcome = terminalOutcome else { return nil }
+        switch outcome {
+        case .failed:    return "failed"
+        case .cancelled: return "cancelled"
+        case .completed: return nil
+        }
+    }
+
+    /// Maps an executor `ExecutionOutcome` to the typed `EpisodeLifecycle` used by
+    /// `MemoryEpisode.status`. Returns `.completed` for legacy rows (nil terminal
+    /// outcome) so the SessionGraph rebuild stays backward-compatible with
+    /// messages persisted before terminal outcomes were tracked. Non-nil outcomes
+    /// pass through `EpisodeLifecycle(_:)` for a 1:1 typed mapping.
+    private static func episodeStatus(from terminalOutcome: ExecutionOutcome?) -> EpisodeLifecycle {
+        guard let outcome = terminalOutcome else { return .completed }
+        return EpisodeLifecycle(outcome)
+    }
+
+    /// Renders a `<termination>` XML element when the turn was force-terminated
+    /// with a reason. Returns nil for `.completed` outcomes, missing outcomes, or
+    /// missing reasons. The reason is truncated and XML-escaped for safe inclusion.
+    private static func renderTerminationElement(
+        terminalOutcome: ExecutionOutcome?,
+        terminalReason: String?,
+        indent: String
+    ) -> String? {
+        guard let outcome = terminalOutcome,
+              let reason = terminalReason?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !reason.isEmpty else { return nil }
+        switch outcome {
+        case .failed, .cancelled:
+            return "\(indent)<termination>\(xmlEscape(truncate(reason, maxLength: 200)))</termination>\n"
+        case .completed:
+            return nil
+        }
     }
 
     // MARK: - Build Graph (with enriched actions)
@@ -177,38 +278,22 @@ struct EpisodicHistoryFormatter {
                     if case .toolExecution(let data) = event, !data.isExecuting {
 
                         usedTools.append(data.name)
-                        let success = data.isSuccess ?? false
+                        let classification = classify(data)
 
-                        // Determine status + error reason from the structured category.
-                        let status: String
-                        var errorReason: String? = nil
-
-                        if success {
-                            status = "SUCCESS"
-                        } else if let category = data.failureCategory {
-                            status = category.episodeStatusTag
-                            errorReason = data.output.map { truncate($0, maxLength: 150) }
-
-                            if category.producesHardConstraint {
-                                negativeConstraints.insert(data.name)
-                            }
-                            if category == .userDenied {
-                                userCorrection = "User denied: \(data.name)"
-                            }
-                        } else {
-                            // Legacy persisted data without a category — conservative fallback:
-                            // treat as a generic failure, record detail, but do NOT ban the tool.
-                            status = "FAILED"
-                            errorReason = data.output.map { truncate($0, maxLength: 150) }
+                        if classification.producesHardConstraint {
+                            negativeConstraints.insert(data.name)
+                        }
+                        if let correction = classification.userCorrection {
+                            userCorrection = correction
                         }
 
                         let action = MemoryAction(
                             id: data.id,
                             toolName: data.name,
                             intent: data.name,
-                            status: status,
+                            status: classification.status,
                             params: parseParams(data.params),
-                            errorReason: errorReason
+                            errorReason: classification.errorReason
                         )
                         actions.append(action)
                     }
@@ -226,10 +311,13 @@ struct EpisodicHistoryFormatter {
                         summary = "User query: '\(truncatedUser)' -> Agent executed tools: [\(uniqueTools)]."
                     }
 
+                    // Episode status now reflects the executor's terminal outcome instead
+                    // of being hardcoded to COMPLETED. Legacy rows without a recorded
+                    // terminalOutcome still resolve to COMPLETED via the helper.
                     let episode = MemoryEpisode(
                         id: message.id,
                         primaryGoal: userText,
-                        status: "COMPLETED",
+                        status: Self.episodeStatus(from: message.terminalOutcome),
                         finalOutcome: text.isEmpty ? "(Agent returned visual output/tool result)" : text,
                         summary: summary,
                         actions: actions,
@@ -286,10 +374,15 @@ struct EpisodicHistoryFormatter {
             let recencyLabel = turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
 
             let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
+            // Authoritative status (from executor) overrides action-derived classification.
+            // Catches circuit-breaker aborts and iteration exhaustion where every tool
+            // technically succeeded — those would otherwise read as "completed".
             let turnStatus: String
-            if turn.wasCancelled {
+            if let authoritative = Self.authoritativeStatus(from: turn.terminalOutcome) {
+                turnStatus = authoritative
+            } else if turn.wasCancelled {
                 turnStatus = "cancelled"
-            } else if turn.actions.contains(where: { $0.status != "SUCCESS" }) {
+            } else if turn.actions.contains(where: { $0.status.isFailure }) {
                 turnStatus = "failed"
             } else {
                 turnStatus = "completed"
@@ -303,15 +396,24 @@ struct EpisodicHistoryFormatter {
                 xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
             }
 
-            for action in turn.actions {
-                let actionStatus: String
-                switch action.status {
-                case "SUCCESS": actionStatus = "success"
-                case "DENIED": actionStatus = "denied"
-                default: actionStatus = "failed"
-                }
+            // Termination element — explicit reason for non-completed terminal outcomes
+            // (circuit-breaker abort, iteration exhaustion, cancellation). Renders only
+            // when the executor recorded both an outcome and a reason; legacy rows skip.
+            if let termination = Self.renderTerminationElement(
+                terminalOutcome: turn.terminalOutcome,
+                terminalReason: turn.terminalReason,
+                indent: "      "
+            ) {
+                xml += termination
+            }
 
-                xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(actionStatus)\">\n"
+            for action in turn.actions {
+                // `xmlValue` covers all 9 ActionStatus cases (success, denied,
+                // permission_denied, failed, timeout, invalid_args, not_found,
+                // cancelled, active). The previous switch only covered SUCCESS/DENIED
+                // and silently collapsed everything else into "failed", losing
+                // signal for timeouts, permission rejections, and not-found tools.
+                xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(action.status.xmlValue)\">\n"
 
                 // Params as XML attributes
                 if !action.params.isEmpty {
@@ -361,15 +463,34 @@ struct EpisodicHistoryFormatter {
         for (index, turn) in turns.enumerated() {
             let turnsAgo = totalTurns - index
             let recency = turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
-            let status = turn.wasCancelled ? "cancelled" : (turn.actions.contains(where: { $0.status == "FAILED" || $0.status == "DENIED" }) ? "failed" : "completed")
+            // Same authority cascade as buildRecentHistoryString — terminalOutcome
+            // takes precedence; fall back to action-derived classification for legacy rows.
+            let status: String
+            if let authoritative = Self.authoritativeStatus(from: turn.terminalOutcome) {
+                status = authoritative
+            } else if turn.wasCancelled {
+                status = "cancelled"
+            } else if turn.actions.contains(where: { $0.status.isFailure }) {
+                status = "failed"
+            } else {
+                status = "completed"
+            }
             let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
 
             xml += "    <turn status=\"\(status)\" goal=\"\(goal)\" recency=\"\(recency)\">\n"
             xml += "      <outcome>Call get_conversation_history(\(index)) for details.</outcome>\n"
 
+            if let termination = Self.renderTerminationElement(
+                terminalOutcome: turn.terminalOutcome,
+                terminalReason: turn.terminalReason,
+                indent: "      "
+            ) {
+                xml += termination
+            }
+
             // Skeleton actions — tool name + status only, no params
             for action in turn.actions {
-                let toolStatus = action.status.lowercased()
+                let toolStatus = action.status.xmlValue
                 xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\"/>\n"
 
                 // Always preserve error signals
@@ -419,7 +540,17 @@ struct EpisodicHistoryFormatter {
             let turnsAgo = totalTurns - index
             let recency = turnsAgo == 1 ? "1 turn ago" : "\(turnsAgo) turns ago"
             let isPointer = index < pointerCount
-            let status = turn.wasCancelled ? "cancelled" : (turn.actions.contains(where: { $0.status == "FAILED" || $0.status == "DENIED" }) ? "failed" : "completed")
+            // Same authority cascade as the other emitters.
+            let status: String
+            if let authoritative = Self.authoritativeStatus(from: turn.terminalOutcome) {
+                status = authoritative
+            } else if turn.wasCancelled {
+                status = "cancelled"
+            } else if turn.actions.contains(where: { $0.status.isFailure }) {
+                status = "failed"
+            } else {
+                status = "completed"
+            }
             let goal = xmlEscape(truncate(turn.userQuery, maxLength: 80))
 
             xml += "    <turn status=\"\(status)\" goal=\"\(goal)\" recency=\"\(recency)\">\n"
@@ -428,8 +559,16 @@ struct EpisodicHistoryFormatter {
                 // Pointer skeleton — outcome points to tool, actions have no params
                 xml += "      <outcome>Call get_conversation_history(\(index)) for details.</outcome>\n"
 
+                if let termination = Self.renderTerminationElement(
+                    terminalOutcome: turn.terminalOutcome,
+                    terminalReason: turn.terminalReason,
+                    indent: "      "
+                ) {
+                    xml += termination
+                }
+
                 for action in turn.actions {
-                    let toolStatus = action.status.lowercased()
+                    let toolStatus = action.status.xmlValue
                     if let error = action.errorReason {
                         xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\">\n"
                         xml += "        <error>\(xmlEscape(error))</error>\n"
@@ -444,8 +583,16 @@ struct EpisodicHistoryFormatter {
                     xml += "      <outcome>\(xmlEscape(outcome))</outcome>\n"
                 }
 
+                if let termination = Self.renderTerminationElement(
+                    terminalOutcome: turn.terminalOutcome,
+                    terminalReason: turn.terminalReason,
+                    indent: "      "
+                ) {
+                    xml += termination
+                }
+
                 for action in turn.actions {
-                    let toolStatus = action.status.lowercased()
+                    let toolStatus = action.status.xmlValue
                     let paramsAttrs = action.params.map { " \($0.key)=\"\(xmlEscape($0.value))\"" }.joined()
                     xml += "      <action tool=\"\(xmlEscape(action.toolName))\" status=\"\(toolStatus)\">\n"
 
@@ -486,6 +633,14 @@ struct EpisodicHistoryFormatter {
         let outcome: String?
         /// True when the user stopped the agent mid-execution before a response was generated.
         let wasCancelled: Bool
+        /// Authoritative terminal outcome from the executor's `.executionFinished` event.
+        /// Nil for legacy rows persisted before terminal outcomes were tracked — callers
+        /// fall back to action-derived status in that case.
+        let terminalOutcome: ExecutionOutcome?
+        /// Human-readable reason accompanying a non-completed terminal outcome.
+        /// Surfaced as `<termination>` in the XML so the model sees explicit context
+        /// for circuit-breaker aborts and iteration exhaustion.
+        let terminalReason: String?
     }
 
     /// Pairs consecutive user↔agent messages into logical turns.
@@ -504,29 +659,19 @@ struct EpisodicHistoryFormatter {
 
                 for event in message.timelineEvents {
                     if case .toolExecution(let data) = event, !data.isExecuting {
+                        let classification = classify(data)
 
-                        let success = data.isSuccess ?? false
-                        let status: String
-                        var errorReason: String? = nil
-
-                        if success {
-                            status = "SUCCESS"
-                        } else if let out = data.output, out.contains("denied") || out.contains("User explicitly") {
-                            status = "DENIED"
-                            errorReason = truncate(out, maxLength: 150)
-                            userCorrection = "User denied: \(data.name)"
-                        } else {
-                            status = "FAILED"
-                            errorReason = data.output.map { truncate($0, maxLength: 150) }
+                        if let correction = classification.userCorrection {
+                            userCorrection = correction
                         }
 
                         actions.append(MemoryAction(
                             id: data.id,
                             toolName: data.name,
                             intent: data.name,
-                            status: status,
+                            status: classification.status,
                             params: parseParams(data.params),
-                            errorReason: errorReason
+                            errorReason: classification.errorReason
                         ))
                     }
                 }
@@ -538,20 +683,23 @@ struct EpisodicHistoryFormatter {
                 let responseText = message.content.textContent ?? ""
 
                 // Detect cancellation: the executor emits this placeholder when
-                // the user stops execution mid-session.
+                // the user stops execution mid-session. Modern rows also have
+                // `terminalOutcome == .cancelled`; we OR the two signals so a row
+                // missing one but having the other is still classified correctly.
                 let cancellationPlaceholders = [
                     "*Operation stopped by user.*",
                     "*Operation was stopped before a response could be generated.*"
                 ]
                 let wasCancelled = cancellationPlaceholders.contains(where: { responseText.contains($0) })
+                    || message.terminalOutcome == .cancelled
 
                 let outcome: String?
                 if wasCancelled || responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Cancelled or empty — synthesize outcome from completed tool actions
                     // so the next turn has factual context about what was done before termination.
                     if !actions.isEmpty {
-                        let completedTools = actions.filter { $0.status == "SUCCESS" }.map(\.toolName)
-                        let failedTools = actions.filter { $0.status != "SUCCESS" }.map(\.toolName)
+                        let completedTools = actions.filter { $0.status == .success }.map(\.toolName)
+                        let failedTools = actions.filter { $0.status != .success }.map(\.toolName)
                         var parts: [String] = []
                         if !completedTools.isEmpty { parts.append("Completed: " + completedTools.joined(separator: ", ")) }
                         if !failedTools.isEmpty { parts.append("Failed: " + failedTools.joined(separator: ", ")) }
@@ -568,7 +716,9 @@ struct EpisodicHistoryFormatter {
                     actions: actions,
                     userCorrection: userCorrection,
                     outcome: outcome,
-                    wasCancelled: wasCancelled
+                    wasCancelled: wasCancelled,
+                    terminalOutcome: message.terminalOutcome,
+                    terminalReason: message.terminalReason
                 ))
                 pendingUserText = nil
             }
@@ -581,7 +731,9 @@ struct EpisodicHistoryFormatter {
                 actions: [],
                 userCorrection: nil,
                 outcome: "No agent response",
-                wasCancelled: true
+                wasCancelled: true,
+                terminalOutcome: .cancelled,
+                terminalReason: "Agent never responded to this query"
             ))
         }
 

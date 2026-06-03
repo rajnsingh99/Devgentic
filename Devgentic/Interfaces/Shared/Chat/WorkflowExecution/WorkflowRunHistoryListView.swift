@@ -93,8 +93,11 @@ private struct WorkflowRunCardView: View {
         }
     }
 
-    private var durationText: String {
-        let d = record.duration
+    private var durationText: String { Self.formatDuration(record.duration) }
+
+    /// Shared formatter used both for the static (finalized) duration and the
+    /// live-ticking elapsed time on `.running` rows.
+    private static func formatDuration(_ d: TimeInterval) -> String {
         if d < 1 { return "<1s" }
         if d < 60 { return "\(String(format: "%.1f", d))s" }
         return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
@@ -109,26 +112,36 @@ private struct WorkflowRunCardView: View {
     var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 8) {
-                // Row 1: Status + timestamp + duration
+                // Row 1: Status + run duration
+                // The prominent timer here is the run *duration* — how long the job
+                // actually took. The previous design used `Text(record.timestamp,
+                // style: .relative)` which kept ticking up indefinitely ("10 days,
+                // 19 hrs") since `.relative` formats time-elapsed-since, not job
+                // duration.
                 HStack(spacing: 8) {
                     Image(systemName: statusIcon)
                         .font(.system(size: 13))
                         .foregroundColor(statusColor)
 
-                    Text(record.timestamp, style: .relative)
-                        .font(theme.fontCaption)
-                        .foregroundColor(theme.primaryText)
+                    // For .running rows, tick `Date() - record.timestamp` once
+                    // per second via `TimelineView(.periodic)`. The view stops
+                    // re-rendering the moment the row's status flips out of
+                    // .running (the surrounding `if` evaluates again and we
+                    // swap to the static `durationText`). The frozen value
+                    // already lives in `record.duration` by then.
+                    if record.status == .running {
+                        TimelineView(.periodic(from: record.timestamp, by: 1.0)) { context in
+                            Text(Self.formatDuration(context.date.timeIntervalSince(record.timestamp)))
+                                .font(theme.fontCaption.weight(.medium).monospacedDigit())
+                                .foregroundColor(theme.primaryText)
+                        }
+                    } else {
+                        Text(durationText)
+                            .font(theme.fontCaption.weight(.medium).monospacedDigit())
+                            .foregroundColor(theme.primaryText)
+                    }
 
                     Spacer()
-
-                    Text(durationText)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(theme.secondaryText)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule().fill(theme.surfaceOverlay)
-                        )
                 }
 
                 // Row 2: User input preview

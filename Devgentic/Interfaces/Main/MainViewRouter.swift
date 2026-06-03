@@ -17,8 +17,11 @@ enum MainViewDestination: Equatable, Hashable {
     case profileDetail(profileID: UUID)
     case settingsDetail(category: SettingsCategory)
     case toolLibrary(profileID: UUID)
+    case addMCPServer
+    case editMCPServer(sourceID: UUID)
     case promptDetail(promptID: UUID)
     case scheduledTaskDetail(taskID: UUID)
+    case scheduledTaskCreate(prefillPrompt: String?, prefillConversationID: UUID?)
     case ollamaModelStore(profileID: UUID)
     case mlxModelStore(profileID: UUID, filterForTools: Bool)
     case downloadManager
@@ -32,8 +35,11 @@ enum MainViewDestination: Equatable, Hashable {
         case .profileDetail: return "Profile"
         case .settingsDetail(let category): return category.rawValue
         case .toolLibrary: return "Tool Library"
+        case .addMCPServer: return "Add MCP Server"
+        case .editMCPServer: return "Edit MCP Server"
         case .promptDetail: return "Prompt"
         case .scheduledTaskDetail: return "Scheduled Task"
+        case .scheduledTaskCreate: return "New Scheduled Task"
         case .ollamaModelStore: return "Ollama Models"
         case .mlxModelStore: return "MLX Models"
         case .downloadManager: return "Downloads"
@@ -104,6 +110,21 @@ final class MainViewRouter {
         navigationStack.removeAll()
         navigationStack.append(.chat)
         activeDestination = .scheduledTaskDetail(taskID: taskID)
+    }
+
+    /// Navigate to the new-scheduled-task editor.
+    /// `prefillPrompt` and `prefillConversationID` are used by the chat-input
+    /// "Custom..." entry point so the form opens with the current message text
+    /// and defaults the run mode to "Continue this conversation" with the
+    /// active conversation pre-selected. Clears any existing non-chat stack
+    /// so Back returns to chat.
+    func navigateToNewTask(prefillPrompt: String? = nil, prefillConversationID: UUID? = nil) {
+        navigationStack.removeAll()
+        navigationStack.append(.chat)
+        activeDestination = .scheduledTaskCreate(
+            prefillPrompt: prefillPrompt,
+            prefillConversationID: prefillConversationID
+        )
     }
 
     /// Navigate to a model store from within a profile detail view.

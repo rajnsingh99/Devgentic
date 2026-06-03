@@ -230,7 +230,7 @@ actor HistoryCompactionService {
             switch msg.content {
             case .plainText(let t), .markdownText(let t): text = t
             case .codeBlock(_, let code): text = code
-            case .error(let title, let details): text = "\(title ?? "Error"): \(details)"
+            case .error(let title, let details, _, _): text = "\(title ?? "Error"): \(details)"
             case .image(_, let alt, _): text = "[Image: \(alt ?? "image attachment")]"
             case .mediaArtifact(let a): text = "[Media: \(a.label ?? a.kind.rawValue)]"
             case .checkpoint: continue // Already handled above

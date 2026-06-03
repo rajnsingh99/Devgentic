@@ -70,6 +70,16 @@ actor ReActAgentExecutor: Executor {
                     var accumulatedTokenUsage = TokenUsage()
                     var executionSummary = ExecutionSummary(originalGoal: input.userInput)
                     let executionTrace = input.traceContext
+
+                    // Parse-loop blindness guard: when the parser rejects model output
+                    // (`.suspectedFormatFailure`), we inject a corrective alert and retry.
+                    // If the model emits the *byte-identical* output multiple times in a row,
+                    // the corrective alert isn't landing — the model is stuck. Tracking the
+                    // last failed `step.reasoning` lets us abort early with a typed reason
+                    // instead of burning the entire iteration budget on the same stuck output.
+                    var lastFailedReasoning: String? = nil
+                    var consecutiveIdenticalFormatFailures = 0
+                    let maxIdenticalFormatFailures = 2  // 2 retries on the same output, then bail
                     
                     var memoryStrategy = input.workingMemory
                     var previousScratchpadLength = 0
@@ -121,9 +131,8 @@ actor ReActAgentExecutor: Executor {
                     // owns the episode lifecycle. Skip to avoid N+1 duplicate episodes.
                     if !input.suppressEpisodeManagement {
                         logState.info("New Top-Level Request Detected: Appending new MemoryEpisode.")
-                        sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
+                        sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: .active))
                         sessionState.workingMemory.removeValue(forKey: "current_focus")
-                        sessionState.workingMemory.removeValue(forKey: "last_status")
                         await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     }
                     
@@ -208,7 +217,8 @@ actor ReActAgentExecutor: Executor {
                             userProfile: userProfile,
                             skillManifests: input.skillManifests,
                             taskDescription: input.workflowContext?.taskDescription,
-                            promptLayerConfig: input.workflowContext != nil ? .workflow : .agent
+                            promptLayerConfig: input.workflowContext != nil ? .workflow : .agent,
+                            workflowContext: input.workflowContext
                         )
 
                         // G12: Seed native conversation turns on iter 1. System prompt and
@@ -219,12 +229,15 @@ actor ReActAgentExecutor: Executor {
                         if currentIteration == 1, let nativeGen = nativeGenerator {
                             let canonicalMessages = nativeGen.compileMessages(from: context)
                             liveConversationTurns = canonicalMessages.map { nativeGen.toolTurnAdapter.normalizeCanonical(message: $0) }
+                            // Pre-resolve attached image bytes (async) so the sync adapter
+                            // can serialize them into the kickoff user turn natively. Empty
+                            // → byte-identical text turn (KV-cache prefix unchanged). A failed
+                            // resolve throws → surfaced as an execution error, never dropped.
+                            let resolvedUserImages = try await resolveUserImages(input.userPayload)
                             liveConversationTurns.append(
-                                nativeGen.toolTurnAdapter.normalizeCanonical(
-                                    message: ["role": "user", "content": input.userInput]
-                                )
+                                nativeGen.toolTurnAdapter.userTurn(text: input.userInput, images: resolvedUserImages)
                             )
-                            logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns)")
+                            logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns, \(resolvedUserImages.count) image(s))")
                         }
 
                         try Task.checkCancellation()
@@ -299,7 +312,16 @@ actor ReActAgentExecutor: Executor {
                                 accumulatedTokenUsage.accumulate(usage)
                             }
 
-                            logger.info("📄 Model Reasoning: \(step.reasoning)")
+                            // Reasoning is suppressed by `ReasoningQualityFilter` for stub
+                            // patterns ("Executing tool X..."), so it is empty for most
+                            // small/Q4 model outputs. Logging "📄 Model Reasoning: " with
+                            // nothing after the colon is misleading during triage; show
+                            // an explicit `(none)` marker instead.
+                            if step.reasoning.isEmpty {
+                                logger.info("📄 Model Reasoning: (none)")
+                            } else {
+                                logger.info("📄 Model Reasoning: \(step.reasoning)")
+                            }
                             if step.toolCalls.isEmpty {
                                 logger.info("🛑 No tool calls produced.")
                             } else {
@@ -364,7 +386,7 @@ actor ReActAgentExecutor: Executor {
                                     iteration: currentIteration
                                 )
                                 if !input.suppressEpisodeManagement {
-                                    sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
+                                    sessionState.closeActiveEpisode(outcome: .failed, message: reason)
                                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED")
                                 }
@@ -389,11 +411,11 @@ actor ReActAgentExecutor: Executor {
                                     iteration: currentIteration
                                 )
                                 if !input.suppressEpisodeManagement {
-                                    sessionState.closeActiveEpisode(status: "FAILED", outcome: reason)
+                                    sessionState.closeActiveEpisode(outcome: .failed, message: reason)
                                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED (capability)")
                                 }
-                                continuation.yield(.error(reason))
+                                continuation.yield(.error(.init(reason)))
                                 continuation.yield(.executionFinished(outcome: .failed, reason: reason))
                                 continuation.finish()
                                 return
@@ -435,6 +457,43 @@ actor ReActAgentExecutor: Executor {
                             executionSummary.finalAgentThought = finalThought
                             break cognitiveLoop
                         case .suspectedFormatFailure(let originalReason, _):
+                            // Identical-output detection. If the model emits byte-identical
+                            // reasoning multiple iterations in a row, the corrective alert
+                            // isn't landing — abort with `.repetitiveActionLoop` instead of
+                            // burning the full iteration budget on the same stuck output.
+                            // This catches the real-world case where Llama-3 keeps emitting
+                            // `{"name":"X","parameters":{...}}` 12+ times despite the alert.
+                            let currentReasoning = step.reasoning.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !currentReasoning.isEmpty, currentReasoning == lastFailedReasoning {
+                                consecutiveIdenticalFormatFailures += 1
+                                if consecutiveIdenticalFormatFailures > maxIdenticalFormatFailures {
+                                    let abortReason = "Model emitted the same malformed output \(consecutiveIdenticalFormatFailures + 1) times in a row — corrective alerts aren't landing. Likely a parser/dialect mismatch."
+                                    logger.error("🛑 Identical-output parse loop detected at iteration \(currentIteration). Aborting.")
+                                    let classified = ClassifiedAgentError.synthetic(
+                                        category: .parseExhausted,
+                                        origin: "ReActAgentExecutor.identicalOutputLoop",
+                                        message: abortReason,
+                                        context: [
+                                            "iteration": "\(currentIteration)",
+                                            "repeat_count": "\(consecutiveIdenticalFormatFailures + 1)",
+                                            "raw_snippet": String(currentReasoning.prefix(120))
+                                        ]
+                                    )
+                                    await TraceRecorder.shared.emitAgentError(
+                                        span: input.traceContext,
+                                        error: classified,
+                                        iteration: currentIteration
+                                    )
+                                    continuation.yield(.error(.init(abortReason)))
+                                    continuation.yield(.executionFinished(outcome: .failed, reason: abortReason))
+                                    continuation.finish()
+                                    return
+                                }
+                            } else {
+                                lastFailedReasoning = currentReasoning.isEmpty ? nil : currentReasoning
+                                consecutiveIdenticalFormatFailures = 0
+                            }
+
                             // Typed parse failure — build a reason-specific corrective alert
                             // so the model gets targeted feedback (e.g. "unknown tool name,
                             // did you mean X?" vs "your JSON had syntax errors"). The old
@@ -482,6 +541,11 @@ actor ReActAgentExecutor: Executor {
                             logger.warning("🔄 Suspected format failure [\(reason.uiChipLabel)]. Injecting typed corrective alert and retrying iteration \(currentIteration).")
                             continue cognitiveLoop
                         case .proceed:
+                            // Parse succeeded — reset the identical-output guard so
+                            // intermittent format failures (which the corrective alert
+                            // *did* land for) don't trip the abort prematurely.
+                            lastFailedReasoning = nil
+                            consecutiveIdenticalFormatFailures = 0
                             break
                         }
 
@@ -543,6 +607,7 @@ actor ReActAgentExecutor: Executor {
                                 stepId: terminal.stepId,
                                 toolCallId: terminal.toolCallId,
                                 toolName: terminal.toolName,
+                                params: terminal.params,
                                 result: terminal.result,
                                 artifacts: terminal.artifacts
                             )
@@ -557,7 +622,7 @@ actor ReActAgentExecutor: Executor {
                         // Detection is via the canonical denial string produced by
                         // `ToolExecutionResult.userDenied`.
                         for obs in observations {
-                            memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, result: obs.result, artifacts: obs.artifacts)
+                            memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
 
                             if !obs.isSuccess && obs.result.hasPrefix("System Security: User explicitly denied") {
                                 memoryStrategy.recordSystemAlert(
@@ -711,7 +776,7 @@ actor ReActAgentExecutor: Executor {
                                     forceSynthesis: true
                                 )
                                 if !input.suppressEpisodeManagement {
-                                    sessionState.closeActiveEpisode(status: "FAILED", outcome: response)
+                                    sessionState.closeActiveEpisode(outcome: .failed, message: response)
                                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED")
                                 }
@@ -756,7 +821,7 @@ actor ReActAgentExecutor: Executor {
                             let failureMsg = "Reached maximum allowed steps (\(maxIterations)) without completion."
                             executionSummary.markComplete(failureReason: failureMsg)
                             if !input.suppressEpisodeManagement {
-                                sessionState.closeActiveEpisode(status: "FAILED", outcome: failureMsg)
+                                sessionState.closeActiveEpisode(outcome: .failed, message: failureMsg)
                                 await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                                 logState.info("💾 Auto-Patched Active Episode to: FAILED (failHard)")
                             }
@@ -781,7 +846,7 @@ actor ReActAgentExecutor: Executor {
                                 error: classified,
                                 iteration: currentIteration
                             )
-                            continuation.yield(.error(failureMsg))
+                            continuation.yield(.error(.init(failureMsg)))
                             continuation.yield(.executionFinished(outcome: .failed, reason: failureMsg))
                             continuation.finish()
                             return
@@ -797,7 +862,16 @@ actor ReActAgentExecutor: Executor {
                     // --- UI Progress: Synthesis ---
                     continuation.yield(.thought("Composing final response…"))
 
-                    let exitStatus = iterationExhausted ? "FAILED" : "COMPLETED"
+                    // Single typed source of truth: the executor's terminal outcome.
+                    // Everything below — episode close, trace text, stream event — derives
+                    // from `terminalOutcome`. The previous `exitStatus` string variable
+                    // re-encoded this fact in three places and was the root of vocabulary
+                    // drift between SessionGraph episode status and ExecutionOutcome.
+                    let terminalOutcome: ExecutionOutcome = iterationExhausted ? .failed : .completed
+                    let terminalReason: String? = iterationExhausted
+                        ? "Reached maximum iterations (\(maxIterations)) without explicit completion"
+                        : nil
+
                     let response = await ResponseSynthesizer.synthesize(
                         summary: executionSummary,
                         personaInstructions: input.instructions,
@@ -807,9 +881,9 @@ actor ReActAgentExecutor: Executor {
                     )
 
                     if !input.suppressEpisodeManagement {
-                        sessionState.closeActiveEpisode(status: exitStatus, outcome: response)
+                        sessionState.closeActiveEpisode(outcome: terminalOutcome, message: response)
                         await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
-                        logState.info("💾 Auto-Patched Active Episode to: \(exitStatus)")
+                        logState.info("💾 Auto-Patched Active Episode to: \(terminalOutcome.rawValue.uppercased())")
                     }
 
                     onTraceUpdate(AgentTraceLog(
@@ -818,7 +892,7 @@ actor ReActAgentExecutor: Executor {
                         parentSpanID: input.traceContext.parentSpanID,
                         stepNumber: currentIteration,
                         state: .thinking(.finalizing),
-                        content: exitStatus == "COMPLETED" ? "Task completed successfully." : "Task failed or reached max iterations."
+                        content: terminalOutcome == .completed ? "Task completed successfully." : "Task failed or reached max iterations."
                     ))
 
                     logger.info("--- 🏁 REACT EXECUTION COMPLETE 🏁 ---")
@@ -832,8 +906,6 @@ actor ReActAgentExecutor: Executor {
                     }
 
                     continuation.yield(.content(response))
-                    let terminalOutcome: ExecutionOutcome = exitStatus == "COMPLETED" ? .completed : .failed
-                    let terminalReason: String? = exitStatus == "COMPLETED" ? nil : "Reached maximum iterations (\(maxIterations)) without explicit completion"
                     continuation.yield(.executionFinished(outcome: terminalOutcome, reason: terminalReason))
                     continuation.finish()
 
@@ -853,15 +925,17 @@ actor ReActAgentExecutor: Executor {
                     continuation.finish()
                 } catch {
                     // Classify the fatal error so analytics can bucket unexpected throws.
-                    // Uses `.executionThrew`-analogue — there isn't a perfect category for
-                    // "executor-level fatal throw"; the taxonomy has domain-specific fatals
-                    // (parseExhausted, providerAuth, etc.) but catches at this level are
-                    // already misclassified most of the time. Bucket as .toolSystemCrash
-                    // since it most closely matches "some execution layer threw unexpectedly."
+                    // Typed retrieval failures (e.g. an attached image that couldn't be
+                    // resolved for a vision turn) carry a precise category — honour it so
+                    // the trace lands in the right bucket instead of the generic crash one.
+                    // Everything else buckets as .toolSystemCrash since it most closely
+                    // matches "some execution layer threw unexpectedly."
+                    let fatalCategory = (error as? FileRetrievalError)?.category ?? .toolSystemCrash
+                    let fatalMessage = (error as? FileRetrievalError)?.message ?? "ReAct fatal error: \(error.localizedDescription)"
                     let classified = error.classify(
-                        as: .toolSystemCrash,
+                        as: fatalCategory,
                         origin: "ReActAgentExecutor.fatalCatch",
-                        message: "ReAct fatal error: \(error.localizedDescription)"
+                        message: fatalMessage
                     )
                     logger.error(
                         "ReAct Fatal Error: \(classified.message)",
@@ -904,6 +978,37 @@ fileprivate func sortObservationsByToolCallOrder(
         let rIndex = idToIndex[rhs.toolCallId] ?? Int.max
         return lIndex < rIndex
     }
+}
+
+/// Pre-resolves attached image payloads to base64 for the agent's native kickoff
+/// user turn (adapters are synchronous, so resolution happens here). Throws if an
+/// image can't be retrieved — surfaced as an execution error (consistent with the
+/// bot path), never a silent drop. Empty/nil payload → no images.
+fileprivate func resolveUserImages(_ payload: Payload?) async throws -> [ResolvedImage] {
+    guard let payload else { return [] }
+    var resolved: [ResolvedImage] = []
+    for block in payload {
+        guard case .image(let img) = block else { continue }
+        let data: Data
+        do {
+            data = try await img.reference.resolve()
+        } catch {
+            // Throw a *typed* retrieval failure so it renders as a categorized
+            // "Image Read Failed" card (icon + remediation) rather than a generic
+            // crash — symmetric with the chat attachment path. (Without this it
+            // fell into the executor's fatal catch and was bucketed as a generic
+            // `.toolSystemCrash` with a "Response Error" card.)
+            let pathLabel: String
+            switch img.reference {
+            case .diskPath(let url):  pathLabel = url.path
+            case .remoteURL(let url): pathLabel = url.absoluteString
+            case .ephemeralData:      pathLabel = img.alt ?? "attached image"
+            }
+            throw FileRetrievalError.imageResolutionFailed(path: pathLabel, underlying: error.localizedDescription)
+        }
+        resolved.append(ResolvedImage(mimeType: img.mimeType, base64: data.base64EncodedString()))
+    }
+    return resolved
 }
 
 fileprivate extension ToolObservation {

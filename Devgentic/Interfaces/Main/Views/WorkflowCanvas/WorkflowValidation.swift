@@ -58,7 +58,11 @@ enum WorkflowValidator {
     /// - Returns: Issues sorted by severity (errors first), then by layout order.
     static func validate(
         layout: WorkflowLayout,
-        profileMap: [UUID: BackendProfileModel]
+        profileMap: [UUID: BackendProfileModel],
+        // Current tool catalog (native + connected MCP). Used to warn when an
+        // Action node references an MCP tool whose server is offline/removed.
+        // Empty = skip availability checks (caller didn't provide a catalog).
+        availableToolSources: [ToolSource] = []
     ) -> [WorkflowValidationIssue] {
         var issues: [WorkflowValidationIssue] = []
 
@@ -86,6 +90,34 @@ enum WorkflowValidator {
             }
         }
 
+        // P0-8: Code-node `outputVariable` collisions across the workflow.
+        // Two Code nodes writing to the same variable name silently race in
+        // parallel execution (`WorkflowState.variables` is just a dict; last
+        // write wins, ordering nondeterministic). Flag duplicates as an
+        // error so users notice before runtime.
+        var outputVariableOwners: [String: [(nodeID: UUID, displayName: String)]] = [:]
+        for node in layout.nodes {
+            if case .code(let config) = node.kind,
+               let varName = config.outputVariable?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !varName.isEmpty {
+                outputVariableOwners[varName, default: []].append((node.id, node.displayName))
+            }
+        }
+        for (varName, owners) in outputVariableOwners where owners.count > 1 {
+            for owner in owners {
+                let otherNames = owners
+                    .filter { $0.nodeID != owner.nodeID }
+                    .map(\.displayName)
+                    .joined(separator: ", ")
+                issues.append(WorkflowValidationIssue(
+                    nodeID: owner.nodeID,
+                    nodeName: owner.displayName,
+                    severity: .error,
+                    message: "Output variable '\(varName)' also written by: \(otherNames). Parallel writes race — rename for stable behavior."
+                ))
+            }
+        }
+
         // --- Per-Node Checks ---
 
         for node in layout.nodes {
@@ -104,6 +136,9 @@ enum WorkflowValidator {
 
             case .code(let config):
                 validateCodeNode(node: node, config: config, issues: &issues)
+
+            case .action(let config):
+                validateActionNode(node: node, config: config, availableToolSources: availableToolSources, issues: &issues)
 
             case .trigger:
                 break // Trigger nodes have no user-configurable fields to validate
@@ -221,6 +256,20 @@ enum WorkflowValidator {
                 ))
             }
         }
+
+        // P0-7: `fallbackLabel` must point to an actual rule label.
+        // If the user renames a rule after creation without updating
+        // `fallbackLabel`, the executor activates a port no downstream
+        // edge subscribes to — silent dead-end at run time.
+        let ruleLabels = Set(config.rules.map(\.label))
+        if !config.fallbackLabel.isEmpty, !ruleLabels.contains(config.fallbackLabel) {
+            issues.append(WorkflowValidationIssue(
+                nodeID: node.id,
+                nodeName: node.displayName,
+                severity: .error,
+                message: "Fallback label '\(config.fallbackLabel)' doesn't match any rule label — downstream routing will dead-end."
+            ))
+        }
     }
 
     // MARK: - Loop Node
@@ -279,6 +328,62 @@ enum WorkflowValidator {
                 severity: .warning,
                 message: "Code template is empty — node will produce no output."
             ))
+        }
+    }
+
+    // MARK: - Action Node
+
+    /// Fixed source id for built-in (native) tools — always resolvable, never
+    /// "offline". Mirrors `UnifiedToolStore`'s native source id.
+    private static let nativeToolSourceID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+
+    private static func validateActionNode(
+        node: WorkflowNode,
+        config: ActionNodeConfig,
+        availableToolSources: [ToolSource],
+        issues: inout [WorkflowValidationIssue]
+    ) {
+        guard let tool = config.tool else {
+            issues.append(WorkflowValidationIssue(
+                nodeID: node.id,
+                nodeName: node.displayName,
+                severity: .error,
+                message: "Action node has no tool selected."
+            ))
+            return
+        }
+
+        // Every required argument must have a non-empty binding, otherwise the
+        // tool call will fail to decode at run time.
+        let boundKeys = Set(config.argumentBindings.filter {
+            !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.keys)
+        let missing = tool.parameters.required.filter { !boundKeys.contains($0) }
+        if !missing.isEmpty {
+            issues.append(WorkflowValidationIssue(
+                nodeID: node.id,
+                nodeName: node.displayName,
+                severity: .error,
+                message: "Tool '\(tool.name)' is missing required argument(s): \(missing.sorted().joined(separator: ", "))."
+            ))
+        }
+
+        // Availability check for MCP tools — warn (not error) when the tool's
+        // server isn't currently in the catalog, so the user learns at design
+        // time rather than at run time. Native tools are always resolvable, and
+        // we skip the check entirely when no catalog was supplied.
+        if tool.sourceId != nativeToolSourceID, !availableToolSources.isEmpty {
+            let present = availableToolSources.contains { source in
+                source.id == tool.sourceId && source.tools.contains { $0.name == tool.name }
+            }
+            if !present {
+                issues.append(WorkflowValidationIssue(
+                    nodeID: node.id,
+                    nodeName: node.displayName,
+                    severity: .warning,
+                    message: "Tool '\(tool.name)' isn't currently available — its MCP server may be offline or the tool was removed. The action will fail at run time unless it reconnects."
+                ))
+            }
         }
     }
 }

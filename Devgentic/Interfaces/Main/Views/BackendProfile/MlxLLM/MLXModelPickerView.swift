@@ -13,6 +13,7 @@ struct MLXModelPickerView: View {
     @Binding var cognitiveCapability: ModelCognitiveCapability
     @Binding var modelDialect: ModelDialect
     @Binding var modelMetadata: ModelMetadata?
+    @Binding var supportedModalities: SupportedModalities
     @Binding var chatTemplateSource: ChatTemplateSource
     @Binding var stopSequences: [String]
 
@@ -55,7 +56,8 @@ struct MLXModelPickerView: View {
                     } else {
                         Picker("Model", selection: $selectedModel) {
                             ForEach(visibleModels) { model in
-                                Text(model.displayName)
+                                // Vision badge: flag models the local VLM runtime can see images with.
+                                Text(model.displayName + (service.cachedCognitiveProfile(for: model).modalities.contains(.visionInput) ? "  👁 Vision" : ""))
                                     .tag(model.displayName)
                             }
                         }
@@ -125,6 +127,7 @@ struct MLXModelPickerView: View {
             self.modelMetadata = profile.metadata
             self.chatTemplateSource = profile.chatTemplateSource
             self.stopSequences = profile.stopSequences
+            self.supportedModalities = profile.modalities
             self.currentFitAssessment = ModelFitAdvisor.assess(metadata: profile.metadata)
 
             if filterForTools && profile.capability == .none {

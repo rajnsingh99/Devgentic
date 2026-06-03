@@ -15,6 +15,10 @@ import Flux2Core
 struct ImageGenConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
+    /// When non-nil, the dynamic-island leading button becomes a cancel (xmark)
+    /// that invokes this closure (typically `dismiss()` from a modal host like
+    /// `WorkflowProfileEditorView`). Also hides the trash icon.
+    var onCancel: (() -> Void)? = nil
     @Environment(BackendProfileService.self) var profileService
     @Environment(ToastManager.self) private var toastManager
     @Environment(MainViewRouter.self) private var router
@@ -114,7 +118,12 @@ struct ImageGenConfigDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar(onBack: handleBackTap) {
+            // See AgentConfigDetailView for the rationale — `onCancel` swaps
+            // the leading chevron for an xmark and routes it to the modal host.
+            DynamicIslandBar(
+                onBack: onCancel ?? handleBackTap,
+                leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
+            ) {
                 actionButtons
             }
 
@@ -408,13 +417,16 @@ struct ImageGenConfigDetailView: View {
                 }
             }
 
-            IslandIconButton(
-                symbol: "trash",
-                style: .destructive,
-                help: "Delete profile",
-                accessibilityLabel: "Delete this profile"
-            ) {
-                showingDeleteAlert = true
+            // Hidden in modal-cancel mode — see AgentConfigDetailView.
+            if onCancel == nil {
+                IslandIconButton(
+                    symbol: "trash",
+                    style: .destructive,
+                    help: "Delete profile",
+                    accessibilityLabel: "Delete this profile"
+                ) {
+                    showingDeleteAlert = true
+                }
             }
         }
     }

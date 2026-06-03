@@ -146,6 +146,74 @@ struct GeminiLLMProvider: LLMProvider {
         return textResponse
     }
 
+    // MARK: - Multimodal (Phase 3 — native image input)
+
+    /// Translates `[ProviderMessage]` into Gemini `contents` + `systemInstruction`,
+    /// emitting `parts` with `{"inlineData":{"mimeType":…,"data":<base64>}}` for any
+    /// image blocks. Resolving image bytes can throw — propagates to the caller.
+    private func translateProviderMessagesGemini(_ payload: [ProviderMessage]) async throws -> (contents: [[String: Any]], systemInstruction: [String: Any]?) {
+        var contents: [[String: Any]] = []
+        var systemParts: [[String: Any]] = []
+
+        for msg in payload {
+            var parts: [[String: Any]] = []
+            for block in msg.content {
+                switch block {
+                case .text(let s):
+                    if !s.isEmpty { parts.append(["text": s]) }
+                case .image(let img):
+                    let data = try await img.reference.resolve()
+                    parts.append(["inlineData": ["mimeType": img.mimeType, "data": data.base64EncodedString()]])
+                default:
+                    let t = block.textFallback
+                    if !t.isEmpty { parts.append(["text": t]) }
+                }
+            }
+            if msg.role == "system" {
+                systemParts.append(contentsOf: parts)
+            } else {
+                let geminiRole = (msg.role == "assistant") ? "model" : "user"
+                contents.append(["role": geminiRole, "parts": parts])
+            }
+        }
+
+        let systemInstruction: [String: Any]? = systemParts.isEmpty ? nil : ["parts": systemParts]
+        return (contents, systemInstruction)
+    }
+
+    /// Multimodal overload — serializes image blocks natively instead of the
+    /// default text-downgrade. Mirrors `generate(messages:)` otherwise.
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        let (contents, systemInstruction) = try await translateProviderMessagesGemini(payload)
+
+        var body: [String: Any] = ["contents": contents]
+        if let systemInstruction = systemInstruction { body["systemInstruction"] = systemInstruction }
+        if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+        if let generationConfig = buildGenerationConfig() { body["generationConfig"] = generationConfig }
+
+        let url = try buildURL(endpoint: ":generateContent", apiKey: config.apiKey)
+        var request = URLRequest(url: url, timeoutInterval: config.timeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let candidates = json?["candidates"] as? [[String: Any]], let firstCandidate = candidates.first else {
+            throw LLMProviderError.invalidResponse("Missing candidates in Gemini response.")
+        }
+        if let finishReason = firstCandidate["finishReason"] as? String, finishReason == "SAFETY" {
+            throw LLMProviderError.invalidResponse("Generation blocked by Gemini Safety Settings.")
+        }
+        guard let content = firstCandidate["content"] as? [String: Any], let parts = content["parts"] as? [[String: Any]] else {
+            throw LLMProviderError.invalidResponse("Missing content parts in Gemini response.")
+        }
+        var textResponse = ""
+        for part in parts { if let text = part["text"] as? String { textResponse += text } }
+        return textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let (contents, systemInstruction) = translateMessages(messages)
 

@@ -126,19 +126,24 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
             let pending = arrayDecoded.tool_calls.map {
                 PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
             }
-            return ModernCognitiveStep(reasoning: arrayDecoded.content, toolCalls: pending)
+            return ModernCognitiveStep(
+                reasoning: ReasoningQualityFilter.filter(arrayDecoded.content),
+                toolCalls: pending
+            )
         }
-        
+
         // Attempt 1.5: Nested Content Wrapper (Small models wrap response inside "content" as object)
         // e.g. {"content": {"thought": "...", "tool_calls": [...]}}
         if let nestedDecoded = try? decoder.decode(NestedContentSchema.self, from: data) {
             let inner = nestedDecoded.content
-            let reasoning = inner.thought ?? ""
             let pending = (inner.tool_calls ?? []).map {
                 PendingToolCall(id: UUID().uuidString, name: $0.name, arguments: $0.arguments)
             }
             logger.info("✅ [JSONParser] Nested content schema matched. Tools: \(pending.count)")
-            return ModernCognitiveStep(reasoning: reasoning, toolCalls: pending)
+            return ModernCognitiveStep(
+                reasoning: ReasoningQualityFilter.filter(inner.thought),
+                toolCalls: pending
+            )
         }
 
         // Attempt 2: Graceful Degradation (Dumb Model used old format)
@@ -149,7 +154,10 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
                 pending.append(PendingToolCall(id: UUID().uuidString, name: toolName, arguments: args))
             }
             // G7: empty reasoning stays empty. UI renders "Executing <tool>..." from .toolCall events.
-            return ModernCognitiveStep(reasoning: singleDecoded.content, toolCalls: pending)
+            return ModernCognitiveStep(
+                reasoning: ReasoningQualityFilter.filter(singleDecoded.content),
+                toolCalls: pending
+            )
         }
 
         // Attempt 3: Bare Tool Call (model emitted just {"name": "...", "arguments": {...}})
@@ -555,7 +563,13 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         }
 
         // G7: empty reasoning stays empty. UI renders tool execution state from .toolCall events.
-        return ModernCognitiveStep(reasoning: reasoning, toolCalls: pending)
+        // Note: `reasoning` above is kept unfiltered for the `rescueArgumentsFromContent`
+        // call path, which mines argument values out of free-text content. Filtering only
+        // happens here, at the final boundary, so stub patterns don't leak into the step.
+        return ModernCognitiveStep(
+            reasoning: ReasoningQualityFilter.filter(reasoning),
+            toolCalls: pending
+        )
     }
 
     // MARK: - Array Tool Call Extraction

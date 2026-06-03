@@ -147,9 +147,20 @@ struct WorkflowNodeView: View {
                     color: profileColor,
                     isSelected: isSelected
                 )
+            case .action:
+                ActionNodeCard(
+                    title: node.displayName,
+                    subtitle: nodeKindLabel,
+                    iconName: iconName,
+                    color: profileColor,
+                    isSelected: isSelected
+                )
             }
         }
         .frame(width: nodeSize.width, height: nodeSize.height)
+        .overlay(alignment: .topLeading) {
+            if isOrJoin { orJoinBadge }
+        }
         .shadow(
             color: isSelected ? theme.accentColor.opacity(0.25) : Color.black.opacity(isHovering ? 0.12 : 0.06),
             radius: isSelected ? 8 : (isHovering ? 6 : 3),
@@ -161,7 +172,7 @@ struct WorkflowNodeView: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
             switch node.kind {
-            case .condition, .loop, .code, .gate:
+            case .condition, .loop, .code, .gate, .action:
                 canvasState.targetConfigNode = node
             case .profile(_, let pType) where pType != .workflow:
                 canvasState.targetConfigNode = node
@@ -208,6 +219,7 @@ struct WorkflowNodeView: View {
         case .code:       return "chevron.left.forwardslash.chevron.right"
         case .gate:       return "hand.raised"
         case .trigger:    return "bolt"
+        case .action:     return "bolt.horizontal.fill"
         }
     }
 
@@ -226,6 +238,7 @@ struct WorkflowNodeView: View {
         case .code:       return .cyan
         case .gate:       return .red
         case .trigger:    return .gray
+        case .action:     return .teal
         }
     }
 
@@ -237,6 +250,7 @@ struct WorkflowNodeView: View {
         case .code:               return "Code"
         case .gate:       return "Gate"
         case .trigger:    return "Trigger"
+        case .action(let config): return config.tool?.name ?? "Action"
         }
     }
 
@@ -259,6 +273,26 @@ struct WorkflowNodeView: View {
         guard let drag = canvasState.edgeDragState else { return false }
         guard drag.sourceNodeID != node.id else { return false }
         return true
+    }
+
+    /// True when this node merges its incoming branches with OR semantics.
+    private var isOrJoin: Bool {
+        node.nodeConfig?.joinMode == .any
+    }
+
+    /// Compact badge surfaced on OR-join nodes so the merge semantics are
+    /// visible on the canvas without opening the inspector. Non-interactive so
+    /// it never steals taps from node selection / drag.
+    private var orJoinBadge: some View {
+        Text("OR")
+            .font(.system(size: 8, weight: .heavy, design: .rounded))
+            .foregroundColor(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(Color.orange))
+            .overlay(Capsule().stroke(theme.primaryBackground, lineWidth: 1))
+            .padding(4)
+            .allowsHitTesting(false)
     }
 }
 
@@ -513,6 +547,59 @@ struct TriggerNodeCard: View {
         .overlay(
             WorkflowChevron()
                 .stroke(isSelected ? .white : .clear, lineWidth: isSelected ? 2 : 0)
+        )
+    }
+}
+
+struct ActionNodeCard: View {
+    let title: String
+    let subtitle: String   // the tool name (or "Action" when unconfigured)
+    let iconName: String
+    let color: Color
+    let isSelected: Bool
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: iconName)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(color))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(theme.fontSubheadline.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text("ACTION")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(color)
+                    Text("\u{00B7}")
+                        .foregroundColor(theme.tertiaryText)
+                    Text(subtitle)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(theme.controlBackground)
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(color.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isSelected ? theme.accentColor : color.opacity(0.5), lineWidth: isSelected ? 2 : 1.5)
         )
     }
 }

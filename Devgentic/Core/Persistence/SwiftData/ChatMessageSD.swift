@@ -24,6 +24,20 @@ final class ChatMessageSD {
     var timelineEventsData: Data?
     var tokenUsageData: Data?
 
+    /// Terminal outcome of the agent run that produced this message.
+    /// Stored as the rawValue of `ExecutionOutcome` so older rows decode as `nil`
+    /// when the field didn't exist. Used by `EpisodicHistoryFormatter` to mark
+    /// turns with the authoritative status (e.g. circuit-breaker abort) instead
+    /// of inferring from action statuses, which mis-classify aborts as "completed"
+    /// when all tool calls technically succeeded.
+    var terminalOutcomeRaw: String?
+
+    /// Optional human-readable reason accompanying `terminalOutcomeRaw`.
+    /// Surfaced as a `<termination>` element in the next turn's episodic XML so
+    /// the model gets explicit negative reinforcement after circuit-breaker aborts
+    /// or iteration exhaustion, not just an opaque "failed" status.
+    var terminalReason: String?
+
     var conversation: ConversationSD?
 
     @Relationship(deleteRule: .cascade)
@@ -63,6 +77,9 @@ final class ChatMessageSD {
             message.tokenUsage = try? JSONDecoder().decode(TokenUsage.self, from: data)
         }
 
+        message.terminalOutcome = terminalOutcomeRaw.flatMap { ExecutionOutcome(rawValue: $0) }
+        message.terminalReason = terminalReason
+
         return message
     }
 
@@ -85,7 +102,9 @@ final class ChatMessageSD {
             contentData: contentData,
             agentResponseData: agentResponseData,
             timelineEventsData: timelineEventsData,
-            tokenUsageData: tokenUsageData
+            tokenUsageData: tokenUsageData,
+            terminalOutcomeRaw: message.terminalOutcome?.rawValue,
+            terminalReason: message.terminalReason
         )
 
         if let textFiles = message.attachedTextFiles {
@@ -100,7 +119,8 @@ final class ChatMessageSD {
 
     init(id: UUID, conversationId: UUID, timestamp: Date, senderType: String,
          traceID: String?, profileTypeRaw: String? = nil, contentData: Data,
-         agentResponseData: Data?, timelineEventsData: Data?, tokenUsageData: Data? = nil) {
+         agentResponseData: Data?, timelineEventsData: Data?, tokenUsageData: Data? = nil,
+         terminalOutcomeRaw: String? = nil, terminalReason: String? = nil) {
         self.id = id
         self.conversationId = conversationId
         self.timestamp = timestamp
@@ -111,5 +131,7 @@ final class ChatMessageSD {
         self.agentResponseData = agentResponseData
         self.timelineEventsData = timelineEventsData
         self.tokenUsageData = tokenUsageData
+        self.terminalOutcomeRaw = terminalOutcomeRaw
+        self.terminalReason = terminalReason
     }
 }

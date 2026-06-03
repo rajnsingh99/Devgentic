@@ -107,7 +107,7 @@ struct GenericToolsXMLParser: CognitiveParserProtocol {
         }
 
         return ModernCognitiveStep(
-            reasoning: reasoning.isEmpty ? "Executing tool call..." : reasoning,
+            reasoning: ReasoningQualityFilter.filter(reasoning),
             toolCalls: toolCalls
         )
     }

@@ -153,11 +153,42 @@ final class MessagingCoordinator {
                 self.logger.debug("User message persisted successfully.")
             }
 
-            // Prepare workflow execution state if this is a workflow profile
+            // Prepare workflow execution state if this is a workflow profile.
+            //
+            // We also insert a `.running` run history record immediately so the
+            // run is discoverable from the history list / run picker from frame 1
+            // — important for the very first run in a fresh conversation, where
+            // there's otherwise no on-disk handle on the in-flight execution.
+            // The same `record.id` is upserted with the finalized payload in the
+            // `onComplete` block below.
             let workflowState: WorkflowExecutionState? = {
                 guard config.profile.profileType == .workflow else { return nil }
                 let state = WorkflowExecutionState()
+                state.userInput = plainUserQueryFromEditor
+                state.workflowProfileID = config.profile.id
+                state.startedAt = Date()
+
+                let initialRecord = WorkflowRunRecord(
+                    id: UUID(),
+                    conversationID: conversationIDToUse,
+                    workflowProfileID: config.profile.id,
+                    workflowName: config.profile.displayName,
+                    timestamp: state.startedAt,
+                    userInput: plainUserQueryFromEditor,
+                    nodeResults: [],
+                    finalOutput: "",
+                    variables: [:],
+                    status: .running,
+                    duration: 0,
+                    error: nil
+                )
+                state.runRecordID = initialRecord.id
                 vm.workflowExecutionStates[conversationIDToUse] = state
+                vm.workflowRunHistory[conversationIDToUse, default: []].insert(initialRecord, at: 0)
+                if vm.workflowRunHistory[conversationIDToUse]!.count > 20 {
+                    vm.workflowRunHistory[conversationIDToUse] = Array(vm.workflowRunHistory[conversationIDToUse]!.prefix(20))
+                }
+                WorkflowRunHistoryStore.shared.upsert(initialRecord, forConversation: conversationIDToUse)
                 return state
             }()
 
@@ -178,24 +209,52 @@ final class MessagingCoordinator {
                         vm.streamingMessage = nil
                         self.logger.info("Stream completed. Resetting streamingMessageID.")
 
-                        // Freeze workflow execution state into a persistent run record
+                        // Finalize the workflow run record. The `.running` row was
+                        // already inserted at run start (see above); we reuse the
+                        // same `id` so `upsert` rewrites that row in place rather
+                        // than creating a duplicate.
                         if let wfState = workflowState, config.profile.profileType == .workflow {
                             let layout = WorkflowLayoutStore.shared.load(for: config.profile.id)
-                            let record = WorkflowRunRecord.freeze(
+                            let frozen = WorkflowRunRecord.freeze(
                                 from: wfState,
                                 conversationID: conversationIDToUse,
                                 workflowProfileID: config.profile.id,
                                 workflowName: config.profile.displayName,
                                 userInput: plainUserQueryFromEditor,
-                                timestamp: Date(),
+                                timestamp: wfState.startedAt,
                                 layout: layout
                             )
-                            vm.workflowRunHistory[conversationIDToUse, default: []].insert(record, at: 0)
-                            if vm.workflowRunHistory[conversationIDToUse]!.count > 20 {
-                                vm.workflowRunHistory[conversationIDToUse] = Array(vm.workflowRunHistory[conversationIDToUse]!.prefix(20))
+                            // Stamp the finalized record with the in-flight ID so
+                            // the upsert targets the existing row.
+                            var record = frozen
+                            if let existingID = wfState.runRecordID {
+                                record = WorkflowRunRecord(
+                                    id: existingID,
+                                    conversationID: frozen.conversationID,
+                                    workflowProfileID: frozen.workflowProfileID,
+                                    workflowName: frozen.workflowName,
+                                    timestamp: frozen.timestamp,
+                                    userInput: frozen.userInput,
+                                    nodeResults: frozen.nodeResults,
+                                    finalOutput: frozen.finalOutput,
+                                    variables: frozen.variables,
+                                    status: frozen.status,
+                                    duration: frozen.duration,
+                                    error: frozen.error
+                                )
                             }
-                            WorkflowRunHistoryStore.shared.append(record, forConversation: conversationIDToUse)
-                            self.logger.info("Workflow run record frozen: \(record.id) — \(record.status.rawValue)")
+
+                            // In-memory: replace the matching row if present, else insert.
+                            if let idx = vm.workflowRunHistory[conversationIDToUse]?.firstIndex(where: { $0.id == record.id }) {
+                                vm.workflowRunHistory[conversationIDToUse]?[idx] = record
+                            } else {
+                                vm.workflowRunHistory[conversationIDToUse, default: []].insert(record, at: 0)
+                                if vm.workflowRunHistory[conversationIDToUse]!.count > 20 {
+                                    vm.workflowRunHistory[conversationIDToUse] = Array(vm.workflowRunHistory[conversationIDToUse]!.prefix(20))
+                                }
+                            }
+                            WorkflowRunHistoryStore.shared.upsert(record, forConversation: conversationIDToUse)
+                            self.logger.info("Workflow run record finalized: \(record.id) — \(record.status.rawValue)")
                         }
                     }
                 }

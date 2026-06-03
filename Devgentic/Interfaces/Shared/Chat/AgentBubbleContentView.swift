@@ -7,8 +7,6 @@
 
 import SwiftUI
 
-private let CODE_BLOCK_LINE_LIMIT = 50
-
 struct AgentBubbleContentView: View {
     var message: ChatMessage
     let isAgentic: Bool
@@ -167,7 +165,7 @@ struct AgentBubbleContentView: View {
             }
 
         case .codeBlock(let language, let code):
-            if code.components(separatedBy: .newlines).count > CODE_BLOCK_LINE_LIMIT {
+            if code.components(separatedBy: .newlines).count > ChatUIConstants.codeBlockLineLimit {
                 CodeBlockCardView(language: language ?? "code", lineCount: code.components(separatedBy: .newlines).count, fileName: nil) {
                     let snippet = CodeSnippet(language: language, code: code)
                     chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)
@@ -178,9 +176,9 @@ struct AgentBubbleContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-        case .error(let title, let details):
+        case .error(let title, let details, let category, let suggestion):
             VStack(alignment: .leading, spacing: 8) {
-                ErrorMessageView(title: title, details: details)
+                ErrorMessageView(title: title, details: details, category: category, suggestion: suggestion)
                     .cardStyle()
 
                 // P1: Retry button for failed agent responses

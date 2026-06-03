@@ -126,7 +126,7 @@ struct Conversation: Identifiable, Codable, Equatable {
             return "Code block"
         case .image:
             return "Image attachment"
-        case .error(_, let details):
+        case .error(_, let details, _, _):
             return "Error: \(details)"
         case .mediaArtifact(let artifact):
             return artifact.label ?? artifact.kind.rawValue

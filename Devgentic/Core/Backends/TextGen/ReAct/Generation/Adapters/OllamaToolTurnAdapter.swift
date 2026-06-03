@@ -42,6 +42,23 @@ struct OllamaToolTurnAdapter: ToolTurnAdapter {
         }
     }
 
+    /// Kickoff user turn. Text-only → plain string content (byte-identical to the
+    /// default `normalizeCanonical`, so text runs and their KV-cache prefix are
+    /// unchanged). With images → Ollama's per-message `images` array of RAW base64
+    /// strings (NO `data:` prefix, per /api/chat). The vision model's processor /
+    /// chat template inserts the image tokens server-side, so we never hand-place
+    /// placeholders. Flows straight through `buildCognitiveBody` into the request.
+    func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
+        guard !images.isEmpty else {
+            return ["role": "user", "content": text]
+        }
+        return [
+            "role": "user",
+            "content": text,
+            "images": images.map { $0.base64 }
+        ]
+    }
+
     private func argumentsToDict(_ args: [String: JSONValue]) -> [String: Any] {
         args.mapValues { $0.rawValue }
     }

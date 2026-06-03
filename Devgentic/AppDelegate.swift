@@ -79,6 +79,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // 1. Terminate any active shell processes to prevent zombies
         ShellSessionManager.shared.cleanup()
 
+        // 1b. Disconnect all live MCP sessions so child processes (npx/uvx/etc.)
+        //     don't get re-parented to launchd as orphans. Each disconnect sends
+        //     SIGTERM; ShellProcess escalates to SIGKILL after 2s if needed.
+        let mcpDisconnectSem = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            await MCPClientService.shared.disconnectAll()
+            mcpDisconnectSem.signal()
+        }
+        _ = mcpDisconnectSem.wait(timeout: .now() + .milliseconds(500))
+
         // 2. Flush observability buffers to SQLite before quit. The periodic flush
         //    runs every 5s so we only lose ≤5s on an abrupt quit; this is best-effort
         //    cleanup on graceful quit. We use a short DispatchSemaphore wait because

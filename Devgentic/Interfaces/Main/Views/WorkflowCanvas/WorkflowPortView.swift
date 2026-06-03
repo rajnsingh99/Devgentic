@@ -46,18 +46,22 @@ struct WorkflowPortView: View {
             .gesture(portType == .output ? outputDragGesture : nil)
     }
 
+    @State private var isDragging = false
+
     // MARK: - Output Port Drag Gesture
 
     private var outputDragGesture: some Gesture {
         // Tie to the unscaled canvas layout explicitly
         DragGesture(coordinateSpace: .named("canvasContent"))
             .onChanged { value in
-                if value.translation.width == 0 && value.translation.height == 0 {
+                if !isDragging {
+                    isDragging = true
                     onDragStarted?(value.startLocation)
                 }
                 onDragUpdated?(value.location)
             }
             .onEnded { value in
+                isDragging = false
                 onDragEnded?(value.location)
             }
     }

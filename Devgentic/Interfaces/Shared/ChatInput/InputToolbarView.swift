@@ -28,7 +28,12 @@ struct InputToolbarView: View {
     var onSelectCodeFile: (() -> Void)?
 
     @Binding var showingSchedulePopover: Bool
-    @Binding var showingFullScheduleCreator: Bool
+    /// Active conversation when invoked from chat — quick-preset tasks default
+    /// to continuing this conversation instead of creating an orphan thread.
+    var currentConversationID: UUID?
+    /// Invoked when the user taps "Custom..." in the quick-schedule popover.
+    /// The parent navigates to the in-window scheduler editor via MainViewRouter.
+    var onCustomSchedule: () -> Void
 
     @Environment(CodeSessionManager.self) private var codeSessionManager
     @Environment(BackendProfileService.self) private var profileService
@@ -129,10 +134,9 @@ struct InputToolbarView: View {
             QuickSchedulePopoverView(
                 promptText: promptText,
                 selectedProfileID: selectedProfileID,
+                currentConversationID: currentConversationID,
                 isPresented: $showingSchedulePopover,
-                onCustomSchedule: {
-                    showingFullScheduleCreator = true
-                }
+                onCustomSchedule: onCustomSchedule
             )
         }
     }

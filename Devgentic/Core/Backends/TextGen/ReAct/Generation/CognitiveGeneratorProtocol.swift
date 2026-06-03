@@ -240,8 +240,18 @@ enum PromptBuilder {
         // The native-turn path (G12) passes `includeWorkingMemory: false` so the
         // scratchpad isn't re-injected every iteration — observations flow instead
         // through `assistant(tool_calls) → tool(result)` turns managed by the executor.
+        //
+        // Prefix resolution: explicit `userMessagePrefix` argument wins; otherwise,
+        // if the context carries a `workflowContext`, derive the per-node prefix
+        // from it using this call's own `wrapping`. This is what lets every
+        // generator inherit workflow behavior for free — no per-generator code.
         var userContent = ""
-        if let prefix = userMessagePrefix {
+        let resolvedPrefix: String? = {
+            if let explicit = userMessagePrefix { return explicit }
+            if let wf = context.workflowContext { return wf.userMessagePrefix(wrapping: wrapping) }
+            return nil
+        }()
+        if let prefix = resolvedPrefix {
             userContent += prefix
         }
 

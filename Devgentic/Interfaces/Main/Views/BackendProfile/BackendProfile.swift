@@ -897,9 +897,15 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// User-toggleable in advanced config.
     var thinkingEnabled: Bool = false
 
+    /// The model's input/output modalities (e.g. `.visionInput`), seeded by detection
+    /// (`MLXTokenizerAnalyzer` / `OllamaShowResponse`) at model-selection time. STORED
+    /// (not derived) so the detected capability survives persistence — read by the
+    /// vision-input gate. Defaults `.textOnly` (backward-compat for old configs).
+    var supportedModalities: SupportedModalities = .textOnly
+
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
     var cognitiveProfile: CognitiveProfile {
-        CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
+        CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, modalities: supportedModalities, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
     }
 
     // Explicit memberwise initializer to support default values
@@ -913,7 +919,8 @@ struct ProviderConfig: Codable, Hashable, Sendable {
          modelMetadata: ModelMetadata? = nil,
          chatTemplateSource: ChatTemplateSource = .embedded,
          stopSequences: [String] = [],
-         thinkingEnabled: Bool = false) {
+         thinkingEnabled: Bool = false,
+         supportedModalities: SupportedModalities = .textOnly) {
         self.apiProvider = apiProvider
         self.modelName = modelName
         self.apiKey = apiKey
@@ -925,12 +932,13 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.chatTemplateSource = chatTemplateSource
         self.stopSequences = stopSequences
         self.thinkingEnabled = thinkingEnabled
+        self.supportedModalities = supportedModalities
     }
 
     // MARK: - Codable Conformance
 
     enum CodingKeys: String, CodingKey {
-        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled
+        case apiProvider, modelName, apiKey, baseURL, advancedConfiguration, cognitiveCapability, supportsNativeTools, modelDialect, modelMetadata, chatTemplateSource, stopSequences, thinkingEnabled, supportedModalities
     }
 
     init(from decoder: Decoder) throws {
@@ -955,6 +963,8 @@ struct ProviderConfig: Codable, Hashable, Sendable {
         self.chatTemplateSource = try container.decodeIfPresent(ChatTemplateSource.self, forKey: .chatTemplateSource) ?? .embedded
         self.stopSequences = try container.decodeIfPresent([String].self, forKey: .stopSequences) ?? []
         self.thinkingEnabled = try container.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
+        // Backward-compat: old configs have no modalities → text-only.
+        self.supportedModalities = try container.decodeIfPresent(SupportedModalities.self, forKey: .supportedModalities) ?? .textOnly
     }
 
     func encode(to encoder: Encoder) throws {
@@ -972,5 +982,8 @@ struct ProviderConfig: Codable, Hashable, Sendable {
             try container.encode(stopSequences, forKey: .stopSequences)
         }
         try container.encode(thinkingEnabled, forKey: .thinkingEnabled)
+        if supportedModalities != .textOnly {
+            try container.encode(supportedModalities, forKey: .supportedModalities)
+        }
     }
 }

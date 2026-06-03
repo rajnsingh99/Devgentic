@@ -137,7 +137,8 @@ enum SpanKind: String, Codable, Sendable, DatabaseValueConvertible {
     case toolExecution
     case iteration
     case subtask
-    case workflow
+    case workflow       // top-level workflow run span
+    case workflowNode   // per-node span inside a workflow run; parent of inner agent iteration spans
 }
 
 enum SpanStatus: String, Codable, Sendable, DatabaseValueConvertible {

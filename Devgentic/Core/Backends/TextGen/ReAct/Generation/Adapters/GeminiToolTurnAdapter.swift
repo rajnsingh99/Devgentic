@@ -85,6 +85,18 @@ struct GeminiToolTurnAdapter: ToolTurnAdapter {
         ]
     }
 
+    /// Kickoff user turn. Text-only → `parts:[{text}]` (byte-identical to this
+    /// adapter's normalizeCanonical user turn). With images → `parts` mixing text
+    /// and `inlineData` (base64) blocks.
+    func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
+        var parts: [[String: Any]] = []
+        if !text.isEmpty { parts.append(["text": text]) }
+        for img in images {
+            parts.append(["inlineData": ["mimeType": img.mimeType, "data": img.base64]])
+        }
+        return ["role": "user", "parts": parts]
+    }
+
     private func argumentsToDict(_ args: [String: JSONValue]) -> [String: Any] {
         args.mapValues { $0.rawValue }
     }

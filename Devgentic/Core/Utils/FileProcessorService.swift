@@ -78,6 +78,56 @@ struct FileProcessorService {
         }
     }
 
+    /// Strict variant of `readFileContent` that **throws a typed `FileRetrievalError`**
+    /// instead of swallowing every failure to `nil`. Use this on paths that must
+    /// report retrieval failures to the user (Round 2). Distinguishes missing /
+    /// access-denied / too-large / read-failed / document-extraction causes, and
+    /// surfaces the underlying `DocumentExtractionError` (which the nil variant
+    /// silently catches and discards).
+    func readFileContentOrThrow(for url: URL, maxSize: Int = 500_000) async throws -> String {
+        let didStartAccess = url.startAccessingSecurityScopedResource()
+        defer { if didStartAccess { url.stopAccessingSecurityScopedResource() } }
+
+        if url.isFileURL && !FileManager.default.fileExists(atPath: url.path) {
+            throw FileRetrievalError.notFound(path: url.path)
+        }
+
+        // Rich document formats (PDF/DOCX/XLSX/CSV/PPTX/RTF) — surface the real cause.
+        let registry = DocumentExtractionRegistry.shared
+        if registry.canExtract(from: url) {
+            do {
+                return try await registry.extract(from: url, maxSize: maxSize).text
+            } catch let docError as DocumentExtractionError {
+                throw FileRetrievalError.from(docError, path: url.path)
+            } catch {
+                throw FileRetrievalError.extractionFailed(path: url.path, underlying: error.localizedDescription)
+            }
+        }
+
+        // Plain text.
+        do {
+            if let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber,
+               size.intValue > maxSize * 4 {
+                throw FileRetrievalError.tooLarge(path: url.path)
+            }
+            let content = try String(contentsOf: url, encoding: .utf8)
+            if content.count > maxSize {
+                throw FileRetrievalError.tooLarge(path: url.path)
+            }
+            return content
+        } catch let retrievalError as FileRetrievalError {
+            throw retrievalError
+        } catch let nsError as NSError where nsError.domain == NSCocoaErrorDomain {
+            switch nsError.code {
+            case NSFileReadNoPermissionError: throw FileRetrievalError.accessDenied(path: url.path)
+            case NSFileReadNoSuchFileError:   throw FileRetrievalError.notFound(path: url.path)
+            default:                          throw FileRetrievalError.readFailed(path: url.path, underlying: nsError.localizedDescription)
+            }
+        } catch {
+            throw FileRetrievalError.readFailed(path: url.path, underlying: error.localizedDescription)
+        }
+    }
+
     /// Determines the MIME type of a file. It prioritizes specific UTType preferred MIME types
     /// and falls back to "text/plain" for known source code extensions if a more specific
     /// text-based MIME type isn't available.

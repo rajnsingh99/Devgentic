@@ -16,6 +16,7 @@ struct DiffView: View {
     let fileName: String?
 
     @State private var diffLines: [DiffLine] = []
+    @State private var cachedSignature: Int?
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -70,14 +71,25 @@ struct DiffView: View {
                 }
             }
         }
-        .onAppear {
-            computeDiff()
-        }
+        .onAppear { computeDiffIfNeeded() }
+        .onChange(of: original) { _, _ in computeDiffIfNeeded() }
+        .onChange(of: modified) { _, _ in computeDiffIfNeeded() }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
     }
 
-    private func computeDiff() {
+    private func computeDiffIfNeeded() {
+        // Cheap O(n) hash skips the O(n*m) LCS recompute when inputs are unchanged.
+        // Common when the view re-appears (e.g. user toggles diff view off/on)
+        // or a parent re-renders without any input change.
+        var hasher = Hasher()
+        hasher.combine(original)
+        hasher.combine(modified)
+        let signature = hasher.finalize()
+
+        guard cachedSignature != signature else { return }
+        cachedSignature = signature
+
         let oldLines = original.components(separatedBy: .newlines)
         let newLines = modified.components(separatedBy: .newlines)
         self.diffLines = DiffEngine.computeDiff(oldLines: oldLines, newLines: newLines)

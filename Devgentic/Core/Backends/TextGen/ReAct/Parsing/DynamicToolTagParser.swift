@@ -104,11 +104,10 @@ struct DynamicToolTagParser: CognitiveParserProtocol {
            let range = Range(firstMatch.range, in: text) {
             let before = String(text[text.startIndex..<range.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !before.isEmpty {
-                return before
-            }
+            let filtered = ReasoningQualityFilter.filter(before)
+            if !filtered.isEmpty { return filtered }
         }
-        return "Executing tool calls..."
+        return ""
     }
 
     /// Parses a JSON string into a dictionary, with sanitization fallback.

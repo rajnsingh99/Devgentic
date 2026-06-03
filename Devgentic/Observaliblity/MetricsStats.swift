@@ -88,6 +88,29 @@ struct CircuitBreakerStats: Sendable {
     let windowEnd: Date
 }
 
+// MARK: - Workflow Node Stats
+
+/// Per-workflow-node execution stats aggregated over the window. Each row
+/// represents one node *name* (i.e. the user's display label, not a node UUID),
+/// rolled up across all runs that used a node with that name. Latency comes from
+/// the `workflowNode`-kind span's `(endedAt - startedAt)`, status from
+/// `spans.status`. Driven by P1-10 (per-node spans persisted to TraceStore).
+struct WorkflowNodeStats: Sendable, Identifiable {
+    let nodeName: String
+    let totalRuns: Int
+    let completedCount: Int
+    let failedCount: Int
+    let avgDurationMs: Int?
+    let p50DurationMs: Int?
+    let p95DurationMs: Int?
+
+    var id: String { nodeName }
+    var successRate: Double {
+        guard totalRuns > 0 else { return 0 }
+        return Double(completedCount) / Double(totalRuns)
+    }
+}
+
 // MARK: - Top-level Dashboard Snapshot
 
 /// Aggregated result of `MetricsAggregator.snapshot(since:until:)`. One struct,
@@ -103,6 +126,10 @@ struct MetricsSnapshot: Sendable {
     let categoryStats: [CategoryFrequencyStats]
     let modelStats: [ModelReliabilityStats]
     let circuitBreakerStats: CircuitBreakerStats
+    /// Per-workflow-node stats — populated when the snapshot's profileType
+    /// filter is nil (all) or `.workflow`. Empty for other filters so the
+    /// dashboard can hide the "Workflow Activity" panel when irrelevant.
+    let workflowNodeStats: [WorkflowNodeStats]
 
     /// Number of traces observed in the window. Shown in the header as a
     /// "sanity check" — if this is 0, all the stats below are empty too.

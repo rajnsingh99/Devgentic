@@ -23,6 +23,12 @@ final class ConversationSD {
     @Relationship(deleteRule: .cascade, inverse: \ChatMessageSD.conversation)
     var messages: [ChatMessageSD] = []
 
+    /// Workflow execution runs that happened in this conversation. Cascade-deleted
+    /// with the conversation. Matches the `messages` pattern above — the to-many
+    /// side declares the inverse keypath and the delete rule.
+    @Relationship(deleteRule: .cascade, inverse: \WorkflowRunRecordSD.conversation)
+    var workflowRuns: [WorkflowRunRecordSD] = []
+
     init(id: UUID = UUID(), timestamp: Date = Date(), userDefinedTitle: String? = nil,
          isPinned: Bool = false, openAIThreadID: String? = nil,
          backendType: String? = nil, backendEntityId: UUID? = nil,

@@ -21,6 +21,7 @@ struct GateNodeInspectorView: View {
     @State private var options: [String] = ["Approve", "Reject"]
     @State private var hasTimeout: Bool = false
     @State private var timeoutSeconds: Double = 300
+    @State private var joinMode: JoinMode = .all
     @State private var showGuide: Bool = false
 
     var body: some View {
@@ -33,6 +34,7 @@ struct GateNodeInspectorView: View {
                     approvalPromptCard
                     optionsCard
                     timeoutCard
+                    JoinModeCard(joinMode: $joinMode)
                 }
                 .padding(24)
             }
@@ -54,8 +56,11 @@ struct GateNodeInspectorView: View {
                 .foregroundColor(theme.primaryText)
             Text("\u{00B7}")
                 .foregroundColor(theme.tertiaryText)
-            Text(node.displayName)
+            // Inline-editable node label — same pattern as the agent profile
+            // editor's identity-header rename.
+            TextField("Node Name", text: $node.displayName)
                 .font(theme.fontCaption)
+                .textFieldStyle(.plain)
                 .foregroundColor(theme.secondaryText)
             Spacer()
             Button {
@@ -301,6 +306,7 @@ struct GateNodeInspectorView: View {
     // MARK: - Helpers
 
     private func loadFromNode() {
+        joinMode = node.nodeConfig?.joinMode ?? .all
         guard case .gate(let config) = node.kind else { return }
         prompt = config.prompt
         options = config.options
@@ -317,6 +323,11 @@ struct GateNodeInspectorView: View {
             timeout: hasTimeout ? timeoutSeconds : nil
         )
         node.kind = .gate(config)
+
+        // Persist fan-in behaviour on the shared per-node config.
+        if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
+        node.nodeConfig?.joinMode = joinMode
+
         dismiss()
     }
 }

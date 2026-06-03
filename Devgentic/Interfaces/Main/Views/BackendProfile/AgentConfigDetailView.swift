@@ -22,13 +22,24 @@ import UniformTypeIdentifiers
 struct AgentConfigDetailView: View {
     @Bindable var editBuffer: ProfileEditBuffer
     var onDelete: ((UUID) -> Void)? = nil
+    /// When non-nil, the dynamic-island leading button becomes a cancel (xmark)
+    /// that invokes this closure — typically `dismiss()` from a modal host
+    /// (`WorkflowProfileEditorView`). Also hides the trash icon since modal
+    /// editors don't allow profile deletion; that's reserved for the standalone
+    /// profile management screen.
+    var onCancel: (() -> Void)? = nil
     @Environment(BackendProfileService.self) var profileService
     @Environment(MainViewRouter.self) private var router
     @Environment(ToastManager.self) private var toastManager
+    @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
 
     // Shared advanced config manager (replaces 5 @State config vars + isLoading flag)
     @State private var configManager = ProviderAdvancedConfigManager()
+
+    // Owns this view's floating prompt editor — per-instance, not a singleton,
+    // so opening the editor here doesn't trample any other view's editor.
+    @State private var promptWindowManager = AdvancedPromptWindowManager()
 
     // Tool Library (now navigated via router)
 
@@ -46,6 +57,12 @@ struct AgentConfigDetailView: View {
 
     // Guide
     @State private var showingAgentGuide = false
+
+    /// Inline validation error for the System Instructions field. Set when the
+    /// user attempts to Save while the field is empty/whitespace; cleared the
+    /// moment the user starts editing again. Drives the red-border + inline
+    /// error caption next to the editor.
+    @State private var instructionsError: String? = nil
 
 
     // [PHASE 1 REFACTOR]: Enriched Default Persona
@@ -254,7 +271,15 @@ struct AgentConfigDetailView: View {
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
-            DynamicIslandBar(onBack: handleBackTap) {
+            // When `onCancel` is set (workflow modal context), the leading
+            // button becomes an xmark that dismisses the sheet — clearer than
+            // a back-chevron, which implies router navigation that doesn't
+            // exist here. Default path keeps the chevron + handleBackTap so
+            // the standalone profile screen behaves identically to before.
+            DynamicIslandBar(
+                onBack: onCancel ?? handleBackTap,
+                leadingSymbol: onCancel != nil ? "xmark" : "chevron.left"
+            ) {
                 actionButtons
             }
 
@@ -417,11 +442,11 @@ struct AgentConfigDetailView: View {
                                 Spacer()
 
                                 Button {
-                                    AdvancedPromptWindowManager.shared.showEditor(
+                                    promptWindowManager.showEditor(
                                         text: instructionsBinding,
                                         agentName: editBuffer.draft.displayName,
                                         configuredTools: toolsBinding,
-                                        theme: theme
+                                        themeManager: themeManager
                                     )
                                 } label: {
                                     Label("Expand", systemImage: "arrow.up.left.and.arrow.down.right")
@@ -450,7 +475,15 @@ struct AgentConfigDetailView: View {
                             .scrollContentBackground(.hidden)
                             .background(theme.textBackground)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.dividerColor, lineWidth: 1))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(instructionsError != nil ? theme.errorColor : theme.dividerColor,
+                                            lineWidth: instructionsError != nil ? 1.5 : 1)
+                            )
+                            .onChange(of: instructionsBinding.wrappedValue) { _, _ in
+                                // Clear the validation error as soon as the user starts editing.
+                                instructionsError = nil
+                            }
 
                             if instructionsBinding.wrappedValue.isEmpty {
                                 Text("Define persona, reasoning strategy, and tool guidelines...")
@@ -471,6 +504,20 @@ struct AgentConfigDetailView: View {
                                 instrCount > Int(Double(instrLimit) * 0.9) ? .orange :
                                 theme.secondaryText
                             )
+
+                        // Inline validation error — same visual pattern as
+                        // CreateScheduledTaskView's `inlineError(_:)` helper.
+                        if let message = instructionsError {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .accessibilityHidden(true)
+                                Text(message)
+                                    .font(theme.fontCaption)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .foregroundColor(theme.errorColor)
+                        }
                         }
 
                     }
@@ -724,30 +771,25 @@ struct AgentConfigDetailView: View {
             Text("Are you sure you want to delete this agent? This action cannot be undone.")
         }
         .task {
-            // Auto-populate default instructions if nil (first time setup)
-            if case .agent(var config) = editBuffer.draft.details, config.instructions == nil {
-                config.instructions = defaultSystemPersona
-                editBuffer.draft.details = .agent(config)
-                // Since this is a first-time auto-populate on an unsaved profile,
-                // promote the change to the original so it doesn't show as dirty.
-                editBuffer.load(editBuffer.draft)
-            }
-
+            // Instructions are no longer auto-populated. Empty field is the
+            // initial state for new profiles; the user must either type their
+            // own or click "Use Default Persona". This forces a deliberate
+            // choice so small/Q4 models don't run with zero guidance just
+            // because the user accepted the default without reading it.
             configManager.load(from: providerConfig.wrappedValue, using: profileService)
         }
         .onDisappear {
             // Cleanup: Close the floating window if the user leaves the panel entirely
-            AdvancedPromptWindowManager.shared.closeWindow()
+            promptWindowManager.closeWindow()
         }
         .onChange(of: providerConfig.wrappedValue.apiProvider) { _, _ in
             configManager.load(from: providerConfig.wrappedValue, using: profileService)
         }
         .advancedConfigSync(configManager: configManager, providerConfig: providerConfig, profileService: profileService)
-        .onChange(of: providerConfig.wrappedValue.modelName) { _, newValue in
-            if providerConfig.wrappedValue.apiProvider == .ollama {
-                detectAndApplyOllamaPreset(for: newValue)
-            }
-        }
+        // NOTE: Auto-applying an Ollama preset on every modelName change was
+        // removed — it silently wiped any user customization the moment the
+        // model selector changed. Users now explicitly opt in via the "Apply
+        // Optimal" menu inside Advanced Configuration.
         .unsavedChangesBackGuard(
             isDirty: editBuffer.isDirty,
             showingAlert: $showingBackAlert,
@@ -762,24 +804,6 @@ struct AgentConfigDetailView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 router.goBack()
             }
-        }
-    }
-
-    private func detectAndApplyOllamaPreset(for modelName: String) {
-        let name = modelName.lowercased()
-        var tier: OllamaAdvancedConfig.ModelTier? = nil
-
-        if name.contains("1b") || name.contains("3b") || name.contains("tiny") || name.contains("phi-3") {
-            tier = .tiny
-        } else if name.contains("7b") || name.contains("8b") || name.contains("14b") || name.contains("mistral") || name.contains("llama-3-8b") || name.contains("small") {
-            tier = .smallMedium
-        } else if name.contains("70b") || name.contains("72b") || name.contains("large") {
-            tier = .large
-        }
-
-        if let tier = tier {
-            configManager.localOllamaConfig = OllamaAdvancedConfig.preset(for: tier)
-            // The onChange(of: configManager.localOllamaConfig) will update providerConfig.wrappedValue.advancedConfiguration
         }
     }
 
@@ -812,6 +836,17 @@ struct AgentConfigDetailView: View {
                     accessibilityLabel: "Save profile changes",
                     keyboardShortcut: .defaultAction
                 ) {
+                    // Pre-flight: empty system instructions on a small/Q4 model
+                    // routinely produces looping or wandering behaviour. We don't
+                    // auto-fill a default anymore — the user must make a deliberate
+                    // choice — so block the save and surface the inline error.
+                    let trimmed = instructionsBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty {
+                        instructionsError = String(localized: "System instructions are required.")
+                        return
+                    }
+                    instructionsError = nil
+
                     do {
                         try profileService.saveProfile(editBuffer.draft)
                         editBuffer.markSaved()
@@ -822,13 +857,19 @@ struct AgentConfigDetailView: View {
                 }
             }
 
-            IslandIconButton(
-                symbol: "trash",
-                style: .destructive,
-                help: "Delete profile",
-                accessibilityLabel: "Delete this profile"
-            ) {
-                showingDeleteAlert = true
+            // Trash is hidden in modal-cancel mode: workflow editing doesn't
+            // permit profile deletion (it would orphan every node referencing
+            // this profile across every workflow). Profile lifecycle stays
+            // owned by the standalone profile screen.
+            if onCancel == nil {
+                IslandIconButton(
+                    symbol: "trash",
+                    style: .destructive,
+                    help: "Delete profile",
+                    accessibilityLabel: "Delete this profile"
+                ) {
+                    showingDeleteAlert = true
+                }
             }
         }
     }
@@ -842,7 +883,10 @@ struct AgentConfigDetailView: View {
             thinkingEnabled: Binding(
                 get: { providerConfig.wrappedValue.thinkingEnabled },
                 set: { providerConfig.wrappedValue.thinkingEnabled = $0 }
-            )
+            ),
+            modelMetadata: providerConfig.wrappedValue.modelMetadata,
+            modelName: providerConfig.wrappedValue.modelName,
+            defaultProfile: .agent
         )
     }
 

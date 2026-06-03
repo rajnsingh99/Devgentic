@@ -142,6 +142,10 @@ struct ProviderConfigSection: View {
                         get: { providerConfig.modelMetadata },
                         set: { providerConfig.modelMetadata = $0 }
                     ),
+                    supportedModalities: Binding(
+                        get: { providerConfig.supportedModalities },
+                        set: { providerConfig.supportedModalities = $0 }
+                    ),
                     thinkingEnabled: Binding(
                         get: { providerConfig.thinkingEnabled },
                         set: { providerConfig.thinkingEnabled = $0 }
@@ -182,6 +186,10 @@ struct ProviderConfigSection: View {
                     modelMetadata: Binding(
                         get: { providerConfig.modelMetadata },
                         set: { providerConfig.modelMetadata = $0 }
+                    ),
+                    supportedModalities: Binding(
+                        get: { providerConfig.supportedModalities },
+                        set: { providerConfig.supportedModalities = $0 }
                     ),
                     chatTemplateSource: Binding(
                         get: { providerConfig.chatTemplateSource },

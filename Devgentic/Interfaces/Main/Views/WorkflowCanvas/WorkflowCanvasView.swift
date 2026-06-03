@@ -163,6 +163,11 @@ struct WorkflowCanvasView: View {
                 CodeNodeInspectorView(node: bindingForNode(node.id))
             case .gate:
                 GateNodeInspectorView(node: bindingForNode(node.id))
+            case .action:
+                ActionNodeInspectorView(
+                    node: bindingForNode(node.id),
+                    availableVariables: canvasState.knownVariableNames
+                )
             case .profile:
                 ProfileNodeInspectorView(
                     node: bindingForNode(node.id),
@@ -483,30 +488,7 @@ extension View {
 #endif
 
 // MARK: - Workflow Layout Persistence
-
-/// Sidecar persistence for workflow canvas layout.
-/// Stores node positions and edges keyed by workflow profile ID.
-final class WorkflowLayoutStore {
-    static let shared = WorkflowLayoutStore()
-    private let userDefaultsPrefix = "workflowLayout_"
-
-    func load(for profileID: UUID) -> WorkflowLayout {
-        let key = userDefaultsPrefix + profileID.uuidString
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let layout = try? JSONDecoder().decode(WorkflowLayout.self, from: data) else {
-            return .empty
-        }
-        return layout
-    }
-
-    func save(_ layout: WorkflowLayout, for profileID: UUID) {
-        let key = userDefaultsPrefix + profileID.uuidString
-        guard let data = try? JSONEncoder().encode(layout) else { return }
-        UserDefaults.standard.set(data, forKey: key)
-    }
-
-    func delete(for profileID: UUID) {
-        let key = userDefaultsPrefix + profileID.uuidString
-        UserDefaults.standard.removeObject(forKey: key)
-    }
-}
+// `WorkflowLayoutStore` now lives at
+// `Devgentic/Core/Persistence/SwiftData/WorkflowLayoutStore.swift` and is
+// SwiftData-backed. Same `load/save/delete` API surface — no changes needed
+// at call sites in this file.

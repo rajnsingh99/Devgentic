@@ -34,6 +34,7 @@ class AgentConnect: @unchecked Sendable {
         chatHistory: [ChatMessage],
         conversationID: UUID,
         ragContext: String? = nil,
+        userPayload: Payload? = nil,
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
@@ -390,6 +391,7 @@ class AgentConnect: @unchecked Sendable {
 
                     let input = AgentInput(
                         userInput: userInput,
+                        userPayload: userPayload,
                         chatHistory: chatHistory,
                         conversationID: conversationID,
                         tools: activeTools,
@@ -502,7 +504,11 @@ class AgentConnect: @unchecked Sendable {
     // MARK: - Workflow Node Streaming
 
     /// Workflow-aware streaming that bypasses RAG, history, compaction, and episode management.
-    /// Wraps the resolved generator in `WorkflowCognitiveGenerator` for clean task+input prompts.
+    /// Uses the same generator/parser the agent or bot path would — workflow specifics
+    /// are applied via `SemanticContext.workflowContext`, which `buildStandardMessages`
+    /// reads to derive the per-node user-message prefix and force `.workflow` layer
+    /// config. Any improvement to a dialect's generator, parser, or native tool
+    /// injection is inherited automatically.
     func streamWorkflowNodeResponse(
         for profile: BackendProfileModel,
         workflowContext: WorkflowExecutionContext,
@@ -557,30 +563,22 @@ class AgentConnect: @unchecked Sendable {
 
                     logger.info("[Workflow] Pipeline: skipping RAG, history, compaction, episode management")
 
-                    // 2. Resolve inner generator strategy (dialect-specific)
-                    let innerGenerator = try self.resolveCognitiveGenerator(
+                    // 2. Resolve generator strategy (dialect-specific).
+                    //
+                    // No workflow-specific wrapper: workflow behavior is applied via
+                    // `SemanticContext.workflowContext` (set by the executor below),
+                    // which `buildStandardMessages` reads to:
+                    //   • force `PromptLayerConfig.workflow` (skip RAG/episodic/profile)
+                    //   • derive the per-node user-message prefix
+                    // Each dialect's own generator handles its native tool injection,
+                    // trigger suffix, response schema, and parser — so workflow
+                    // automatically inherits every agent/bot improvement.
+                    let generator = try self.resolveCognitiveGenerator(
                         llmConfig: llmConfig,
                         isBotFlow: isBotFlow
                     )
 
-                    // 3. Determine native flow and resolve dialect rules for the wrapper
-                    let isNativeFlow: Bool = {
-                        switch llmConfig.apiProvider {
-                        case .anthropic, .openAI, .google: return true
-                        case .ollama: return llmConfig.cognitiveCapability != .none && llmConfig.cognitiveProfile.capability == .parallelActions
-                        case .mlx: return false
-                        }
-                    }()
-
-                    // 4. Wrap in WorkflowCognitiveGenerator
-                    // Dialect rules are read directly from inner.dialectRules (protocol property).
-                    let workflowGenerator = WorkflowCognitiveGenerator(
-                        inner: innerGenerator,
-                        workflowContext: workflowContext,
-                        isNativeFlow: isNativeFlow
-                    )
-
-                    // 5. Initialize model
+                    // 3. Initialize model
                     let model = try await self.initializeModel(config: llmConfig, isBotFlow: isBotFlow)
 
                     // 6. Resolve tools (still needed for agent nodes)
@@ -603,7 +601,7 @@ class AgentConnect: @unchecked Sendable {
                         longTermMemory: longTermMemory,
                         agentCapabilities: agentCapabilities,
                         parentModel: model,
-                        generatorStrategy: workflowGenerator,
+                        generatorStrategy: generator,
                         rateLimitKey: rateLimitKey,
                         rateLimitCategory: rateLimitCategory,
                         parentProvider: llmConfig.apiProvider,
@@ -643,14 +641,25 @@ class AgentConnect: @unchecked Sendable {
                         errorRecovery = ErrorRecovery()
                     }
 
+                    // Image payload (Phase 3): upstream image artifacts become native
+                    // image blocks so vision-capable bot nodes "see" them. Reference-
+                    // backed — the provider resolves+encodes at send time (a failed
+                    // resolve throws there and fails the node, never a silent drop).
+                    let workflowImagePayload: Payload? = {
+                        let imageArtifacts = workflowContext.upstreamArtifacts.filter { $0.kind == .image }
+                        guard !imageArtifacts.isEmpty else { return nil }
+                        return imageArtifacts.map { .image(ImagePayload(reference: $0.reference, mimeType: $0.mimeType, alt: $0.label)) }
+                    }()
+
                     let input = AgentInput(
                         userInput: userInputForNode,
+                        userPayload: workflowImagePayload,
                         chatHistory: [],
                         conversationID: conversationID,
                         tools: activeTools,
                         longTermMemory: longTermMemory,
                         recentHistory: nil,
-                        generatorStrategy: workflowGenerator,
+                        generatorStrategy: generator,
                         workingMemory: WindowedLinearMemory(config: memoryConfig),
                         rateLimitKey: rateLimitKey,
                         rateLimitCategory: rateLimitCategory,
@@ -667,7 +676,7 @@ class AgentConnect: @unchecked Sendable {
                         modelTier: llmConfig.modelMetadata?.tier
                     )
 
-                    logger.info("[Workflow] AgentInput: tools=\(activeTools.count), generator=WorkflowCognitiveGenerator(\(type(of: innerGenerator))), node='\(workflowContext.nodeName)'")
+                    logger.info("[Workflow] AgentInput: tools=\(activeTools.count), generator=\(type(of: generator)), node='\(workflowContext.nodeName)'")
 
                     // 8. Execute
                     let executor = ExecutorFactory.create(for: profile)

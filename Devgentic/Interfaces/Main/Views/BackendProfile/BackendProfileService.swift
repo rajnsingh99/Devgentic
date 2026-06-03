@@ -96,8 +96,11 @@ final class BackendProfileService {
     }
 
     /// Deletes a profile using its ID from the persistence layer and reloads the local array.
+    /// Cascades to the matching `WorkflowLayoutSD` row (if any) — a no-op for non-workflow
+    /// profiles since the layout store keys on profile ID and simply finds nothing to delete.
     func deleteProfile(withId id: UUID) throws {
         try profileStore.deleteProfile(withId: id)
+        WorkflowLayoutStore.shared.delete(for: id)
         if editBuffer?.draft.id == id {
             editBuffer = nil
         }

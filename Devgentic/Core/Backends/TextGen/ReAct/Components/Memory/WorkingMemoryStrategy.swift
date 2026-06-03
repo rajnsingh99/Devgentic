@@ -14,7 +14,12 @@ private let logger = DGLogger(category: "WorkingMemory")
 /// Defines how volatile working memory is recorded and compiled for the LLM prompt.
 protocol WorkingMemoryStrategy: Sendable {
     /// Records a tool execution result with optional media artifacts.
-    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, result: String, artifacts: [MediaArtifact])
+    /// `params` is the serialised JSON arguments string the tool was invoked with —
+    /// rendered into the scratchpad so the model can see WHICH inputs produced
+    /// each observation, not just the tool name. Without this, two calls with
+    /// different paths look identical in the scratchpad and the model retries
+    /// the failed input because it can't see what it already attempted.
+    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, params: String, result: String, artifacts: [MediaArtifact])
 
     /// Records a system-level alert or error.
     mutating func recordSystemAlert(msg: String)
@@ -137,6 +142,7 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         let stepId: Int
         let toolCallId: String
         let toolName: String
+        let params: String       // Serialised JSON args, stored pre-truncated to paramsCap
         let result: String       // Stored pre-truncated to perEntryCap
         let artifactCount: Int   // Metadata only — artifacts aren't injected into prompts
     }
@@ -156,6 +162,13 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
 
     /// Separator between compiled lines.
     private static let lineSeparator = "\n\n"
+
+    /// Hard cap on stored params strings. Large enough for paths and search terms
+    /// (the common case ~30-80 chars); truncates write_file-style content payloads
+    /// that would otherwise dominate the per-entry budget. Independent of
+    /// `perEntryCap` so growing the result budget doesn't proportionally bloat
+    /// params storage — params are a disambiguator, not the primary signal.
+    private static let paramsCap = 200
 
     // MARK: - State
 
@@ -187,16 +200,20 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             switch entry {
             case .observation(let rec):
                 stepEntryCount += 1
-                let key = "\(rec.toolName)|\(rec.result.hashValue)"
+                // Dedup key now includes params hash so two calls with different
+                // arguments don't false-positive collapse on a coincidentally
+                // identical result (e.g. two empty-directory listings).
+                let key = "\(rec.toolName)|\(rec.params.hashValue)|\(rec.result.hashValue)"
                 if seenObsKeys.contains(key) {
-                    // Later occurrence — compile will emit a ~100-char pointer line.
-                    estimatedSize += 100
+                    // Later occurrence — compile will emit a pointer line carrying the
+                    // tool signature with params, so size scales with params length.
+                    estimatedSize += 100 + rec.params.count
                 } else {
                     seenObsKeys.insert(key)
                     if stepEntryCount > entries.count - config.fullFidelityWindow {
-                        estimatedSize += rec.result.count + 40 // result + step/tool/id overhead
+                        estimatedSize += rec.result.count + rec.params.count + 40
                     } else {
-                        estimatedSize += min(120, rec.result.count) + 30 // compressed one-liner
+                        estimatedSize += min(120, rec.result.count) + rec.params.count + 30
                     }
                 }
                 estimatedSize += separatorLen
@@ -219,23 +236,35 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
 
     // MARK: - Protocol Conformance
 
-    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, result: String, artifacts: [MediaArtifact]) {
+    mutating func recordObservation(stepId: Int, toolCallId: String, toolName: String, params: String, result: String, artifacts: [MediaArtifact]) {
         // Truncate at recording time to bound per-entry storage cost.
         // Account for truncation suffix length so the total stored size stays within perEntryCap.
-        let capped: String
         let suffixLen = Self.truncationSuffix.count
+
+        let cappedResult: String
         if result.count > config.perEntryCap {
             let prefixLen = max(0, config.perEntryCap - suffixLen)
-            capped = String(result.prefix(prefixLen)) + Self.truncationSuffix
+            cappedResult = String(result.prefix(prefixLen)) + Self.truncationSuffix
         } else {
-            capped = result
+            cappedResult = result
+        }
+
+        // Params get an independent, smaller cap. Large params (e.g. write_file
+        // content) shouldn't crowd out the result they produced.
+        let cappedParams: String
+        if params.count > Self.paramsCap {
+            let prefixLen = max(0, Self.paramsCap - suffixLen)
+            cappedParams = String(params.prefix(prefixLen)) + Self.truncationSuffix
+        } else {
+            cappedParams = params
         }
 
         let record = ObservationRecord(
             stepId: stepId,
             toolCallId: toolCallId,
             toolName: toolName,
-            result: capped,
+            params: cappedParams,
+            result: cappedResult,
             artifactCount: artifacts.count
         )
         entries.append(.observation(record))
@@ -304,8 +333,10 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         // Step 4: Collapse consecutive identical errors in old observations.
         // Only applies to observations (reasoning never "repeats" as an error pattern).
         // This prevents error cascades from consuming budget and evicting useful history.
+        // Error-collapse now requires SAME params too — two failures with different
+        // arguments are distinct exploration attempts and should stay separate.
         enum CollapsedOld {
-            case observation(firstStep: Int, lastStep: Int, toolName: String, result: String, count: Int)
+            case observation(firstStep: Int, lastStep: Int, toolName: String, params: String, result: String, count: Int)
             case reasoning(ReasoningRecord)
         }
         var collapsedOld: [CollapsedOld] = []
@@ -315,15 +346,16 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             case .observation(let obs):
                 let isError = obs.result.hasPrefix("System Error") || obs.result.hasPrefix("System Security")
                 if isError,
-                   case .observation(let fs, _, let tn, let res, let c) = collapsedOld.last,
+                   case .observation(let fs, _, let tn, let tp, let res, let c) = collapsedOld.last,
                    tn == obs.toolName,
+                   tp == obs.params,
                    res == obs.result {
                     collapsedOld[collapsedOld.count - 1] = .observation(
-                        firstStep: fs, lastStep: obs.stepId, toolName: tn, result: res, count: c + 1
+                        firstStep: fs, lastStep: obs.stepId, toolName: tn, params: tp, result: res, count: c + 1
                     )
                 } else {
                     collapsedOld.append(.observation(
-                        firstStep: obs.stepId, lastStep: obs.stepId, toolName: obs.toolName, result: obs.result, count: 1
+                        firstStep: obs.stepId, lastStep: obs.stepId, toolName: obs.toolName, params: obs.params, result: obs.result, count: 1
                     ))
                 }
             case .reasoning(let rec):
@@ -336,39 +368,41 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         var protectedLines: [String] = []
 
         // G10: Redundancy dedup across old + recent. Tracks the first step at which
-        // each unique (toolName, resultHash) combination was rendered at full detail;
-        // later occurrences become pointer lines ("IDENTICAL TO Step M") so the model
-        // sees an explicit signal that it wasted a call, and so the scratchpad doesn't
-        // spend budget re-rendering the same 8KB tree output twice.
+        // each unique (toolName, paramsHash, resultHash) combination was rendered at
+        // full detail; later occurrences become pointer lines ("IDENTICAL TO Step M")
+        // so the model sees an explicit signal that it wasted a call, and so the
+        // scratchpad doesn't spend budget re-rendering the same 8KB tree output twice.
         //
-        // Keyed on (toolName | resultHash) — params aren't stored in ObservationRecord
-        // so we can't key on arg hash, but (toolName, outputHash) identity is already a
-        // strong practical match for the common "re-called same tool same path" case.
-        // Hash collisions across genuinely-different outputs are vanishingly rare.
+        // Keying on params + result eliminates the false-positive collision where two
+        // calls with different paths happen to produce identical output (e.g. two
+        // empty directories). Without params in the key, the second call would be
+        // mislabeled as redundant and the model loses signal that it's exploring
+        // different inputs.
         var seenFirstStep: [String: Int] = [:]
 
-        func dedupKey(toolName: String, result: String) -> String {
-            return "\(toolName)|\(result.hashValue)"
+        func dedupKey(toolName: String, params: String, result: String) -> String {
+            return "\(toolName)|\(params.hashValue)|\(result.hashValue)"
         }
 
         // Render collapsed old entries as compressed one-liners.
         for group in collapsedOld {
             let line: String
             switch group {
-            case .observation(let fs, let ls, let toolName, let result, let count):
+            case .observation(let fs, let ls, let toolName, let params, let result, let count):
+                let signature = renderToolSignature(toolName: toolName, params: params)
                 if count > 1 {
                     // Error-collapse group — keep existing "failed Nx" form.
                     // Seed the dedup tracker so a later identical output still points back here.
-                    let key = dedupKey(toolName: toolName, result: result)
+                    let key = dedupKey(toolName: toolName, params: params, result: result)
                     if seenFirstStep[key] == nil { seenFirstStep[key] = fs }
-                    line = "- [Steps \(fs)-\(ls)] \(toolName) failed \(count)x \u{2192} \(compressSummary(result))"
+                    line = "- [Steps \(fs)-\(ls)] \(signature) failed \(count)x \u{2192} \(compressSummary(result))"
                 } else {
-                    let key = dedupKey(toolName: toolName, result: result)
+                    let key = dedupKey(toolName: toolName, params: params, result: result)
                     if let firstSeen = seenFirstStep[key] {
-                        line = "- [Step \(fs)] \(toolName) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call)"
+                        line = "- [Step \(fs)] \(signature) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call)"
                     } else {
                         seenFirstStep[key] = fs
-                        line = "- [Step \(fs)] \(toolName) \u{2192} \(compressSummary(result))"
+                        line = "- [Step \(fs)] \(signature) \u{2192} \(compressSummary(result))"
                     }
                 }
             case .reasoning(let rec):
@@ -391,15 +425,17 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
         for entry in recentEntries {
             switch entry {
             case .observation(let obs):
-                let key = dedupKey(toolName: obs.toolName, result: obs.result)
+                let signature = renderToolSignature(toolName: obs.toolName, params: obs.params)
+                let key = dedupKey(toolName: obs.toolName, params: obs.params, result: obs.result)
                 if let firstSeen = seenFirstStep[key] {
-                    // G10: This exact (tool, output) already appeared at Step `firstSeen`.
-                    // Surface the redundancy explicitly instead of re-rendering the full output.
-                    protectedLines.append("- [Step \(obs.stepId)] \(obs.toolName) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call, output omitted)")
+                    // G10: This exact (tool, params, output) already appeared at Step
+                    // `firstSeen`. Surface the redundancy explicitly instead of
+                    // re-rendering the full output.
+                    protectedLines.append("- [Step \(obs.stepId)] \(signature) \u{2192} IDENTICAL TO Step \(firstSeen) (redundant call, output omitted)")
                 } else {
                     seenFirstStep[key] = obs.stepId
                     let artifactNote = obs.artifactCount > 0 ? " [\(obs.artifactCount) artifact(s)]" : ""
-                    protectedLines.append("- [Step \(obs.stepId)] \(obs.toolName):\n\(obs.result)\(artifactNote)")
+                    protectedLines.append("- [Step \(obs.stepId)] \(signature):\n\(obs.result)\(artifactNote)")
                 }
             case .reasoning(let rec):
                 protectedLines.append("- [Step \(rec.stepId) thought]\n\(rec.text)")
@@ -487,5 +523,18 @@ struct WindowedLinearMemory: WorkingMemoryStrategy {
             return oneLine
         }
         return String(oneLine.prefix(117)) + "..."
+    }
+
+    /// Renders a tool name + serialised params as a compact call signature like
+    /// `list_directory({"path":"/Users/alice/Acme"})`. Empty / `{}` params render
+    /// as just the bare tool name so synthetic observations seeded by capability
+    /// decorators (Planning, Reflexion — which use `params: ""`) don't show
+    /// trailing empty parens.
+    private func renderToolSignature(toolName: String, params: String) -> String {
+        let trimmed = params.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "{}" {
+            return toolName
+        }
+        return "\(toolName)(\(trimmed))"
     }
 }

@@ -179,8 +179,8 @@ struct MistralV11Parser: CognitiveParserProtocol {
         }
         if let range = text.range(of: Self.callMarker) {
             let before = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return before.isEmpty ? "Executing tool calls..." : before
+            return ReasoningQualityFilter.filter(before)
         }
-        return "Executing tool calls..."
+        return ""
     }
 }

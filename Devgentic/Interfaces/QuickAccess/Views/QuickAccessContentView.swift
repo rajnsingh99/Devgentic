@@ -282,7 +282,7 @@ extension QuickAccessContentView {
         switch lastMessage.content {
         case .plainText(let text), .markdownText(let text): textToCopy = text
         case .codeBlock(_, let code): textToCopy = code
-        case .error(_, let details): textToCopy = details
+        case .error(_, let details, _, _): textToCopy = details
         case .image(let url, let alt, _): textToCopy = url?.absoluteString ?? alt ?? "Image"
         case .mediaArtifact(let artifact): textToCopy = artifact.label ?? artifact.kind.rawValue
         case .checkpoint(let summary): textToCopy = summary

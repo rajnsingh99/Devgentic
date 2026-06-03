@@ -387,16 +387,20 @@ final class ActiveStreamManager {
                             lastUpdateTime = Date()
                         }
                         
-                    case .error(let errorMsg):
+                    case .error(let structuredError):
                         // Surface the failure as a distinct error card in the bubble
                         // instead of leaving it buried in streaming prose. Without this,
                         // capability/system failures render as plain text that mimics
                         // the agent's own output and misleads users into thinking the
                         // run is still in progress.
-                        logger.error("Stream Error Event: \(errorMsg)")
+                        // (Phase 4: category-aware title + actionable suggestion +
+                        // category icon, rendered by ErrorMessageView.)
+                        logger.error("Stream Error Event [\(structuredError.category.rawValue)]: \(structuredError.message)")
                         agentMessage.content = MessageContent.error(
-                            title: "Execution Failed",
-                            details: errorMsg
+                            title: structuredError.title,
+                            details: structuredError.message,
+                            category: structuredError.category,
+                            suggestion: structuredError.suggestion
                         )
                         agentMessage.invalidateMarkdownCache()
                         if let agentResponse = agentMessage.agentResponse,
@@ -429,12 +433,12 @@ final class ActiveStreamManager {
                         logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(String(summary.prefix(200)))")
                         workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary)
 
-                    case .workflowNodeFailed(let nodeID, let profileName, let error):
+                    case .workflowNodeFailed(let nodeID, let profileName, let error, let suggestion):
                         agentMessage.thinkingHeadline = "\(profileName) failed"
                         let failedId = UUID()
                         agentMessage.appendTimelineEvent(.thought(id: failedId, text: "❌ \(profileName): \(error)"))
                         logger.info("[WF_EVENT] NodeFailed: '\(profileName)' [\(nodeID)] error=\(error)")
-                        workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error)
+                        workflowExecutionState?.handleNodeFailed(nodeID: nodeID, profileName: profileName, error: error, suggestion: suggestion)
 
                     case .workflowProgress(let completed, let total):
                         agentMessage.thinkingHeadline = "Workflow progress: \(completed)/\(total)"
@@ -723,9 +727,19 @@ final class ActiveStreamManager {
         }
         
         if let error = error {
-            let errorContent = MessageContent.error(title: "Response Error", details: error.localizedDescription)
+            // Render typed retrieval failures (e.g. an attached image that couldn't
+            // be loaded for a vision turn) with their category icon + remediation,
+            // symmetric with the streaming `.error(StructuredError)` path, instead of
+            // the generic "Response Error" card this chokepoint would otherwise force.
+            let errorContent: MessageContent
+            if let fre = error as? FileRetrievalError {
+                let se = fre.structuredError
+                errorContent = .error(title: se.title, details: se.message, category: se.category, suggestion: se.suggestion)
+            } else {
+                errorContent = .error(title: "Response Error", details: error.localizedDescription)
+            }
             message.content = errorContent
-            
+
             if let agentResponse = message.agentResponse,
                agentResponse.variants.indices.contains(agentResponse.selectedVariantIndex) {
                 message.agentResponse?.variants[agentResponse.selectedVariantIndex].content = errorContent

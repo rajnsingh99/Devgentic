@@ -80,8 +80,11 @@ struct ConversationExporter {
                 lines.append(code)
                 lines.append("```")
 
-            case .error(let errorTitle, let details):
+            case .error(let errorTitle, let details, _, let suggestion):
                 lines.append("> **Error**: \(errorTitle ?? "Unknown") — \(details)")
+                if let suggestion, !suggestion.isEmpty {
+                    lines.append("> 💡 \(suggestion)")
+                }
 
             case .image(_, let alt, _):
                 lines.append("*[Image: \(alt ?? "generated image")]*")

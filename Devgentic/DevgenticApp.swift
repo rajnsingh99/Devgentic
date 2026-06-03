@@ -35,6 +35,9 @@ struct DevgenticApp: App {
                 AttachedImageFileSD.self,
                 // Cross-launch download history (Ollama / MLX / Whisper)
                 DownloadRecord.self,
+                // Workflow persistence (migrated from UserDefaults)
+                WorkflowLayoutSD.self,
+                WorkflowRunRecordSD.self,
             ])
             let appSupportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let storeURL = appSupportURL.appendingPathComponent("DevgenticSD.store")
@@ -45,11 +48,18 @@ struct DevgenticApp: App {
             MCPToolStore.shared.configureContainer(container)
             PromptStore.shared.configureContainer(container)
             ChatPersistenceStore.shared.configureContainer(container)
+            WorkflowLayoutStore.shared.configureContainer(container)
+            WorkflowRunHistoryStore.shared.configureContainer(container)
             // Download-history store is configured on the main actor; do it
             // eagerly via Task so reconcileOrphans runs as soon as possible.
             Task { @MainActor in
                 DownloadHistoryStore.shared.configureContainer(container)
                 DownloadHistoryStore.shared.reconcileOrphans()
+                // Any workflow run still in .running at launch is from a prior
+                // session that ended before the run could finalize. Flip to
+                // .cancelled with "Interrupted" so the history list doesn't
+                // show a phantom spinning record forever.
+                WorkflowRunHistoryStore.shared.reconcileOrphans()
             }
             return container
         } catch {

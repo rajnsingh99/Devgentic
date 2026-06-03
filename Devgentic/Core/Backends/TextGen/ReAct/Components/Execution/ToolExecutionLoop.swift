@@ -31,6 +31,24 @@ func executeToolCalls(
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
 
+    // Emit the per-iteration reasoning trace UPFRONT so `EvaluationLogger`'s
+    // iteration counter increments on every iteration — including ones that
+    // exit via `final_answer`. The previous placement of this emission was
+    // after dedup, which the `final_answer` early-return below skipped, causing
+    // the executor-span summary to report N-1 iterations on clean exits.
+    // We use `toolCalls.count` here (pre-dedup) since dedup hasn't run yet;
+    // the separate "Deduped X → Y" log line further down preserves the dedup
+    // observability for diagnostics.
+    onTraceUpdate(AgentTraceLog(
+        traceID: iterationSpan.traceID,
+        spanID: iterationSpan.spanID,
+        parentSpanID: iterationSpan.parentSpanID,
+        stepNumber: currentIteration,
+        state: .thinking(.reasoning),
+        content: "Analyzing \(toolCalls.count) tool(s)...",
+        metadata: ["iteration": "\(currentIteration)"]
+    ))
+
     // --- Terminal Signal Fast-Path: final_answer wins ---
     // If the model called `final_answer`, it's signalling task completion.
     // Drop every other call in this iteration — the agent MUST only emit one
@@ -55,16 +73,6 @@ func executeToolCalls(
     // --- Deduplicate ---
     let uniqueToolCalls = deduplicateToolCalls(toolCalls)
     logger.info("Deduped \(toolCalls.count) → \(uniqueToolCalls.count) unique tools.")
-
-    onTraceUpdate(AgentTraceLog(
-        traceID: iterationSpan.traceID,
-        spanID: iterationSpan.spanID,
-        parentSpanID: iterationSpan.parentSpanID,
-        stepNumber: currentIteration,
-        state: .thinking(.reasoning),
-        content: "Analyzing \(uniqueToolCalls.count) tools...",
-        metadata: ["iteration": "\(currentIteration)"]
-    ))
 
     // --- Partition: Interactive vs Autonomous ---
     // Interactive tools require human input (ask_user or HITL confirmation).

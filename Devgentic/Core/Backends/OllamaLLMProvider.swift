@@ -24,6 +24,34 @@ struct OllamaLLMProvider: LLMProvider {
     }
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        // Upcast to [[String: Any]] and delegate — text-only, behaviour-identical.
+        try await postChat(messages: messages.map { $0 as [String: Any] }, tools: tools, responseSchema: responseSchema)
+    }
+
+    /// Multimodal (vision) bot path. Overrides the protocol default — which would
+    /// strip images via `toLegacyDict()` — to attach each message's images as
+    /// Ollama's per-message `images` array of RAW base64 strings (no `data:` prefix,
+    /// per /api/chat). Text-only payloads produce the same body as the legacy path.
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        var messages: [[String: Any]] = []
+        for pm in payload {
+            var msg: [String: Any] = ["role": pm.role, "content": pm.content.textContent]
+            var images: [String] = []
+            for block in pm.content {
+                if case .image(let img) = block {
+                    // resolve() throws on a missing/unreadable image → surfaced, not dropped.
+                    images.append(try await img.reference.resolve().base64EncodedString())
+                }
+            }
+            if !images.isEmpty { msg["images"] = images }
+            messages.append(msg)
+        }
+        return try await postChat(messages: messages, tools: tools, responseSchema: responseSchema)
+    }
+
+    /// Shared POST `/api/chat` (non-streaming) → extracted assistant content string.
+    /// Accepts `[[String: Any]]` so callers can attach per-message `images` arrays.
+    private func postChat(messages: [[String: Any]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         let url = config.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"

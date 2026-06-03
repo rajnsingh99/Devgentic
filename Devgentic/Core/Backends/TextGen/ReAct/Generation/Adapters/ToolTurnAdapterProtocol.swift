@@ -14,6 +14,14 @@
 
 import Foundation
 
+/// A pre-resolved image ready for native serialization. Bytes are already loaded
+/// and base64-encoded, because `ToolTurnAdapter` methods are synchronous — image
+/// resolution (async) happens upstream in the executor before the turn is built.
+struct ResolvedImage: Sendable {
+    let mimeType: String   // "image/png", "image/jpeg", …
+    let base64: String     // base64-encoded image bytes
+}
+
 /// Provider-specific serializer for `assistant(tool_calls) → tool(result)` turn pairs.
 ///
 /// Providers diverge on the exact wire shape:
@@ -53,6 +61,15 @@ protocol ToolTurnAdapter: Sendable {
     /// all three accept `{role, content: string}` at minimum). Gemini overrides because
     /// its messages use `parts: [{text: ...}]` instead of a `content` field.
     func normalizeCanonical(message: [String: String]) -> [String: Any]
+
+    /// Builds the kickoff user turn carrying the original query plus any attached
+    /// images (native multimodal input on the agent path). `images` is empty for
+    /// text-only turns — in which case the output MUST be byte-identical to
+    /// `normalizeCanonical({role:user, content:text})` so text runs (and their
+    /// KV-cache prefix) are unchanged. Vision-capable cloud adapters (Claude/
+    /// OpenAI/Gemini) override to emit their native image shape; non-vision/local
+    /// adapters use the default and silently ignore images.
+    func userTurn(text: String, images: [ResolvedImage]) -> [String: Any]
 }
 
 extension ToolTurnAdapter {
@@ -68,5 +85,12 @@ extension ToolTurnAdapter {
     /// Gemini overrides.
     func normalizeCanonical(message: [String: String]) -> [String: Any] {
         message as [String: Any]
+    }
+
+    /// Default: ignore images (non-vision / local providers) — produce the same
+    /// normalized text turn as before, so text-only runs stay byte-identical.
+    /// Vision-capable cloud adapters override.
+    func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
+        normalizeCanonical(message: ["role": "user", "content": text])
     }
 }

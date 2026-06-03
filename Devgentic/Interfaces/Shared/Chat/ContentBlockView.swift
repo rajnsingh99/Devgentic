@@ -11,7 +11,6 @@ import SwiftUI
 import os
 
 private let logger = DGLogger(category: "ContentBlockView")
-private let CODE_BLOCK_LINE_LIMIT = 50
 
 struct ContentBlock: Identifiable, Equatable, Hashable {
     let id: String // e.g., "block-0", "block-1"
@@ -57,7 +56,7 @@ struct ContentBlockView: View, Equatable {
                 .padding(.bottom, theme.spacingSmall)
 
         case .code(let lang, let codeContent, let fileName):
-            if codeContent.components(separatedBy: .newlines).count > CODE_BLOCK_LINE_LIMIT {
+            if codeContent.components(separatedBy: .newlines).count > ChatUIConstants.codeBlockLineLimit {
                 CodeBlockCardView(language: lang, lineCount: codeContent.components(separatedBy: .newlines).count, fileName: fileName) {
                     let snippet = CodeSnippet(language: lang, code: codeContent)
                     chatHistoryViewModel.openMessageInCodeViewer(message: message, selectedSnippet: snippet)

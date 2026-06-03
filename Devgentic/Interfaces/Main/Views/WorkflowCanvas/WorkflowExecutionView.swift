@@ -71,6 +71,34 @@ final class WorkflowExecutionState {
     /// Keyed by operationID for fast lookup/removal on resolution.
     var pendingInteractions: [UUID: WorkflowInteractionRequest] = [:]
 
+    /// The user's typed input that kicked off this workflow run. Used as the
+    /// "input" displayed on source nodes (those without upstream edges) in the
+    /// new card UI. Set by `MessagingCoordinator` when execution starts.
+    var userInput: String = ""
+
+    /// The workflow profile this run belongs to. Lets `WorkflowRunDisplayData`
+    /// load the layout for live runs to render pending placeholder cards and
+    /// compute per-node inputs from upstream edges.
+    var workflowProfileID: UUID?
+
+    /// Wall-clock start time of the run. Lets the title bar show "Total time"
+    /// while the run is still live.
+    var startedAt: Date = Date()
+
+    /// Wall-clock end time of the run. Set when the workflow reaches a terminal
+    /// state (`handleFinalOutput` / `handleError`). When non-nil, `WorkflowRunDisplayData`
+    /// freezes `duration` at `completedAt - startedAt` instead of recomputing
+    /// against the current date on every re-render — otherwise the "Total time"
+    /// string would keep ticking up forever as long as the live state stays in memory.
+    var completedAt: Date?
+
+    /// ID of the persisted `WorkflowRunRecord` this live state is bound to.
+    /// Set when `MessagingCoordinator` inserts an initial `.running` record at
+    /// run start; reused when the same record is upserted with the final
+    /// `.completed/.failed/.cancelled` payload on completion. Lets the UI
+    /// resolve "the in-progress history row" back to this live state.
+    var runRecordID: UUID?
+
     // MARK: - Per-Node Timeline
 
     /// Appends a timeline event to a specific node's timeline.
@@ -121,17 +149,21 @@ final class WorkflowExecutionState {
         }
     }
 
-    func handleNodeFailed(nodeID: UUID, profileName: String, error: String) {
+    func handleNodeFailed(nodeID: UUID, profileName: String, error: String, suggestion: String? = nil) {
+        // Fold the actionable remediation into `detail` so it rides the existing
+        // node-detail plumbing and surfaces in every run card (live + persisted)
+        // with no adapter/snapshot changes.
+        let detail = suggestion.map { "\(error)\n\n💡 \($0)" } ?? error
         if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
             nodeResults[idx] = WorkflowNodeResult(
                 id: nodeResults[idx].id, nodeID: nodeID, profileName: profileName,
-                status: .failed, detail: error,
+                status: .failed, detail: detail,
                 startTime: nodeResults[idx].startTime, endTime: Date()
             )
         } else {
             nodeResults.append(WorkflowNodeResult(
                 id: UUID(), nodeID: nodeID, profileName: profileName,
-                status: .failed, detail: error,
+                status: .failed, detail: detail,
                 startTime: Date(), endTime: Date()
             ))
         }
@@ -155,11 +187,13 @@ final class WorkflowExecutionState {
     func handleFinalOutput(_ output: String) {
         finalOutput = output
         isRunning = false
+        completedAt = Date()
     }
 
     func handleError(_ error: String) {
         workflowError = error
         isRunning = false
+        completedAt = Date()
     }
 
     func reset() {
@@ -171,6 +205,8 @@ final class WorkflowExecutionState {
         workflowError = nil
         nodeTimelines = [:]
         pendingInteractions = [:]
+        completedAt = nil
+        runRecordID = nil
     }
 }
 

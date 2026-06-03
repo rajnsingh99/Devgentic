@@ -142,6 +142,12 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                     : (try? JSONEncoder().encode(message.timelineEvents))
                 existing.traceID = message.traceID
                 existing.senderType = message.sender.rawValue
+                // Terminal status — set late in the run by the executor's `.executionFinished`
+                // event, so almost every persistence write here happens AFTER the field is
+                // populated. Update on every upsert to keep disk in sync with the in-memory
+                // ChatMessage that ActiveStreamManager mutates.
+                existing.terminalOutcomeRaw = message.terminalOutcome?.rawValue
+                existing.terminalReason = message.terminalReason
 
                 // Update attachments
                 for old in existing.attachedTextFiles { context.delete(old) }

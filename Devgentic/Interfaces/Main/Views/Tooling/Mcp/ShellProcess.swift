@@ -39,90 +39,124 @@ class ShellProcess {
     
     init(command: String, arguments: [String], environment: [String: String] = [:]) throws {
         self.process = Process()
-        
-        // 1. Construct Safe Command
-        let safeArgs = arguments.map { arg -> String in
-            if arg.contains(" ") && !arg.hasPrefix("\"") && !arg.hasPrefix("'") {
-                return "\"\(arg)\""
-            }
-            return arg
-        }
-        
-        let fullCommandString = ([command] + safeArgs).joined(separator: " ")
-        self.commandLine = fullCommandString
-        
-        // 2. Setup Login Shell
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-l", "-c", fullCommandString]
-        
-        // 3. Environment Setup & PATH Injection (CRITICAL FIX)
+
+        // 1. Environment & augmented PATH
+        //    Common binary locations are prepended so we can locate `npx`, `uvx`, etc.
+        //    when the parent process inherits a minimal PATH.
         var mergedEnv = ProcessInfo.processInfo.environment
-        
-        // Merge provided envs (like API Keys)
         environment.forEach { mergedEnv[$0] = $1 }
-        
+
         if mergedEnv["TERM"] == nil {
             mergedEnv["TERM"] = "xterm-256color"
         }
-        
-        // FIX: Manually inject common binary locations into PATH.
-        // This solves "uvx: command not found" if .zshrc doesn't load correctly in non-interactive mode.
+
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let commonPaths = [
-            "\(home)/.cargo/bin",   // Common for uv / rust tools
-            "\(home)/.local/bin",   // Common for python tools
-            "/opt/homebrew/bin",    // Apple Silicon Homebrew
-            "/usr/local/bin",       // Intel Homebrew
+            "\(home)/.cargo/bin",
+            "\(home)/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
             "/usr/bin",
             "/bin",
             "/usr/sbin",
             "/sbin"
         ]
-        
-        // Get existing PATH, default to empty
-        var currentPath = mergedEnv["PATH"] ?? ""
-        
-        // Prepend missing paths
-        for path in commonPaths {
-            // Check if path exists before adding to keep PATH clean (optional, but good practice)
-            if FileManager.default.fileExists(atPath: path) {
-                // Only add if not already present to avoid duplicates
-                if !currentPath.contains(path) {
-                    currentPath = "\(path):\(currentPath)"
-                }
+
+        var pathComponents = (mergedEnv["PATH"] ?? "").split(separator: ":").map(String.init)
+        for path in commonPaths where FileManager.default.fileExists(atPath: path) {
+            if !pathComponents.contains(path) {
+                pathComponents.insert(path, at: 0)
             }
         }
-        
+        let currentPath = pathComponents.joined(separator: ":")
         mergedEnv["PATH"] = currentPath
         process.environment = mergedEnv
-        
-        // 4. Pipe Setup
+
+        // 2. Resolve executable path WITHOUT shell interpolation.
+        //    Passing user-supplied args through `zsh -c "<joined string>"` is a command-injection
+        //    vector ($, backticks, ;, |, &, quotes, newlines all get interpreted). We resolve
+        //    `command` to an absolute path and exec it directly with `arguments` as an array,
+        //    so each element is a literal argv entry — no shell metacharacter parsing.
+        let resolvedExecutable = try Self.resolveExecutable(command, augmentedPath: currentPath)
+
+        process.executableURL = URL(fileURLWithPath: resolvedExecutable)
+        process.arguments = arguments
+
+        self.commandLine = ([resolvedExecutable] + arguments).joined(separator: " ")
+
+        // 3. Pipe Setup
         process.standardInput = stdInPipe
         process.standardOutput = stdOutPipe
         process.standardError = stdErrPipe
-        
-        // 5. CRITICAL LOGGING FIX: Real-time Stderr Monitoring
+
+        // 4. Real-time Stderr Monitoring
         stdErrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            
+
             if let str = String(data: data, encoding: .utf8) {
                 let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    // Log immediately to Console.app / Xcode
                     logger.error("[STDERR] \(trimmed)")
-                    
-                    // Archive it safely
                     self?.stderrQueue.async {
                         self?.capturedStderr += str
                     }
                 }
             }
         }
-        
-        logger.info("Spawning ShellProcess: /bin/zsh -l -c \(fullCommandString)")
-        // Log the constructed PATH for debugging verification
+
+        // MCP server CLIs commonly take secrets as args (`--api-key X`, `TOKEN=X`,
+        // `Authorization: Bearer X`). Redact before logging — the live `process.arguments`
+        // above still receives the original, unredacted values.
+        let redactedArgs = MCPRedaction.redact(arguments: arguments).joined(separator: " ")
+        logger.info("Spawning ShellProcess: \(resolvedExecutable) \(redactedArgs)")
         logger.info("Constructed PATH: \(currentPath)")
+    }
+
+    /// Resolves `command` to an absolute executable path without going through a shell.
+    /// - Absolute paths are validated for executability and returned as-is.
+    /// - Tilde paths (`~/foo`) are expanded against the user's home directory.
+    /// - Bare names (`npx`, `uvx`) are searched against the augmented PATH.
+    /// - Relative paths containing `/` (e.g. `./foo`) are rejected to avoid
+    ///   CWD-dependent surprises.
+    private static func resolveExecutable(_ command: String, augmentedPath: String) throws -> String {
+        let fm = FileManager.default
+
+        if command.hasPrefix("/") {
+            guard fm.isExecutableFile(atPath: command) else {
+                throw ShellProcessError.processFailedToStart(
+                    "Executable not found or not executable: \(command)"
+                )
+            }
+            return command
+        }
+
+        if command.hasPrefix("~") {
+            let expanded = (command as NSString).expandingTildeInPath
+            guard fm.isExecutableFile(atPath: expanded) else {
+                throw ShellProcessError.processFailedToStart(
+                    "Executable not found or not executable: \(expanded)"
+                )
+            }
+            return expanded
+        }
+
+        if command.contains("/") {
+            throw ShellProcessError.processFailedToStart(
+                "Relative paths are not supported (got '\(command)'). Use an absolute path or a bare command name available on PATH."
+            )
+        }
+
+        for dir in augmentedPath.split(separator: ":") {
+            let candidate = "\(dir)/\(command)"
+            if fm.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+
+        throw ShellProcessError.processFailedToStart(
+            "Command '\(command)' not found in PATH. Ensure it is installed, or provide an absolute path."
+        )
     }
     
     func run() throws {
@@ -137,14 +171,17 @@ class ShellProcess {
     func terminate() {
         // Remove handler to prevent crashes accessing invalid handles
         stdErrPipe.fileHandleForReading.readabilityHandler = nil
-        
+
         guard process.isRunning else { return }
-        process.terminate()
-        
+        process.terminate() // sends SIGTERM
+
+        // Escalate to SIGKILL if the child hasn't exited within 2 seconds.
+        // `Process.terminate()` only ever sends SIGTERM, so calling it twice is a no-op
+        // — we have to invoke `kill(2)` directly with SIGKILL to guarantee teardown.
         DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 2.0) { [weak process] in
             guard let proc = process, proc.isRunning else { return }
-            logger.warning("Process stuck. Sending SIGKILL.")
-            proc.terminate()
+            logger.warning("Process \(proc.processIdentifier) stuck after SIGTERM. Sending SIGKILL.")
+            kill(proc.processIdentifier, SIGKILL)
         }
     }
     

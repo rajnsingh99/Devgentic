@@ -6,9 +6,13 @@
 //
 
 import Foundation
+import CoreImage
 import MLX
 import MLXLLM
 @preconcurrency import MLXLMCommon
+import MLXVLM   // Vision-language models. Importing it also keeps `MLXVLM.TrampolineModelFactory`
+               // in the binary so `loadModelContainer`'s registry auto-routes VLMs to the VLM
+               // factory (the registry resolves it via NSClassFromString — dead-stripped otherwise).
 import os
 
 /// A thread-safe actor that manages the lifecycle and inference of local MLX models.
@@ -395,6 +399,93 @@ actor MLXService {
         }
     }
     
+    // MARK: - Vision Inference
+
+    /// Streams a VISION chat response. Uses the SAME loaded `modelContainer` as
+    /// `streamChat` (the registry already loaded it via the VLM factory for a vision
+    /// `model_type`), but routes through the model's `UserInputProcessor` so attached
+    /// images are encoded into the prompt — the processor inserts the per-family image
+    /// tokens automatically, so we never hand-place placeholders.
+    ///
+    /// `imageData` are raw image bytes; `CIImage` is constructed inside `perform` (off
+    /// the actor's Sendable path) and attached to the LAST user turn. Generation is a
+    /// simple chunk stream — no tool-call / stop-sequence machinery (vision answers are
+    /// plain prose).
+    func streamVisionChat(
+        messages: [[String: String]],
+        imageData: [Data],
+        maxTokens: Int = 2048,
+        temperature: Float = 0.6,
+        topP: Float = 1.0
+    ) -> AsyncThrowingStream<String, Error> {
+        cancelIdleTimer()
+
+        return AsyncThrowingStream { continuation in
+            Task {
+                guard let container = modelContainer else {
+                    continuation.finish(throwing: NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "No MLX model is currently loaded. Please load a model first."]))
+                    return
+                }
+
+                do {
+                    let wrappedMessages = UnsafeSendable(messages)
+                    let wrappedData = UnsafeSendable(imageData)
+
+                    let stream = try await container.perform { context -> AsyncStream<Generation> in
+                        // Decode raw bytes → CIImage → UserInput.Image inside the closure.
+                        let images: [UserInput.Image] = wrappedData.value.compactMap { data in
+                            CIImage(data: data).map { .ciImage($0) }
+                        }
+
+                        // Rebuild the chat, attaching the images to the final user turn.
+                        let msgs = wrappedMessages.value
+                        let lastUserIdx = msgs.lastIndex(where: { $0["role"] == "user" })
+                        var chat: [Chat.Message] = []
+                        for (i, m) in msgs.enumerated() {
+                            let content = m["content"] ?? ""
+                            let imgs = (i == lastUserIdx) ? images : []
+                            switch m["role"] {
+                            case "system":    chat.append(.system(content, images: imgs))
+                            case "assistant": chat.append(.assistant(content, images: imgs))
+                            default:          chat.append(.user(content, images: imgs))
+                            }
+                        }
+
+                        let userInput = UserInput(chat: chat)
+                        let lmInput = try await context.processor.prepare(input: userInput)
+
+                        let parameters = GenerateParameters(
+                            maxTokens: maxTokens,
+                            temperature: temperature,
+                            topP: topP,
+                            repetitionPenalty: nil,
+                            repetitionContextSize: 20
+                        )
+
+                        return try MLXLMCommon.generate(
+                            input: lmInput,
+                            parameters: parameters,
+                            context: context
+                        )
+                    }
+
+                    for await generation in stream {
+                        if case .chunk(let text) = generation {
+                            continuation.yield(text)
+                        }
+                    }
+
+                    continuation.finish()
+                } catch {
+                    logger.error("MLX Vision Generation Error: \(error.localizedDescription)")
+                    continuation.finish(throwing: error)
+                }
+
+                self.startIdleTimer()
+            }
+        }
+    }
+
     // MARK: - Sendable Bridge
 
     /// Recursively projects a JSON-compatible `Any` into a concrete `Sendable` type.

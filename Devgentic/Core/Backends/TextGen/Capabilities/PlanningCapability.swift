@@ -69,7 +69,7 @@ actor PlanningExecutorWrapper: Executor {
                     let executionTrace = input.traceContext
 
                     // --- Start Episode ---
-                    sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
+                    sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: .active))
                     sessionState.workingMemory.removeValue(forKey: "current_focus")
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
@@ -125,7 +125,8 @@ actor PlanningExecutorWrapper: Executor {
                         userProfile: userProfile,
                         skillManifests: input.skillManifests,
                         taskDescription: nil,
-                        promptLayerConfig: .agent
+                        promptLayerConfig: .agent,
+                        workflowContext: nil
                     )
 
                     let planGenerator = PlanGeneratorStrategy(planningConfig: config)
@@ -164,7 +165,7 @@ actor PlanningExecutorWrapper: Executor {
                             // User rejected the plan or stream was cancelled
                             logger.info("Plan rejected by user.")
                             continuation.yield(.content("Plan was cancelled. Let me know if you'd like a different approach."))
-                            sessionState.closeActiveEpisode(status: "CANCELLED", outcome: "Plan rejected by user")
+                            sessionState.closeActiveEpisode(outcome: .cancelled, message: "Plan rejected by user")
                             await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                             continuation.yield(.executionFinished(outcome: .cancelled, reason: "Plan rejected by user"))
                             continuation.finish()
@@ -307,9 +308,8 @@ actor PlanningExecutorWrapper: Executor {
                     let terminalReason: String? = failedSubtasks > 0
                         ? "\(failedSubtasks) of \(totalSubtasks) subtasks failed"
                         : nil
-                    let episodeStatus = allFailed ? "FAILED" : "COMPLETED"
 
-                    sessionState.closeActiveEpisode(status: episodeStatus, outcome: response)
+                    sessionState.closeActiveEpisode(outcome: terminalOutcome, message: response)
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     continuation.yield(.content(response))
@@ -398,6 +398,7 @@ actor PlanningExecutorWrapper: Executor {
                     stepId: 0,
                     toolCallId: "dep_\(depID)",
                     toolName: "prior_subtask",
+                    params: "",
                     result: "[\(depDescription)]: \(depResult)",
                     artifacts: []
                 )

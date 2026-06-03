@@ -15,11 +15,17 @@
 import Foundation
 
 /// Workflow-specific execution context passed from `WorkflowExecutor` through
-/// `AgentConnect` to the `WorkflowCognitiveGenerator`.
+/// `AgentConnect` to the underlying agent/bot generator via `SemanticContext`.
 ///
 /// Carries the two inputs a workflow node needs:
 /// - `taskDescription`: WHAT to do (per-node directive, merged with user query for first nodes)
 /// - `upstreamInput`: WITH what data (clean text from upstream nodes)
+///
+/// The presence of this struct on `SemanticContext.workflowContext` is the
+/// single signal `buildStandardMessages` uses to apply workflow-specific
+/// behavior (per-node user-message prefix). The `PromptLayerConfig.workflow`
+/// switch is handled separately at the SemanticContext construction site
+/// (see `ReActAgentExecutor` and `ChatExecutor`).
 struct WorkflowExecutionContext: Sendable {
 
     /// Per-node task description from `WorkflowNodeConfig.taskDescription`.
@@ -39,4 +45,65 @@ struct WorkflowExecutionContext: Sendable {
 
     /// Node display name for logging and tracing.
     let nodeName: String
+
+    /// Media/file artifacts produced by completed upstream nodes (images, audio,
+    /// video, documents). Surfaced to the node as a text *manifest* (kind, label,
+    /// mime, resolvable path) by `userMessagePrefix`, so an agent with file/HTTP
+    /// tools can act on them. Native image-into-vision injection is a later phase;
+    /// this field is the carrier for it. Empty when no upstream artifacts.
+    var upstreamArtifacts: [MediaArtifact] = []
+
+    /// Pre-extracted text of `.document` upstream artifacts (PDF/DOCX/XLSX/…),
+    /// computed asynchronously by the executor and budget-limited. Inlined into the
+    /// prompt so a text-only model can still read attached documents. Empty when
+    /// there are no extractable documents.
+    var upstreamArtifactText: String = ""
+
+    /// Computes the per-node user-message prefix that gets prepended to the
+    /// user turn in `buildStandardMessages`. Single source of truth — used by
+    /// both the agent (ReAct) path and the bot (Chat) path automatically.
+    ///
+    /// Three branches:
+    ///   - `.isFirstNode == true` → "Execute your task." (the task description
+    ///     already lives in the system prompt's `<task>` layer)
+    ///   - `.upstreamInput.isEmpty` → "No input data provided. …" (downstream
+    ///     node where every predecessor failed/skipped — surface the gap)
+    ///   - else → wrapping-appropriate `<input>upstreamInput</input>` block
+    ///
+    /// `wrapping` is supplied by the caller (`buildStandardMessages` knows its
+    /// own wrapping) so XML-style generators get `<input>…</input>` and
+    /// markdown-style generators get `## Input\n…`.
+    func userMessagePrefix(wrapping: PromptWrapping) -> String {
+        if isFirstNode {
+            return "Execute your task."
+        }
+
+        // Compose the downstream user message from up to three sections: the
+        // upstream text, a manifest of attached files, and inlined document text.
+        // Each is wrapping-aware so XML dialects get `<input>`/`<attached_files>`
+        // and markdown dialects get `## Input` / `## Attached Files`. Both the bot
+        // and agent workflow paths route through here, so artifacts reach both.
+        var sections: [String] = []
+
+        if !upstreamInput.isEmpty {
+            sections.append(wrapping.section("input", content: upstreamInput))
+        }
+
+        let manifest = ContextCompressor.renderArtifactManifest(upstreamArtifacts)
+        if !manifest.isEmpty {
+            sections.append(wrapping.section("attached_files", content: manifest))
+        }
+
+        if !upstreamArtifactText.isEmpty {
+            sections.append(wrapping.section("attached_documents", content: upstreamArtifactText))
+        }
+
+        // No text AND no artifacts — every predecessor failed/skipped or produced
+        // nothing. Surface the gap rather than emitting an empty user turn.
+        if sections.isEmpty {
+            return "No input data provided. Execute your task based on the task description."
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
 }

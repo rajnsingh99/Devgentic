@@ -39,6 +39,9 @@ enum WorkflowNodeKind: Codable, Hashable, Sendable {
 
     /// Trigger — starts workflow execution (webhook, schedule, manual).
     case trigger(TriggerNodeConfig)
+
+    /// Action/integration — invokes a tool directly and deterministically (no LLM).
+    case action(ActionNodeConfig)
 }
 
 // MARK: - Node Kind Configs
@@ -234,6 +237,33 @@ struct GateNodeConfig: Codable, Hashable, Sendable {
 
 struct TriggerNodeConfig: Codable, Hashable, Sendable { }
 
+/// Deterministic action/integration node — invokes a tool directly, with NO LLM.
+///
+/// At run time the node resolves `tool` to an executable tool, builds the tool's
+/// JSON arguments by resolving each `argumentBindings` template against the
+/// upstream data (`{{ input }}`, `{{ input.json.x }}`, `{{ var.y }}`), invokes it,
+/// and emits the tool's output + artifacts. This is the "do things" node:
+/// HTTP calls, file writes, notifications, MCP tool invocations — instant,
+/// free (no tokens), and deterministic, versus puppeteering an agent to do it.
+struct ActionNodeConfig: Codable, Hashable, Sendable {
+    /// The selected tool reference (native or MCP), or nil when unconfigured.
+    /// Reuses the same `Tool` type profiles persist — carries the tool `name`,
+    /// `sourceId` (native vs MCP routing), and a snapshot of its `parameters`
+    /// schema (so the inspector can render one binding field per argument).
+    var tool: Tool? = nil
+
+    /// Maps each tool-argument name → a template string resolved at run time.
+    /// e.g. `["url": "https://hooks.example.com", "body": "{{ input }}"]`.
+    /// Only bound arguments are sent; unbound optional args are omitted (and an
+    /// unbound *required* arg surfaces as a clear tool-decode failure at run time).
+    var argumentBindings: [String: String] = [:]
+
+    init(tool: Tool? = nil, argumentBindings: [String: String] = [:]) {
+        self.tool = tool
+        self.argumentBindings = argumentBindings
+    }
+}
+
 // MARK: - Per-Node Execution Config
 
 /// Per-node execution configuration owned by the workflow layer (not the agent layer).
@@ -256,10 +286,42 @@ struct WorkflowNodeConfig: Codable, Hashable, Sendable {
     /// Defines WHAT this node should do with upstream input — independent of the profile's persona.
     /// Empty string = no explicit task; the node relies solely on its profile system instructions.
     var taskDescription: String = ""
+
+    /// How this node combines multiple incoming branches (fan-in).
+    /// Only has an effect when the node has 2+ incoming edges.
+    /// Defaults to `.all` (AND-join) to preserve historical behaviour.
+    var joinMode: JoinMode = .all
+}
+
+// MARK: - WorkflowNodeConfig Codable (backward-compatible)
+//
+// `joinMode` was added after the original schema shipped. Swift's *synthesized*
+// `init(from:)` would `throw` on any layout serialized before this field
+// existed (synthesized decoding ignores property defaults for missing keys).
+// A hand-rolled decoder using `decodeIfPresent` lets old layouts load cleanly
+// and also hardens every other field against partially-written configs.
+// Declared in an extension so the memberwise initializer (`WorkflowNodeConfig()`)
+// is preserved; `encode(to:)` stays synthesized from these same keys.
+extension WorkflowNodeConfig {
+    private enum CodingKeys: String, CodingKey {
+        case maxNodeRetries, retryDelay, onFailure, hardTimeout, taskDescription, joinMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            maxNodeRetries: try c.decodeIfPresent(Int.self, forKey: .maxNodeRetries) ?? 0,
+            retryDelay: try c.decodeIfPresent(TimeInterval.self, forKey: .retryDelay) ?? 0,
+            onFailure: try c.decodeIfPresent(NodeFailurePolicy.self, forKey: .onFailure) ?? .skipDependents,
+            hardTimeout: try c.decodeIfPresent(TimeInterval.self, forKey: .hardTimeout),
+            taskDescription: try c.decodeIfPresent(String.self, forKey: .taskDescription) ?? "",
+            joinMode: try c.decodeIfPresent(JoinMode.self, forKey: .joinMode) ?? .all
+        )
+    }
 }
 
 /// Cascade policy when a workflow node fails.
-enum NodeFailurePolicy: String, Codable, Hashable, Sendable {
+enum NodeFailurePolicy: String, Codable, Hashable, Sendable, CaseIterable {
     /// Skip all downstream dependent nodes (default — current behavior).
     case skipDependents
 
@@ -268,6 +330,28 @@ enum NodeFailurePolicy: String, Codable, Hashable, Sendable {
 
     /// Continue executing all remaining nodes regardless of this failure.
     case continueAll
+}
+
+/// How a node combines its incoming branches when several edges fan into it.
+///
+/// Both modes are *synchronizing*: the node still waits for every incoming
+/// branch in its dependency level to finish before it runs. They differ only
+/// in whether all branches must have *succeeded*:
+/// - `.all` (AND-join): runs only if every incoming branch is satisfied;
+///   if any branch failed or was skipped, this node is skipped too.
+/// - `.any` (OR-join / synchronizing merge): runs if at least one incoming
+///   branch succeeded, consuming only the successful branches' outputs.
+enum JoinMode: String, Codable, Hashable, Sendable, CaseIterable {
+    case all
+    case any
+
+    /// Short label for UI controls.
+    var displayName: String {
+        switch self {
+        case .all: return "Wait for all"
+        case .any: return "Any one"
+        }
+    }
 }
 
 // MARK: - Workflow Node

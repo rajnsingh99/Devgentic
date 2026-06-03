@@ -73,26 +73,48 @@ actor ChatExecutor: Executor {
                     var didSetFinalizing = false
                     var fullResponse = ""
 
-                    // Stream thoughts & content
-                    // IMPORTANT: ChatExecutor currently uses the base LLMProvider.stream method
-                    // until streamChat is formally added to the protocol.
-                    for try await chunk in model.stream(messages: messages, tools: nil) {
-                        try Task.checkCancellation()
-                        fullResponse += chunk
-                        
-                        if !didSetFinalizing {
-                             onTraceUpdate(AgentTraceLog(
-                                traceID: traceSpan.traceID,
-                                spanID: traceSpan.spanID,
-                                parentSpanID: traceSpan.parentSpanID,
-                                stepNumber: 2,
-                                state: .thinking(.finalizing),
-                                content: "Generating final answer..."
-                            ))
-                            didSetFinalizing = true
+                    // Multimodal branch (Phase 3 — native image input): when the
+                    // message carries image blocks, route through the non-streaming
+                    // `generate(payload:)` so vision-capable providers (Claude/OpenAI/
+                    // Gemini) receive the image natively. Text-only providers downgrade
+                    // gracefully (image dropped, text kept). Token streaming is traded
+                    // for image support on these turns. A failed image resolve throws
+                    // here and is surfaced as an error (never a silent drop).
+                    let imageBlocks: [MessageBlock] = (input.userPayload ?? []).filter {
+                        if case .image = $0 { return true } else { return false }
+                    }
+
+                    if !imageBlocks.isEmpty {
+                        let providerMessages = Self.appendImages(to: messages, imageBlocks: imageBlocks)
+                        let result = try await model.generate(payload: providerMessages, tools: nil, responseSchema: nil)
+                        fullResponse = result
+                        onTraceUpdate(AgentTraceLog(
+                            traceID: traceSpan.traceID, spanID: traceSpan.spanID, parentSpanID: traceSpan.parentSpanID,
+                            stepNumber: 2, state: .thinking(.finalizing), content: "Generating final answer..."
+                        ))
+                        continuation.yield(.content(result))
+                    } else {
+                        // Stream thoughts & content
+                        // IMPORTANT: ChatExecutor currently uses the base LLMProvider.stream method
+                        // until streamChat is formally added to the protocol.
+                        for try await chunk in model.stream(messages: messages, tools: nil) {
+                            try Task.checkCancellation()
+                            fullResponse += chunk
+
+                            if !didSetFinalizing {
+                                 onTraceUpdate(AgentTraceLog(
+                                    traceID: traceSpan.traceID,
+                                    spanID: traceSpan.spanID,
+                                    parentSpanID: traceSpan.parentSpanID,
+                                    stepNumber: 2,
+                                    state: .thinking(.finalizing),
+                                    content: "Generating final answer..."
+                                ))
+                                didSetFinalizing = true
+                            }
+
+                            continuation.yield(.content(chunk))
                         }
-                        
-                        continuation.yield(.content(chunk))
                     }
 
                     logger.info("--- 🏁 CHAT EXECUTOR COMPLETE 🏁 ---")
@@ -123,7 +145,7 @@ actor ChatExecutor: Executor {
                     continuation.finish()
                 } catch {
                     logger.error("ChatExecutor Error: \(error.localizedDescription)")
-                    continuation.yield(.error(error.localizedDescription))
+                    continuation.yield(.error(.init(error.localizedDescription)))
                     continuation.finish(throwing: error)
                 }
             }
@@ -133,6 +155,23 @@ actor ChatExecutor: Executor {
                 task.cancel()
             }
         }
+    }
+
+    // MARK: - Multimodal
+
+    /// Builds provider messages from the legacy text messages and appends image
+    /// blocks to the final user turn (the user's text already lives in `messages`).
+    /// Image bytes stay reference-backed here — the provider resolves+encodes them.
+    nonisolated private static func appendImages(to messages: [[String: String]], imageBlocks: [MessageBlock]) -> [ProviderMessage] {
+        var providerMessages = messages.map { ProviderMessage(legacy: $0) }
+        if let lastUser = providerMessages.lastIndex(where: { $0.role == "user" }) {
+            var content = providerMessages[lastUser].content
+            content.append(contentsOf: imageBlocks)
+            providerMessages[lastUser] = ProviderMessage(role: "user", content: content, toolCallId: providerMessages[lastUser].toolCallId)
+        } else {
+            providerMessages.append(ProviderMessage(role: "user", content: imageBlocks))
+        }
+        return providerMessages
     }
 
     // MARK: - Message Construction
@@ -163,27 +202,24 @@ actor ChatExecutor: Executor {
     // MARK: - Workflow Message Building
 
     /// Builds workflow bot messages using the unified `PromptBuilder` with `.workflow` config.
+    /// The per-node user-message prefix is auto-derived from `workflowContext` inside
+    /// `buildStandardMessages` via `SemanticContext.workflowContext` — no per-call
+    /// duplication of the first-node / no-input / `<input>` branching logic.
     nonisolated private func buildWorkflowMessages(
         input: AgentInput,
         workflowContext: WorkflowExecutionContext
     ) -> [[String: String]] {
         logger.info("[Workflow] Building workflow messages for bot node '\(workflowContext.nodeName)'")
 
-        let context = buildSemanticContext(from: input, taskDescription: workflowContext.taskDescription)
-
-        let prefix: String
-        if workflowContext.isFirstNode {
-            prefix = "Execute your task."
-        } else if workflowContext.upstreamInput.isEmpty {
-            prefix = "No input data provided. Execute your task based on the task description."
-        } else {
-            prefix = "<input>\n\(workflowContext.upstreamInput)\n</input>"
-        }
+        let context = buildSemanticContext(
+            from: input,
+            taskDescription: workflowContext.taskDescription,
+            workflowContext: workflowContext
+        )
 
         return PromptBuilder.buildStandardMessages(
             context: context,
-            layerConfig: .workflow,
-            userMessagePrefix: prefix
+            layerConfig: .workflow
         )
     }
 
@@ -191,9 +227,12 @@ actor ChatExecutor: Executor {
 
     /// Builds a lightweight SemanticContext from AgentInput for Bot/Workflow-Bot usage.
     /// Bot-irrelevant fields (tools, working memory, guardrails, skills) are empty/nil.
+    /// When `workflowContext` is non-nil, `buildStandardMessages` auto-derives the
+    /// per-node user-message prefix from it — no per-call-site duplication.
     nonisolated private func buildSemanticContext(
         from input: AgentInput,
-        taskDescription: String? = nil
+        taskDescription: String? = nil,
+        workflowContext: WorkflowExecutionContext? = nil
     ) -> SemanticContext {
         let envFacts = EnvironmentFacts(
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
@@ -218,7 +257,8 @@ actor ChatExecutor: Executor {
             userProfile: nil,
             skillManifests: nil,
             taskDescription: taskDescription,
-            promptLayerConfig: taskDescription != nil ? .workflow : .bot
+            promptLayerConfig: workflowContext != nil ? .workflow : .bot,
+            workflowContext: workflowContext
         )
     }
 }

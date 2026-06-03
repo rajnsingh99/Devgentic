@@ -93,6 +93,7 @@ struct ThemeDecorator: Theme {
     var errorColor: Color { base.errorColor }
     var successColor: Color { base.successColor }
     var warningColor: Color { base.warningColor }
+    var colorScheme: ColorScheme? { base.colorScheme }
 
     // Tier 2 — Extended (Defaults provided by protocol extension, but we forward base)
     var controlBackground: Color { base.controlBackground }
@@ -231,6 +232,12 @@ protocol Theme {
     var successColor: Color { get }
     var warningColor: Color { get }
 
+    /// Hint to SwiftUI / AppKit about whether this theme is intended for
+    /// light or dark contexts — used by detached `NSWindow` editors that
+    /// can't infer the app's light/dark state from the parent environment.
+    /// `nil` defers to the system appearance.
+    var colorScheme: ColorScheme? { get }
+
     // ── Tier 2: Extended Color Tokens (defaults provided) ────────────
 
     /// Background for standard controls (input fields, popovers, chips).
@@ -330,6 +337,12 @@ protocol Theme {
 /// Default values for all Tier 2 / Tier 3 tokens. Existing themes compile
 /// with zero changes; any theme may selectively override.
 extension Theme {
+
+    // ── Light/Dark Default ───────────────────────────────────────────
+
+    /// Default to system appearance — concrete themes with a clear
+    /// light/dark intent (Dracula, OneDark, OneLight, etc.) override this.
+    var colorScheme: ColorScheme? { nil }
 
     // ── Tier 2 Color Defaults ────────────────────────────────────────
 
@@ -445,6 +458,7 @@ extension AppThemes {
     struct DraculaTheme: Theme {
         let id = "dracula"
         let displayName = "Dracula"
+        let colorScheme: ColorScheme? = .dark
 
         // Tier 1 — Core
         let primaryBackground: Color = Color(hex: "#282a36")
@@ -505,6 +519,7 @@ extension AppThemes {
     struct OneLightTheme: Theme {
         let id = "one_light"
         let displayName = "One Light"
+        let colorScheme: ColorScheme? = .light
 
         // Tier 1 — Core (Light Mode)
         let primaryBackground: Color = Color(hex: "#fafafa")
@@ -571,6 +586,7 @@ extension AppThemes {
     struct OneDarkTheme: Theme {
         let id = "one_dark"
         let displayName = "One Dark"
+        let colorScheme: ColorScheme? = .dark
 
         // Tier 1 — Core (Atom One Dark)
         let primaryBackground: Color = Color(hex: "#282c34")
@@ -636,6 +652,7 @@ extension AppThemes {
     struct CosmicDarkTheme: Theme {
         let id = "cosmic_dark"
         let displayName = "Cosmic Dark"
+        let colorScheme: ColorScheme? = .dark
 
         // Tier 1 — Core (Spotify Palette)
         let primaryBackground: Color = Color(hex: "#121212")        // Pure Spotify Dark

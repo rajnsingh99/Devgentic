@@ -195,8 +195,6 @@ final class MainApplicationViewModel {
         settingsCoordinator = SettingsCoordinator(viewModel: self)
         settingsCoordinator.load()
 
-        migrateWorkflowRunHistoryIfNeeded()
-
         // Conversation CRUD lives in its own coordinator (Gap C extraction).
         conversationManagementCoordinator = ConversationManagementCoordinator(
             viewModel: self,
@@ -313,14 +311,6 @@ final class MainApplicationViewModel {
 
     func disableAndRemoveWebSearch() {
         settingsCoordinator.disableAndRemoveWebSearch()
-    }
-
-    /// One-time migration from profile-keyed to conversation-keyed workflow run history.
-    private func migrateWorkflowRunHistoryIfNeeded() {
-        let profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
-        let workflowIDs = profiles.filter { $0.profileType == .workflow }.map(\.id)
-        guard !workflowIDs.isEmpty else { return }
-        WorkflowRunHistoryStore.shared.migrateFromProfileKeyedStorage(profileIDs: workflowIDs)
     }
 
     // `loadWorkflowRunHistoryIfNeeded` (was a private helper here) and

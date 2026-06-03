@@ -107,6 +107,7 @@ private struct SpanRow: View {
         case .llmCall: return "llm call"
         case .subtask: return "subtask"
         case .workflow: return nil // Top-level, no need
+        case .workflowNode: return "node"
         }
     }
 
@@ -140,6 +141,7 @@ private struct SpanRow: View {
         case .toolExecution: return "hammer"
         case .llmCall: return "brain"
         case .workflow: return "flowchart"
+        case .workflowNode: return "circle.grid.3x3.fill"
         case .subtask: return "square.stack.3d.down.right"
         }
     }
@@ -150,6 +152,7 @@ private struct SpanRow: View {
         case .toolExecution: return .orange
         case .llmCall: return .purple
         case .workflow: return theme.accentColor
+        case .workflowNode: return .pink
         case .subtask: return .teal
         }
     }

@@ -208,7 +208,8 @@ struct ChatHistoryView: View {
                             // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
                             // .background(.ultraThinMaterial)
                             .transition(.opacity)
-                            .accessibilityLabel("Loading conversation")
+                            .accessibilityLabel("Loading conversation history")
+                            .accessibilityHint("Fetching messages from storage")
                     }
                 }
             }

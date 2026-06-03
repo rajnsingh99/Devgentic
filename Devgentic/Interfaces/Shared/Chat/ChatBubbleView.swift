@@ -11,8 +11,6 @@ import os
 
 private let logger = DGLogger(category: "ChatBubbleView")
 
-private let STREAMING_BUBBLE_MIN_HEIGHT: CGFloat = 550
-
 struct ChatBubbleView: View {
     var message: ChatMessage
     @Environment(ChatHistoryViewModel.self) private var chatHistoryViewModel
@@ -21,6 +19,7 @@ struct ChatBubbleView: View {
     // MARK: - State
     @State private var applyMinHeight: Bool = false
     @State private var didCopyFeedback: Bool = false
+    @State private var feedbackTask: Task<Void, Never>?
 
     // MARK: - Identity Logic
     /// Uses the persisted profileType (tagged at creation) instead of runtime profile store lookups.
@@ -46,7 +45,7 @@ struct ChatBubbleView: View {
                     isAgentic: isAgentic,
                     contentToDisplay: contentToDisplay
                 )
-                .frame(minHeight: applyMinHeight ? STREAMING_BUBBLE_MIN_HEIGHT : nil, alignment: .topLeading)
+                .frame(minHeight: applyMinHeight ? ChatUIConstants.streamingBubbleMinHeight : nil, alignment: .topLeading)
             } else {
                 UserBubbleContentView(message: message)
             }
@@ -79,6 +78,9 @@ struct ChatBubbleView: View {
                 }
             }
         }
+        .onDisappear {
+            feedbackTask?.cancel()
+        }
     }
 
     // MARK: - Full-Message Copy
@@ -87,8 +89,10 @@ struct ChatBubbleView: View {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         didCopyFeedback = true
-        Task { @MainActor in
+        feedbackTask?.cancel()
+        feedbackTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
             didCopyFeedback = false
         }
     }

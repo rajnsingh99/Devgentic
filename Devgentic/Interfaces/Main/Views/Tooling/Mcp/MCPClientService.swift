@@ -48,7 +48,17 @@ final class MCPClientService {
     
     // MARK: - Connection Methods
     
-    func connect(sourceId: UUID, config: ServerDefinition) async throws -> (client: MCP.Client, tools: [ToolDefinition]) {
+    /// Connect to an MCP server. Secrets (env values, auth tokens) are passed
+    /// as a separate `secrets` bundle and never live inside `config` — config
+    /// is persisted in SwiftData while secrets live in Keychain. When the
+    /// caller has a persisted `sourceID` + `definition` but no live secrets
+    /// (e.g. tool-execution reconnect), pass `secrets: nil` to have the
+    /// service materialize them from Keychain itself.
+    func connect(
+        sourceId: UUID,
+        config: ServerDefinition,
+        secrets: MCPRuntimeSecrets? = nil
+    ) async throws -> (client: MCP.Client, tools: [ToolDefinition]) {
         // 1. Cleanup existing session
         if activeSessions[sourceId] != nil {
             logger.info("Disconnecting existing session for source \(sourceId)")
@@ -60,17 +70,23 @@ final class MCPClientService {
         logger.info("Initializing new MCP Client for source \(sourceId)")
         let client = MCP.Client(name: "DevgenticClientV2", version: "2.0.0")
 
+        // Materialize secrets from Keychain when the caller didn't supply them
+        // (i.e. background reconnects rather than form-driven connects).
+        let resolvedSecrets = secrets ?? MCPRuntimeSecrets.materialize(for: sourceId, definition: config)
+
         let transport: any Transport
         var shellProcess: ShellProcess? = nil
 
         do {
             // 2. Transport Setup
             if let urlString = config.url {
-                transport = try setupRemoteTransport(urlString: urlString, config: config)
-                logger.info("Transport type: Remote (\(urlString))")
+                transport = try setupRemoteTransport(urlString: urlString, config: config, secrets: resolvedSecrets)
+                // Strip userinfo and secret-named query params before logging — users
+                // sometimes paste URLs with embedded credentials or `?api_key=…`.
+                logger.info("Transport type: Remote (\(MCPRedaction.redact(url: urlString)))")
             } else if let command = config.command {
                 logger.info("Transport type: Local Process (\(command))")
-                let (localTransport, process) = try setupLocalTransport(config: config)
+                let (localTransport, process) = try setupLocalTransport(config: config, secrets: resolvedSecrets)
                 transport = localTransport
                 shellProcess = process
 
@@ -95,6 +111,17 @@ final class MCPClientService {
             }
 
             logger.info("SDK handshake successful. Storing session.")
+
+            // 3a. Subscribe to `tools/list_changed`. When the server adds or
+            //     removes tools at runtime, refetch and update the persisted
+            //     set so the UI and the agent both see the new surface area.
+            //     Capture weakly to avoid keeping the service alive forever.
+            await client.onNotification(ToolListChangedNotification.self) { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.handleToolListChanged(sourceID: sourceId)
+                }
+            }
 
             // 4. Store Session
             let session = MCPSession(id: sourceId, client: client, transport: transport, process: shellProcess)
@@ -145,11 +172,35 @@ final class MCPClientService {
     }
     
     func disconnectAll() async {
-        for id in activeSessions.keys {
+        // Snapshot keys before iterating: `disconnect` mutates `activeSessions`,
+        // and modifying a Dictionary while iterating its `.keys` view is undefined.
+        let ids = Array(activeSessions.keys)
+        for id in ids {
             await disconnect(sourceId: id)
         }
     }
     
+    // MARK: - tools/list_changed
+
+    /// Called when the SDK delivers a `notifications/tools/list_changed`
+    /// notification for an active session. Re-runs `listTools` and hands the
+    /// fresh set off to `MCPToolStore` so persistence + UI both update. Best
+    /// effort — failures log and leave the prior list in place rather than
+    /// blanking it on a transient error.
+    private func handleToolListChanged(sourceID: UUID) async {
+        guard let session = activeSessions[sourceID] else {
+            logger.warning("tools/list_changed for unknown source \(sourceID); ignoring.")
+            return
+        }
+        do {
+            let tools = try await listTools(client: session.client)
+            MCPToolStore.shared.replaceTools(forSourceID: sourceID, with: tools)
+            logger.info("Refreshed \(tools.count) tool(s) for source \(sourceID) on list_changed.")
+        } catch {
+            logger.warning("Failed to refresh tools on list_changed for \(sourceID): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Tool Execution
     
     func executeTool(sourceId: UUID, name: String, arguments: [String: Any]) async throws -> String {
@@ -253,31 +304,59 @@ final class MCPClientService {
         }
     }
     
-    private func setupLocalTransport(config: ServerDefinition) throws -> (any Transport, ShellProcess) {
-        guard let command = config.command else { throw MCPManagerError.invalidJSONConfiguration("Missing command.") }
-        
+    private func setupLocalTransport(
+        config: ServerDefinition,
+        secrets: MCPRuntimeSecrets
+    ) throws -> (any Transport, ShellProcess) {
+        guard let command = config.command else {
+            throw MCPManagerError.invalidJSONConfiguration("Missing command.")
+        }
+
         let shell = try ShellProcess(
             command: command,
             arguments: config.args ?? [],
-            environment: config.env ?? [:]
+            environment: secrets.env  // env values come from Keychain via secrets bundle
         )
-        
+
         try shell.run()
-        
+
         let transport = StdioTransport(
             input: .init(rawValue: shell.stdOutPipe.fileHandleForReading.fileDescriptor),
             output: .init(rawValue: shell.stdInPipe.fileHandleForWriting.fileDescriptor)
         )
-        
+
         return (transport, shell)
     }
-    
-    private func setupRemoteTransport(urlString: String, config: ServerDefinition) throws -> any Transport {
-        guard let url = URL(string: urlString) else { throw MCPManagerError.invalidJSONConfiguration("Invalid URL.") }
+
+    private func setupRemoteTransport(
+        urlString: String,
+        config: ServerDefinition,
+        secrets: MCPRuntimeSecrets
+    ) throws -> any Transport {
+        guard let url = URL(string: urlString) else {
+            throw MCPManagerError.invalidJSONConfiguration("Invalid URL.")
+        }
+
+        // HTTPS enforcement: when the user has configured *any* auth scheme,
+        // refuse to send credentials in cleartext over plain HTTP. Localhost
+        // is allowed because OAuth 2.1 (RFC 8252) explicitly permits it for
+        // loopback flows during development.
+        if config.auth != .none {
+            let scheme = url.scheme?.lowercased() ?? ""
+            let isHTTPS = scheme == "https" || scheme == "wss"
+            let isLoopback = url.host.map { $0 == "localhost" || $0 == "127.0.0.1" || $0 == "::1" } ?? false
+            if !isHTTPS && !isLoopback {
+                throw MCPManagerError.invalidJSONConfiguration(
+                    "Refusing to send credentials over plaintext '\(scheme)://'. Use https:// (or localhost for development)."
+                )
+            }
+        }
+
+        let header = secrets.authorizationHeader
         return HTTPClientTransport(endpoint: url, requestModifier: { req in
             var r = req
-            if let token = config.authentication?["token"] {
-                r.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if let header {
+                r.addValue(header.value, forHTTPHeaderField: header.name)
             }
             return r
         })

@@ -11,6 +11,11 @@ struct QuickSchedulePopoverView: View {
 
     let promptText: String
     let selectedProfileID: UUID?
+    /// When invoked from inside an open chat, the preset task continues that
+    /// conversation (mode = .conversationBound) instead of creating an orphan
+    /// thread. When nil (welcome screen, no active chat), falls back to a
+    /// stateless autonomous task.
+    let currentConversationID: UUID?
     @Binding var isPresented: Bool
     var onCustomSchedule: () -> Void
 
@@ -100,10 +105,13 @@ struct QuickSchedulePopoverView: View {
             fireDate = Date().addingTimeInterval(preset.interval)
         }
 
+        // If invoked from inside an active conversation, the preset continues
+        // that thread; otherwise falls back to a stateless autonomous run.
+        let boundToConversation = currentConversationID != nil
         let task = ScheduledTask(
             id: UUID(),
             displayName: String(promptText.prefix(30)),
-            mode: .autonomous,
+            mode: boundToConversation ? .conversationBound : .autonomous,
             promptTemplate: promptText,
             profileID: selectedProfileID,
             attachedFileURLs: [],
@@ -116,8 +124,8 @@ struct QuickSchedulePopoverView: View {
             nextRunAt: fireDate,
             runCount: 0,
             lastRunSummary: nil,
-            linkedConversationID: nil,
-            contextWindowMode: .stateless,
+            linkedConversationID: currentConversationID,
+            contextWindowMode: boundToConversation ? .continuous : .stateless,
             createdAt: Date()
         )
 

@@ -61,6 +61,24 @@ struct ClaudeToolTurnAdapter: ToolTurnAdapter {
         ]]
     }
 
+    /// Kickoff user turn. Text-only → plain string content (byte-identical to the
+    /// default normalizeCanonical). With images → an Anthropic content-block array
+    /// mixing text and base64 image source blocks.
+    func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
+        guard !images.isEmpty else {
+            return ["role": "user", "content": text]
+        }
+        var blocks: [[String: Any]] = []
+        if !text.isEmpty { blocks.append(["type": "text", "text": text]) }
+        for img in images {
+            blocks.append([
+                "type": "image",
+                "source": ["type": "base64", "media_type": img.mimeType, "data": img.base64]
+            ])
+        }
+        return ["role": "user", "content": blocks]
+    }
+
     private func argumentsToDict(_ args: [String: JSONValue]) -> [String: Any] {
         args.mapValues { $0.rawValue }
     }

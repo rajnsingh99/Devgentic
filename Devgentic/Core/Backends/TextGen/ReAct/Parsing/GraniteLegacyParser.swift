@@ -155,9 +155,10 @@ struct GraniteLegacyParser: CognitiveParserProtocol {
         for marker in Self.markers {
             if let range = text.range(of: marker) {
                 let before = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !before.isEmpty { return before }
+                let filtered = ReasoningQualityFilter.filter(before)
+                if !filtered.isEmpty { return filtered }
             }
         }
-        return "Executing tool calls..."
+        return ""
     }
 }

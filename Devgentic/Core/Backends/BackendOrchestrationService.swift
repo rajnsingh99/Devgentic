@@ -99,15 +99,13 @@ class BackendOrchestrationService {
                         )
 
                     case .directInjection:
-                        // Extract full text and inject into prompt context
-                        let (fileContext, skippedFiles) = await self.assembleTextFileContent(for: files)
+                        // Extract full text and inject into prompt context.
+                        let (fileContext, docFailures) = await self.assembleTextFileContent(for: files)
                         if !fileContext.isEmpty {
                             queryForRequest = fileContext + "\n\n" + queryForRequest
                         }
-                        if !skippedFiles.isEmpty {
-                            let warning = "[System] Could not extract text from: \(skippedFiles.joined(separator: ", ")). These files were not included in the context."
-                            continuation.yield(.content(warning + "\n\n"))
-                        }
+                        // D3: report (traced + structured notice), keep answering.
+                        await self.reportFileFailures(docFailures, span: context, continuation: continuation)
 
                     case .stateless:
                         // No extraction — note file paths for agent tool access
@@ -193,8 +191,33 @@ class BackendOrchestrationService {
 
                 dispatchLoop: while true {
                 do {
+                    // Native image input: turn the message's attached images into an
+                    // image payload so vision-capable bot/agent profiles see them
+                    // natively. D3: any unreadable image is reported (traced + notice),
+                    // and the turn still answers (degrade).
+                    let (rawImagePayload, imageFailures) = self.buildImagePayload(from: files)
+                    await self.reportFileFailures(imageFailures, span: context, continuation: continuation)
+
+                    // Vision capability gate (LOCAL providers only — cloud keeps its
+                    // existing no-gate behavior). If the selected local model can't see
+                    // images, drop them and tell the user, but still answer from text
+                    // (degrade, per the chosen "degrade + tell user" policy). This covers
+                    // both the MLXVLM gap families (mllama/llava-1.5/phi3_v/…) and any
+                    // plain text-only local model the user attached an image to.
+                    let attachedImagePayload: Payload?
+                    if let raw = rawImagePayload,
+                       currentConfig.profile.usesLocalProvider,
+                       !currentConfig.profile.supportsVisionInput {
+                        attachedImagePayload = nil
+                        let modelName = currentConfig.profile.primaryLLMConfig?.modelName ?? "This model"
+                        continuation.yield(.content("⚠️ \(modelName) can't analyze images — answering from text only. Pick a vision-capable model to inspect the image.\n\n"))
+                        logger.info("Vision gate: dropped \(raw.count) image block(s) for non-vision local model '\(modelName)'")
+                    } else {
+                        attachedImagePayload = rawImagePayload
+                    }
+
                     switch currentConfig.profile.profileType {
-                        
+
                     case .bot:
                         logger.info("Routing BOT profile '\(currentConfig.profile.displayName)' to Unified Pipeline.")
 
@@ -204,6 +227,7 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
                         )
@@ -233,6 +257,7 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: traceHandler
                         )
@@ -306,6 +331,7 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
                         )
@@ -390,7 +416,7 @@ class BackendOrchestrationService {
                             continuation.finish()
                         } catch {
                             logger.error("ImageGen setup error: \(error.localizedDescription)")
-                            continuation.yield(.error(error.localizedDescription))
+                            continuation.yield(.error(.init(error.localizedDescription)))
                             continuation.finish()
                         }
 
@@ -412,6 +438,7 @@ class BackendOrchestrationService {
                             chatHistory: conversationHistory,
                             conversationID: conversationID,
                             ragContext: ragContextString,
+                            userPayload: attachedImagePayload,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
                         )
@@ -542,20 +569,46 @@ class BackendOrchestrationService {
     /// Maximum total characters to inject across all files (~50K tokens)
     private let directInjectionTotalBudget: Int = 200_000
 
-    private func assembleTextFileContent(for files: [FileSystemItem]) async -> (content: String, skippedFiles: [String]) {
+    /// Builds an image `Payload` from the current message's attachments so
+    /// vision-capable bot/agent profiles receive them natively (separate from the
+    /// document text-extraction path). Reads bytes now under security-scoped access
+    /// into ephemeral references; the provider resolves+encodes at send time.
+    /// Returns nil when no images are attached. A file that can't be read is logged
+    /// and skipped (it still appears in the document path's skipped-files notice).
+    private func buildImagePayload(from files: [FileSystemItem]) -> (payload: Payload?, failures: [FileRetrievalError]) {
+        var blocks: [MessageBlock] = []
+        var failures: [FileRetrievalError] = []
+        for file in files {
+            let mime = fileProcessorService.getFileMimeType(for: file.url)
+            guard fileProcessorService.isImageFile(mimeType: mime, url: file.url) else { continue }
+            let didAccess = file.url.startAccessingSecurityScopedResource()
+            defer { if didAccess { file.url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: file.url)
+                blocks.append(.image(ImagePayload(reference: .ephemeralData(data), mimeType: mime, alt: file.name)))
+            } catch {
+                // Never silent: report the image read failure (chat degrades — the
+                // turn still answers, just without this image).
+                failures.append(.imageResolutionFailed(path: file.url.path, underlying: error.localizedDescription))
+            }
+        }
+        return (blocks.isEmpty ? nil : blocks, failures)
+    }
+
+    /// Extracts text from attached documents for direct injection. Returns the
+    /// assembled content plus a typed list of files that couldn't be read (via the
+    /// throwing `readFileContentOrThrow`, so the real cause is preserved). Images
+    /// are skipped here — they flow through `buildImagePayload`.
+    private func assembleTextFileContent(for files: [FileSystemItem]) async -> (content: String, failures: [FileRetrievalError]) {
         var assembledContent = ""
-        var skippedFiles: [String] = []
+        var failures: [FileRetrievalError] = []
 
         for file in files {
-            // Check total budget
-            guard assembledContent.count < directInjectionTotalBudget else {
-                skippedFiles.append("\(file.name) (context budget exceeded)")
-                continue
-            }
+            let mime = fileProcessorService.getFileMimeType(for: file.url)
+            if fileProcessorService.isImageFile(mimeType: mime, url: file.url) { continue }
 
-            let info = fileProcessorService.extractionInfo(for: file.url)
-            guard info.canExtract else {
-                skippedFiles.append(file.name)
+            guard assembledContent.count < directInjectionTotalBudget else {
+                failures.append(.tooLarge(path: file.url.path))
                 continue
             }
 
@@ -564,17 +617,43 @@ class BackendOrchestrationService {
                 directInjectionTotalBudget - assembledContent.count
             )
 
-            if let content = await fileProcessorService.readFileContent(
-                for: file.url,
-                maxSize: remainingBudget
-            ) {
+            do {
+                let content = try await fileProcessorService.readFileContentOrThrow(for: file.url, maxSize: remainingBudget)
                 assembledContent += "\n\n--- Start of file: \(file.name) ---\n\(content)\n--- End of file: \(file.name) ---"
-            } else {
-                skippedFiles.append(file.name)
+            } catch let retrievalError as FileRetrievalError {
+                failures.append(retrievalError)
+            } catch {
+                failures.append(.readFailed(path: file.url.path, underlying: error.localizedDescription))
             }
         }
 
-        return (assembledContent, skippedFiles)
+        return (assembledContent, failures)
+    }
+
+    /// D3 (chat = degrade): trace each retrieval failure (kills the observability
+    /// dark zone) and surface a structured, actionable notice — the turn still
+    /// answers with whatever loaded. (Phase 4 renders this as a card; for now it's
+    /// a clear prepended notice, replacing the old buried `[System]` string.)
+    private func reportFileFailures(
+        _ failures: [FileRetrievalError],
+        span: TraceContext,
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
+    ) async {
+        guard !failures.isEmpty else { return }
+        for failure in failures {
+            let classified = ClassifiedAgentError.synthetic(
+                category: failure.category,
+                origin: "BackendOrchestrationService.fileRetrieval",
+                message: failure.message,
+                context: ["path": failure.path]
+            )
+            await TraceRecorder.shared.emitAgentError(span: span, error: classified)
+        }
+        let lines = failures.map { failure -> String in
+            "• " + failure.message + (failure.suggestion.map { " — \($0)" } ?? "")
+        }
+        let notice = "⚠️ Some attachments couldn't be read:\n" + lines.joined(separator: "\n")
+        continuation.yield(.content(notice + "\n\n"))
     }
 
     // MARK: - Knowledge Source Helpers
@@ -605,5 +684,34 @@ class BackendOrchestrationService {
             }
         }
         return assembled
+    }
+}
+
+// MARK: - Vision Capability Gate Helpers
+
+private extension BackendProfileModel {
+    /// The primary chat model's config (bot / agent profiles). Workflow / image-gen → nil.
+    var primaryLLMConfig: ProviderConfig? {
+        switch details {
+        case .bot(let c):   return c.llmConfig
+        case .agent(let c): return c.llmConfig
+        default:            return nil
+        }
+    }
+
+    /// Whether the primary model accepts image input — from its detected, persisted
+    /// modality (`SupportedModalities.visionInput`).
+    var supportsVisionInput: Bool {
+        primaryLLMConfig?.supportedModalities.contains(.visionInput) ?? false
+    }
+
+    /// LOCAL provider (MLX / Ollama), where vision detection is authoritative and the
+    /// degrade gate applies. Cloud keeps its existing no-gate behavior (send the image,
+    /// let the API error), so cloud vision is unaffected by the gate.
+    var usesLocalProvider: Bool {
+        switch primaryLLMConfig?.apiProvider {
+        case .mlx, .ollama: return true
+        default:            return false
+        }
     }
 }

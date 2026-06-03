@@ -90,7 +90,18 @@ struct ResponseSynthesizer {
         }
 
         // --- LLM SYNTHESIS PATH (Multi-Tool / Complex Output) ---
-        logger.info("🧠 [Synthesizer] Legacy LLM path triggered. Status: \(String(describing: summary.completionStatus)), tools: \(summary.toolResults.count).")
+        // `completionStatus` is derived purely from per-tool success flags, which
+        // means a forced-termination run (circuit-breaker abort, iteration
+        // exhaustion) where all tools technically succeeded reads as
+        // `.success` here — misleading during triage. Surface `failureReason`
+        // alongside it so the log honestly reflects forced-termination cases.
+        let statusInfo: String = {
+            if let reason = summary.failureReason {
+                return "\(String(describing: summary.completionStatus)) (forced-termination: \(reason.prefix(80)))"
+            }
+            return String(describing: summary.completionStatus)
+        }()
+        logger.info("🧠 [Synthesizer] Legacy LLM path triggered. Status: \(statusInfo), tools: \(summary.toolResults.count).")
 
         let prompt = buildSynthesisPrompt(summary: summary, originalQuery: originalQuery)
         

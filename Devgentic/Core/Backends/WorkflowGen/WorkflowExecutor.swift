@@ -34,6 +34,26 @@ actor WorkflowExecutor: Executor {
         self.workflowProfileID = workflowProfileID
     }
 
+    // MARK: - Error Classification
+
+    /// Maps `WorkflowError` cases to the corresponding `AgentErrorCategory` so
+    /// `emitAgentError` can stamp spans with workflow-phase categories. Without
+    /// this, the 8 `wf*` categories in `AgentErrorCategory` (Workflow Depth
+    /// Exceeded, Empty Workflow, Cycle, etc.) sit unused and the workflow phase
+    /// slot in TrendsView stays empty.
+    nonisolated static func classify(_ error: WorkflowError) -> AgentErrorCategory {
+        switch error {
+        case .emptyWorkflow:            return .wfEmpty
+        case .cycleDetected:            return .wfCycle
+        case .profileNotFound:          return .wfProfileNotFound
+        case .nodeTimeout:              return .wfNodeFailed
+        case .nodeExecutionFailed:      return .wfNodeFailed
+        case .allUpstreamsFailed:       return .wfNodeSkipped
+        case .loopBodyNotConfigured:    return .wfValidationFailed
+        case .validationFailed:         return .wfValidationFailed
+        }
+    }
+
     // MARK: - Standard Executor Conformance
 
     /// Standard Executor protocol entry point.
@@ -91,11 +111,34 @@ actor WorkflowExecutor: Executor {
 
         return AsyncThrowingStream<AgentStreamEvent, Error> { continuation in
             let task = Task {
-                // Wrap in incremented depth for sub-workflow recursion guard
+                // Wrap in incremented depth for sub-workflow recursion guard,
+                // and in a LogContext scope so every DGLogger call inside this
+                // executor body is auto-tagged with the workflow traceID and
+                // `.workflow` phase. Without this, the 49 log lines emitted
+                // during a workflow run land in `log_entries` with `traceID = nil`
+                // and can't be filtered by trace in the Report Inspector.
                 try await WorkflowDepth.$current.withValue(WorkflowDepth.current + 1) {
+                await LogContext.with(traceID: traceContext.traceID, phase: .workflow) {
                 do {
+                    // Persist the workflow's root span so per-node child spans have
+                    // a parent that actually exists in the `spans` table. Without
+                    // this, fetchFullTrace's reconstruction orphans the per-node
+                    // spans (their parentSpanID points at a non-existent row).
+                    await TraceRecorder.shared.beginSpan(
+                        context: traceContext,
+                        name: "workflow:\(profileID.uuidString.prefix(8))",
+                        kind: .workflow
+                    )
+
                     // Recursion guard — prevent infinite sub-workflow nesting
                     guard WorkflowDepth.current <= WorkflowDepth.maxDepth else {
+                        let classified = ClassifiedAgentError.synthetic(
+                            category: .wfDepthExceeded,
+                            origin: "WorkflowExecutor.executeWorkflow.depthGuard",
+                            message: "Maximum workflow nesting depth (\(WorkflowDepth.maxDepth)) exceeded",
+                            context: ["profile_id": profileID.uuidString, "depth": "\(WorkflowDepth.current)"]
+                        )
+                        await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
                         throw WorkflowError.nodeExecutionFailed(
                             nodeID: profileID,
                             profileName: "Workflow",
@@ -109,7 +152,16 @@ actor WorkflowExecutor: Executor {
                     // 1. LOAD & VALIDATE DAG
                     // =============================================================
 
-                    let layout = injectedLayout ?? WorkflowLayoutStore.shared.load(for: profileID)
+                    let layout: WorkflowLayout
+                    if let injectedLayout {
+                        layout = injectedLayout
+                    } else {
+                        // `WorkflowLayoutStore` is `@MainActor`-isolated (SwiftData
+                        // ModelContext lives on main). The executor is an actor, so we
+                        // hop briefly to load the layout — same pattern used for
+                        // `BackendProfileStore.fetchProfile(byId:)` later in this method.
+                        layout = await MainActor.run { WorkflowLayoutStore.shared.load(for: profileID) }
+                    }
 
                     guard !layout.nodes.isEmpty else {
                         throw WorkflowError.emptyWorkflow
@@ -230,6 +282,23 @@ actor WorkflowExecutor: Executor {
                                     metadata: .simple(start: Date(), end: Date(), output: "")
                                 )
                                 state.recordResult(from: skipResult)
+                                // P1-11: classify upstream-skip into the workflow phase so
+                                // it shows up in TrendsView. Without this, the skip is a
+                                // silent control-flow decision invisible to telemetry.
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: .wfNodeSkipped,
+                                    origin: "WorkflowExecutor.dispatch.upstreamSkip",
+                                    message: skipReason,
+                                    context: ["node_name": node.displayName, "node_id": nodeID.uuidString]
+                                )
+                                await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                                // P0-6: skipped nodes activate the `"error"` port for
+                                // downstream routing. Without this, branches wired
+                                // exclusively to the `error` port hang waiting for an
+                                // activation that never comes — a silent dead-end.
+                                // Skip propagates as an upstream-failure signal so error
+                                // recovery branches actually fire.
+                                state.setActiveOutputPorts(["error"], for: nodeID)
                                 continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: node.displayName, error: skipReason))
                                 completedCount += 1
                                 continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
@@ -251,6 +320,14 @@ actor WorkflowExecutor: Executor {
                                         metadata: .simple(start: Date(), end: Date(), output: "")
                                     )
                                     state.recordResult(from: failResult)
+                                    // P1-11: classify the profile-not-found dispatch failure.
+                                    let classified = ClassifiedAgentError.synthetic(
+                                        category: .wfProfileNotFound,
+                                        origin: "WorkflowExecutor.dispatch.profileNotFound",
+                                        message: error.localizedDescription,
+                                        context: ["node_name": node.displayName, "profile_id": profileID.uuidString]
+                                    )
+                                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
                                     continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: node.displayName, error: error.localizedDescription))
                                     completedCount += 1
                                     continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
@@ -258,7 +335,7 @@ actor WorkflowExecutor: Executor {
                                 }
                                 profileNodes.append((node, nodeProfile))
 
-                            case .condition, .loop, .code, .gate, .trigger:
+                            case .condition, .loop, .code, .gate, .trigger, .action:
                                 structuralNodes.append(node)
                             }
                         }
@@ -269,8 +346,13 @@ actor WorkflowExecutor: Executor {
                             logger.info("Level \(levelIndex + 1) dispatch: structural=[\(structNames)] profile=[\(profNames)]")
                         }
 
-                        // --- Execute structural nodes (gate nodes are async — HITL suspension) ---
-                        for node in structuralNodes {
+                        // --- Execute structural nodes ---
+                        // Nodes within a level are independent (no same-level edges),
+                        // so multiple run in parallel — two HTTP Action nodes on one
+                        // level no longer serialize. A single structural node stays on
+                        // the simple path. Gate nodes suspend for HITL independently.
+                        if structuralNodes.count == 1 {
+                            let node = structuralNodes[0]
                             let upstreamResults = state.upstreamResultEnvelopes(for: node.id, edges: layout.edges)
                             let structResult = await Self.executeStructuralNode(
                                 node: node,
@@ -280,14 +362,16 @@ actor WorkflowExecutor: Executor {
                                 continuation: continuation,
                                 nodeIndex: completedCount + 1,
                                 totalNodes: totalNodes,
+                                traceContext: traceContext,
+                                onTraceUpdate: onTraceUpdate,
                                 streamProvider: agentConnect,
-                                profileMap: profileMap
+                                profileMap: profileMap,
+                                workflowConfig: workflowConfig
                             )
                             state.recordResult(from: structResult.envelope)
                             if let ports = structResult.activePorts {
                                 state.setActiveOutputPorts(ports, for: node.id)
                             }
-                            // Activate error port on structural node failure (mirrors profile node behavior)
                             if case .failed = structResult.envelope.status, structResult.activePorts == nil {
                                 state.setActiveOutputPorts(["error"], for: node.id)
                             }
@@ -296,11 +380,60 @@ actor WorkflowExecutor: Executor {
                             }
                             completedCount += 1
                             continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
-
-                            // Check stopWorkflow policy
                             if case .failed = structResult.envelope.status, node.nodeConfig?.onFailure == .stopWorkflow {
                                 workflowStopped = true
-                                break
+                            }
+                        } else if !structuralNodes.isEmpty {
+                            // Parallel — snapshot state before launch (same pattern as
+                            // parallel profile nodes); upstream results are read from the
+                            // snapshot so child tasks never touch the mutable `state`.
+                            let snapshotState = state
+                            await withTaskGroup(of: StructuralNodeResult.self) { group in
+                                for (nodeOffset, node) in structuralNodes.enumerated() {
+                                    let displayIndex = completedCount + nodeOffset + 1
+                                    let upstreamResults = snapshotState.upstreamResultEnvelopes(for: node.id, edges: layout.edges)
+                                    group.addTask {
+                                        await Self.executeStructuralNode(
+                                            node: node,
+                                            upstreamResults: upstreamResults,
+                                            state: snapshotState,
+                                            conversationID: conversationID,
+                                            continuation: continuation,
+                                            nodeIndex: displayIndex,
+                                            totalNodes: totalNodes,
+                                            traceContext: traceContext,
+                                            onTraceUpdate: onTraceUpdate,
+                                            streamProvider: agentConnect,
+                                            profileMap: profileMap,
+                                            workflowConfig: workflowConfig
+                                        )
+                                    }
+                                }
+                                // Apply results as they complete (out-of-order is safe —
+                                // same-level nodes are independent; variable collisions are
+                                // a pre-flight validation error).
+                                for await structResult in group {
+                                    let sid = structResult.envelope.nodeID
+                                    state.recordResult(from: structResult.envelope)
+                                    if let ports = structResult.activePorts {
+                                        state.setActiveOutputPorts(ports, for: sid)
+                                    }
+                                    if case .failed = structResult.envelope.status, structResult.activePorts == nil {
+                                        state.setActiveOutputPorts(["error"], for: sid)
+                                    }
+                                    for (key, value) in structResult.variableUpdates {
+                                        state.setVariable(key, value: value)
+                                    }
+                                    completedCount += 1
+                                    continuation.yield(.workflowProgress(completed: completedCount, total: totalNodes))
+
+                                    if case .failed = structResult.envelope.status,
+                                       layout.nodes.first(where: { $0.id == sid })?.nodeConfig?.onFailure == .stopWorkflow {
+                                        workflowStopped = true
+                                        group.cancelAll()
+                                        logger.notice("Sibling cancellation: structural node failed with stopWorkflow; cancelling remaining parallel tasks.")
+                                    }
+                                }
                             }
                         }
 
@@ -360,6 +493,14 @@ actor WorkflowExecutor: Executor {
                                         let failedNode = layout.nodes.first(where: { $0.id == result.nodeID })
                                         if failedNode?.nodeConfig?.onFailure == .stopWorkflow {
                                             workflowStopped = true
+                                            // P0-9: cancel still-running siblings the moment a
+                                            // `.stopWorkflow` failure lands. Without this, the
+                                            // TaskGroup keeps draining results from siblings
+                                            // that were already launched — wasting compute and
+                                            // emitting confusing trailing events after the user
+                                            // has been told the run was stopped.
+                                            group.cancelAll()
+                                            logger.notice("Sibling cancellation: '\(failedNode?.displayName ?? "?")' failed with stopWorkflow policy; cancelling remaining parallel tasks.")
                                         }
                                     }
                                     completedCount += 1
@@ -403,11 +544,13 @@ actor WorkflowExecutor: Executor {
                     // workflow as a whole reports its own outcome here so the bubble's
                     // TerminalOutcomeChip reflects workflow-level success vs partial-failure.
                     if successfulTerminals.isEmpty {
+                        await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .error)
                         continuation.yield(.executionFinished(
                             outcome: .failed,
                             reason: "All \(terminalOutputs.count) terminal node\(terminalOutputs.count == 1 ? "" : "s") failed"
                         ))
                     } else {
+                        await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .completed)
                         continuation.yield(.executionFinished(outcome: .completed, reason: nil))
                     }
                     continuation.finish()
@@ -415,13 +558,47 @@ actor WorkflowExecutor: Executor {
                 } catch is CancellationError {
                     logger.notice("Workflow cancelled for conversation: \(conversationID)")
                     await ExecutionSuspensionService.shared.cancel(for: conversationID)
+                    let classified = ClassifiedAgentError.synthetic(
+                        category: .userCancelled,
+                        origin: "WorkflowExecutor.executeWorkflow.cancelled",
+                        message: "User stopped the workflow",
+                        context: ["conversation_id": conversationID.uuidString]
+                    )
+                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                    await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .error)
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the workflow"))
                     continuation.finish()
+                } catch let wfError as WorkflowError {
+                    // Workflow-typed failure: classify with the matching wf* category
+                    // (the categories were defined but never emitted — this lights up
+                    // the workflow phase in TrendsView and produces actionable error
+                    // rows in the Report Inspector).
+                    logger.error("Workflow fatal error: \(wfError.localizedDescription)")
+                    let category = Self.classify(wfError)
+                    let classified = ClassifiedAgentError.synthetic(
+                        category: category,
+                        origin: "WorkflowExecutor.executeWorkflow.workflowError",
+                        message: wfError.localizedDescription,
+                        context: ["profile_id": profileID.uuidString]
+                    )
+                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                    await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .error)
+                    continuation.yield(.executionFinished(outcome: .failed, reason: wfError.localizedDescription))
+                    continuation.finish(throwing: wfError)
                 } catch {
                     logger.error("Workflow fatal error: \(error.localizedDescription)")
+                    let classified = ClassifiedAgentError.synthetic(
+                        category: .wfNodeFailed,
+                        origin: "WorkflowExecutor.executeWorkflow.unexpected",
+                        message: error.localizedDescription,
+                        context: ["profile_id": profileID.uuidString]
+                    )
+                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
+                    await TraceRecorder.shared.endSpan(spanID: traceContext.spanID, status: .error)
                     continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
+                } // end LogContext.with
                 } // end WorkflowDepth.withValue
             }
 
@@ -464,6 +641,15 @@ actor WorkflowExecutor: Executor {
         let startTime = Date()
         let nodeSpan = traceContext.newSpan()
 
+        // Persist the per-node span so inner agent iteration spans (which parent
+        // off this nodeSpan via `nodeSpan.newSpan()`) actually attach to a parent
+        // row in the `spans` table. Without this, fetchFullTrace orphaned them.
+        await TraceRecorder.shared.beginSpan(
+            context: nodeSpan,
+            name: "node:\(displayName)",
+            kind: .workflowNode
+        )
+
         onTraceUpdate(AgentTraceLog(
             traceID: nodeSpan.traceID,
             spanID: nodeSpan.spanID,
@@ -495,13 +681,56 @@ actor WorkflowExecutor: Executor {
             effectiveTaskDescription = baseTaskDescription
         }
 
+        // Gather media/file artifacts from completed upstream nodes. Mirrors the
+        // completed-only filter `compileForWorkflow` applies to text, so artifacts
+        // and text stay consistent (and inactive condition branches, already
+        // port-filtered out of `upstreamResults`, contribute neither). De-duplicated
+        // by id so a diamond/OR-join (where two branches each forward the same
+        // ancestor artifact) doesn't list it twice in the manifest or extract it twice.
+        let upstreamArtifacts: [MediaArtifact] = Self.forwardedArtifacts(
+            own: [],
+            upstream: upstreamResults
+                .filter { if case .completed = $0.status { return true }; return false }
+                .flatMap(\.artifacts)
+        )
+
+        // Extract text from `.document` artifacts (PDF/DOCX/…) so a text-only model
+        // can read attached files. Report-and-skip (policy b): a doc that can't be
+        // read is traced + surfaced as a per-node warning, and the node CONTINUES
+        // with whatever extracted (this is enrichment, not a hard dependency).
+        let upstreamArtifactText: String
+        if upstreamArtifacts.isEmpty {
+            upstreamArtifactText = ""
+        } else {
+            let (extracted, docFailures) = await ContextCompressor.extractDocumentText(
+                from: upstreamArtifacts,
+                fileProcessor: FileProcessorService()
+            )
+            upstreamArtifactText = extracted
+            for failure in docFailures {
+                let classified = ClassifiedAgentError.synthetic(
+                    category: failure.category,
+                    origin: "WorkflowExecutor.executeNode.extractDocumentText",
+                    message: failure.message,
+                    context: ["path": failure.path, "node": displayName]
+                )
+                await TraceRecorder.shared.emitAgentError(span: nodeSpan, error: classified)
+                continuation.yield(.warning(category: .resourceUnavailable, message: failure.message, relatedPath: failure.path, sourceNodeID: nodeID))
+            }
+        }
+
         let workflowContext = WorkflowExecutionContext(
             taskDescription: effectiveTaskDescription,
             upstreamInput: upstreamInput,
             isFirstNode: isFirstNode,
-            nodeName: displayName
+            nodeName: displayName,
+            upstreamArtifacts: upstreamArtifacts,
+            upstreamArtifactText: upstreamArtifactText
         )
 
+        if !upstreamArtifacts.isEmpty {
+            logger.info("Node '\(displayName)' received \(upstreamArtifacts.count) upstream artifact(s), extracted \(upstreamArtifactText.count) chars of document text")
+        }
         logger.info("Node '\(displayName)' context: taskDescription=\(effectiveTaskDescription.count) chars, upstreamInput=\(upstreamInput.count) chars, isFirstNode=\(isFirstNode)")
         if !upstreamInput.isEmpty {
             logger.debug("Node '\(displayName)' upstream preview:\n\(String(upstreamInput.prefix(500)))")
@@ -521,9 +750,17 @@ actor WorkflowExecutor: Executor {
         var nodeStatus: NodeExecutionStatus = .completed
 
         do {
-            // Race: stream consumption vs timeout (same pattern as AgentConnect)
+            // Race: stream consumption vs timeout (same pattern as AgentConnect).
+            //
+            // The inner stream now also reports its terminal `ExecutionOutcome` so
+            // we can detect "synthesizer laundering" — the case where the inner
+            // ReAct/Bot loop emitted `.executionFinished(outcome: .failed)` (e.g.
+            // iteration ceiling hit, classified error) but ResponseSynthesizer
+            // produced a clean-sounding string. Without this, every such failure
+            // becomes a `.completed` workflow node and (a) inflates the success
+            // tally and (b) makes node-level retry (`maxNodeRetries`) unreachable.
             let streamResult = try await withThrowingTaskGroup(
-                of: (String, [ToolOutput], [MediaArtifact]).self
+                of: (String, [ToolOutput], [MediaArtifact], ExecutionOutcome?, String?).self
             ) { group in
                 // Timeout sentinel
                 group.addTask {
@@ -538,6 +775,12 @@ actor WorkflowExecutor: Executor {
                     var output = ""
                     var tools: [ToolOutput] = []
                     var media: [MediaArtifact] = []
+                    // Tracks the inner agent/bot's terminal outcome (last
+                    // `.executionFinished` event). Surfaces the laundering case:
+                    // inner outcome can be `.failed` even when the synthesizer
+                    // produced a non-empty `content` value.
+                    var innerOutcome: ExecutionOutcome? = nil
+                    var innerReason: String? = nil
 
                     let nodeStream = agentConnect.streamWorkflowNodeResponse(
                         for: profile,
@@ -579,7 +822,14 @@ actor WorkflowExecutor: Executor {
                             continuation.yield(.requestClarification(question: "[\(displayName)] \(question)", operationID: operationID, sourceNodeID: nodeID))
 
                         case .error(let errMsg):
-                            continuation.yield(.error("[\(displayName)] \(errMsg)"))
+                            // Prefix the node name but PRESERVE the structured error's
+                            // category/path/suggestion (don't flatten via interpolation).
+                            continuation.yield(.error(StructuredError(
+                                category: errMsg.category,
+                                message: "[\(displayName)] \(errMsg.message)",
+                                relatedPath: errMsg.relatedPath,
+                                suggestion: errMsg.suggestion
+                            )))
 
                         case .warning(let cat, let msg, let relatedPath, _):
                             // Always route to the node's own timeline — detail visibility when
@@ -613,15 +863,17 @@ actor WorkflowExecutor: Executor {
                              .tokenUsage:
                             continuation.yield(event)
 
-                        case .executionFinished:
-                            // Inner executor finishing is per-node — the workflow as a whole
-                            // emits its own completion via workflowNodeCompleted/Failed. Swallow
-                            // the nested terminal signal so the chat bubble reflects the
-                            // outer workflow outcome, not an individual node's.
-                            break
+                        case .executionFinished(let outcome, let reason):
+                            // Inner executor's terminal event is captured locally
+                            // (to derive `nodeStatus` below) but not forwarded to
+                            // the outer continuation — the workflow emits its own
+                            // `workflowNodeCompleted` / `workflowNodeFailed` and
+                            // ultimately one `executionFinished` for the whole run.
+                            innerOutcome = outcome
+                            innerReason = reason
                         }
                     }
-                    return (output, tools, media)
+                    return (output, tools, media, innerOutcome, innerReason)
                 }
 
                 let result = try await group.next()!
@@ -631,6 +883,27 @@ actor WorkflowExecutor: Executor {
             nodeOutput = streamResult.0
             nodeArtifacts = streamResult.1
             nodeMediaArtifacts = streamResult.2
+
+            // Demote `.completed` → `.failed` when the inner agent/bot signalled
+            // a non-success terminal outcome. The default nodeStatus (`.completed`)
+            // only sticks when the inner stream finished without an `executionFinished`
+            // event OR finished with `outcome == .completed`. Treating this as
+            // `.modelError` keeps the failure retryable (`AgentFailureReason.isRetryable`
+            // is true for `.modelError`), so node-level `maxNodeRetries` now fires
+            // for the synthesizer-laundered case.
+            if case .completed = nodeStatus, let outcome = streamResult.3 {
+                switch outcome {
+                case .completed:
+                    break
+                case .failed:
+                    let reasonText = streamResult.4 ?? "Inner agent execution failed"
+                    nodeStatus = .failed(.modelError(provider: "agent", error: reasonText))
+                    logger.warning("Node '\(displayName)' inner outcome=.failed (\(reasonText)). Demoting nodeStatus to .failed.")
+                case .cancelled:
+                    nodeStatus = .canceled
+                    logger.notice("Node '\(displayName)' inner outcome=.cancelled. Demoting nodeStatus to .canceled.")
+                }
+            }
             logger.debug("Node '\(displayName)' raw output preview:\n\(String(nodeOutput.prefix(300)))")
         } catch is CancellationError {
             nodeStatus = .canceled
@@ -645,6 +918,15 @@ actor WorkflowExecutor: Executor {
 
         let endTime = Date()
 
+        // Auto-detect structured output: if the agent/bot emitted a JSON object or
+        // array (optionally fenced), expose it as `structuredOutput` so downstream
+        // nodes can do `{{ input.json.path }}` access and field routing. Plain text
+        // stays `nil`. Zero-config — no per-node schema required for the common case.
+        let structured = JSONValue.parseStructured(nodeOutput)
+        if structured != nil {
+            logger.info("Node '\(displayName)' produced structured (JSON) output")
+        }
+
         // --- Build Result Envelope ---
         // Safe to force-unwrap: callers guarantee only profile-backed nodes reach executeNode()
         let result = NodeResultEnvelope(
@@ -655,30 +937,66 @@ actor WorkflowExecutor: Executor {
             profileType: node.profileType ?? .bot,
             status: nodeStatus,
             output: nodeOutput,
-            artifacts: nodeMediaArtifacts,
+            // Forward upstream artifacts alongside this node's own produced media,
+            // so artifacts survive multi-hop pipelines (not just producer→consumer).
+            artifacts: Self.forwardedArtifacts(own: nodeMediaArtifacts, upstream: upstreamArtifacts),
             metadata: NodeExecutionMetadata(
                 startTime: startTime,
                 endTime: endTime,
                 iterationsUsed: 1,
                 toolsInvoked: nodeArtifacts.map(\.toolName),
                 tokenEstimate: nodeOutput.count / 4
-            )
+            ),
+            structuredOutput: structured
         )
+
+        // P1-16: persist per-node execution metrics. `NodeResultEnvelope.metadata`
+        // (duration, iterationsUsed, toolsInvoked, tokenEstimate) used to live
+        // only in memory and get discarded at run end. Emitting each field as a
+        // `metric` span event makes them queryable from `span_events` so per-node
+        // p50/p95 latency and tool-usage rollups are computable.
+        let durationMs = Int(result.metadata.duration * 1000)
+        await TraceRecorder.shared.emitMetric(span: nodeSpan, key: "node_duration", valueMs: durationMs)
+        await TraceRecorder.shared.emitMetric(span: nodeSpan, key: "tools_invoked", valueMs: result.metadata.toolsInvoked.count)
+        await TraceRecorder.shared.emitMetric(span: nodeSpan, key: "token_estimate", valueMs: result.metadata.tokenEstimate)
 
         // --- Emit Node Completion ---
         switch nodeStatus {
         case .completed:
             let summary = String(nodeOutput.prefix(100)) + (nodeOutput.count > 100 ? "..." : "")
+            await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .completed)
             continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: summary))
             logger.info("Node '\(displayName)' completed. Output: \(nodeOutput.count) chars, Duration: \(String(format: "%.1f", result.metadata.duration))s")
 
         case .failed(let reason):
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: reason.localizedDescription))
+            // Classify the per-node failure so it surfaces in TrendsView under
+            // the workflow phase rather than as an opaque span-error.
+            let classified = ClassifiedAgentError.synthetic(
+                category: .wfNodeFailed,
+                origin: "WorkflowExecutor.executeNode",
+                message: reason.localizedDescription,
+                context: ["node_name": displayName, "node_id": nodeID.uuidString]
+            )
+            await TraceRecorder.shared.emitAgentError(span: nodeSpan, error: classified, iteration: nil)
+            await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .error)
+            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: reason.localizedDescription, suggestion: reason.remediation))
 
         case .canceled:
+            await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .error)
             continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Cancelled"))
 
         case .skipped(let reason):
+            // Skipped here is the "post-execution skip" path (rare in practice;
+            // upstream skips are caught earlier with a synthetic envelope). Still
+            // emit the category so the workflow phase shows the signal.
+            let classified = ClassifiedAgentError.synthetic(
+                category: .wfNodeSkipped,
+                origin: "WorkflowExecutor.executeNode.skipped",
+                message: reason,
+                context: ["node_name": displayName, "node_id": nodeID.uuidString]
+            )
+            await TraceRecorder.shared.emitAgentError(span: nodeSpan, error: classified, iteration: nil)
+            await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .completed)
             continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Skipped: \(reason)"))
         }
 
@@ -742,6 +1060,50 @@ actor WorkflowExecutor: Executor {
         return lastResult!
     }
 
+    // MARK: - Artifact Forwarding
+
+    /// Merges a node's own produced artifacts with the artifacts it received from
+    /// upstream, de-duplicated by `id` (stable, first occurrence wins).
+    ///
+    /// This is what makes media/file artifacts flow *end-to-end* rather than one
+    /// hop: a node's output envelope carries its own media **plus** everything its
+    /// upstreams carried, so a downstream vision node can consume an image produced
+    /// several hops earlier — even across intermediate Code/Gate/Agent nodes that
+    /// didn't themselves emit media. De-dup by id keeps diamonds (A→B,C→D) from
+    /// double-listing the same artifact and bounds growth to the run's distinct set.
+    private nonisolated static func forwardedArtifacts(
+        own: [MediaArtifact],
+        upstream: [MediaArtifact]
+    ) -> [MediaArtifact] {
+        var seen = Set<UUID>()
+        var merged: [MediaArtifact] = []
+        for artifact in own + upstream where seen.insert(artifact.id).inserted {
+            merged.append(artifact)
+        }
+        return merged
+    }
+
+    /// Runs a resolved tool with a wall-clock timeout. Mirrors the per-node timeout
+    /// race used for profile nodes (`executeNode`) — a hung tool throws
+    /// `AgentExecutionError.executionTimeout` instead of blocking the level forever.
+    /// The thrown timeout is retryable by the Action node's retry loop.
+    private nonisolated static func runToolWithTimeout(
+        _ tool: AgentTool,
+        args: Data,
+        timeout: TimeInterval
+    ) async throws -> (output: String, artifacts: [MediaArtifact]) {
+        try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
+            group.addTask { try await tool.run(args) }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeout))
+                throw AgentExecutionError(reason: .executionTimeout(elapsed: timeout, limit: timeout))
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
+
     // MARK: - Structural Node Result
 
     /// Result from a structural node execution, including port activation and variable updates.
@@ -764,8 +1126,17 @@ actor WorkflowExecutor: Executor {
         continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
         nodeIndex: Int,
         totalNodes: Int,
+        // Trace context + callback are threaded through so loop bodies can
+        // produce child spans of the parent loop rather than fresh root traces,
+        // and so body iterations' onTraceUpdate events reach the same consumer
+        // as the parent workflow's. Defaults preserve the prior single-shot
+        // behaviour for non-loop structural nodes (condition, gate, code).
+        traceContext: TraceContext = TraceContext(subAgentName: "structural", provider: .anthropic),
+        onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void = { _ in },
         streamProvider: (any WorkflowStreamProvider)? = nil,
-        profileMap: [UUID: BackendProfileModel]? = nil
+        profileMap: [UUID: BackendProfileModel]? = nil,
+        // Workflow defaults used by Action nodes for timeout/retry resolution.
+        workflowConfig: WorkflowConfig = WorkflowConfig(agentProfileIDs: [])
     ) async -> StructuralNodeResult {
 
         let nodeID = node.id
@@ -782,6 +1153,8 @@ actor WorkflowExecutor: Executor {
         var activePorts: Set<String>? = nil
         var variableUpdates: [String: String] = [:]
         var status: NodeExecutionStatus = .completed
+        // Artifacts the node itself produces (only Action nodes, via their tool).
+        var producedArtifacts: [MediaArtifact] = []
 
         let upstreamNames = upstreamResults.map(\.profileName).joined(separator: ", ")
         let upstreamTotalChars = upstreamResults.reduce(0) { $0 + $1.output.count }
@@ -792,6 +1165,7 @@ actor WorkflowExecutor: Executor {
         case .code: "code"
         case .gate: "gate"
         case .trigger: "trigger"
+        case .action: "action"
         }
         logger.info("Structural node '\(displayName)' (\(kindLabel)): \(upstreamResults.count) upstream results [\(upstreamNames)], total \(upstreamTotalChars) chars")
 
@@ -853,11 +1227,25 @@ actor WorkflowExecutor: Executor {
                         upstreamText: upstreamText,
                         displayName: displayName,
                         nodeID: nodeID,
-                        continuation: continuation
+                        continuation: continuation,
+                        traceContext: traceContext
                     )
                 } catch {
                     logger.error("Condition LLM fallback failed for '\(displayName)': \(error.localizedDescription)")
                     continuation.yield(.thought("[\(displayName)] AI Classifier failed: \(error.localizedDescription)", sourceNodeID: nodeID))
+                    // P1-18: classify the failure into the workflow phase so it
+                    // surfaces in TrendsView instead of being a silent thought event.
+                    let classified = ClassifiedAgentError.synthetic(
+                        category: .wfClassifierFailed,
+                        origin: "WorkflowExecutor.evaluateConditionWithLLM",
+                        message: error.localizedDescription,
+                        context: [
+                            "node_name": displayName,
+                            "node_id": nodeID.uuidString,
+                            "model": config.llmModelName ?? ""
+                        ]
+                    )
+                    await TraceRecorder.shared.emitAgentError(span: traceContext, error: classified, iteration: nil)
                 }
             }
 
@@ -902,24 +1290,35 @@ actor WorkflowExecutor: Executor {
                     iteration: iteration, maxIterations: maxIter
                 ))
 
-                // Execute body workflow (thread injected dependencies for testability)
+                // Execute body workflow (thread injected dependencies for testability).
+                //
+                // P0-4: child span of the parent loop's traceContext (not a fresh root),
+                // and forward the parent's `onTraceUpdate` so body-iteration trace events
+                // are no longer orphaned in the trace tree.
                 let bodyExecutor = WorkflowExecutor(workflowProfileID: bodyProfileID)
-                let bodyTrace = TraceContext(subAgentName: "\(displayName) iter \(iteration)", provider: .anthropic)
+                let bodyTrace = traceContext.newSpan()
                 let bodyStream = bodyExecutor.executeWorkflow(
                     userInput: iterationInput,
                     chatHistory: [],
                     conversationID: conversationID,
                     ragContext: nil,
                     traceContext: bodyTrace,
-                    onTraceUpdate: { _ in },
+                    onTraceUpdate: onTraceUpdate,
                     layout: nil,
                     profileMap: profileMap,
                     streamProvider: streamProvider
                 )
 
-                // Consume body stream, accumulate text output
+                // Consume body stream, accumulate text output.
+                //
+                // P0-5: body-failure detection now reads the body's
+                // `.executionFinished(outcome:)` event — the single source of truth.
+                // Previously we keyed off the `.error` event, which only fires when
+                // *all* terminals failed; a partial-failure body reported `.completed`
+                // and the loop kept iterating against unreliable upstream data.
                 var bodyOutput = ""
-                var bodyFailed = false
+                var bodyOutcome: ExecutionOutcome? = nil
+                var bodyFailureReason: String? = nil
                 do {
                     for try await event in bodyStream {
                         switch event {
@@ -928,18 +1327,31 @@ actor WorkflowExecutor: Executor {
                         case .thought(let msg, let id, _):
                             continuation.yield(.thought("[\(displayName) iter \(iteration)] \(msg)", id: id, sourceNodeID: nodeID))
                         case .error(let errMsg):
-                            // Body workflow emits .error when all terminals failed — treat as body failure
-                            continuation.yield(.thought("[\(displayName) iter \(iteration)] Error: \(errMsg)", sourceNodeID: nodeID))
-                            bodyFailed = true
+                            // Surface in the node timeline but don't decide outcome here —
+                            // wait for the body's `.executionFinished` to make the call.
+                            continuation.yield(.thought("[\(displayName) iter \(iteration)] Error: \(errMsg.message)", sourceNodeID: nodeID))
+                            bodyFailureReason = errMsg.message
+                        case .executionFinished(let outcome, let reason):
+                            bodyOutcome = outcome
+                            if let reason { bodyFailureReason = reason }
                         default:
                             break // Suppress inner workflow orchestration events
                         }
                     }
-                    // If body reported failure via .error event (not exception), break the loop
-                    if bodyFailed {
-                        logger.error("Loop '\(displayName)' iteration \(iteration) body reported failure")
+                    // Outcome-based failure detection. `.failed` is authoritative;
+                    // `.cancelled` propagates as a cancel-shaped failure (consistent
+                    // with the prior catch behavior). `.completed` is success.
+                    if bodyOutcome == .failed {
+                        let reasonText = bodyFailureReason ?? "Loop body reported failure"
+                        logger.error("Loop '\(displayName)' iteration \(iteration) body outcome=.failed (\(reasonText))")
                         output = iterationOutput.isEmpty ? upstreamText : iterationOutput
-                        status = .failed(.modelError(provider: "workflow", error: "Loop body failed at iteration \(iteration)"))
+                        status = .failed(.modelError(provider: "workflow", error: "Loop body failed at iteration \(iteration): \(reasonText)"))
+                        break
+                    }
+                    if bodyOutcome == .cancelled {
+                        logger.notice("Loop '\(displayName)' iteration \(iteration) body outcome=.cancelled")
+                        output = iterationOutput.isEmpty ? upstreamText : iterationOutput
+                        status = .canceled
                         break
                     }
                 } catch is CancellationError {
@@ -1003,26 +1415,25 @@ actor WorkflowExecutor: Executor {
             }
 
         case .code(let config):
-            // Template transform: replace {{ var.name }} FIRST, then {{ input }} LAST.
-            // This order prevents template injection — upstream text won't be re-scanned
-            // for {{ var.X }} patterns that happen to appear in upstream output.
+            // Template transform via WorkflowTemplate (single-pass, injection-safe).
+            // Supports {{ input }}, {{ input.json.path }}, {{ var.name }}, and
+            // {{ var.name.path }}. `input.json` reads the first upstream node that
+            // produced structured (JSON) output.
             let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
-            var result = config.template
+            let upstreamJSON = upstreamResults.compactMap(\.structuredOutput).first
 
             logger.debug("Code node '\(displayName)' template before substitution:\n\(String(config.template.prefix(300)))")
             logger.debug("Code node '\(displayName)' upstream input preview:\n\(String(upstreamText.prefix(300)))")
-
-            // Step 1: Replace {{ var.name }} with workflow variables
-            for (key, value) in state.variables {
-                result = result.replacingOccurrences(of: "{{ var.\(key) }}", with: value)
-                result = result.replacingOccurrences(of: "{{var.\(key)}}", with: value)
+            if upstreamJSON != nil {
+                logger.debug("Code node '\(displayName)' has upstream structured JSON available for {{ input.json.* }}")
             }
 
-            // Step 2: Replace {{ input }} with upstream text LAST (prevents injection)
-            result = result.replacingOccurrences(of: "{{ input }}", with: upstreamText)
-            result = result.replacingOccurrences(of: "{{input}}", with: upstreamText)
-
-            output = result
+            output = WorkflowTemplate.render(
+                config.template,
+                input: upstreamText,
+                inputJSON: upstreamJSON,
+                variables: state.variables
+            )
             logger.debug("Code node '\(displayName)' output after substitution:\n\(String(output.prefix(300)))")
 
             // Write to shared variable if configured
@@ -1100,9 +1511,139 @@ actor WorkflowExecutor: Executor {
                 logger.info("Gate node '\(displayName)' rejected")
             }
 
+            // P1-12: emit a user-interaction span event so gate approve/reject is
+            // visible in the Report Inspector and counted in dashboards. The
+            // `userInteraction` event type was defined in `TraceRecorder` but
+            // never called from any code path — this is the first emitter.
+            await TraceRecorder.shared.emitUserInteraction(
+                span: traceContext,
+                type: "workflow_gate",
+                toolName: displayName,
+                outcome: approved ? "approved" : "rejected"
+            )
+
         case .trigger:
             output = ""
             logger.info("Trigger node '\(displayName)' skipped (entry-point only)")
+
+        case .action(let config):
+            // Deterministic tool invocation — no LLM. Resolve the configured tool,
+            // bind its arguments from upstream data, run it (with timeout + retry),
+            // and surface the tool's output + artifacts. Failures route through the
+            // node's `error` port.
+            guard let toolRef = config.tool else {
+                output = "Action node has no tool configured"
+                status = .failed(.modelError(provider: "workflow", error: "Action node '\(displayName)' has no tool configured"))
+                logger.error("Action node '\(displayName)' has no tool configured")
+                break
+            }
+
+            guard let provider = streamProvider,
+                  let agentTool = await provider.resolveWorkflowTool(toolRef, conversationID: conversationID) else {
+                output = "Could not resolve tool '\(toolRef.name)'"
+                status = .failed(.modelError(provider: "workflow", error: "Action node '\(displayName)': tool '\(toolRef.name)' could not be resolved (removed, disabled, or MCP server offline)"))
+                logger.error("Action node '\(displayName)': failed to resolve tool '\(toolRef.name)'")
+                break
+            }
+
+            // Emit a tool-call timeline event up front so the node shows a proper
+            // tool card. Argument *names* only (not resolved values) so a binding
+            // like `{{ var.api_key }}` never leaks a secret into the trace/UI.
+            let argKeys = config.argumentBindings.keys.sorted().joined(separator: ", ")
+            let toolParams = "args: [\(argKeys)]"
+            let toolStart = Date()
+            continuation.yield(.toolCall(name: toolRef.name, params: toolParams, sourceNodeID: nodeID))
+
+            // (#4) Permission pre-flight. Action nodes bypass ToolExecutionMediator,
+            // so we run the same TCC check it does — triggering the macOS prompt if
+            // undetermined and failing with an actionable message if denied (rather
+            // than letting the tool fail opaquely deep inside its own call).
+            let requiredPermissions = ToolExecutionMediator.getRequiredPermissions(for: toolRef.name)
+            if !requiredPermissions.isEmpty {
+                let granted = await PermissionManager.shared.ensurePermissions(for: requiredPermissions)
+                if !granted {
+                    let permList = requiredPermissions.map { String(describing: $0) }.joined(separator: ", ")
+                    output = "Missing macOS permission for '\(toolRef.name)'. Grant access in System Settings › Privacy & Security, then re-run."
+                    status = .failed(.modelError(provider: "tool", error: "Missing permission(s): \(permList)"))
+                    continuation.yield(.toolFailed(
+                        ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
+                        category: .permissionRejected, sourceNodeID: nodeID
+                    ))
+                    logger.warning("Action node '\(displayName)': permission denied for '\(toolRef.name)' (\(permList))")
+                    break
+                }
+            }
+
+            // Resolve each argument binding against the upstream data. Structural
+            // nodes read all port-active upstreams (consistent with Code/Gate).
+            // Computed once — stable across retries.
+            let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
+            let upstreamJSON = upstreamResults.compactMap(\.structuredOutput).first
+            let argsData = WorkflowActionArgs.build(
+                bindings: config.argumentBindings,
+                schema: toolRef.parameters,
+                input: upstreamText,
+                inputJSON: upstreamJSON,
+                variables: state.variables
+            )
+
+            // (#1) Per-node timeout — a hung tool can't block the workflow forever.
+            // (#2) Retry — transient failures (network/MCP/timeout) retry up to
+            // `maxNodeRetries`. Defaults: hardTimeout → workflow default (120s),
+            // retries → workflow default (0). Both honor per-node overrides.
+            let nodeTimeout: TimeInterval = node.nodeConfig?.hardTimeout ?? workflowConfig.resolvedNodeTimeout
+            let maxRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
+            let retryDelay = node.nodeConfig?.retryDelay ?? 0
+            logger.info("Action node '\(displayName)': invoking tool '\(toolRef.name)' (\(config.argumentBindings.count) binding(s), timeout \(Int(nodeTimeout))s, retries \(maxRetries))")
+
+            var attempt = 0
+            while true {
+                do {
+                    let (toolOutput, toolArtifacts) = try await Self.runToolWithTimeout(agentTool, args: argsData, timeout: nodeTimeout)
+                    output = toolOutput
+                    producedArtifacts = toolArtifacts
+                    let durationMs = Int(Date().timeIntervalSince(toolStart) * 1000)
+                    continuation.yield(.toolSucceeded(
+                        ToolOutput(toolName: toolRef.name, params: toolParams, output: toolOutput, isSuccess: true),
+                        durationMs: durationMs, sourceNodeID: nodeID
+                    ))
+                    logger.info("Action node '\(displayName)': tool '\(toolRef.name)' returned \(toolOutput.count) chars, \(toolArtifacts.count) artifact(s)")
+                    break
+                } catch is CancellationError {
+                    status = .canceled
+                    output = "Action cancelled"
+                    continuation.yield(.toolFailed(
+                        ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
+                        category: .cancelled, sourceNodeID: nodeID
+                    ))
+                    logger.notice("Action node '\(displayName)': cancelled")
+                    break
+                } catch {
+                    // Retry transient failures (timeout, network, MCP) up to the cap.
+                    if attempt < maxRetries {
+                        attempt += 1
+                        logger.notice("Action node '\(displayName)': tool '\(toolRef.name)' failed (\(error.localizedDescription)); retry \(attempt)/\(maxRetries)")
+                        continuation.yield(.thought("[\(displayName)] Tool failed — retrying (\(attempt)/\(maxRetries))...", sourceNodeID: nodeID))
+                        if retryDelay > 0 { try? await Task.sleep(for: .seconds(retryDelay)) }
+                        continue
+                    }
+                    output = "Tool '\(toolRef.name)' failed: \(error.localizedDescription)"
+                    status = .failed(.modelError(provider: "tool", error: error.localizedDescription))
+                    // Distinguish timeout from a generic throw for the timeline icon.
+                    let failureCategory: ToolFailureCategory
+                    if let agentErr = error as? AgentExecutionError, case .executionTimeout = agentErr.reason {
+                        failureCategory = .timeout
+                    } else {
+                        failureCategory = .executionThrew
+                    }
+                    continuation.yield(.toolFailed(
+                        ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
+                        category: failureCategory, sourceNodeID: nodeID
+                    ))
+                    logger.error("Action node '\(displayName)': tool '\(toolRef.name)' failed after \(attempt + 1) attempt(s): \(error.localizedDescription)")
+                    break
+                }
+            }
         }
 
         let endTime = Date()
@@ -1119,7 +1660,7 @@ actor WorkflowExecutor: Executor {
             }
             continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: summary))
         case .failed(let reason):
-            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: reason.localizedDescription))
+            continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: reason.localizedDescription, suggestion: reason.remediation))
         case .canceled:
             continuation.yield(.workflowNodeFailed(nodeID: nodeID, profileName: displayName, error: "Cancelled"))
         case .skipped(let reason):
@@ -1134,14 +1675,24 @@ actor WorkflowExecutor: Executor {
             profileType: .bot,
             status: status,
             output: output,
-            artifacts: [],
+            // Structural nodes (Code/Gate/Loop/Condition) are pipeline plumbing —
+            // they forward upstream artifacts so media survives the hop (a Gate or
+            // Code node between an image producer and a vision consumer no longer
+            // drops the image). Action nodes additionally contribute any artifacts
+            // their tool produced (`producedArtifacts`); the rest produce none.
+            // Uses the same port-active upstream set the node sees text from.
+            artifacts: Self.forwardedArtifacts(own: producedArtifacts, upstream: upstreamResults.flatMap(\.artifacts)),
             metadata: NodeExecutionMetadata(
                 startTime: startTime,
                 endTime: endTime,
                 iterationsUsed: 1,
                 toolsInvoked: [],
                 tokenEstimate: output.count / 4
-            )
+            ),
+            // Auto-detect structured output (mirrors the profile-node path): a Code
+            // node emitting JSON, or a Loop/Gate passing JSON through, exposes it as
+            // `structuredOutput` for downstream `{{ input.json.path }}` access.
+            structuredOutput: JSONValue.parseStructured(output)
         )
 
         return StructuralNodeResult(envelope: envelope, activePorts: activePorts, variableUpdates: variableUpdates)
@@ -1157,7 +1708,8 @@ actor WorkflowExecutor: Executor {
         upstreamText: String,
         displayName: String,
         nodeID: UUID,
-        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation
+        continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
+        traceContext: TraceContext
     ) async throws -> String {
 
         let classificationLabels = config.rules.map(\.label)
@@ -1254,7 +1806,40 @@ actor WorkflowExecutor: Executor {
 
         continuation.yield(.thought("[\(displayName)] Classifying with AI (\(model.modelName))...", sourceNodeID: nodeID))
 
-        let response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+        // P1-13: instrument the classifier LLM call. The classifier was previously
+        // invisible to telemetry — no model, no latency, no token count — despite
+        // being a real cost center. Each classifier call now emits a child span
+        // so per-classifier-node latency and reliability is queryable.
+        let classifierSpan = traceContext.newSpan()
+        await TraceRecorder.shared.beginSpan(
+            context: classifierSpan,
+            name: "classifier:\(displayName)",
+            kind: .llmCall
+        )
+        await TraceRecorder.shared.emitLLMRequest(
+            span: classifierSpan,
+            model: model.modelName,
+            messageCount: messages.count
+        )
+        let callStart = Date()
+
+        let response: String
+        do {
+            response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+        } catch {
+            await TraceRecorder.shared.endSpan(spanID: classifierSpan.spanID, status: .error)
+            throw error
+        }
+
+        let durationMs = Int(Date().timeIntervalSince(callStart) * 1000)
+        await TraceRecorder.shared.emitLLMResponse(
+            span: classifierSpan,
+            durationMs: durationMs,
+            preview: response.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        await TraceRecorder.shared.emitMetric(span: classifierSpan, key: "classifier_latency", valueMs: durationMs)
+        await TraceRecorder.shared.endSpan(spanID: classifierSpan.spanID, status: .completed)
+
         logger.debug("AI Classifier '\(displayName)' raw response: \"\(response)\"")
 
         // Immediately reclaim GPU RAM — classifier is a one-shot task,

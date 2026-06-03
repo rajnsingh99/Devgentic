@@ -4,9 +4,11 @@
 //
 //  Created by Raj Singh on 11/04/26.
 //
-//  A single workflow node's execution result card.
-//  Fixed vertical rectangle showing agent name + timeline preview.
-//  Tapping selects the card and renders full detail in the output area below.
+//  Redesign (build 2026-04-25): each card represents a single workflow node and
+//  shows the *input* the node received (or will receive). Three visual states —
+//  pending / running / completed-or-failed — are driven entirely by
+//  `NodeDisplayData.status`. The full output for the selected card now renders
+//  in the dedicated Final Output area below the strip, not inside the card.
 //
 
 import SwiftUI
@@ -26,85 +28,110 @@ struct WorkflowOutcomeCardView: View {
         return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
     }
 
+    private var statusColor: Color { nodeData.status.color }
+
+    /// Body text resolution. Terminal states (`.completed` / `.failed`) preview
+    /// the node's *output* (`detail`) so each card mirrors the Final Outcome
+    /// card and the user can scan results without selecting every node. Pre-
+    /// terminal states (`.pending` / `.running` / `.skipped`) preview the
+    /// upstream-derived input — i.e. "what's coming into this node" — so the
+    /// user can see the flow before output exists.
+    private var bodyText: String? {
+        switch nodeData.status {
+        case .completed, .failed:
+            let detail = nodeData.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return detail.isEmpty ? nil : detail
+        case .pending, .running, .skipped:
+            if let input = nodeData.input?.trimmingCharacters(in: .whitespacesAndNewlines), !input.isEmpty {
+                return input
+            }
+            return nil
+        }
+    }
+
+    private var fallbackBodyText: String {
+        switch nodeData.status {
+        case .pending:
+            if let src = nodeData.inputSourceLabel, !src.isEmpty {
+                return "Waiting for \(src)…"
+            }
+            return "Awaiting input…"
+        case .running:
+            return "Running…"
+        case .skipped:
+            return "Skipped — upstream condition not met."
+        case .failed:
+            return "Failed — no output produced."
+        default:
+            return "—"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header: status + name
-            HStack(spacing: 6) {
-                if nodeData.status == .running {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    Image(systemName: nodeData.status.icon)
-                        .foregroundColor(nodeData.status.color)
-                        .font(.system(size: 13))
-                }
+            // Header: status icon + name + duration
+            HStack(spacing: 8) {
+                statusBadge
                 Text(nodeData.profileName)
-                    .font(theme.fontCaption.weight(.semibold))
+                    .font(theme.fontSubheadline.weight(.semibold))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-
-            Divider()
-                .padding(.horizontal, 8)
-
-            // Timeline preview (clipped, non-interactive)
-            if !nodeData.nodeTimeline.isEmpty {
-                AgentTimelineView(events: nodeData.nodeTimeline, isStreaming: nodeData.isStreaming)
-                    .frame(maxHeight: .infinity)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .clipped()
-                    .allowsHitTesting(false)
-            } else if !nodeData.detail.isEmpty && nodeData.status != .running {
-                // Fallback: show output preview when no timeline
-                Text(nodeData.detail)
-                    .font(.system(size: 10))
-                    .foregroundColor(theme.secondaryText)
-                    .lineLimit(6)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            } else {
-                Spacer()
-            }
-
-            Divider()
-                .padding(.horizontal, 8)
-
-            // Footer: duration + event count
-            HStack(spacing: 6) {
-                Text(durationText)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(theme.secondaryText)
-
-                if !nodeData.nodeTimeline.isEmpty {
-                    Text("\(nodeData.nodeTimeline.count) event\(nodeData.nodeTimeline.count == 1 ? "" : "s")")
-                        .font(.system(size: 9))
+                Spacer(minLength: 6)
+                if nodeData.status != .pending && nodeData.duration > 0 {
+                    Text(durationText)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundColor(theme.tertiaryText)
                 }
-
-                Spacer(minLength: 0)
-
-                Text(nodeData.status.label)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(nodeData.status.color)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+
+            // Body: terminal nodes preview their output; pre-terminal nodes
+            // preview their upstream input. Font is intentionally compact —
+            // 240×180 cards fit the most useful preview at ~11pt.
+            Group {
+                if let text = bodyText {
+                    Text(text)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(5)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    Text(fallbackBodyText)
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.tertiaryText)
+                        .italic()
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
+
+            // Footer: status label band
+            HStack(spacing: 6) {
+                Text(nodeData.status.label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(statusColor)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(statusColor.opacity(0.08))
         }
-        .frame(width: 200)
+        .frame(width: 240, height: 180)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(isSelected ? theme.accentColor.opacity(0.08) : (isHovering ? theme.surfaceOverlay : theme.controlBackground))
+                .fill(theme.controlBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(
-                    isSelected ? theme.accentColor : nodeData.status.color.opacity(isHovering ? 0.5 : 0.3),
+                    isSelected ? statusColor : statusColor.opacity(isHovering ? 0.55 : 0.35),
                     lineWidth: isSelected ? 2 : 1.5
                 )
         )
@@ -114,6 +141,20 @@ struct WorkflowOutcomeCardView: View {
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
             }
+        }
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        switch nodeData.status {
+        case .running:
+            ProgressView()
+                .controlSize(.small)
+                .tint(statusColor)
+        default:
+            Image(systemName: nodeData.status.icon)
+                .foregroundColor(statusColor)
+                .font(.system(size: 14))
         }
     }
 }

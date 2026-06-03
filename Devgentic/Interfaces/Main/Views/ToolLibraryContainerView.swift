@@ -19,7 +19,6 @@ struct ToolLibraryContainerView: View {
 
     @State private var searchText = ""
     @State private var selectedSidebar: SidebarSelection? = .all
-    @State private var isPresentingAddView = false
     @State private var isSelectionMode = false
     @State private var selectedToolIDs: Set<String> = []
 
@@ -38,6 +37,10 @@ struct ToolLibraryContainerView: View {
                 }
                 .padding(.bottom, 8)
 
+                // The container itself takes whatever width is offered. The
+                // inner ToolLibraryView caps itself at 1200pt (20% wider than
+                // the global content column) so the sidebar + table can breathe
+                // without dragging the island bar wider than its standard.
                 ToolLibraryView(
                     configuredTools: toolsBinding,
                     instructions: currentInstructions,
@@ -47,21 +50,9 @@ struct ToolLibraryContainerView: View {
                     selectedToolIDs: $selectedToolIDs,
                     hiddenToolNames: hiddenToolNames
                 )
-                .frame(maxWidth: ViewLayout.maxContentWidth)
                 .frame(maxWidth: .infinity)
             }
             .id(profileID)
-            .sheet(isPresented: $isPresentingAddView) {
-                AddMCPServerView(
-                    onToolAdded: { serverName, serverDefinition, tools -> Bool in
-                        if MCPToolStore.shared.sources.contains(where: { $0.serverName.caseInsensitiveCompare(serverName) == .orderedSame }) {
-                            return false
-                        }
-                        MCPToolStore.shared.addTool(serverName: serverName, serverDefinition: serverDefinition, newTools: tools)
-                        return true
-                    }
-                )
-            }
         } else {
             ContentNotFoundView(
                 icon: "exclamationmark.triangle",
@@ -99,7 +90,7 @@ struct ToolLibraryContainerView: View {
                 help: "Add MCP Server",
                 accessibilityLabel: "Add MCP Server"
             ) {
-                isPresentingAddView = true
+                router.navigate(to: .addMCPServer)
             }
 
             // "Done" uses `checkmark.seal.fill` to disambiguate from the

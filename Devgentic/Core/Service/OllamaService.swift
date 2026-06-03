@@ -199,7 +199,7 @@ class OllamaService {
                         } catch {
                             logger.error("Failed to fetch details for model \(name): \(error.localizedDescription)")
                             // Even if details fail, we can create a model with no tags
-                            let emptyResponse = OllamaShowResponse(license: nil, modelfile: nil, parameters: nil, template: nil, details: nil, capabilities: nil)
+                            let emptyResponse = OllamaShowResponse(license: nil, modelfile: nil, parameters: nil, template: nil, details: nil, capabilities: nil, modelInfo: nil)
                             return LocalModel(name: name, response: emptyResponse)
                         }
                     }

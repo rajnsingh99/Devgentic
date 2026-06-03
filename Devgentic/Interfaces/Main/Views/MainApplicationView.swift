@@ -159,10 +159,19 @@ struct MainApplicationView: View {
             SettingsDetailContainerView(category: category)
         case .toolLibrary(let profileID):
             ToolLibraryContainerView(profileID: profileID)
+        case .addMCPServer:
+            AddMCPServerContainerView(mode: .add)
+        case .editMCPServer(let sourceID):
+            AddMCPServerContainerView(mode: .edit(sourceID: sourceID))
         case .promptDetail(let promptID):
             PromptDetailContainerView(promptID: promptID)
         case .scheduledTaskDetail(let taskID):
             ScheduledTaskDetailContainerView(taskID: taskID)
+        case .scheduledTaskCreate(let prefillPrompt, let prefillConversationID):
+            ScheduledTaskCreateContainerView(
+                prefillPrompt: prefillPrompt,
+                prefillConversationID: prefillConversationID
+            )
         case .ollamaModelStore:
             OllamaModelStoreContainerView()
         case .mlxModelStore(_, let filterForTools):

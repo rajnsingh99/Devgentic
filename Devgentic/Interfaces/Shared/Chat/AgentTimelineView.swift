@@ -42,12 +42,29 @@ struct AgentTimelineView: View {
     }
 
     /// Initialize from raw timeline events (used by workflow per-node detail views).
-    init(events: [TimelineEvent], isStreaming: Bool = false) {
+    /// - Parameter chatFidelity: When `true`, render with the same compact
+    ///   reasoning treatment used in chat bubbles (`InterimReasoningRow` for
+    ///   thoughts) and surface the streaming footer when `isStreaming` is true.
+    ///   The workflow execution UI passes `true` for the live "currently running"
+    ///   node so its in-flight timeline matches what the user sees in chat.
+    /// - Parameter streamingStartedAt: Wall-clock start time for the streaming
+    ///   footer's elapsed counter. Required when `chatFidelity && isStreaming`;
+    ///   ignored otherwise.
+    init(
+        events: [TimelineEvent],
+        isStreaming: Bool = false,
+        chatFidelity: Bool = false,
+        streamingStartedAt: Date? = nil
+    ) {
         self.events = events
         self.isStreaming = isStreaming
         self.finalContentText = nil
-        self.streamingContext = nil
-        self.compactReasoning = false
+        if chatFidelity, isStreaming, let start = streamingStartedAt {
+            self.streamingContext = StreamingContext(startedAt: start, isStreaming: true)
+        } else {
+            self.streamingContext = nil
+        }
+        self.compactReasoning = chatFidelity
     }
 
     var body: some View {

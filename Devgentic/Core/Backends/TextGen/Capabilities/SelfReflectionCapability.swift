@@ -105,7 +105,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                     var reflexionMemory = ReflexionMemoryState()
 
                     // --- Start Episode ---
-                    sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: "ACTIVE"))
+                    sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: .active))
                     sessionState.workingMemory.removeValue(forKey: "current_focus")
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
@@ -155,6 +155,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                                 stepId: 0,
                                 toolCallId: "trial_\(trial - 1)",
                                 toolName: "prior_trial",
+                                params: "",
                                 result: "[Trial \(trial - 1) output]: \(bestOutput)",
                                 artifacts: []
                             )
@@ -315,8 +316,8 @@ actor SelfReflectionExecutorWrapper: Executor {
                     // FINAL OUTPUT
                     // =====================================================================
 
-                    let exitStatus = bestOutput.isEmpty ? "FAILED" : "COMPLETED"
-                    sessionState.closeActiveEpisode(status: exitStatus, outcome: bestOutput)
+                    let terminalOutcome: ExecutionOutcome = bestOutput.isEmpty ? .failed : .completed
+                    sessionState.closeActiveEpisode(outcome: terminalOutcome, message: bestOutput)
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     onTraceUpdate(AgentTraceLog(
@@ -329,10 +330,9 @@ actor SelfReflectionExecutorWrapper: Executor {
                     ))
 
                     continuation.yield(.content(bestOutput))
-                    // Terminal outcome: empty best output after exhausting all trials means
-                    // the reflection loop never produced acceptable content. Treat that as
-                    // .failed so the UI marks the bubble honestly.
-                    let terminalOutcome: ExecutionOutcome = bestOutput.isEmpty ? .failed : .completed
+                    // Reuse `terminalOutcome` computed earlier for the episode close —
+                    // empty best output after exhausting all trials means the reflection
+                    // loop never produced acceptable content; that's `.failed`.
                     let terminalReason: String? = bestOutput.isEmpty
                         ? "All \(self.config.maxTrials) trials rejected by reflection evaluator"
                         : nil

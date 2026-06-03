@@ -79,6 +79,43 @@ struct MLXLLMProvider: LLMProvider {
         return fullText
     }
 
+    /// Multimodal (vision) bot path. Overrides the protocol default — which strips
+    /// images via `toLegacyDict()` — to route attached images through the on-device
+    /// VLM processor (`MLXService.streamVisionChat`). No images → falls back to the
+    /// text path. (Detection in `MLXTokenizerAnalyzer` gates which models report
+    /// `.visionInput`; Phase D adds the degrade-if-not-vision guard.)
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        // Collect attached image bytes (resolve() throws on missing/unreadable → surfaced).
+        var imageData: [Data] = []
+        for pm in payload {
+            for block in pm.content {
+                if case .image(let img) = block {
+                    imageData.append(try await img.reference.resolve())
+                }
+            }
+        }
+
+        let messages = payload.map { $0.toLegacyDict() }   // role + flattened text
+
+        // No images → ordinary text generation (preserves the legacy downgrade behaviour).
+        guard !imageData.isEmpty else {
+            return try await generate(messages: messages, tools: tools, responseSchema: responseSchema)
+        }
+
+        var fullText = ""
+        let stream = await MLXService.shared.streamVisionChat(
+            messages: messages,
+            imageData: imageData,
+            maxTokens: generationConfig.maxTokens,
+            temperature: Float(generationConfig.temperature),
+            topP: Float(generationConfig.topP)
+        )
+        for try await token in stream {
+            fullText += token
+        }
+        return fullText
+    }
+
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
         // Capture config values before entering the closure
         let config = generationConfig

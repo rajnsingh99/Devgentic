@@ -168,6 +168,104 @@ struct ClaudeLLMProvider: LLMProvider {
         return textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // MARK: - Multimodal (Phase 3 — native image input)
+
+    /// Translates provider-agnostic `[ProviderMessage]` into Anthropic messages,
+    /// emitting native content-block arrays (`{"type":"image","source":{"type":"base64",…}}`)
+    /// for any image blocks. Text-only messages stay as a plain content string.
+    /// Resolving image bytes can throw (file gone/unreadable) — the error propagates
+    /// to the caller (node failure / chat error), never a silent drop.
+    private func translateProviderMessages(_ payload: [ProviderMessage]) async throws -> (system: String?, anthropicMessages: [[String: Any]]) {
+        var systemPrompt = ""
+        var anthropicMessages: [[String: Any]] = []
+
+        for msg in payload {
+            if msg.role == "system" {
+                if !systemPrompt.isEmpty { systemPrompt += "\n\n" }
+                systemPrompt += msg.content.textContent
+                continue
+            }
+            let anthropicRole = (msg.role == "assistant") ? "assistant" : "user"
+
+            if msg.content.isTextOnly {
+                anthropicMessages.append(["role": anthropicRole, "content": msg.content.textContent])
+                continue
+            }
+
+            var blocks: [[String: Any]] = []
+            for block in msg.content {
+                switch block {
+                case .text(let s):
+                    if !s.isEmpty { blocks.append(["type": "text", "text": s]) }
+                case .image(let img):
+                    let data = try await img.reference.resolve()
+                    blocks.append([
+                        "type": "image",
+                        "source": ["type": "base64", "media_type": img.mimeType, "data": data.base64EncodedString()]
+                    ])
+                default:
+                    // audio/video/tool blocks aren't sent natively here — project to text.
+                    let t = block.textFallback
+                    if !t.isEmpty { blocks.append(["type": "text", "text": t]) }
+                }
+            }
+            anthropicMessages.append(["role": anthropicRole, "content": blocks])
+        }
+
+        return (systemPrompt.isEmpty ? nil : systemPrompt, anthropicMessages)
+    }
+
+    /// Multimodal overload — serializes image blocks natively instead of the
+    /// default text-downgrade. Mirrors `generate(messages:)` otherwise.
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        let (systemPrompt, anthropicMessages) = try await translateProviderMessages(payload)
+
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": anthropicMessages,
+            "max_tokens": maxTokens
+        ]
+        applyGenerationParams(to: &body)
+        if let systemPrompt = systemPrompt { body["system"] = systemPrompt }
+        if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+
+        var request = makeRequest()
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+
+        if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
+            logger.warning("⚠️ Anthropic multimodal response truncated (stop_reason: max_tokens). Configured max_tokens: \(self.maxTokens).")
+        }
+        guard let contentBlocks = json?["content"] as? [[String: Any]] else {
+            throw LLMProviderError.invalidResponse("Missing content blocks in Anthropic response.")
+        }
+
+        var textResponse = ""
+        var syntheticSteps: [[String: Any]] = []
+        for block in contentBlocks {
+            if let type = block["type"] as? String {
+                if type == "text" {
+                    textResponse += (block["text"] as? String ?? "")
+                } else if type == "tool_use" {
+                    let toolName = block["name"] as? String ?? "unknown_tool"
+                    let inputArgs = block["input"] as? [String: Any] ?? [:]
+                    syntheticSteps.append([
+                        "content": textResponse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Executing tool \(toolName)..." : textResponse.trimmingCharacters(in: .whitespacesAndNewlines),
+                        "tool_name": toolName,
+                        "arguments": inputArgs
+                    ])
+                }
+            }
+        }
+        if let firstStep = syntheticSteps.first {
+            let syntheticData = try JSONSerialization.data(withJSONObject: firstStep)
+            return String(data: syntheticData, encoding: .utf8) ?? "{}"
+        }
+        return textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let (systemPrompt, anthropicMessages) = translateMessages(messages)
 

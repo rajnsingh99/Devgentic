@@ -88,11 +88,45 @@ struct NodeResultEnvelope: Sendable, Identifiable {
     /// The synthesized text response from the inner executor.
     let output: String
 
+    /// Structured form of the output, when the node produced JSON (object/array).
+    /// Populated by auto-detection (parsing `output`) or by a Code node that emits
+    /// JSON. Enables downstream `{{ input.json.path }}` access and field routing.
+    /// `nil` when the output is plain text.
+    let structuredOutput: JSONValue?
+
     /// Media artifacts produced during execution.
     let artifacts: [MediaArtifact]
 
     /// Execution metadata (timing, token usage, tools invoked).
     let metadata: NodeExecutionMetadata
+
+    /// Explicit initializer (replaces the synthesized memberwise init) so that
+    /// `structuredOutput` can default to `nil` — the many synthetic envelope
+    /// construction sites (skips, profile-not-found, structural nodes) keep
+    /// compiling unchanged; only producers that detect JSON pass the argument.
+    init(
+        taskID: UUID,
+        nodeID: UUID,
+        sourceProfileID: UUID,
+        profileName: String,
+        profileType: ProfileType,
+        status: NodeExecutionStatus,
+        output: String,
+        artifacts: [MediaArtifact],
+        metadata: NodeExecutionMetadata,
+        structuredOutput: JSONValue? = nil
+    ) {
+        self.taskID = taskID
+        self.nodeID = nodeID
+        self.sourceProfileID = sourceProfileID
+        self.profileName = profileName
+        self.profileType = profileType
+        self.status = status
+        self.output = output
+        self.artifacts = artifacts
+        self.metadata = metadata
+        self.structuredOutput = structuredOutput
+    }
 }
 
 // MARK: - Node Execution Status

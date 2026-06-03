@@ -73,8 +73,11 @@ enum AgentStreamEvent: Sendable {
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
     case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
 
-    /// A non-fatal warning or error message to display in the trace/debug log.
-    case error(String)
+    /// A terminal error. Carries a `StructuredError` (category + message +
+    /// optional relatedPath/suggestion). Legacy `.error("string")` call sites
+    /// keep compiling via `StructuredError`'s string-literal/interpolation
+    /// conformance (defaulting to the `.executionFailed` category).
+    case error(StructuredError)
 
     /// A structured system-level warning — recoverable issue the agent hit during execution.
     /// Distinct from `.thought` (model reasoning) and `.error` (terminal failure).
@@ -95,8 +98,10 @@ enum AgentStreamEvent: Sendable {
     /// A workflow node has completed execution successfully.
     case workflowNodeCompleted(nodeID: UUID, profileName: String, summary: String)
 
-    /// A workflow node has failed.
-    case workflowNodeFailed(nodeID: UUID, profileName: String, error: String)
+    /// A workflow node has failed. `suggestion` carries an optional actionable
+    /// remediation hint (derived from the typed `AgentFailureReason`) that the UI
+    /// folds into the node's failure detail.
+    case workflowNodeFailed(nodeID: UUID, profileName: String, error: String, suggestion: String? = nil)
 
     /// Overall workflow progress update.
     case workflowProgress(completed: Int, total: Int)
@@ -187,6 +192,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
     case formatCorrection  // model described tool in prose instead of structured call
     case contextPressure   // nearing iteration / compaction threshold
     case circuitBreaker    // repetitive-action / loop safeguard tripping (imminent or already aborted)
+    case resourceUnavailable // an attached/upstream file couldn't be read (report-and-skip)
 
     var displayName: String {
         switch self {
@@ -197,6 +203,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .formatCorrection: return "Format"
         case .contextPressure:  return "Context"
         case .circuitBreaker:   return "Loop Guard"
+        case .resourceUnavailable: return "Attachment"
         }
     }
 
@@ -210,6 +217,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         case .formatCorrection: return "text.badge.xmark"
         case .contextPressure:  return "gauge.with.dots.needle.67percent"
         case .circuitBreaker:   return "arrow.triangle.2.circlepath.circle"
+        case .resourceUnavailable: return "doc.badge.exclamationmark"
         }
     }
 
@@ -223,7 +231,7 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
         switch self {
         case .circuitBreaker, .contextPressure:
             return true
-        case .retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection:
+        case .retry, .throttle, .memoryPressure, .parseFailure, .formatCorrection, .resourceUnavailable:
             return false
         }
     }
@@ -295,18 +303,19 @@ enum ToolFailureCategory: String, Sendable, Codable, Equatable, CaseIterable {
         }
     }
 
-    /// Episode-memory status tag consumed by `EpisodicHistoryFormatter` and surfaced
-    /// inside the `<episodic_memory>` XML block injected into prompts. Shorter than
-    /// `displayName` and chosen to be unambiguous when the LLM reads prior failures.
-    var episodeStatusTag: String {
+    /// Typed projection into the `ActionStatus` vocabulary used by `MemoryAction`
+    /// and the episodic XML emitters. Each `ToolFailureCategory` case maps 1:1
+    /// to an `ActionStatus` failure case. Render to a prompt-friendly lowercase
+    /// XML attribute via `actionStatus.xmlValue`.
+    var actionStatus: ActionStatus {
         switch self {
-        case .userDenied:         return "DENIED"
-        case .permissionRejected: return "PERMISSION_DENIED"
-        case .executionThrew:     return "FAILED"
-        case .timeout:            return "TIMEOUT"
-        case .invalidArgs:        return "INVALID_ARGS"
-        case .notFound:           return "NOT_FOUND"
-        case .cancelled:          return "CANCELLED"
+        case .userDenied:         return .denied
+        case .permissionRejected: return .permissionDenied
+        case .executionThrew:     return .failed
+        case .timeout:            return .timeout
+        case .invalidArgs:        return .invalidArgs
+        case .notFound:           return .notFound
+        case .cancelled:          return .cancelled
         }
     }
 }

@@ -22,6 +22,10 @@ private let wfStateLogger = DGLogger(category: "WorkflowState")
 /// the data a downstream node needs: text, artifacts, status.
 struct NodeOutput: Sendable {
     let text: String
+    /// Structured form of `text` when the node produced JSON (object/array).
+    /// Carried so downstream nodes can do `{{ input.json.path }}` access without
+    /// re-parsing. `nil` for plain-text outputs.
+    let structuredOutput: JSONValue?
     let artifacts: [MediaArtifact]
     let metadata: NodeExecutionMetadata
     let status: NodeExecutionStatus
@@ -75,6 +79,7 @@ struct WorkflowState: Sendable {
 
         nodeOutputs[envelope.nodeID] = NodeOutput(
             text: envelope.output,
+            structuredOutput: envelope.structuredOutput,
             artifacts: envelope.artifacts,
             metadata: envelope.metadata,
             status: envelope.status,
@@ -164,7 +169,8 @@ struct WorkflowState: Sendable {
                 status: output.status,
                 output: output.text,
                 artifacts: output.artifacts,
-                metadata: output.metadata
+                metadata: output.metadata,
+                structuredOutput: output.structuredOutput
             )
         }
         let names = envelopes.map(\.profileName).joined(separator: ", ")
@@ -180,14 +186,18 @@ struct WorkflowState: Sendable {
     /// (2) the connecting edge's port label matches the upstream's active output ports.
     func shouldExecuteNode(_ nodeID: UUID, edges: [WorkflowEdge], nodes: [WorkflowNode]) -> Bool {
         let incomingEdges = edges.filter { $0.targetNodeID == nodeID }
-        let nodeName = nodes.first(where: { $0.id == nodeID })?.displayName ?? nodeID.uuidString
+        let targetNode = nodes.first(where: { $0.id == nodeID })
+        let nodeName = targetNode?.displayName ?? nodeID.uuidString
 
         guard !incomingEdges.isEmpty else {
             wfStateLogger.info("Routing: '\(nodeName)' → EXECUTE (entry node, no incoming edges)")
             return true
         }
 
-        let result = incomingEdges.allSatisfy { edge in
+        // Per-edge predicate: is this single incoming branch "live" (succeeded,
+        // or routed through via continueAll / an active error port)? This is the
+        // unit the join quantifier below is applied over.
+        let edgeIsSatisfied: (WorkflowEdge) -> Bool = { edge in
             let upstreamID = edge.sourceNodeID
 
             guard let output = nodeOutputs[upstreamID] else { return false }
@@ -230,7 +240,24 @@ struct WorkflowState: Sendable {
             }
             return true
         }
-        wfStateLogger.info("Routing: '\(nodeName)' → \(result ? "EXECUTE" : "SKIP") (incoming edges: \(incomingEdges.count))")
+
+        // Join quantifier. Both modes are synchronizing — by the time this runs,
+        // leveled execution has already waited for every incoming branch in an
+        // earlier level to finish. They differ only in how many branches must be
+        // satisfied:
+        //   .all (AND-join, default) — every incoming branch must be satisfied.
+        //   .any (OR-join / merge)   — at least one satisfied branch is enough.
+        // When an OR-join runs on partial success, `upstreamResultEnvelopes`
+        // (port-filtered) + `ContextCompressor.compileForWorkflow` (completed-only)
+        // already ensure only the successful branches' outputs reach the node.
+        let joinMode = targetNode?.nodeConfig?.joinMode ?? .all
+        let result: Bool
+        switch joinMode {
+        case .all: result = incomingEdges.allSatisfy(edgeIsSatisfied)
+        case .any: result = incomingEdges.contains(where: edgeIsSatisfied)
+        }
+
+        wfStateLogger.info("Routing: '\(nodeName)' → \(result ? "EXECUTE" : "SKIP") (join: \(joinMode.rawValue), incoming edges: \(incomingEdges.count))")
         return result
     }
 

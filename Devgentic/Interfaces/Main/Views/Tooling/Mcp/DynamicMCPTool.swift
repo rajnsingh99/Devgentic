@@ -95,6 +95,26 @@ struct DynamicMCPTool: DevgenticTool {
 
                 try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
 
+                // Reactive OAuth refresh on the first retry only. If the
+                // initial failure was a 401 / token-expired, refreshing the
+                // bundle here means the subsequent `connect` materializes a
+                // fresh access token via `MCPRuntimeSecrets.materialize`. We
+                // only try once — if the refresh itself fails (revoked
+                // refresh token, etc.) the user has to re-authenticate via
+                // the form.
+                if attempt == 1, case .oauth = serverDef.auth {
+                    do {
+                        _ = try await MCPOAuthCoordinator.refresh(sourceID: self.source.id)
+                    } catch {
+                        // Best-effort: log via the existing connection state
+                        // and let the regular reconnect attempt run anyway.
+                        // Even with a stale token the SDK may reconnect on
+                        // some transports, and surfacing the original tool
+                        // error is more useful than the refresh error.
+                        print("DynamicMCPTool: OAuth refresh failed for \(source.serverName): \(error.localizedDescription)")
+                    }
+                }
+
                 do {
                     _ = try await MCPClientService.shared.connect(sourceId: self.source.id, config: serverDef)
                     return try await MCPClientService.shared.executeTool(

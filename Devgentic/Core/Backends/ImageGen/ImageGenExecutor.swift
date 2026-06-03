@@ -96,7 +96,7 @@ struct ImageGenExecutor: Sendable {
 
                 } catch let error as ImageGenError {
                     logger.error("ImageGen error: \(error.localizedDescription)")
-                    continuation.yield(.error(error.localizedDescription))
+                    continuation.yield(.error(.init(error.localizedDescription)))
                     continuation.finish()
                 } catch {
                     logger.error("Unexpected error during image generation: \(error.localizedDescription)")
@@ -122,7 +122,7 @@ struct ImageGenExecutor: Sendable {
             guard capability.supportsImageToImage else {
                 let modelName = extractModelName(from: profile)
                 let errorMsg = "The model '\(modelName)' does not support Image-to-Image variations. Please select a model with I2I capability (e.g., Gemini or MLX Flux2), or provide a fresh text prompt."
-                continuation.yield(.error(errorMsg))
+                continuation.yield(.error(.init(errorMsg)))
                 continuation.finish()
                 throw ImageGenError.imageToImageNotSupported(modelName: modelName)
             }
@@ -131,7 +131,7 @@ struct ImageGenExecutor: Sendable {
             guard capability.supportsTextToImage else {
                 let modelName = extractModelName(from: profile)
                 let errorMsg = "The model '\(modelName)' does not support Text-to-Image generation."
-                continuation.yield(.error(errorMsg))
+                continuation.yield(.error(.init(errorMsg)))
                 continuation.finish()
                 throw ImageGenError.textToImageNotSupported(modelName: modelName)
             }

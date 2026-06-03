@@ -26,6 +26,7 @@ struct TrendsView: View {
     @AppStorage(AppSettings.developerModeKey) private var isDeveloperMode: Bool = false
 
     @State private var window: Window = .sevenDays
+    @State private var profileFilter: ProfileFilter = .all
     @State private var snapshot: MetricsSnapshot?
     @State private var isLoading: Bool = false
 
@@ -43,6 +44,24 @@ struct TrendsView: View {
         }
     }
 
+    /// Profile-type filter for the dashboard. Raw values match the `ProfileType`
+    /// rawValues stored in `traces.profileType` so SQL filter passes through as
+    /// a string. `.all` means "no filter — aggregate every profile type".
+    enum ProfileFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case bot = "Bot"
+        case agent = "Agent"
+        case workflow = "Workflow"
+        case code = "Code"
+        case imageGen = "ImageGen"
+        var id: String { rawValue }
+
+        /// The string passed to MetricsAggregator. Nil for `.all`.
+        var sqlValue: String? { self == .all ? nil : rawValue }
+
+        var label: String { rawValue }
+    }
+
     var body: some View {
         Group {
             if !isDeveloperMode {
@@ -53,6 +72,9 @@ struct TrendsView: View {
         }
         .task { await load() }
         .onChange(of: window) { _, _ in
+            Task { await load() }
+        }
+        .onChange(of: profileFilter) { _, _ in
             Task { await load() }
         }
     }
@@ -91,6 +113,12 @@ struct TrendsView: View {
                     categoryFrequencySection
                     modelReliabilitySection
                     circuitBreakerSection
+                    // Workflow Activity is hidden when the user explicitly
+                    // scoped to a non-workflow profile type (panel would be empty).
+                    // Otherwise — shown whenever there are workflow nodes to report.
+                    if showWorkflowActivity {
+                        workflowActivitySection
+                    }
                 }
             }
             .padding(20)
@@ -110,6 +138,17 @@ struct TrendsView: View {
             }
 
             Spacer()
+
+            // Profile-type filter — drives `MetricsAggregator.snapshot(profileType:)`.
+            // `.all` (default) keeps the pre-P1-15 behaviour; everything else
+            // scopes every panel to traces matching the selected profile type.
+            Picker("", selection: $profileFilter) {
+                ForEach(ProfileFilter.allCases) { p in
+                    Text(p.label).tag(p)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(minWidth: 110)
 
             Picker("", selection: $window) {
                 ForEach(Window.allCases) { w in
@@ -222,6 +261,36 @@ struct TrendsView: View {
         }
     }
 
+    // MARK: - Workflow Activity
+
+    /// Decides whether the Workflow Activity panel is relevant for the current
+    /// filter. When the user explicitly chose a non-workflow profile type, the
+    /// snapshot's `workflowNodeStats` will be empty anyway (we skip the query in
+    /// `MetricsAggregator`) — hide the section so it doesn't render an empty
+    /// state every time. `.all` and `.workflow` keep it visible.
+    private var showWorkflowActivity: Bool {
+        switch profileFilter {
+        case .all, .workflow: return true
+        default: return false
+        }
+    }
+
+    @ViewBuilder
+    private var workflowActivitySection: some View {
+        sectionCard(
+            title: "Workflow Activity",
+            subtitle: "Per-node success rate and latency across workflow runs"
+        ) {
+            if let stats = snapshot?.workflowNodeStats, !stats.isEmpty {
+                WorkflowNodeStatsTable(stats: Array(stats.prefix(20)))
+            } else {
+                Text("No workflow nodes executed in window.")
+                    .font(.caption)
+                    .foregroundColor(theme.tertiaryText)
+            }
+        }
+    }
+
     // MARK: - Circuit Breaker
 
     @ViewBuilder
@@ -304,9 +373,10 @@ struct TrendsView: View {
         defer { isLoading = false }
 
         let days = window.days
+        let profileTypeSQL = profileFilter.sqlValue
         // MetricsAggregator is Sendable + reads only — safe to call from background.
         let snap = await Task.detached(priority: .userInitiated) {
-            MetricsAggregator.shared.snapshot(lastDays: days)
+            MetricsAggregator.shared.snapshot(lastDays: days, profileType: profileTypeSQL)
         }.value
         snapshot = snap
     }
@@ -411,6 +481,64 @@ private struct ModelStatsTable: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Workflow node stats table
+
+/// Per-workflow-node aggregate table. Each row = one node *name* across every
+/// workflow run that produced a `workflowNode`-kind span. Mirrors the visual
+/// style of `ToolStatsTable` so the eye treats them as a uniform family of
+/// reliability surfaces (tool → workflow node → model).
+private struct WorkflowNodeStatsTable: View {
+    let stats: [WorkflowNodeStats]
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Node").bold().frame(maxWidth: .infinity, alignment: .leading)
+                Text("Runs").bold().frame(width: 60, alignment: .trailing)
+                Text("Success").bold().frame(width: 70, alignment: .trailing)
+                Text("p50").bold().frame(width: 70, alignment: .trailing)
+                Text("p95").bold().frame(width: 70, alignment: .trailing)
+            }
+            .font(.caption)
+            .foregroundColor(theme.secondaryText)
+            Divider()
+
+            ForEach(stats) { stat in
+                HStack {
+                    Text(stat.nodeName)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(1)
+                    Text("\(stat.totalRuns)")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 60, alignment: .trailing)
+                    Text(String(format: "%.0f%%", stat.successRate * 100))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 70, alignment: .trailing)
+                        .foregroundColor(stat.successRate >= 0.8 ? .green : (stat.successRate >= 0.5 ? .orange : .red))
+                    Text(stat.p50DurationMs.map(formatMs) ?? "—")
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(theme.tertiaryText)
+                        .frame(width: 70, alignment: .trailing)
+                    Text(stat.p95DurationMs.map(formatMs) ?? "—")
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(theme.tertiaryText)
+                        .frame(width: 70, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    /// Mixed-unit formatting: sub-second values render as ms, multi-second as
+    /// rounded seconds. Node durations span a wide range (a Code-node template
+    /// transform is ~5 ms; an Agent-node multi-iteration loop is ~60 s).
+    private func formatMs(_ ms: Int) -> String {
+        if ms < 1000 { return "\(ms)ms" }
+        return "\(Int((Double(ms) / 1000).rounded()))s"
     }
 }
 

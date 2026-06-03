@@ -4,9 +4,23 @@
 //
 //  Created by Raj Singh on 11/04/26.
 //
-//  Dual-mode output area for workflow execution:
-//  - When a node is selected: shows that node's full AgentTimelineView + output
-//  - When no node selected (Final Outcome): shows final synthesized output, variables, user input
+//  Bottom area of the workflow execution screen. Three rendering states drive
+//  the body, all keyed off the currently selected card:
+//
+//    1. Running   — the selected node is actively executing. Renders its live
+//                   timeline using `AgentTimelineView` with chatFidelity=true,
+//                   matching the in-chat agent experience exactly.
+//    2. Pending   — the selected node hasn't started yet, or no node has started.
+//                   Renders a "Waiting for execution" placeholder.
+//    3. Completed — the selected node finished, or the Final Outcome card is
+//                   selected with a synthesised output ready. Renders the markdown
+//                   content through the shared `WorkflowMarkdownView` pipeline
+//                   (parseMarkdown → ContentBlock → CodeBlockView / MarkdownTableView),
+//                   wrapped in a Final-Output panel header with a Copy action.
+//
+//  All branches reuse the same content-rendering pipeline used by chat bubbles,
+//  so code blocks, tables, inline-code styling, and other markdown features
+//  render identically here.
 //
 
 import SwiftUI
@@ -16,245 +30,345 @@ struct WorkflowOutputView: View {
     let selectedNodeID: UUID?
     @Environment(\.appTheme) private var theme
 
-    /// Resolved selected node data, if any.
+    /// Which content the user is currently viewing for the selected completed
+    /// node. Only meaningful when the node has a non-empty `nodeTimeline`; for
+    /// timeline-less nodes (bots, or historical runs without live state) the
+    /// toggle is hidden and only Output is shown. Resets to `.output` whenever
+    /// `selectedNodeID` changes so each new selection starts predictably.
+    @State private var contentTab: ContentTab = .output
+
+    enum ContentTab: Hashable { case output, timeline }
+
     private var selectedNode: WorkflowRunDisplayData.NodeDisplayData? {
         guard let nodeID = selectedNodeID else { return nil }
         return displayData.nodeResults.first { $0.nodeID == nodeID }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        Group {
             if let node = selectedNode {
-                // MARK: - Node Detail Mode
-                nodeDetailView(node)
+                nodeContent(for: node)
             } else {
-                // MARK: - Final Outcome Mode
-                finalOutcomeView
+                finalOutcomeContent
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: selectedNodeID) { _, _ in
+            contentTab = .output
+        }
+    }
+
+    // MARK: - Per-node content
+
+    @ViewBuilder
+    private func nodeContent(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
+        switch node.status {
+        case .running:
+            runningTimeline(for: node)
+
+        case .pending:
+            waitingPlaceholder(message: "Waiting for execution")
+
+        case .completed, .failed, .skipped:
+            // Completed/failed nodes with a captured timeline get a two-tab
+            // view (Output ↔ Timeline) so agent reasoning + tool calls remain
+            // accessible after completion. Timeline-less nodes (bots, or
+            // post-restart historical) render Output directly without a tab.
+            let hasTimeline = !node.nodeTimeline.isEmpty
+            if hasTimeline && node.status != .skipped {
+                tabbedNodeContent(for: node)
+            } else {
+                completedOutput(
+                    title: node.status == .failed ? "Error" : "Output",
+                    subtitle: subtitleFor(node: node),
+                    content: node.detail,
+                    copyTarget: node.detail,
+                    isError: node.status == .failed
+                )
             }
         }
     }
 
-    // MARK: - Node Detail
+    /// Completed/failed agent-node body with the Output/Timeline segmented
+    /// toggle in the header.
+    @ViewBuilder
+    private func tabbedNodeContent(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            outputPanelHeader(
+                icon: node.status == .failed ? "exclamationmark.triangle.fill" : "sparkle",
+                iconColor: node.status == .failed ? .red : .purple,
+                title: node.profileName,
+                subtitle: contentTab == .output
+                    ? (node.status == .failed ? "Error from \(node.profileName)" : "Result from \(node.profileName)")
+                    : "Reasoning & tool calls",
+                copyTarget: contentTab == .output ? node.detail : nil,
+                segmented: { contentTabPicker }
+            )
 
-    private func nodeDetailView(_ node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
-        VStack(spacing: 0) {
-            // Node header
-            HStack(spacing: 8) {
-                Image(systemName: node.status.icon)
-                    .foregroundColor(node.status.color)
-                    .font(.system(size: 14))
+            Divider().opacity(0.4)
 
-                Text(node.profileName)
-                    .font(theme.fontSubheadline.weight(.semibold))
-                    .foregroundColor(theme.primaryText)
-
-                Text(node.status.label)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(node.status.color)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(node.status.color.opacity(0.1)))
-
-                Spacer()
-
-                Label(formatDuration(node.duration), systemImage: "clock")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(theme.secondaryText)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(theme.secondaryBackground.opacity(0.3))
-
-            Divider()
-
-            // Input section (historical runs)
-            if let input = node.input, !input.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 4) {
-                        Label("Input", systemImage: "arrow.right.circle")
-                            .font(theme.fontCaption.weight(.semibold))
-                            .foregroundColor(theme.secondaryText)
-                        if let source = node.inputSourceLabel {
-                            Text("from \(source)")
-                                .font(.system(size: 9))
-                                .foregroundColor(theme.tertiaryText)
-                        }
+            switch contentTab {
+            case .output:
+                ScrollView(.vertical) {
+                    if node.status == .failed {
+                        Text(node.detail)
+                            .font(theme.fontBody)
+                            .foregroundColor(.red)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    } else {
+                        WorkflowMarkdownView(text: node.detail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
                     }
-                    Text(input)
-                        .font(.system(size: 12))
-                        .foregroundColor(theme.primaryText)
-                        .textSelection(.enabled)
-                        .lineLimit(4)
                 }
+            case .timeline:
+                ScrollView(.vertical) {
+                    AgentTimelineView(
+                        events: node.nodeTimeline,
+                        isStreaming: false,
+                        chatFidelity: true,
+                        streamingStartedAt: displayData.timestamp
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+    }
+
+    /// Segmented control rendered inline in the panel header — only built for
+    /// the tabbed branch above.
+    private var contentTabPicker: some View {
+        HStack(spacing: 2) {
+            tabPickerButton(.output, label: "Output", icon: "doc.text")
+            tabPickerButton(.timeline, label: "Timeline", icon: "list.bullet.indent")
+        }
+        .padding(2)
+        .background(Capsule().fill(theme.surfaceOverlay))
+    }
+
+    private func tabPickerButton(_ tab: ContentTab, label: String, icon: String) -> some View {
+        let isSelected = contentTab == tab
+        return Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                contentTab = tab
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(
+                Capsule().fill(isSelected ? theme.controlBackground : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func subtitleFor(node: WorkflowRunDisplayData.NodeDisplayData) -> String {
+        "Result from \(node.profileName)"
+    }
+
+    // MARK: - Final outcome content
+
+    @ViewBuilder
+    private var finalOutcomeContent: some View {
+        if displayData.nodeResults.isEmpty || displayData.nodeResults.allSatisfy({ $0.status == .pending }) {
+            waitingPlaceholder(message: "Waiting for execution")
+        } else if displayData.isRunning && displayData.finalOutput.isEmpty {
+            // Workflow is mid-flight and no final output yet — surface a progress
+            // placeholder rather than the completed panel.
+            waitingPlaceholder(
+                message: "Synthesising final output…",
+                showsSpinner: true
+            )
+        } else if let error = displayData.workflowError, displayData.finalOutput.isEmpty {
+            completedOutput(
+                title: "Error",
+                subtitle: "Workflow failed",
+                content: error,
+                copyTarget: error,
+                isError: true
+            )
+        } else {
+            completedOutput(
+                title: "Final Output",
+                subtitle: "Result from the workflow",
+                content: displayData.finalOutput,
+                copyTarget: displayData.finalOutput,
+                isError: false
+            )
+        }
+    }
+
+    // MARK: - State views
+
+    /// Renders the live timeline of a running node with chat-bubble fidelity.
+    private func runningTimeline(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            outputPanelHeader(
+                icon: "sparkle",
+                iconColor: .blue,
+                title: node.profileName,
+                subtitle: "Live execution",
+                copyTarget: nil
+            )
+
+            Divider().opacity(0.4)
+
+            ScrollView(.vertical) {
+                AgentTimelineView(
+                    events: node.nodeTimeline,
+                    isStreaming: node.isStreaming,
+                    chatFidelity: true,
+                    streamingStartedAt: displayData.timestamp
+                )
                 .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(theme.secondaryBackground.opacity(0.2))
-
-                Divider()
-            }
-
-            // Full AgentTimelineView + output
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 12) {
-                    if !node.nodeTimeline.isEmpty {
-                        AgentTimelineView(events: node.nodeTimeline, isStreaming: node.isStreaming)
-                            .padding(.horizontal, 16)
-                            .padding(.top, 12)
-                    }
-
-                    if !node.detail.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(node.status == .completed ? "Output" : "Error")
-                                .font(theme.fontCaption.weight(.semibold))
-                                .foregroundColor(theme.secondaryText)
-                            if node.status == .completed {
-                                WorkflowMarkdownView(text: node.detail)
-                            } else {
-                                Text(node.detail)
-                                    .font(theme.fontBody)
-                                    .foregroundColor(.red)
-                                    .textSelection(.enabled)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, node.nodeTimeline.isEmpty ? 12 : 0)
-                        .padding(.bottom, 16)
-                    }
-                }
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }
 
-    // MARK: - Final Outcome
-
-    private var finalOutcomeView: some View {
-        VStack(spacing: 0) {
-            // User input section (historical runs only)
-            if !displayData.isLive && !displayData.userInput.isEmpty {
-                userInputPanel
-                Divider()
-            }
-
-            // Shared variables panel
-            if !displayData.variables.isEmpty {
-                variablesPanel
-                Divider()
-            }
-
-            // Final output / status
-            ScrollView(.vertical) {
-                if !displayData.finalOutput.isEmpty {
-                    WorkflowMarkdownView(text: displayData.finalOutput)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
-
-                } else if let error = displayData.workflowError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(theme.fontBody)
-                        .foregroundColor(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
-
-                } else if displayData.isRunning {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Awaiting final output...")
-                            .font(theme.fontCaption)
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(16)
-
-                } else if displayData.nodeResults.isEmpty {
-                    emptyState
-                }
-            }
-        }
-    }
-
-    // MARK: - User Input Panel (Historical)
-
-    private var userInputPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("User Input", systemImage: "text.bubble")
-                .font(theme.fontCaption.weight(.semibold))
-                .foregroundColor(theme.secondaryText)
-
-            Text(displayData.userInput)
-                .font(.system(size: 12))
-                .foregroundColor(theme.primaryText)
-                .textSelection(.enabled)
-                .lineLimit(3)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(theme.secondaryBackground.opacity(0.3))
-    }
-
-    // MARK: - Variables Panel
-
-    private var variablesPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label("Workflow Variables", systemImage: "tray.2")
-                    .font(theme.fontCaption.weight(.semibold))
-                    .foregroundColor(theme.secondaryText)
-                Spacer()
-                Text("\(displayData.variables.count)")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(theme.surfaceOverlay))
-            }
-
-            ForEach(displayData.variables.sorted(by: { $0.key < $1.key }), id: \.key) { key, value in
-                HStack(spacing: 6) {
-                    Text(key)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(theme.accentColor)
-                    Text("=")
-                        .font(.system(size: 10))
-                        .foregroundColor(theme.secondaryText)
-                    Text(String(value.prefix(100)) + (value.count > 100 ? "..." : ""))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(theme.primaryText)
-                        .lineLimit(1)
-                    Spacer()
-                }
-                .padding(.vertical, 2)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(theme.secondaryBackground.opacity(0.5))
-    }
-
-    // MARK: - Empty State
-
-    private var emptyState: some View {
+    /// Static placeholder shown when no node has started yet, or the selected
+    /// node is still pending.
+    private func waitingPlaceholder(message: String, showsSpinner: Bool = false) -> some View {
         VStack(spacing: 12) {
-            Image(systemName: "play.circle")
-                .font(.system(size: 40))
-                .foregroundColor(theme.secondaryText)
-            Text("No execution results yet")
+            if showsSpinner {
+                ProgressView()
+                    .controlSize(.regular)
+            } else {
+                Image(systemName: "hourglass")
+                    .font(.system(size: 32))
+                    .foregroundColor(theme.tertiaryText)
+            }
+            Text(message)
                 .font(theme.fontSubheadline)
                 .foregroundColor(theme.secondaryText)
-            Text("Run the workflow to see node-by-node results here.")
-                .font(theme.fontCaption)
-                .foregroundColor(theme.secondaryText)
-                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
     }
 
-    // MARK: - Helpers
+    /// Renders a completed node / workflow output through the shared markdown
+    /// pipeline, wrapped in a panel header with a copy action.
+    private func completedOutput(
+        title: String,
+        subtitle: String,
+        content: String,
+        copyTarget: String?,
+        isError: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            outputPanelHeader(
+                icon: isError ? "exclamationmark.triangle.fill" : "sparkle",
+                iconColor: isError ? .red : .purple,
+                title: title,
+                subtitle: subtitle,
+                copyTarget: copyTarget
+            )
 
-    private func formatDuration(_ d: TimeInterval) -> String {
-        if d < 1 { return "<1s" }
-        if d < 60 { return "\(String(format: "%.1f", d))s" }
-        return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
+            Divider().opacity(0.4)
+
+            ScrollView(.vertical) {
+                if isError {
+                    Text(content)
+                        .font(theme.fontBody)
+                        .foregroundColor(.red)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                } else {
+                    WorkflowMarkdownView(text: content)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
+            }
+        }
+    }
+
+    // MARK: - Panel header
+
+    private func outputPanelHeader<Segmented: View>(
+        icon: String,
+        iconColor: Color,
+        title: String,
+        subtitle: String,
+        copyTarget: String?,
+        @ViewBuilder segmented: () -> Segmented = { EmptyView() }
+    ) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(iconColor)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(theme.fontSubheadline.weight(.semibold))
+                    .foregroundColor(theme.primaryText)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+            }
+
+            Spacer()
+
+            segmented()
+
+            if let target = copyTarget, !target.isEmpty {
+                CopyOutputButton(target: target)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(theme.secondaryBackground.opacity(0.4))
+    }
+}
+
+// MARK: - Copy Button
+
+/// Lightweight copy-to-pasteboard chip used in the panel header. Mirrors the
+/// chat code-block copy affordance in look and behaviour, including the brief
+/// "Copied" confirmation state.
+private struct CopyOutputButton: View {
+    let target: String
+    @Environment(\.appTheme) private var theme
+    @State private var isCopied = false
+
+    var body: some View {
+        Button(action: copy) {
+            HStack(spacing: 4) {
+                Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 11))
+                Text(isCopied ? "Copied" : "Copy")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(isCopied ? theme.successColor : theme.secondaryText)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(theme.surfaceOverlay)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isCopied ? "Copied" : "Copy output")
+    }
+
+    private func copy() {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(target, forType: .string)
+        isCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            isCopied = false
+        }
     }
 }

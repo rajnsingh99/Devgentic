@@ -27,7 +27,43 @@ enum MLXTokenizerAnalyzer {
     static func detectCognitiveProfile(for modelPath: URL, modelName: String) -> CognitiveProfile {
         let (capability, dialect, metadata, templateSource) = detectCapabilityAndDialect(for: modelPath, modelName: modelName)
         let stopSequences = extractStopSequences(from: modelPath)
-        return CognitiveProfile(capability: capability, dialect: dialect, metadata: metadata, chatTemplateSource: templateSource, stopSequences: stopSequences)
+        let modalities = detectVisionModalities(for: modelPath)
+        return CognitiveProfile(capability: capability, dialect: dialect, metadata: metadata, modalities: modalities, chatTemplateSource: templateSource, stopSequences: stopSequences)
+    }
+
+    // MARK: - Vision Detection
+
+    /// VLM `model_type` identifiers that the bundled MLXVLM runtime
+    /// (`MLXVLM.VLMTypeRegistry.shared`, mlx-swift-lm 3.31.3) can actually RUN.
+    /// Mirrored by hand because the registry's `creators` keys are `private`.
+    ///
+    /// This is deliberately the RUNNABLE subset, not "every VLM that exists":
+    /// `mllama` (Llama-3.2-Vision), `llava`/`llava_next` (LLaVA-1.5), `phi3_v`,
+    /// `minicpmv`, and `internvl_chat` are vision models MLXVLM CANNOT run, so they
+    /// are intentionally absent → detected as text-only → they degrade (Phase D)
+    /// instead of producing garbage. "Detect ⇔ runnable" by construction.
+    ///
+    /// Ambiguous text/vision dual-use types (`qwen3_5`, `qwen3_5_moe`) are excluded
+    /// to fail closed. Re-sync this set when bumping mlx-swift-lm.
+    private static let visionModelTypes: Set<String> = [
+        "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl",
+        "idefics3", "gemma3", "gemma4", "smolvlm",
+        "fastvlm", "llava_qwen2", "pixtral", "mistral3",
+        "lfm2_vl", "lfm2-vl", "glm_ocr"
+    ]
+
+    /// Reads `config.json`'s top-level `model_type` (the authoritative VLM signal,
+    /// verified against Hugging Face configs) and reports `.visionCapable` iff that
+    /// type is one MLXVLM can run. Note: text-only Gemma-3 ships as `gemma3_text`
+    /// (not `gemma3`), so it correctly stays text-only here.
+    private static func detectVisionModalities(for modelPath: URL) -> SupportedModalities {
+        let configURL = modelPath.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let modelType = (json["model_type"] as? String)?.lowercased() else {
+            return .textOnly
+        }
+        return visionModelTypes.contains(modelType) ? .visionCapable : .textOnly
     }
 
     // MARK: - Legacy Capability-Only API (backward compat)

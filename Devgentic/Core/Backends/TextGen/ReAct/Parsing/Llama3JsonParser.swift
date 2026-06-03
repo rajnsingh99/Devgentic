@@ -192,17 +192,25 @@ struct Llama3JsonParser: CognitiveParserProtocol {
     ///   1. Prose text before the first `{` in the stripped raw (pure-prose path).
     ///   2. `content` field from the decoded tool call JSON (flat-JSON drift shape —
     ///      `{"content":"...", "tool_name":"...", ...}` has reasoning embedded in the object).
-    ///   3. Default placeholder.
+    ///   3. Empty (no reasoning produced).
+    ///
+    /// Both the prose path and the content-field path are routed through
+    /// `ReasoningQualityFilter`. Llama-3.1 / 3.2 / 3.3 instruction-tuned models
+    /// (especially at Q4) routinely fill the `content` slot with stock phrases
+    /// like "Executing tool list_directory..." that look like reasoning but carry
+    /// no signal beyond the tool name. The filter strips those while passing
+    /// real reasoning through unchanged.
     private func extractReasoning(from text: String) -> String {
         guard let openIdx = text.firstIndex(of: "{") else {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         let before = String(text[..<openIdx]).trimmingCharacters(in: .whitespacesAndNewlines)
-        if !before.isEmpty { return before }
+        let filteredProse = ReasoningQualityFilter.filter(before)
+        if !filteredProse.isEmpty { return filteredProse }
         if let content = extractContentFieldFromBareJSON(text) {
-            return content
+            return ReasoningQualityFilter.filter(content)
         }
-        return "Executing tool calls..."
+        return ""
     }
 
     /// Best-effort reasoning from a flat-JSON body's `content` field, if present.

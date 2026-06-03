@@ -46,6 +46,24 @@ struct OpenAIToolTurnAdapter: ToolTurnAdapter {
         }
     }
 
+    /// Kickoff user turn. Text-only → plain string content (byte-identical to the
+    /// default normalizeCanonical). With images → an OpenAI content array mixing
+    /// text and `image_url` data-URL blocks.
+    func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
+        guard !images.isEmpty else {
+            return ["role": "user", "content": text]
+        }
+        var content: [[String: Any]] = []
+        if !text.isEmpty { content.append(["type": "text", "text": text]) }
+        for img in images {
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": "data:\(img.mimeType);base64,\(img.base64)"]
+            ])
+        }
+        return ["role": "user", "content": content]
+    }
+
     private func serializeArguments(_ args: [String: JSONValue]) -> String {
         let rawDict = args.mapValues { $0.rawValue }
         guard let data = try? JSONSerialization.data(withJSONObject: rawDict),

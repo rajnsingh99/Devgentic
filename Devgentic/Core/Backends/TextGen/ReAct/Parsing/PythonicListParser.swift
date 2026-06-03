@@ -71,11 +71,11 @@ struct PythonicListParser: CognitiveParserProtocol {
         // Body should start with `[` or `identifier(` — find that position.
         if let openBracket = body.firstIndex(of: "["), isValidPythonicStart(body, from: openBracket) {
             let reasoning = String(body[..<openBracket]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return (reasoning.isEmpty ? "Executing tool calls..." : reasoning, String(body[openBracket...]))
+            return (ReasoningQualityFilter.filter(reasoning), String(body[openBracket...]))
         }
         if let callStart = firstIdentifierCallStart(in: body) {
             let reasoning = String(body[..<callStart]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return (reasoning.isEmpty ? "Executing tool calls..." : reasoning, String(body[callStart...]))
+            return (ReasoningQualityFilter.filter(reasoning), String(body[callStart...]))
         }
         return (text, body)
     }

@@ -27,12 +27,21 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
     /// and then call `router.goBack()` themselves). Defaults to `router.goBack()`.
     let onBack: (() -> Void)?
 
+    /// Override for the leading button's SF Symbol. Defaults to `chevron.left`
+    /// (the standard "back" affordance). Modal-context consumers (e.g. the
+    /// workflow profile editor) pass `xmark` so the leading button reads as
+    /// "cancel / dismiss this sheet" rather than "navigate back through the
+    /// router stack." Pair with a custom `onBack` that performs the dismiss.
+    let leadingSymbol: String
+
     init(
         onBack: (() -> Void)? = nil,
+        leadingSymbol: String = "chevron.left",
         @ViewBuilder center: () -> CenterContent,
         @ViewBuilder trailing: () -> TrailingContent
     ) {
         self.onBack = onBack
+        self.leadingSymbol = leadingSymbol
         self.center = center()
         self.trailing = trailing()
     }
@@ -46,7 +55,7 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
             // ("Back to Chat", "Back to Settings") so users know where
             // they're about to land before committing.
             IslandIconButton(
-                symbol: "chevron.left",
+                symbol: leadingSymbol,
                 style: .prominent,
                 help: backButtonLabel,
                 accessibilityLabel: backButtonLabel,
@@ -54,8 +63,17 @@ struct DynamicIslandBar<CenterContent: View, TrailingContent: View>: View {
             ) {
                 performBack()
             }
-            .disabled(!router.canGoBack)
-            .contextMenu { backButtonContextMenu }
+            // Custom leading symbol = consumer is in modal-cancel mode; the
+            // router context-menu (Back to Chat / Back to Settings / etc.) is
+            // meaningless there, and the cancel action shouldn't be disabled
+            // just because the router stack is empty — modal dismiss is always
+            // available.
+            .disabled(leadingSymbol == "chevron.left" && !router.canGoBack)
+            .contextMenu {
+                if leadingSymbol == "chevron.left" {
+                    backButtonContextMenu
+                }
+            }
 
             Spacer()
 
@@ -174,9 +192,11 @@ private struct IslandBackdropModifier: ViewModifier {
 extension DynamicIslandBar where CenterContent == EmptyView {
     init(
         onBack: (() -> Void)? = nil,
+        leadingSymbol: String = "chevron.left",
         @ViewBuilder trailing: () -> TrailingContent
     ) {
         self.onBack = onBack
+        self.leadingSymbol = leadingSymbol
         self.center = EmptyView()
         self.trailing = trailing()
     }
@@ -184,8 +204,9 @@ extension DynamicIslandBar where CenterContent == EmptyView {
 
 // Back only (no center, no trailing) — used by settings, scheduler
 extension DynamicIslandBar where CenterContent == EmptyView, TrailingContent == EmptyView {
-    init(onBack: (() -> Void)? = nil) {
+    init(onBack: (() -> Void)? = nil, leadingSymbol: String = "chevron.left") {
         self.onBack = onBack
+        self.leadingSymbol = leadingSymbol
         self.center = EmptyView()
         self.trailing = EmptyView()
     }
@@ -233,9 +254,11 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel {
         title: String,
         icon: String? = nil,
         onBack: (() -> Void)? = nil,
+        leadingSymbol: String = "chevron.left",
         @ViewBuilder trailing: () -> TrailingContent
     ) {
         self.onBack = onBack
+        self.leadingSymbol = leadingSymbol
         self.center = IslandTitleLabel(title: title, icon: icon)
         self.trailing = trailing()
     }
@@ -244,8 +267,9 @@ extension DynamicIslandBar where CenterContent == IslandTitleLabel {
 extension DynamicIslandBar where CenterContent == IslandTitleLabel, TrailingContent == EmptyView {
     /// Island with just a title label — replaces bare `DynamicIslandBar()` calls
     /// that previously left the capsule visually empty.
-    init(title: String, icon: String? = nil, onBack: (() -> Void)? = nil) {
+    init(title: String, icon: String? = nil, onBack: (() -> Void)? = nil, leadingSymbol: String = "chevron.left") {
         self.onBack = onBack
+        self.leadingSymbol = leadingSymbol
         self.center = IslandTitleLabel(title: title, icon: icon)
         self.trailing = EmptyView()
     }

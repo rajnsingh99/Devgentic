@@ -595,6 +595,12 @@ struct SemanticContext: Sendable {
 
     // 9. Prompt layer configuration — controls which optional layers are included
     let promptLayerConfig: PromptLayerConfig
+
+    // 10. Workflow context — full per-node execution context (nil for normal chat).
+    //     When non-nil, `buildStandardMessages` auto-derives the user-message
+    //     prefix from `workflowContext.userMessagePrefix(wrapping:)` so every
+    //     generator inherits workflow behavior with zero per-generator code.
+    let workflowContext: WorkflowExecutionContext?
 }
 
 // MARK: - Agent Failure Reasons
@@ -638,6 +644,29 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
             "Model error from \(provider): \(error)"
         case .cancelled:
             "Execution cancelled"
+        }
+    }
+
+    /// A short, actionable remediation hint shown to the workflow author when a
+    /// node fails with this reason. `nil` when there's nothing useful to suggest
+    /// (e.g. a user-initiated cancel). Folded into the node's failure detail so
+    /// it surfaces in every run card (Round 2 Phase 4).
+    var remediation: String? {
+        switch self {
+        case .iterationBudgetExhausted:
+            return "The agent ran out of iterations. Simplify the node's task or raise its iteration limit."
+        case .consecutiveParseFailures:
+            return "The model's structured output couldn't be parsed repeatedly. Try a different model or a simpler task."
+        case .consecutiveToolFailures(_, let lastTool, _):
+            return "The '\(lastTool)' tool kept failing. Check its configuration and the inputs it received."
+        case .repetitiveActionLoop:
+            return "The agent repeated the same action. Refine the task so the goal is reachable in distinct steps."
+        case .executionTimeout(_, let limit):
+            return "The node exceeded its \(Int(limit))s timeout. Raise the node timeout or reduce the work it does."
+        case .modelError:
+            return "The model provider returned an error. Check connectivity, credentials, and the selected model."
+        case .cancelled:
+            return nil
         }
     }
 }

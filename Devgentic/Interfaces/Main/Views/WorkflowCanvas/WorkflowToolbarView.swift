@@ -357,6 +357,17 @@ struct WorkflowToolbarView: View {
                     paletteItem(icon: "hand.raised", label: "HITL Gate", color: .red)
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    showNodePalette = false
+                    onAddStructuralNode(
+                        .action(ActionNodeConfig()),
+                        "Action"
+                    )
+                } label: {
+                    paletteItem(icon: "bolt.horizontal.fill", label: "Action (Run a Tool)", color: .teal)
+                }
+                .buttonStyle(.plain)
             }
 
             // Annotate

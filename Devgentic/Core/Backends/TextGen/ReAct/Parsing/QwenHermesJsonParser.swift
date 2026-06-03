@@ -250,7 +250,12 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
     /// Reasoning priority:
     ///   1. Prose text before the first `<tool_call>` wrapper (wrapped path).
     ///   2. `content` field from a bare JSON object (flat-shape Q4 drift path).
-    ///   3. Default placeholder.
+    ///   3. Empty (no reasoning produced).
+    ///
+    /// Both extraction paths are routed through `ReasoningQualityFilter`.
+    /// Qwen2.5/3 and Hermes-2/3-Pro at Q4 routinely fill the `content` slot
+    /// with stock phrases like "Executing tool fs_smart_search..." that look
+    /// like reasoning but carry no signal beyond the tool name.
     private func extractReasoning(from text: String, extractedCount: Int) -> String {
         guard extractedCount > 0 else {
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -258,11 +263,12 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
         if let range = text.range(of: "<tool_call>", options: .caseInsensitive) {
             let before = String(text[..<range.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !before.isEmpty { return before }
+            let filtered = ReasoningQualityFilter.filter(before)
+            if !filtered.isEmpty { return filtered }
         }
         if let content = extractContentFieldFromBareJSON(text) {
-            return content
+            return ReasoningQualityFilter.filter(content)
         }
-        return "Executing tool calls..."
+        return ""
     }
 }

@@ -118,19 +118,32 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
     case memExhausted               // utilization >= 100%; eviction triggered
     case memEviction                // entries dropped to fit budget
 
-    // MARK: Workflow (6)
+    // MARK: Workflow (8)
     case wfDepthExceeded            // workflow nesting depth past hard limit
     case wfEmpty                    // workflow has no nodes
     case wfCycle                    // DAG validation detected a cycle
     case wfValidationFailed         // pre-flight configuration validation failed
     case wfProfileNotFound          // node's referenced profile is missing
     case wfNodeSkipped              // node skipped because an upstream dependency failed
+    case wfNodeFailed               // per-node inner agent/bot execution failed (post-synthesizer demotion)
+    case wfClassifierFailed         // AI Classifier LLM call or response parsing failed
 
     // MARK: Session / lifecycle (4)
     case userCancelled              // user stopped the run
     case suspensionTimeout          // HITL operation (ask_user / plan review) timed out
     case suspensionServiceError     // ExecutionSuspensionService internal failure
     case modelUnloaded              // local model (MLX / Ollama) evicted mid-execution
+
+    // MARK: Resource / data-loading (9)
+    case executionFailed            // generic/unclassified terminal error (default for legacy string errors)
+    case fileNotFound               // attached/upstream file does not exist at its path
+    case fileAccessDenied           // OS / security-scoped access denied
+    case fileReadFailed             // I/O read error (disk, transient)
+    case fileTooLarge               // file exceeds the inlining size budget
+    case documentExtractionFailed   // PDF/DOCX/XLSX/… extraction threw
+    case documentPasswordProtected  // document is encrypted/password-protected
+    case documentCorrupted          // document is malformed/corrupted
+    case imageResolutionFailed      // MediaReference.resolve() failed for an image payload
 
     // MARK: - Derived properties
 
@@ -153,7 +166,12 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
              .cbToolRetryLimit, .cbAskUserLimit,
              .subtaskFailed, .reflectionEvalFailed,
              .memExhausted,
-             .suspensionTimeout, .modelUnloaded:
+             .suspensionTimeout, .modelUnloaded,
+             // Resource/data-loading: never silent, but recoverable — chat degrades,
+             // workflow fails just the node (not the whole app).
+             .fileNotFound, .fileAccessDenied, .fileReadFailed, .fileTooLarge,
+             .documentExtractionFailed, .documentPasswordProtected, .documentCorrupted,
+             .imageResolutionFailed:
             return .recoverable
 
         // Fatal: execution terminates
@@ -162,7 +180,9 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
              .cbConsecutiveFail, .cbIdleLimit,
              .planGenFailed, .reflectionExhausted,
              .wfDepthExceeded, .wfEmpty, .wfCycle, .wfValidationFailed, .wfProfileNotFound,
-             .userCancelled, .suspensionServiceError:
+             .wfNodeFailed, .wfClassifierFailed,
+             .userCancelled, .suspensionServiceError,
+             .executionFailed:   // generic terminal error (legacy string-error default)
             return .fatal
         }
     }
@@ -181,7 +201,12 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
         case .toolNotFound, .toolArgMissing, .toolArgInvalid, .toolPermissionDenied,
              .toolTimeout, .toolSemanticFail, .toolSystemCrash, .toolUserDenied,
              .cbRepetitiveAction, .cbConsecutiveFail, .cbToolRetryLimit,
-             .cbIdleLimit, .cbAskUserLimit:
+             .cbIdleLimit, .cbAskUserLimit,
+             // Resource/data-loading happens during tool/context preparation —
+             // bucketed under .tooling (no dedicated phase to avoid ExecutionPhase ripple).
+             .fileNotFound, .fileAccessDenied, .fileReadFailed, .fileTooLarge,
+             .documentExtractionFailed, .documentPasswordProtected, .documentCorrupted,
+             .imageResolutionFailed:
             return .tooling
 
         case .planGenFailed, .planUserRejected, .subtaskFailed,
@@ -192,10 +217,11 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
             return .memory
 
         case .wfDepthExceeded, .wfEmpty, .wfCycle, .wfValidationFailed,
-             .wfProfileNotFound, .wfNodeSkipped:
+             .wfProfileNotFound, .wfNodeSkipped, .wfNodeFailed, .wfClassifierFailed:
             return .workflow
 
-        case .userCancelled, .suspensionTimeout, .suspensionServiceError, .modelUnloaded:
+        case .userCancelled, .suspensionTimeout, .suspensionServiceError, .modelUnloaded,
+             .executionFailed:   // generic/unclassified terminal error (least-wrong bucket)
             return .session
         }
     }
@@ -210,7 +236,9 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
              .providerRateLimit, .providerTimeout, .providerServerError, .providerStreamError,
              .toolTimeout, .toolSemanticFail,
              .memObsTruncated, .memPressureWarn, .memExhausted, .memEviction,
-             .modelUnloaded, .reflectionTrialRejected:
+             .modelUnloaded, .reflectionTrialRejected,
+             .wfNodeFailed,                          // per-node retry via maxNodeRetries
+             .fileReadFailed, .imageResolutionFailed: // transient I/O — a retry may succeed
             return true
         default:
             return false
@@ -269,11 +297,23 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
         case .wfValidationFailed:        return "Workflow Invalid"
         case .wfProfileNotFound:         return "Profile Not Found"
         case .wfNodeSkipped:             return "Node Skipped"
+        case .wfNodeFailed:              return "Node Failed"
+        case .wfClassifierFailed:        return "Classifier Failed"
 
         case .userCancelled:             return "User Cancelled"
         case .suspensionTimeout:         return "HITL Timeout"
         case .suspensionServiceError:    return "Suspension Error"
         case .modelUnloaded:             return "Model Unloaded"
+
+        case .executionFailed:           return "Execution Failed"
+        case .fileNotFound:              return "File Not Found"
+        case .fileAccessDenied:          return "File Access Denied"
+        case .fileReadFailed:            return "File Read Failed"
+        case .fileTooLarge:              return "File Too Large"
+        case .documentExtractionFailed:  return "Document Extraction Failed"
+        case .documentPasswordProtected: return "Document Password-Protected"
+        case .documentCorrupted:         return "Document Corrupted"
+        case .imageResolutionFailed:     return "Image Read Failed"
         }
     }
 }
@@ -294,6 +334,7 @@ extension WarningCategory {
         case .formatCorrection: return .parseFormatDrift
         case .contextPressure:  return .memExhausted
         case .circuitBreaker:   return .cbRepetitiveAction     // most common CB trigger
+        case .resourceUnavailable: return .fileReadFailed      // attachment/file couldn't be read
         }
     }
 }

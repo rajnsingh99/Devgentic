@@ -8,6 +8,9 @@
 import Foundation
 import SwiftUI
 import Markdown
+import os
+
+private let logger = DGLogger(category: "MarkdownParser")
 
 /// Step 3: Stream-Resilient Preprocessor
 /// Automatically closes unmatched code blocks to ensure AST parsers (and our UI)
@@ -134,6 +137,8 @@ func parseMarkdown(_ markdown: String) -> [ContentBlock] {
     // dropped everything (e.g., deeply malformed markdown). Fall back to rendering the
     // raw text as a paragraph so the user sees *something* instead of a blank bubble.
     if blocks.isEmpty && !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let preview = markdown.prefix(120).replacingOccurrences(of: "\n", with: "\\n")
+        logger.warning("Markdown AST produced zero blocks for non-empty input (\(markdown.count) chars). Preview: \"\(preview)\". Falling back to raw paragraph.")
         blocks.append(ContentBlock(id: "block-0", type: .paragraph(markdown)))
     }
 

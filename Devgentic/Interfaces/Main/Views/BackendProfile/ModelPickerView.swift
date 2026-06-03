@@ -147,6 +147,7 @@ struct OllamaModelPickerView: View {
     @Binding var cognitiveCapability: ModelCognitiveCapability
     @Binding var modelDialect: ModelDialect
     @Binding var modelMetadata: ModelMetadata?
+    @Binding var supportedModalities: SupportedModalities
     @Binding var thinkingEnabled: Bool
 
     let baseURL: String
@@ -204,7 +205,8 @@ struct OllamaModelPickerView: View {
                     } else {
                         Picker("Available Models", selection: $selectedModel) {
                             ForEach(visibleModels, id: \.name) { model in
-                                Text(model.name)
+                                // Vision badge: flag models that report image-input capability.
+                                Text(model.name + (model.cognitiveProfile.modalities.contains(.visionInput) ? "  👁 Vision" : ""))
                                     .tag(model.name)
                             }
                         }
@@ -331,6 +333,7 @@ struct OllamaModelPickerView: View {
             self.cognitiveCapability = matchedModel.cognitiveCapability
             self.modelDialect = matchedModel.modelDialect
             self.modelMetadata = matchedModel.cognitiveProfile.metadata
+            self.supportedModalities = matchedModel.cognitiveProfile.modalities
             self.thinkingEnabled = matchedModel.supportsThinking
             self.currentFitAssessment = ModelFitAdvisor.assess(metadata: matchedModel.cognitiveProfile.metadata)
         }

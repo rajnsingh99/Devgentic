@@ -128,6 +128,70 @@ struct OpenAILLMProvider: LLMProvider {
         return content
     }
 
+    // MARK: - Multimodal (Phase 3 — native image input)
+
+    /// Translates `[ProviderMessage]` into OpenAI chat messages, emitting a content
+    /// array (`{"type":"text"…}` + `{"type":"image_url","image_url":{"url":"data:…;base64,…"}}`)
+    /// for any image blocks. Text-only messages keep a plain content string.
+    private func translateProviderMessagesOpenAI(_ payload: [ProviderMessage]) async throws -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        for msg in payload {
+            if msg.content.isTextOnly {
+                out.append(["role": msg.role, "content": msg.content.textContent])
+                continue
+            }
+            var content: [[String: Any]] = []
+            for block in msg.content {
+                switch block {
+                case .text(let s):
+                    if !s.isEmpty { content.append(["type": "text", "text": s]) }
+                case .image(let img):
+                    let data = try await img.reference.resolve()
+                    content.append(["type": "image_url", "image_url": ["url": "data:\(img.mimeType);base64,\(data.base64EncodedString())"]])
+                default:
+                    let t = block.textFallback
+                    if !t.isEmpty { content.append(["type": "text", "text": t]) }
+                }
+            }
+            out.append(["role": msg.role, "content": content])
+        }
+        return out
+    }
+
+    /// Multimodal overload — serializes image blocks natively instead of the
+    /// default text-downgrade. Mirrors `generate(messages:)` otherwise.
+    func generate(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        let openAIMessages = try await translateProviderMessagesOpenAI(payload)
+        var body: [String: Any] = [
+            "model": config.modelName,
+            "messages": openAIMessages,
+            "stream": false
+        ]
+        applyGenerationParams(to: &body)
+        if let tools = tools, !tools.isEmpty { body["tools"] = tools }
+        if let schema = responseSchema as? [String: Any] {
+            body["response_format"] = [
+                "type": "json_schema",
+                "json_schema": ["name": "cognitive_step", "strict": true, "schema": schema] as [String: Any]
+            ] as [String: Any]
+        }
+
+        var request = makeRequest()
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let choices = json?["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any] else {
+            throw LLMProviderError.invalidResponse("Missing message object in OpenAI response")
+        }
+        if let finishReason = firstChoice["finish_reason"] as? String, finishReason == "length" {
+            logger.warning("⚠️ OpenAI multimodal response truncated (finish_reason: length).")
+        }
+        return message["content"] as? String ?? ""
+    }
+
     // MARK: - Cognitive Step
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {

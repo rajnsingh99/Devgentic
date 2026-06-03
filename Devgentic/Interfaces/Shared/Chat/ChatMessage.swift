@@ -320,7 +320,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
             return max(1, codeTokens + proseTokens)
         case .plainText(let text):
             return max(1, text.count / 4)
-        case .error(let title, let details):
+        case .error(let title, let details, _, _):
             return max(1, ((title?.count ?? 0) + details.count) / 4)
         case .image, .mediaArtifact:
             return 0
@@ -540,7 +540,7 @@ enum MessageContent: Equatable, Codable {
     case plainText(String)
     case markdownText(String)
     case codeBlock(language: String?, code: String)
-    case error(title: String?, details: String)
+    case error(title: String?, details: String, category: AgentErrorCategory? = nil, suggestion: String? = nil)
     case image(url: URL?, alt: String?, imageData: Data?)
     case mediaArtifact(MediaArtifact)
 
@@ -550,6 +550,7 @@ enum MessageContent: Equatable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case type, text, language, code, title, details, imageUrl, imageAlt, imageData, artifact, summary
+        case category, suggestion   // structured error enrichment (Round 2 Phase 4)
     }
 
     init(from decoder: Decoder) throws {
@@ -570,7 +571,10 @@ enum MessageContent: Equatable, Codable {
         case "error":
             let title = try container.decodeIfPresent(String.self, forKey: .title)
             let details = try container.decode(String.self, forKey: .details)
-            self = .error(title: title, details: details)
+            // Backward-compat: pre-Round-2 error messages have no category/suggestion.
+            let category = try container.decodeIfPresent(AgentErrorCategory.self, forKey: .category)
+            let suggestion = try container.decodeIfPresent(String.self, forKey: .suggestion)
+            self = .error(title: title, details: details, category: category, suggestion: suggestion)
         case "image":
             let urlString = try container.decodeIfPresent(String.self, forKey: .imageUrl)
             let alt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
@@ -601,10 +605,12 @@ enum MessageContent: Equatable, Codable {
             try container.encode("codeBlock", forKey: .type)
             try container.encodeIfPresent(language, forKey: .language)
             try container.encode(code, forKey: .code)
-        case .error(let title, let details):
+        case .error(let title, let details, let category, let suggestion):
             try container.encode("error", forKey: .type)
             try container.encodeIfPresent(title, forKey: .title)
             try container.encode(details, forKey: .details)
+            try container.encodeIfPresent(category, forKey: .category)
+            try container.encodeIfPresent(suggestion, forKey: .suggestion)
         case .image(let url, let alt, let imageData):
             try container.encode("image", forKey: .type)
             try container.encodeIfPresent(url?.absoluteString, forKey: .imageUrl)
@@ -624,7 +630,7 @@ enum MessageContent: Equatable, Codable {
         case .plainText(let text): return text
         case .markdownText(let text): return text
         case .codeBlock(_, let code): return code
-        case .error(let title, let details): return "\(title ?? "Error"): \(details)"
+        case .error(let title, let details, _, _): return "\(title ?? "Error"): \(details)"
         case .image: return nil
         case .mediaArtifact: return nil
         case .checkpoint(let summary): return summary

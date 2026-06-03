@@ -347,8 +347,18 @@ final class TraceStore: Sendable {
     /// Per-tool reliability stats (success/failure counts, latency percentiles,
     /// failure-category breakdown). Uses the `toolResult` event type + dev-mode-populated
     /// `durationMs` / `errorCategory` columns.
-    func toolReliabilityStats(since: Date, until: Date = Date()) throws -> [ToolReliabilityStats] {
+    func toolReliabilityStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [ToolReliabilityStats] {
         try dbPool.read { db in
+            // P1-15 profileType filter: scope to the subset of traces matching the
+            // user's chosen profile type (Bot / Agent / Workflow / Code / ImageGen)
+            // by constraining `traceID IN (matching traces)`. Nil filter = no scope,
+            // queries behave as before.
+            let typeFilter = profileType.map { _ in
+                "AND traceID IN (SELECT traceID FROM traces WHERE profileType = ?)"
+            } ?? ""
+            var baseArgs: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { baseArgs.append(profileType) }
+
             // 1. Per-tool aggregate counts + avg duration.
             let rows = try Row.fetchAll(db, sql: """
                 SELECT
@@ -360,9 +370,10 @@ final class TraceStore: Sendable {
                 FROM span_events
                 WHERE eventType = 'toolResult'
                   AND timestamp >= ? AND timestamp <= ?
+                  \(typeFilter)
                 GROUP BY content
                 ORDER BY total DESC
-                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+                """, arguments: StatementArguments(baseArgs))
 
             var results: [ToolReliabilityStats] = []
 
@@ -375,6 +386,8 @@ final class TraceStore: Sendable {
 
                 // 2. Percentiles — one extra pass per tool, ordered by duration.
                 // For small windows (<1000 tool calls per tool) this is fast.
+                var perToolArgs: [any DatabaseValueConvertible] = [toolName, since.timeIntervalSince1970, until.timeIntervalSince1970]
+                if let profileType { perToolArgs.append(profileType) }
                 let durations = try Int.fetchAll(db, sql: """
                     SELECT durationMs
                     FROM span_events
@@ -382,8 +395,9 @@ final class TraceStore: Sendable {
                       AND content = ?
                       AND durationMs IS NOT NULL
                       AND timestamp >= ? AND timestamp <= ?
+                      \(typeFilter)
                     ORDER BY durationMs ASC
-                    """, arguments: [toolName, since.timeIntervalSince1970, until.timeIntervalSince1970])
+                    """, arguments: StatementArguments(perToolArgs))
 
                 let p50 = percentile(durations, 0.50)
                 let p95 = percentile(durations, 0.95)
@@ -398,8 +412,9 @@ final class TraceStore: Sendable {
                       AND severity = 'warning'
                       AND errorCategory IS NOT NULL
                       AND timestamp >= ? AND timestamp <= ?
+                      \(typeFilter)
                     GROUP BY errorCategory
-                    """, arguments: [toolName, since.timeIntervalSince1970, until.timeIntervalSince1970])
+                    """, arguments: StatementArguments(perToolArgs))
 
                 var breakdown: [AgentErrorCategory: Int] = [:]
                 for br in breakdownRows {
@@ -424,16 +439,23 @@ final class TraceStore: Sendable {
     }
 
     /// Per-category error/warning frequency. Populated by Phase D sites + Phase 1 warnings.
-    func categoryFrequencyStats(since: Date, until: Date = Date()) throws -> [CategoryFrequencyStats] {
+    func categoryFrequencyStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [CategoryFrequencyStats] {
         try dbPool.read { db in
+            let typeFilter = profileType.map { _ in
+                "AND traceID IN (SELECT traceID FROM traces WHERE profileType = ?)"
+            } ?? ""
+            var args: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { args.append(profileType) }
+
             let rows = try Row.fetchAll(db, sql: """
                 SELECT errorCategory, COUNT(*) AS cnt
                 FROM span_events
                 WHERE errorCategory IS NOT NULL
                   AND timestamp >= ? AND timestamp <= ?
+                  \(typeFilter)
                 GROUP BY errorCategory
                 ORDER BY cnt DESC
-                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+                """, arguments: StatementArguments(args))
 
             var results: [CategoryFrequencyStats] = []
             for row in rows {
@@ -448,8 +470,12 @@ final class TraceStore: Sendable {
     /// Per-(provider, model) outcome rates. Joins `traces` to `trace_configs` so we can
     /// split runs by the model actually used. Outcome classification reads from
     /// `traces.status` which is set at `endTrace(status:error:)`.
-    func modelReliabilityStats(since: Date, until: Date = Date()) throws -> [ModelReliabilityStats] {
+    func modelReliabilityStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [ModelReliabilityStats] {
         try dbPool.read { db in
+            let typeFilter = profileType.map { _ in "AND t.profileType = ?" } ?? ""
+            var args: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { args.append(profileType) }
+
             let rows = try Row.fetchAll(db, sql: """
                 SELECT
                     tc.provider AS provider,
@@ -461,9 +487,10 @@ final class TraceStore: Sendable {
                 FROM trace_configs tc
                 JOIN traces t ON t.traceID = tc.traceID
                 WHERE t.startedAt >= ? AND t.startedAt <= ?
+                  \(typeFilter)
                 GROUP BY tc.provider, tc.modelName
                 ORDER BY total DESC
-                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+                """, arguments: StatementArguments(args))
 
             return rows.compactMap { row in
                 guard let provider: String = row["provider"],
@@ -487,8 +514,11 @@ final class TraceStore: Sendable {
 
     /// Circuit breaker trip summary — which safeguard fires most, which tools
     /// trigger it most. CB categories are the 5 `.cb*` cases in AgentErrorCategory.
-    func circuitBreakerStatsAggregate(since: Date, until: Date = Date()) throws -> CircuitBreakerStats {
+    func circuitBreakerStatsAggregate(since: Date, until: Date = Date(), profileType: String? = nil) throws -> CircuitBreakerStats {
         try dbPool.read { db in
+            let typeFilter = profileType.map { _ in
+                "AND traceID IN (SELECT traceID FROM traces WHERE profileType = ?)"
+            } ?? ""
             // CB trips by category.
             let cbCategoryRaws: [String] = AgentErrorCategory.allCases
                 .filter { $0.rawValue.hasPrefix("cb") }
@@ -505,13 +535,16 @@ final class TraceStore: Sendable {
             ]
             assert(Set(cbCategoryRaws) == Set(explicitCBs), "Phase E: update CB stats query if AgentErrorCategory cb* set changes")
 
+            var categoryArgs: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { categoryArgs.append(profileType) }
             let categoryRows = try Row.fetchAll(db, sql: """
                 SELECT errorCategory, COUNT(*) AS cnt
                 FROM span_events
                 WHERE errorCategory IN (\(cbCategoryRaws.map { "'\($0)'" }.joined(separator: ", ")))
                   AND timestamp >= ? AND timestamp <= ?
+                  \(typeFilter)
                 GROUP BY errorCategory
-                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+                """, arguments: StatementArguments(categoryArgs))
 
             var tripsByCategory: [AgentErrorCategory: Int] = [:]
             var total = 0
@@ -525,6 +558,8 @@ final class TraceStore: Sendable {
 
             // Offending tools — parse `context.tool_name` out of detailJSON. Approximate
             // (LIKE on JSON substring) but cheap and deterministic enough for a dashboard.
+            var toolArgs: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { toolArgs.append(profileType) }
             let toolRows = try Row.fetchAll(db, sql: """
                 SELECT
                     SUBSTR(detailJSON, INSTR(detailJSON, '"tool_name":"') + 13, 64) AS raw,
@@ -533,10 +568,11 @@ final class TraceStore: Sendable {
                 WHERE errorCategory IN (\(cbCategoryRaws.map { "'\($0)'" }.joined(separator: ", ")))
                   AND detailJSON LIKE '%"tool_name":%'
                   AND timestamp >= ? AND timestamp <= ?
+                  \(typeFilter)
                 GROUP BY raw
                 ORDER BY cnt DESC
                 LIMIT 5
-                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970])
+                """, arguments: StatementArguments(toolArgs))
 
             let topTools: [(tool: String, count: Int)] = toolRows.compactMap { row in
                 guard let raw: String = row["raw"], let cnt: Int = row["cnt"] else { return nil }
@@ -557,13 +593,83 @@ final class TraceStore: Sendable {
 
     /// Number of traces in the window. Cheap count — used as a header sanity signal
     /// in the dashboard ("X traces analyzed").
-    func traceCount(since: Date, until: Date = Date()) throws -> Int {
+    func traceCount(since: Date, until: Date = Date(), profileType: String? = nil) throws -> Int {
         try dbPool.read { db in
-            try Int.fetchOne(db, sql: """
+            let typeFilter = profileType.map { _ in "AND profileType = ?" } ?? ""
+            var args: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { args.append(profileType) }
+            return try Int.fetchOne(db, sql: """
                 SELECT COUNT(*)
                 FROM traces
                 WHERE startedAt >= ? AND startedAt <= ?
-                """, arguments: [since.timeIntervalSince1970, until.timeIntervalSince1970]) ?? 0
+                  \(typeFilter)
+                """, arguments: StatementArguments(args)) ?? 0
+        }
+    }
+
+    /// Per-workflow-node execution stats — rolled up by node display name across
+    /// every `workflowNode`-kind span in the window. Duration comes from the
+    /// span's `(endedAt - startedAt)` and status from the span's terminal state.
+    /// Drives the "Workflow Activity" panel in TrendsView. Profile-type filter is
+    /// implicit here (only `workflowNode` spans are queried, which only exist on
+    /// workflow traces); the `profileType` argument is accepted for API
+    /// consistency but additionally constrains via `traces` for safety.
+    func workflowNodeStats(since: Date, until: Date = Date(), profileType: String? = nil) throws -> [WorkflowNodeStats] {
+        try dbPool.read { db in
+            let typeFilter = profileType.map { _ in "AND traceID IN (SELECT traceID FROM traces WHERE profileType = ?)" } ?? ""
+            var aggArgs: [any DatabaseValueConvertible] = [since.timeIntervalSince1970, until.timeIntervalSince1970]
+            if let profileType { aggArgs.append(profileType) }
+
+            // 1. Per-name aggregate.
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    name,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS failed,
+                    AVG(CASE WHEN endedAt IS NOT NULL THEN (endedAt - startedAt) * 1000 END) AS avg_duration
+                FROM spans
+                WHERE kind = 'workflowNode'
+                  AND startedAt >= ? AND startedAt <= ?
+                  \(typeFilter)
+                GROUP BY name
+                ORDER BY total DESC
+                """, arguments: StatementArguments(aggArgs))
+
+            var results: [WorkflowNodeStats] = []
+            for row in rows {
+                guard let name: String = row["name"] else { continue }
+                let total: Int = row["total"] ?? 0
+                let completed: Int = row["completed"] ?? 0
+                let failed: Int = row["failed"] ?? 0
+                let avgDuration: Double? = row["avg_duration"]
+
+                // 2. Per-node-name percentiles — same approach as toolReliabilityStats.
+                // Strip the `name = ?` prefix from typeFilter handling by keeping args local.
+                var pctArgs: [any DatabaseValueConvertible] = [name, since.timeIntervalSince1970, until.timeIntervalSince1970]
+                if let profileType { pctArgs.append(profileType) }
+                let durations = try Int.fetchAll(db, sql: """
+                    SELECT CAST((endedAt - startedAt) * 1000 AS INTEGER) AS duration_ms
+                    FROM spans
+                    WHERE kind = 'workflowNode'
+                      AND name = ?
+                      AND endedAt IS NOT NULL
+                      AND startedAt >= ? AND startedAt <= ?
+                      \(typeFilter)
+                    ORDER BY duration_ms ASC
+                    """, arguments: StatementArguments(pctArgs))
+
+                results.append(WorkflowNodeStats(
+                    nodeName: name,
+                    totalRuns: total,
+                    completedCount: completed,
+                    failedCount: failed,
+                    avgDurationMs: avgDuration.map { Int($0) },
+                    p50DurationMs: percentile(durations, 0.50),
+                    p95DurationMs: percentile(durations, 0.95)
+                ))
+            }
+            return results
         }
     }
 

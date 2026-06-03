@@ -109,15 +109,40 @@ final class UnifiedToolStore {
     
     // MARK: - CRUD Pass-through Methods
     
-    /// A pass-through method to add a new MCP tool.
-    func addTool(serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
-        mcpStore.addTool(serverName: serverName, serverDefinition: serverDefinition, newTools: newTools)
+    /// A pass-through method to add a new MCP tool. Returns the new source ID
+    /// (or nil on failure) so callers can clean up any pending temp-ID state.
+    @discardableResult
+    func addTool(
+        serverName: String,
+        serverDefinition: ServerDefinition,
+        secrets: MCPRuntimeSecrets,
+        newTools: [ToolDefinition]
+    ) -> UUID? {
+        let newID = mcpStore.addTool(
+            serverName: serverName,
+            serverDefinition: serverDefinition,
+            secrets: secrets,
+            newTools: newTools
+        )
         refreshSources()
+        return newID
     }
 
     /// A pass-through method to update an existing MCP tool.
-    func updateTool(id: UUID, serverName: String, serverDefinition: ServerDefinition, newTools: [ToolDefinition]) {
-        mcpStore.updateTool(id: id, serverName: serverName, serverDefinition: serverDefinition, newTools: newTools)
+    func updateTool(
+        id: UUID,
+        serverName: String,
+        serverDefinition: ServerDefinition,
+        secrets: MCPRuntimeSecrets,
+        newTools: [ToolDefinition]
+    ) {
+        mcpStore.updateTool(
+            id: id,
+            serverName: serverName,
+            serverDefinition: serverDefinition,
+            secrets: secrets,
+            newTools: newTools
+        )
         refreshSources()
     }
 

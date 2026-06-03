@@ -18,7 +18,6 @@ struct TaskSchedulerSidebarView: View {
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
 
-    @State private var showingCreateSheet = false
     @State private var showingDeleteAlert = false
     @State private var taskToDelete: ScheduledTask?
 
@@ -32,7 +31,7 @@ struct TaskSchedulerSidebarView: View {
                 title: "Scheduler",
                 buttonTitle: "New Task",
                 systemImage: "plus",
-                onAction: { showingCreateSheet = true }
+                onAction: { router.navigateToNewTask() }
             )
             .padding(.horizontal, 12)
             .padding(.top, 12)
@@ -65,14 +64,11 @@ struct TaskSchedulerSidebarView: View {
                     subtitle: "Schedule tasks to run automatically at specific times",
                     buttonTitle: "Create Task",
                     systemImage: "clock.badge",
-                    onAction: { showingCreateSheet = true }
+                    onAction: { router.navigateToNewTask() }
                 )
             } else {
                 taskList
             }
-        }
-        .sheet(isPresented: $showingCreateSheet) {
-            CreateScheduledTaskView()
         }
         .alert("Delete Task?", isPresented: $showingDeleteAlert, presenting: taskToDelete) { task in
             Button("Delete", role: .destructive) {
