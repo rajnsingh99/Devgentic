@@ -148,10 +148,14 @@ struct ConversationSidebarRow: View {
         if isSelectionMode {
             toggleBatchSelection()
         } else {
-            viewModel.selectedConversationID = conversation.id
-            // Return to chat if currently viewing a non-chat destination
-            if !router.isShowingChat {
-                router.returnToChat()
+            // Guarded: if a workflow canvas has unsaved edits, prompt Save/Discard/Cancel
+            // before switching conversations (otherwise the edits are silently lost).
+            viewModel.workflowEditGuard.attempt {
+                viewModel.selectedConversationID = conversation.id
+                // Return to chat if currently viewing a non-chat destination
+                if !router.isShowingChat {
+                    router.returnToChat()
+                }
             }
         }
     }

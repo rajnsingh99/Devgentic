@@ -161,7 +161,9 @@ struct AddBackendProfileView: View {
                 tools: []
             ))
         case .workflow:
-            details = .workflow(WorkflowConfig(agentProfileIDs: []))
+            // New workflows default the node timeout OFF (nodes run unbounded until the
+            // user opts in). Existing profiles keep `nil` → enabled (backward-compat).
+            details = .workflow(WorkflowConfig(agentProfileIDs: [], nodeTimeoutEnabled: false))
         case .imageGen:
             let imageGenConfig = ProviderConfig(apiProvider: .openAI, modelName: "dall-e-3")
             details = .imageGen(ImageGenConfig(

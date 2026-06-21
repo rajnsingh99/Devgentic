@@ -369,4 +369,163 @@ final class ReflexionCapabilityIntegrationTests: XCTestCase {
         let hasTrial2Start = thoughts.contains { $0.contains("Starting trial 2") }
         XCTAssertTrue(hasTrial2Start, "Trial 2 should start after trial 1 rejection")
     }
+
+    // MARK: - Test 6: A1 — a later FAILED trial must not clobber a good earlier one (#18)
+
+    func testReflexion_LaterFailedTrial_DoesNotClobberEarlierOutput() async throws {
+        // Trial 1 produces good content, reflection RETRYs, then trial 2 hits a provider-fatal
+        // error → the inner executor finishes with NO content (empty trial output, no retry).
+        // Pre-#18 the unconditional `bestOutput = trialOutput` overwrote the good trial-1 result
+        // with empty → shipped `.failed` + an empty bubble. A1 keeps the most recent NON-EMPTY
+        // output, so the run still COMPLETES with trial 1's answer.
+        let tool = TestToolFactory.make(name: "attempt", output: "some data")
+
+        let provider = FaultInjectingMock(
+            steps: [
+                // Trial 1: tool call → good termination
+                ModernCognitiveStep(
+                    reasoning: "First attempt.",
+                    toolCalls: [TestToolCallFactory.make(name: "attempt", input: "1")]
+                ),
+                ModernCognitiveStep(reasoning: "TRIAL_1_GOOD_OUTPUT: the complete answer.")
+            ],
+            generateResponses: [
+                makeReflectionResponse(acceptable: false, critique: "Try again.")
+            ],
+            // Trial 2's first cognitive call (step index 2) throws a provider-fatal error →
+            // executor yields .error + finishes with empty content (4xx = fatal, no retry/backoff).
+            throwOnStepIndex: 2,
+            stepError: CloudProviderError(statusCode: 400, retryAfterSeconds: nil, requestId: nil, rawBody: "bad request", provider: .local)
+        )
+
+        let executor = makeReflexionExecutor(maxTrials: 2)
+        let input = TestAgentInputFactory.make(query: "Complete the task", tools: [tool])
+
+        let stream = executor.execute(model: provider, input: input) { _ in }
+        let events = try await StreamCollector.collect(from: stream)
+
+        // Trial 2 ran (no early exit) but its empty/failed output did NOT clobber trial 1.
+        let thoughts = StreamCollector.thoughts(from: events)
+        XCTAssertTrue(thoughts.contains { $0.contains("Starting trial 2") }, "Trial 2 should run after RETRY")
+
+        // The run completes with trial 1's content rather than failing empty.
+        let content = StreamCollector.contentText(from: events)
+        XCTAssertFalse(content.isEmpty, "A failed trial 2 must not clobber trial 1 into an empty result")
+        let completed = events.contains { if case .executionFinished(.completed, _) = $0 { return true }; return false }
+        XCTAssertTrue(completed, "Run should complete (trial 1 preserved), not fail empty")
+        let failedEmpty = events.contains { if case .executionFinished(.failed, _) = $0 { return true }; return false }
+        XCTAssertFalse(failedEmpty, "Pre-#18 behavior was empty clobber → .failed; must not happen now")
+    }
+
+    // MARK: - Test 7: B — cancellation during reflection propagates, not swallowed (#18)
+
+    func testReflexion_CancellationDuringReflection_PropagatesNotSwallowed() async throws {
+        // Trial 1 runs, then the reflection LLM call is cancelled. Pre-#18 the evaluator's
+        // catch-all folded CancellationError into a "not acceptable" verdict → trial 2 ran
+        // and a bogus critique polluted state. The fix rethrows it → the loop stops at the
+        // reflection boundary and the run ends cancelled.
+        let tool = TestToolFactory.make(name: "analyze", output: "Some analysis.")
+        let provider = FaultInjectingMock(
+            steps: [
+                ModernCognitiveStep(
+                    reasoning: "Analyzing.",
+                    toolCalls: [TestToolCallFactory.make(name: "analyze", input: "x")]
+                ),
+                ModernCognitiveStep(reasoning: "Trial 1 output.")
+            ],
+            throwOnGenerate: CancellationError()
+        )
+
+        let executor = makeReflexionExecutor(maxTrials: 2)
+        let input = TestAgentInputFactory.make(query: "Do it", tools: [tool])
+
+        let stream = executor.execute(model: provider, input: input) { _ in }
+        let events = try await StreamCollector.collect(from: stream)
+
+        let thoughts = StreamCollector.thoughts(from: events)
+        XCTAssertFalse(thoughts.contains { $0.contains("Starting trial 2") },
+                       "Cancellation during reflection must stop the loop, not advance to trial 2")
+        XCTAssertEqual(provider.cognitiveCallCount, 2,
+                       "Only trial 1's 2 cognitive steps should run; trial 2 must not execute")
+        XCTAssertTrue(thoughts.contains { $0.contains("Cancelled") },
+                      "Run should report cancellation")
+    }
+
+    // MARK: - Test 8: #23 — cancel emits a content placeholder (no empty bubble)
+
+    func testReflexion_Cancel_EmitsStopPlaceholder() async throws {
+        // #23: a cancelled Reflexion run must yield a content placeholder so the message bubble
+        // isn't left empty (mirrors ReActAgentExecutor). Cancellation fires during the reflection
+        // LLM call — a wrapper-level point where no answer content has reached the UI (trial
+        // content is accumulated into `trialOutput`, not forwarded).
+        let tool = TestToolFactory.make(name: "analyze", output: "Some analysis.")
+        let provider = FaultInjectingMock(
+            steps: [
+                ModernCognitiveStep(
+                    reasoning: "Analyzing.",
+                    toolCalls: [TestToolCallFactory.make(name: "analyze", input: "x")]
+                ),
+                ModernCognitiveStep(reasoning: "Trial 1 output.")
+            ],
+            throwOnGenerate: CancellationError()
+        )
+
+        let executor = makeReflexionExecutor(maxTrials: 2)
+        let input = TestAgentInputFactory.make(query: "Do it", tools: [tool])
+
+        let stream = executor.execute(model: provider, input: input) { _ in }
+        let events = try await StreamCollector.collect(from: stream)
+
+        let content = StreamCollector.contentText(from: events)
+        XCTAssertTrue(content.contains("Operation stopped by user"),
+                      "Cancelled Reflexion run must emit the stop placeholder, not an empty bubble; got: '\(content)'")
+    }
+}
+
+/// Scriptable mock that can inject a thrown error on a specific cognitive-step index
+/// (`throwOnStepIndex`) or on the reflection `generate` call (`throwOnGenerate`) — for
+/// exercising #18's failed-trial (A1) and cancel-during-reflection (B) paths.
+private final class FaultInjectingMock: LLMProvider, @unchecked Sendable {
+    let modelName = "fault-mock"
+    private let steps: [ModernCognitiveStep]
+    private var stepIndex = 0
+    private let generateResponses: [String]
+    private var generateIndex = 0
+    private let throwOnStepIndex: Int?
+    private let stepError: Error
+    private let throwOnGenerate: Error?
+    private(set) var cognitiveCallCount = 0
+
+    init(steps: [ModernCognitiveStep] = [],
+         generateResponses: [String] = [],
+         throwOnStepIndex: Int? = nil,
+         stepError: Error = NSError(domain: "test", code: 1),
+         throwOnGenerate: Error? = nil) {
+        self.steps = steps
+        self.generateResponses = generateResponses
+        self.throwOnStepIndex = throwOnStepIndex
+        self.stepError = stepError
+        self.throwOnGenerate = throwOnGenerate
+    }
+
+    func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        if stepIndex == throwOnStepIndex { throw stepError }
+        cognitiveCallCount += 1
+        guard stepIndex < steps.count else { return ModernCognitiveStep(reasoning: "No more scripted steps.") }
+        let step = steps[stepIndex]
+        stepIndex += 1
+        return step
+    }
+
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        if let throwOnGenerate { throw throwOnGenerate }
+        guard generateIndex < generateResponses.count else { return "[]" }
+        let response = generateResponses[generateIndex]
+        generateIndex += 1
+        return response
+    }
+
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
 }

@@ -225,6 +225,11 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
     /// Extracts the outermost JSON object from a string by tracking brace depth.
     private static func extractOutermostJSON(from text: String) -> String? {
+        // NOTE (#15): the `prevChar != "\\"` escape heuristic is intentional here — NOT the
+        // strict in-string-only `escaped` flag used by BalancedJSONScanner. The heuristic
+        // parser runs on malformed / stringified JSON where escaped quotes appear OUTSIDE
+        // string spans, and the legacy/native-fallback recovery depends on this looser model.
+        // (Switching to the strict flag regressed testFallback_* / testConversationalExit.)
         var depth = 0
         var startIndex: String.Index?
         var inString = false
@@ -434,10 +439,18 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
         return String(result)
     }
 
+    /// Upper bound on the input length for the regex-based recovery helpers below (#15
+    /// sub-issue 2). The `(?:[^"\\]|\\.)*` patterns are linear (the two branches are
+    /// disjoint), so this is a defensive cap against a pathologically large input causing a
+    /// slow scan — not a fix for exponential backtracking. Generous: a cognitive step is a
+    /// few KB, and large *valid* JSON still flows through the primary `JSONDecoder` path.
+    private static let maxRegexRecoveryLength = 200_000
+
     /// Detects `"arguments": "{...}"` or `"parameters": "{...}"` patterns where the model
     /// emitted the arguments dict as a JSON-encoded string, and unwraps them to raw objects.
     /// Example: `"arguments": "{\"path\": \"/tmp\"}"` → `"arguments": {"path": "/tmp"}`
     private static func unwrapStringifiedArguments(_ json: String) -> String {
+        guard json.count <= maxRegexRecoveryLength else { return json }
         // Match "arguments" or "parameters" followed by a colon and a string that starts with {
         let pattern = #"("(?:arguments|parameters)")\s*:\s*"(\{(?:[^"\\]|\\.)*\})""#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators) else {
@@ -472,6 +485,7 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
 
     /// A fallback heuristic that attempts to extract required fields using regular expressions when standard JSON decoding fails.
     private static func attemptLenientExtraction(from json: String) -> ModernCognitiveStep? {
+        guard json.count <= maxRegexRecoveryLength else { return nil }
         func extractStringOrNull(forKey key: String, in text: String) -> String? {
             let stringPattern = #"\"\#(key)\"\s*:\s*\"((?:[^\"\\]|\\.)*)\""#
             if let regex = try? NSRegularExpression(pattern: stringPattern, options: .dotMatchesLineSeparators),
@@ -640,6 +654,7 @@ struct HeuristicCognitiveParser: CognitiveParserProtocol {
     /// Used when a model flattens "arguments" keys into the tool call object.
     private static func extractFlattenedArguments(from json: String, excludingKeys: [String]) -> [String: JSONValue] {
         var args: [String: JSONValue] = [:]
+        guard json.count <= maxRegexRecoveryLength else { return args }
         let excludeSet = Set(excludingKeys)
 
         // Match "key": "stringValue"

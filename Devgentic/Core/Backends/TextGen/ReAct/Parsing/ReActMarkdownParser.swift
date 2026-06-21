@@ -46,7 +46,11 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
 
         logger.info("ReActMarkdownParser: Parsed action='\(rawToolName)' with \(arguments.count) argument(s).")
         let call = PendingToolCall(id: UUID().uuidString, name: rawToolName, arguments: arguments)
-        return ModernCognitiveStep(reasoning: reasoning ?? "Executing...", toolCalls: [call])
+        // Filter template-stub narration ("Calling X…") out of the with-tools reasoning so it
+        // doesn't pollute the working-memory scratchpad (#15 / G7). A nil/stub Thought becomes
+        // "" — empty reasoning is correct (the UI renders "Executing <tool>…" from the tool
+        // event). The termination path above is deliberately NOT filtered (it's the final answer).
+        return ModernCognitiveStep(reasoning: ReasoningQualityFilter.filter(reasoning), toolCalls: [call])
     }
 
     // MARK: - Field Extractors
@@ -111,31 +115,8 @@ struct ReActMarkdownParser: CognitiveParserProtocol {
 
     // MARK: - JSON Extraction Helper
 
-    /// Extracts the outermost JSON object from a string by tracking brace depth.
+    /// Extracts the outermost balanced JSON object, honoring JSON string/escape rules (#15).
     private func extractOutermostJSON(from text: String) -> String? {
-        var depth = 0
-        var startIndex: String.Index?
-        var inString = false
-        var prevChar: Character = "\0"
-
-        for (index, char) in zip(text.indices, text) {
-            if char == "\"" && prevChar != "\\" {
-                inString.toggle()
-            }
-
-            if !inString {
-                if char == "{" {
-                    if depth == 0 { startIndex = index }
-                    depth += 1
-                } else if char == "}" {
-                    depth -= 1
-                    if depth == 0, let start = startIndex {
-                        return String(text[start...index])
-                    }
-                }
-            }
-            prevChar = char
-        }
-        return nil
+        BalancedJSONScanner.firstObject(in: text).map(String.init)
     }
 }

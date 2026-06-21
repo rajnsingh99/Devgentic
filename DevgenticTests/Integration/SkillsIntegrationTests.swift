@@ -151,7 +151,8 @@ final class SkillPromptInjectionTests: XCTestCase {
             userProfile: nil,
             skillManifests: manifests,
             taskDescription: nil,
-            promptLayerConfig: .agent
+            promptLayerConfig: .agent,
+            workflowContext: nil
         )
 
         let generator = NativeStructuredGenerator()
@@ -192,7 +193,8 @@ final class SkillPromptInjectionTests: XCTestCase {
             userProfile: nil,
             skillManifests: nil,
             taskDescription: nil,
-            promptLayerConfig: .agent
+            promptLayerConfig: .agent,
+            workflowContext: nil
         )
 
         let generator = NativeStructuredGenerator()

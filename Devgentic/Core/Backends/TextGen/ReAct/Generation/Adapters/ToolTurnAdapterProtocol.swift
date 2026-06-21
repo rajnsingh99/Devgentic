@@ -22,6 +22,20 @@ struct ResolvedImage: Sendable {
     let base64: String     // base64-encoded image bytes
 }
 
+/// Coarse classification of an already-serialized native turn, used by the executor
+/// to compact the conversation payload along pairing-safe boundaries (#22). The
+/// concrete wire shapes diverge per provider, so classification lives on the adapter.
+enum NativeTurnKind {
+    /// Assistant/model turn carrying tool calls (`tool_use` blocks / top-level
+    /// `tool_calls` / `functionCall` parts).
+    case toolCallAssistant
+    /// Turn carrying tool results (`tool_result` blocks / `role: tool` / `functionResponse` parts).
+    case toolResult
+    /// Anything else — system prompt, user kickoff, history, or a standalone alert turn.
+    /// Unpaired, so safe to drop or keep without orphaning a tool-call id.
+    case other
+}
+
 /// Provider-specific serializer for `assistant(tool_calls) → tool(result)` turn pairs.
 ///
 /// Providers diverge on the exact wire shape:
@@ -70,6 +84,12 @@ protocol ToolTurnAdapter: Sendable {
     /// OpenAI/Gemini) override to emit their native image shape; non-vision/local
     /// adapters use the default and silently ignore images.
     func userTurn(text: String, images: [ResolvedImage]) -> [String: Any]
+
+    /// Classifies an already-built turn so the executor can find pairing-safe
+    /// compaction boundaries without reaching into provider-specific keys (#22). A
+    /// default implementation covers every current provider; override only if a new
+    /// wire shape can't be told apart by the shared key inspection.
+    func classifyTurn(_ turn: [String: Any]) -> NativeTurnKind
 }
 
 extension ToolTurnAdapter {
@@ -92,5 +112,28 @@ extension ToolTurnAdapter {
     /// Vision-capable cloud adapters override.
     func userTurn(text: String, images: [ResolvedImage]) -> [String: Any] {
         normalizeCanonical(message: ["role": "user", "content": text])
+    }
+
+    /// Universal classifier covering every current adapter's wire shape:
+    ///   - OpenAI / Ollama: `role == "tool"` (result) or a top-level `tool_calls` array (call).
+    ///   - Claude: a `content` block array containing a `tool_use` (call) or `tool_result` (result) block.
+    ///   - Gemini: a `parts` array containing a `functionCall` (call) or `functionResponse` (result) part.
+    /// Everything else (system / user / kickoff / alert) is `.other`. The branches are
+    /// mutually exclusive across providers, so one shared implementation is safe.
+    func classifyTurn(_ turn: [String: Any]) -> NativeTurnKind {
+        // OpenAI / Ollama
+        if (turn["role"] as? String) == "tool" { return .toolResult }
+        if let calls = turn["tool_calls"] as? [Any], !calls.isEmpty { return .toolCallAssistant }
+        // Claude content-block array
+        if let blocks = turn["content"] as? [[String: Any]] {
+            if blocks.contains(where: { ($0["type"] as? String) == "tool_use" }) { return .toolCallAssistant }
+            if blocks.contains(where: { ($0["type"] as? String) == "tool_result" }) { return .toolResult }
+        }
+        // Gemini parts array
+        if let parts = turn["parts"] as? [[String: Any]] {
+            if parts.contains(where: { $0["functionCall"] != nil }) { return .toolCallAssistant }
+            if parts.contains(where: { $0["functionResponse"] != nil }) { return .toolResult }
+        }
+        return .other
     }
 }

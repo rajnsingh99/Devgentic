@@ -103,7 +103,7 @@ final class ChatMessageSDTests: XCTestCase {
         let decoded = sd.toChatMessage()
         let content = decoded.currentAgentContent ?? decoded.content
 
-        if case .error(let title, let details) = content {
+        if case .error(let title, let details, _, _) = content {
             XCTAssertEqual(title, "Timeout")
             XCTAssertEqual(details, "Model timed out after 60s")
         } else {
@@ -467,7 +467,7 @@ final class ChatMessageSDTests: XCTestCase {
 
         let decoded = sd.toChatMessage()
         // Should fall back to error content
-        if case .error(let title, _) = decoded.content {
+        if case .error(let title, _, _, _) = decoded.content {
             XCTAssertEqual(title, "Decode Error")
         } else {
             XCTFail("Expected error content for corrupted data")

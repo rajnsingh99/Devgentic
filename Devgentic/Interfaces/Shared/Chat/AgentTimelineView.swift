@@ -50,15 +50,20 @@ struct AgentTimelineView: View {
     /// - Parameter streamingStartedAt: Wall-clock start time for the streaming
     ///   footer's elapsed counter. Required when `chatFidelity && isStreaming`;
     ///   ignored otherwise.
+    /// - Parameter finalContentText: When the caller renders the final answer
+    ///   separately below this timeline (e.g. the workflow node detail view),
+    ///   pass it here so a trailing reasoning event that merely repeats the
+    ///   answer is deduplicated — same behaviour as the chat-bubble init.
     init(
         events: [TimelineEvent],
         isStreaming: Bool = false,
         chatFidelity: Bool = false,
-        streamingStartedAt: Date? = nil
+        streamingStartedAt: Date? = nil,
+        finalContentText: String? = nil
     ) {
         self.events = events
         self.isStreaming = isStreaming
-        self.finalContentText = nil
+        self.finalContentText = finalContentText
         if chatFidelity, isStreaming, let start = streamingStartedAt {
             self.streamingContext = StreamingContext(startedAt: start, isStreaming: true)
         } else {

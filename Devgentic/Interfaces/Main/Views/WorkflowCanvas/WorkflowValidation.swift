@@ -90,31 +90,44 @@ enum WorkflowValidator {
             }
         }
 
-        // P0-8: Code-node `outputVariable` collisions across the workflow.
-        // Two Code nodes writing to the same variable name silently race in
-        // parallel execution (`WorkflowState.variables` is just a dict; last
-        // write wins, ordering nondeterministic). Flag duplicates as an
-        // error so users notice before runtime.
-        var outputVariableOwners: [String: [(nodeID: UUID, displayName: String)]] = [:]
+        // P0-8: Code-node `outputVariable` collisions that can RACE. Two Code nodes
+        // writing the same variable on the SAME execution level run in parallel
+        // (`WorkflowState.variables` is a plain dict — last write wins, order
+        // nondeterministic). Writes on DIFFERENT levels are sequential and therefore
+        // deterministic (last write wins predictably), so only same-level collisions
+        // are flagged. If levels can't be computed (cycle), fall back to flagging any
+        // duplicate conservatively.
+        let nodeLevel: [UUID: Int] = {
+            guard let levels = layout.computeExecutionLevels() else { return [:] }
+            var map: [UUID: Int] = [:]
+            for (levelIndex, level) in levels.enumerated() {
+                for nodeID in level { map[nodeID] = levelIndex }
+            }
+            return map
+        }()
+        var outputVariableOwners: [String: [(nodeID: UUID, displayName: String, level: Int)]] = [:]
         for node in layout.nodes {
             if case .code(let config) = node.kind,
                let varName = config.outputVariable?.trimmingCharacters(in: .whitespacesAndNewlines),
                !varName.isEmpty {
-                outputVariableOwners[varName, default: []].append((node.id, node.displayName))
+                // level -1 = unknown (cyclic): groups together so they still collide.
+                outputVariableOwners[varName, default: []].append((node.id, node.displayName, nodeLevel[node.id] ?? -1))
             }
         }
-        for (varName, owners) in outputVariableOwners where owners.count > 1 {
-            for owner in owners {
-                let otherNames = owners
-                    .filter { $0.nodeID != owner.nodeID }
-                    .map(\.displayName)
-                    .joined(separator: ", ")
-                issues.append(WorkflowValidationIssue(
-                    nodeID: owner.nodeID,
-                    nodeName: owner.displayName,
-                    severity: .error,
-                    message: "Output variable '\(varName)' also written by: \(otherNames). Parallel writes race — rename for stable behavior."
-                ))
+        for (varName, owners) in outputVariableOwners {
+            for (_, sameLevelOwners) in Dictionary(grouping: owners, by: { $0.level }) where sameLevelOwners.count > 1 {
+                for owner in sameLevelOwners {
+                    let otherNames = sameLevelOwners
+                        .filter { $0.nodeID != owner.nodeID }
+                        .map(\.displayName)
+                        .joined(separator: ", ")
+                    issues.append(WorkflowValidationIssue(
+                        nodeID: owner.nodeID,
+                        nodeName: owner.displayName,
+                        severity: .error,
+                        message: "Output variable '\(varName)' also written by: \(otherNames). Parallel writes race — rename for stable behavior."
+                    ))
+                }
             }
         }
 

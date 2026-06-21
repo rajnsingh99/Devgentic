@@ -38,12 +38,17 @@ final class WorkflowTestScenario {
         )
         profileMap[profileID] = profile
 
-        let node = WorkflowNode(
+        var node = WorkflowNode(
             id: nodeID,
             kind: .profile(profileID: profileID, profileType: .bot),
             position: position,
             displayName: name
         )
+        // Profile nodes require a non-empty task description, or workflow pre-flight
+        // validation fails the run with `.validationFailed`. Tests don't assert on
+        // it (mock streams are scripted by profile ID), so a generic default keeps
+        // `executeWorkflow` from throwing before any node runs.
+        node.nodeConfig = WorkflowNodeConfig(taskDescription: "Respond to the input.")
         nodes.append(node)
         return nodeID
     }
@@ -65,11 +70,28 @@ final class WorkflowTestScenario {
             ConditionRule(label: "False", field: .upstreamOutput, op: .isEmpty, value: "")
         ],
         fallbackLabel: String = "False",
+        passthroughContent: Bool = true,
         position: CGPoint = .zero
     ) -> UUID {
         let nodeID = UUID()
         var config = ConditionNodeConfig()
-        config.rules = rules
+        config.passthroughContent = passthroughContent
+        // Production validation requires ≥2 rules and that `fallbackLabel` names a
+        // real rule (the canvas exposes one output port per rule). When a test models
+        // a "match → A, else → B" router as a single rule + a distinct fallback,
+        // materialize the else-branch as a real never-matching rule so the layout is
+        // valid. Runtime routing is unchanged — the executor still activates the
+        // fallback port when no user rule matches (`matchedLabel ?? fallbackLabel`).
+        var effectiveRules = rules
+        if !fallbackLabel.isEmpty, !effectiveRules.contains(where: { $0.label == fallbackLabel }) {
+            effectiveRules.append(ConditionRule(
+                label: fallbackLabel,
+                field: .upstreamOutput,
+                op: .equals,
+                value: "__wf_test_fallback_never_matches__"
+            ))
+        }
+        config.rules = effectiveRules
         config.fallbackLabel = fallbackLabel
 
         let node = WorkflowNode(
@@ -201,7 +223,15 @@ final class WorkflowTestScenario {
     /// Sets per-node execution config (failure policy, retries, timeout).
     func setNodeConfig(_ config: WorkflowNodeConfig, for nodeID: UUID) {
         guard let index = nodes.firstIndex(where: { $0.id == nodeID }) else { return }
-        nodes[index].nodeConfig = config
+        var cfg = config
+        // Preserve the node's existing task description when the override doesn't
+        // set one. Profile nodes require a non-empty taskDescription for pre-flight
+        // validation, and most callers only mean to tweak failure/retry policy.
+        if cfg.taskDescription.isEmpty,
+           let existing = nodes[index].nodeConfig?.taskDescription, !existing.isEmpty {
+            cfg.taskDescription = existing
+        }
+        nodes[index].nodeConfig = cfg
     }
 
     /// Sets the per-node task description for workflow execution.
@@ -253,6 +283,9 @@ final class InnerWorkflowBuilder {
     var profileMap: [UUID: BackendProfileModel] { scenario.profileMap }
 
     /// Saves the inner layout to WorkflowLayoutStore and returns the layout.
+    /// `@MainActor` because `WorkflowLayoutStore` is main-actor isolated; the test
+    /// class is `@MainActor` too, so callers invoke this synchronously.
+    @MainActor
     @discardableResult
     func save() -> WorkflowLayout {
         let layout = scenario.layout
@@ -261,6 +294,7 @@ final class InnerWorkflowBuilder {
     }
 
     /// Removes the inner layout from WorkflowLayoutStore.
+    @MainActor
     func cleanup() {
         WorkflowLayoutStore.shared.delete(for: workflowProfileID)
     }

@@ -154,37 +154,7 @@ struct QwenHermesJsonParser: CognitiveParserProtocol {
     /// Finds the first balanced `{...}` JSON object starting at or after `startingAt`.
     /// Tracks string state so braces inside quoted strings don't affect depth.
     private func balancedJSONObjectRange(in text: String, startingAt: String.Index) -> Range<String.Index>? {
-        guard let openIdx = text[startingAt...].firstIndex(of: "{") else { return nil }
-
-        var depth = 0
-        var inString = false
-        var escaped = false
-
-        for idx in text[openIdx...].indices {
-            let c = text[idx]
-            if escaped {
-                escaped = false
-                continue
-            }
-            if c == "\\" && inString {
-                escaped = true
-                continue
-            }
-            if c == "\"" {
-                inString.toggle()
-                continue
-            }
-            if inString { continue }
-            if c == "{" { depth += 1 }
-            else if c == "}" {
-                depth -= 1
-                if depth == 0 {
-                    let endIdx = text.index(after: idx)
-                    return openIdx..<endIdx
-                }
-            }
-        }
-        return nil
+        BalancedJSONScanner.balancedRange(in: text, from: startingAt, opener: "{")
     }
 
     // MARK: - Decoding

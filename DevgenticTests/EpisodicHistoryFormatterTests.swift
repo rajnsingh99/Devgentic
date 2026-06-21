@@ -213,7 +213,7 @@ final class EpisodicHistoryFormatterTests: XCTestCase {
         XCTAssertEqual(action.toolName, "fs_smart_search")
         XCTAssertEqual(action.params["search_term"], "*.log")
         XCTAssertEqual(action.params["search_scope"], "/var")
-        XCTAssertEqual(action.status, "SUCCESS")
+        XCTAssertEqual(action.status, .success)
         XCTAssertNil(action.errorReason)
     }
 

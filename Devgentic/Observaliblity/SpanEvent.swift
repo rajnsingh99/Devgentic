@@ -120,6 +120,12 @@ struct SpanEvent: Codable, Identifiable, Sendable {
 extension SpanEvent: FetchableRecord, PersistableRecord, MutablePersistableRecord {
     static var databaseTableName: String { "span_events" }
 
+    // Persist `timestamp` as REAL seconds-since-1970 (matching the `.double` column) so the
+    // metrics time-window filters on `span_events.timestamp` actually match. See `TraceRecord`
+    // for the full rationale; GRDB 7 spells these as `(for column:)` functions.
+    static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
+    static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
+
     enum Columns: String, ColumnExpression {
         case id, spanID, traceID, timestamp, eventType, content, detailJSON, severity
         case errorCategory, errorChainID, phase, iterationNumber, causedByEventID, durationMs
@@ -206,7 +212,17 @@ struct Span: Codable, Identifiable, Sendable {
 
 extension Span: FetchableRecord, PersistableRecord {
     static var databaseTableName: String { "spans" }
-    
+
+    // Store/read Date columns as REAL seconds-since-1970, matching the `.double` schema
+    // columns and the raw-SQL Double writes in `updateSpan`/`closeOpenSpans`. Without an
+    // explicit strategy, GRDB's Codable bridge defaults to a TEXT date string, which a
+    // `.double`-affinity column keeps as text — and SQLite sorts TEXT above REAL, so every
+    // numeric `startedAt`/`endedAt` comparison (duration math, reconciliation) silently
+    // never matches. (GRDB 7 spells these as `(for column:)` functions, not properties —
+    // a `var` of the same name compiles but is silently ignored.)
+    static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
+    static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
+
     enum Columns: String, ColumnExpression {
         case spanID, traceID, parentSpanID, name, kind, startedAt, endedAt, status, metadataJSON
     }
@@ -217,7 +233,35 @@ extension Span: FetchableRecord, PersistableRecord {
 enum TraceStatus: String, Codable, Sendable, DatabaseValueConvertible {
     case running
     case completed
+    /// A graceful terminal failure — the run reached a failure outcome without an
+    /// exception propagating to the stream boundary (circuit-breaker abort, parse/
+    /// iteration exhaustion, workflow all-terminals-failed, ImageGen failure).
+    case failed
+    /// An exception propagated to the stream boundary (`finalizeMessage` received a
+    /// thrown error). Distinct from `.failed`, which is a clean give-up.
     case error
+    /// The run was cancelled by the user or its task was cancelled.
+    case cancelled
+    /// The owning process died mid-run (graceful quit or crash) before `endTrace` ran;
+    /// stamped by the startup reconciliation pass, never by the run itself.
+    case interrupted
+}
+
+extension TraceStatus {
+    /// Derives the persisted trace status from how a run actually ended. A thrown error
+    /// reaching the stream boundary always wins (it is the most severe signal); otherwise
+    /// the executor-reported terminal outcome decides. Centralized here so the mapping can
+    /// be unit-tested independently of `ActiveStreamManager.finalizeMessage`, its sole
+    /// production caller.
+    static func resolve(thrownError: Bool, terminalOutcome: ExecutionOutcome?) -> TraceStatus {
+        if thrownError { return .error }
+        switch terminalOutcome {
+        case .completed: return .completed
+        case .failed:    return .failed
+        case .cancelled: return .cancelled
+        case .none:      return .completed
+        }
+    }
 }
 
 // MARK: - TraceRecord (Top-level envelope)
@@ -238,7 +282,15 @@ struct TraceRecord: Codable, Identifiable, Sendable {
     var status: TraceStatus
     var errorSummary: String?
     var metadataJSON: String?
-    
+
+    // v5: release attribution (stamped at beginTrace) + token accounting (set at endTrace).
+    var appVersion: String?
+    var buildNumber: String?
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var estimatedCostUSD: Double?
+    var tokensEstimated: Bool?
+
     // Hydrated at query time (not stored in DB)
     var rootSpans: [Span]?
     
@@ -263,7 +315,13 @@ struct TraceRecord: Codable, Identifiable, Sendable {
         endedAt: Date? = nil,
         status: TraceStatus = .running,
         errorSummary: String? = nil,
-        metadataJSON: String? = nil
+        metadataJSON: String? = nil,
+        appVersion: String? = nil,
+        buildNumber: String? = nil,
+        inputTokens: Int? = nil,
+        outputTokens: Int? = nil,
+        estimatedCostUSD: Double? = nil,
+        tokensEstimated: Bool? = nil
     ) {
         self.traceID = traceID
         self.conversationID = conversationID
@@ -278,12 +336,19 @@ struct TraceRecord: Codable, Identifiable, Sendable {
         self.status = status
         self.errorSummary = errorSummary
         self.metadataJSON = metadataJSON
+        self.appVersion = appVersion
+        self.buildNumber = buildNumber
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.estimatedCostUSD = estimatedCostUSD
+        self.tokensEstimated = tokensEstimated
     }
-    
+
     // Exclude hydrated fields from DB coding
     enum CodingKeys: String, CodingKey {
         case traceID, conversationID, messageID, profileID, profileName, profileType
         case provider, modelName, startedAt, endedAt, status, errorSummary, metadataJSON
+        case appVersion, buildNumber, inputTokens, outputTokens, estimatedCostUSD, tokensEstimated
     }
 }
 
@@ -291,10 +356,19 @@ struct TraceRecord: Codable, Identifiable, Sendable {
 
 extension TraceRecord: FetchableRecord, PersistableRecord {
     static var databaseTableName: String { "traces" }
-    
+
+    // See `Span`'s note: persist Date columns as REAL seconds-since-1970 so the schema's
+    // `.double` `startedAt`/`endedAt` columns actually hold numbers. Otherwise `purgeOlderThan`,
+    // `reconcileOrphanedTraces`, the reliability time-window filters, and duration math all
+    // compare a TEXT date against a Double and silently match nothing. (GRDB 7 spells
+    // these as `(for column:)` functions, not properties.)
+    static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
+    static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
+
     enum Columns: String, ColumnExpression {
         case traceID, conversationID, messageID, profileID, profileName, profileType
         case provider, modelName, startedAt, endedAt, status, errorSummary, metadataJSON
+        case appVersion, buildNumber, inputTokens, outputTokens, estimatedCostUSD, tokensEstimated
     }
 }
 

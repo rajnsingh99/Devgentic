@@ -7,16 +7,20 @@
 //  Bottom area of the workflow execution screen. Three rendering states drive
 //  the body, all keyed off the currently selected card:
 //
-//    1. Running   — the selected node is actively executing. Renders its live
-//                   timeline using `AgentTimelineView` with chatFidelity=true,
-//                   matching the in-chat agent experience exactly.
+//    1. Running   — the selected node is actively executing. Agentic nodes
+//                   render their live timeline via `AgentTimelineView`
+//                   (chatFidelity=true); single-shot nodes (bots etc.) stream to
+//                   the run's final output, so they show a "Generating…" indicator.
 //    2. Pending   — the selected node hasn't started yet, or no node has started.
 //                   Renders a "Waiting for execution" placeholder.
 //    3. Completed — the selected node finished, or the Final Outcome card is
-//                   selected with a synthesised output ready. Renders the markdown
-//                   content through the shared `WorkflowMarkdownView` pipeline
-//                   (parseMarkdown → ContentBlock → CodeBlockView / MarkdownTableView),
-//                   wrapped in a Final-Output panel header with a Copy action.
+//                   selected with a synthesised output ready. Agentic nodes show a
+//                   unified chat-fidelity view (reasoning/tool-call timeline +
+//                   the final answer below it, no Output/Timeline toggle); bots and
+//                   the Final Outcome render the markdown output directly. All
+//                   markdown flows through the shared `WorkflowMarkdownView`
+//                   pipeline (parseMarkdown → ContentBlock → CodeBlockView /
+//                   MarkdownTableView), wrapped in a panel header with Copy.
 //
 //  All branches reuse the same content-rendering pipeline used by chat bubbles,
 //  so code blocks, tables, inline-code styling, and other markdown features
@@ -29,15 +33,6 @@ struct WorkflowOutputView: View {
     let displayData: WorkflowRunDisplayData
     let selectedNodeID: UUID?
     @Environment(\.appTheme) private var theme
-
-    /// Which content the user is currently viewing for the selected completed
-    /// node. Only meaningful when the node has a non-empty `nodeTimeline`; for
-    /// timeline-less nodes (bots, or historical runs without live state) the
-    /// toggle is hidden and only Output is shown. Resets to `.output` whenever
-    /// `selectedNodeID` changes so each new selection starts predictably.
-    @State private var contentTab: ContentTab = .output
-
-    enum ContentTab: Hashable { case output, timeline }
 
     private var selectedNode: WorkflowRunDisplayData.NodeDisplayData? {
         guard let nodeID = selectedNodeID else { return nil }
@@ -53,9 +48,6 @@ struct WorkflowOutputView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onChange(of: selectedNodeID) { _, _ in
-            contentTab = .output
-        }
     }
 
     // MARK: - Per-node content
@@ -64,19 +56,27 @@ struct WorkflowOutputView: View {
     private func nodeContent(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
         switch node.status {
         case .running:
-            runningTimeline(for: node)
+            if node.supportsTimeline {
+                runningTimeline(for: node)
+            } else {
+                // Single-shot nodes (bots etc.) stream their text to the run's
+                // final output, not a per-node timeline — show a generating
+                // indicator until the node completes and its Output is ready.
+                waitingPlaceholder(message: "Generating output…", showsSpinner: true)
+            }
 
         case .pending:
             waitingPlaceholder(message: "Waiting for execution")
 
         case .completed, .failed, .skipped:
-            // Completed/failed nodes with a captured timeline get a two-tab
-            // view (Output ↔ Timeline) so agent reasoning + tool calls remain
-            // accessible after completion. Timeline-less nodes (bots, or
-            // post-restart historical) render Output directly without a tab.
-            let hasTimeline = !node.nodeTimeline.isEmpty
+            // Agentic nodes (agents + Action tool calls) render the chat-fidelity
+            // experience — the reasoning/tool-call timeline followed by the final
+            // answer in one unified scroll, no Output/Timeline toggle. Single-shot
+            // nodes (bots, image generators, structural transforms) and skipped
+            // nodes have no meaningful trace, so they show Output directly.
+            let hasTimeline = node.supportsTimeline && !node.nodeTimeline.isEmpty
             if hasTimeline && node.status != .skipped {
-                tabbedNodeContent(for: node)
+                timelineContent(for: node)
             } else {
                 completedOutput(
                     title: node.status == .failed ? "Error" : "Output",
@@ -89,88 +89,54 @@ struct WorkflowOutputView: View {
         }
     }
 
-    /// Completed/failed agent-node body with the Output/Timeline segmented
-    /// toggle in the header.
+    /// Completed/failed agentic node: the reasoning + tool-call timeline (compact,
+    /// chat fidelity) followed by the node's final answer (or error) in one
+    /// scroll. Mirrors the chat bubble — which renders the trace above its final
+    /// content — so the user reads the agent's steps and result top-to-bottom
+    /// without a confusing Output/Timeline toggle.
     @ViewBuilder
-    private func tabbedNodeContent(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
+    private func timelineContent(for node: WorkflowRunDisplayData.NodeDisplayData) -> some View {
+        let isError = node.status == .failed
         VStack(alignment: .leading, spacing: 0) {
             outputPanelHeader(
-                icon: node.status == .failed ? "exclamationmark.triangle.fill" : "sparkle",
-                iconColor: node.status == .failed ? .red : .purple,
+                icon: isError ? "exclamationmark.triangle.fill" : "sparkle",
+                iconColor: isError ? .red : .purple,
                 title: node.profileName,
-                subtitle: contentTab == .output
-                    ? (node.status == .failed ? "Error from \(node.profileName)" : "Result from \(node.profileName)")
-                    : "Reasoning & tool calls",
-                copyTarget: contentTab == .output ? node.detail : nil,
-                segmented: { contentTabPicker }
+                subtitle: isError ? "Error from \(node.profileName)" : "Result from \(node.profileName)",
+                copyTarget: node.detail
             )
 
             Divider().opacity(0.4)
 
-            switch contentTab {
-            case .output:
-                ScrollView(.vertical) {
-                    if node.status == .failed {
-                        Text(node.detail)
-                            .font(theme.fontBody)
-                            .foregroundColor(.red)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                    } else {
-                        WorkflowMarkdownView(text: node.detail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                    }
-                }
-            case .timeline:
-                ScrollView(.vertical) {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Steps: reasoning + tool calls, deduplicated against the final
+                    // answer so a "final answer == last thought" flow isn't repeated.
                     AgentTimelineView(
                         events: node.nodeTimeline,
                         isStreaming: false,
                         chatFidelity: true,
-                        streamingStartedAt: displayData.timestamp
+                        finalContentText: node.detail
                     )
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                    // Final answer (or error) rendered prominently below the trace.
+                    if !node.detail.isEmpty {
+                        if isError {
+                            Text(node.detail)
+                                .font(theme.fontBody)
+                                .foregroundColor(.red)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            WorkflowMarkdownView(text: node.detail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                 }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
-    }
-
-    /// Segmented control rendered inline in the panel header — only built for
-    /// the tabbed branch above.
-    private var contentTabPicker: some View {
-        HStack(spacing: 2) {
-            tabPickerButton(.output, label: "Output", icon: "doc.text")
-            tabPickerButton(.timeline, label: "Timeline", icon: "list.bullet.indent")
-        }
-        .padding(2)
-        .background(Capsule().fill(theme.surfaceOverlay))
-    }
-
-    private func tabPickerButton(_ tab: ContentTab, label: String, icon: String) -> some View {
-        let isSelected = contentTab == tab
-        return Button {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                contentTab = tab
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 10, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .foregroundColor(isSelected ? theme.primaryText : theme.secondaryText)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(
-                Capsule().fill(isSelected ? theme.controlBackground : Color.clear)
-            )
-        }
-        .buttonStyle(.plain)
     }
 
     private func subtitleFor(node: WorkflowRunDisplayData.NodeDisplayData) -> String {
@@ -297,13 +263,12 @@ struct WorkflowOutputView: View {
 
     // MARK: - Panel header
 
-    private func outputPanelHeader<Segmented: View>(
+    private func outputPanelHeader(
         icon: String,
         iconColor: Color,
         title: String,
         subtitle: String,
-        copyTarget: String?,
-        @ViewBuilder segmented: () -> Segmented = { EmptyView() }
+        copyTarget: String?
     ) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
@@ -320,8 +285,6 @@ struct WorkflowOutputView: View {
             }
 
             Spacer()
-
-            segmented()
 
             if let target = copyTarget, !target.isEmpty {
                 CopyOutputButton(target: target)

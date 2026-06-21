@@ -36,7 +36,8 @@ final class OllamaCognitiveProfileTests: XCTestCase {
             parameters: nil,
             template: template,
             details: details,
-            capabilities: capabilities
+            capabilities: capabilities,
+            modelInfo: nil
         )
     }
 

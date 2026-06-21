@@ -198,7 +198,7 @@ class ReportViewModel {
                     kind: .workflow,
                     startedAt: trace.startedAt,
                     endedAt: trace.endedAt,
-                    status: .init(rawValue: trace.status.rawValue) ?? .completed
+                    status: Self.spanStatus(forTrace: trace.status)
                 )
             }
         case .fullConversation:
@@ -210,14 +210,26 @@ class ReportViewModel {
                     kind: .workflow,
                     startedAt: trace.startedAt,
                     endedAt: trace.endedAt,
-                    status: .init(rawValue: trace.status.rawValue) ?? .completed
+                    status: Self.spanStatus(forTrace: trace.status)
                 )
             }
         }
         
         updateVisibleEvents()
     }
-    
+
+    /// Collapse a trace's terminal status into the 3-case `SpanStatus` used to render
+    /// the synthetic trace-level root span. `.failed`/`.cancelled` have no `SpanStatus`
+    /// equivalent, so they map to `.error` (any non-success terminal state) rather than
+    /// silently falling back to `.completed` and rendering a failed run as green.
+    private static func spanStatus(forTrace status: TraceStatus) -> SpanStatus {
+        switch status {
+        case .completed:                  return .completed
+        case .running:                    return .running
+        case .error, .failed, .cancelled, .interrupted: return .error
+        }
+    }
+
     private func handleSelectionChange() {
         guard let id = selectedSpanID else {
             updateVisibleEvents()

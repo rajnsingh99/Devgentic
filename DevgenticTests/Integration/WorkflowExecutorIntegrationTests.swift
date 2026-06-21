@@ -13,6 +13,7 @@
 import XCTest
 @testable import devgentic
 
+@MainActor
 final class WorkflowExecutorIntegrationTests: XCTestCase {
 
     private var mockProvider: MockWorkflowStreamProvider!
@@ -150,11 +151,18 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let profileID = scenario.profileID(for: botA)!
         scenario.profileMap.removeValue(forKey: profileID)
 
-        let events = try await execute(scenario)
-
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertEqual(failed.count, 1)
-        XCTAssertTrue(failed[0].error.contains("not found"), "Expected 'not found' error, got: \(failed[0].error)")
+        // Pre-flight validation catches a missing profile and rejects the run.
+        do {
+            _ = try await execute(scenario)
+            XCTFail("Expected validationFailed for a missing profile")
+        } catch let error as WorkflowError {
+            guard case .validationFailed(let issues, _) = error else {
+                XCTFail("Expected validationFailed, got \(error)")
+                return
+            }
+            XCTAssertTrue(issues.contains(where: { $0.nodeID == botA }),
+                          "Validation should flag the node with the missing profile")
+        }
     }
 
     func testCycleDetection_Throws() async {
@@ -493,6 +501,53 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(started.contains(botB), "Normal handler should NOT execute when error port active")
     }
 
+    func testMultiPort_SameUpstream_RunsOnError() async throws {
+        // A node wired to BOTH the default and `error` ports of one upstream must run
+        // when that upstream FAILS (its error branch is live). Per-upstream join — not
+        // per-edge AND — is what keeps this node reachable.
+        let scenario = WorkflowTestScenario()
+        let worker = scenario.addBotNode(name: "Worker")
+        let finalizer = scenario.addBotNode(name: "Finalizer")
+
+        scenario.connect(from: worker, to: finalizer)                     // default (success) port
+        scenario.connect(from: worker, to: finalizer, portLabel: "error") // error port
+
+        mockProvider.scriptError(for: scenario.profileID(for: worker)!, error: NSError(domain: "t", code: 1))
+        mockProvider.scriptStream(for: scenario.profileID(for: finalizer)!, events: [.content("recovered")])
+
+        let events = try await execute(scenario)
+
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(started.contains(finalizer),
+                      "Finalizer wired to both default+error should run when the upstream fails")
+    }
+
+    func testMultiPort_SameUpstream_RunsOnSuccess_OutputOnce() async throws {
+        // The same dual-wired node must also run when the upstream SUCCEEDS (default
+        // branch is live), with the upstream's output injected exactly once (dedup),
+        // not once per edge.
+        let scenario = WorkflowTestScenario()
+        let worker = scenario.addBotNode(name: "Worker")
+        let finalizer = scenario.addBotNode(name: "Finalizer")
+
+        scenario.connect(from: worker, to: finalizer)
+        scenario.connect(from: worker, to: finalizer, portLabel: "error")
+
+        mockProvider.scriptStream(for: scenario.profileID(for: worker)!, events: [.content("worker output")])
+        mockProvider.scriptStream(for: scenario.profileID(for: finalizer)!, events: [.content("done")])
+
+        let events = try await execute(scenario)
+
+        let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
+        XCTAssertTrue(started.contains(finalizer),
+                      "Finalizer wired to both default+error should run when the upstream succeeds")
+
+        let fPid = scenario.profileID(for: finalizer)!
+        let fInv = mockProvider.invocations.first(where: { $0.profileID == fPid })!
+        let occurrences = fInv.userInput.components(separatedBy: "worker output").count - 1
+        XCTAssertEqual(occurrences, 1, "Upstream output should be injected once, not duplicated per edge")
+    }
+
     func testContinueAll_ExecutesDespiteFailure() async throws {
         let scenario = WorkflowTestScenario()
         let botA = scenario.addBotNode(name: "Failing Bot")
@@ -801,7 +856,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         // Should emit an error about all terminals failing
         let errors = events.compactMap { event -> String? in
-            if case .error(let msg) = event { return msg }
+            if case .error(let err) = event { return err.message }
             return nil
         }
         XCTAssertTrue(errors.contains(where: { $0.contains("all terminal nodes failed") }),
@@ -1105,6 +1160,50 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         let result = ContextCompressor.compileForWorkflow(results: [envelope])
         XCTAssertEqual(result, "", "Completed but empty output should produce empty string")
+    }
+
+    func testCompileForWorkflow_IncludeFailures_AnnotatesFailedUpstream() {
+        let failed = NodeResultEnvelope(
+            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
+            profileName: "Risky Bot", profileType: .bot,
+            status: .failed(.modelError(provider: "test", error: "boom")),
+            output: "partial result before failure", artifacts: [],
+            metadata: .simple(start: Date(), end: Date(), output: "")
+        )
+
+        // Default: failed upstream excluded (error handler would see nothing).
+        XCTAssertEqual(
+            ContextCompressor.compileForWorkflow(results: [failed]), "",
+            "Failed upstream should be excluded by default"
+        )
+
+        // includeFailures: surfaced with a reason annotation + the partial output,
+        // so an error-handler node can act on what failed.
+        let recovered = ContextCompressor.compileForWorkflow(results: [failed], includeFailures: true)
+        XCTAssertTrue(recovered.contains("Risky Bot"), "Should name the failed upstream")
+        XCTAssertTrue(recovered.contains("failed"), "Should mark the upstream as failed")
+        XCTAssertTrue(recovered.contains("partial result before failure"), "Should include the partial output")
+    }
+
+    func testCompileForWorkflow_IncludeFailures_MixedKeepsBoth() {
+        let completed = NodeResultEnvelope(
+            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
+            profileName: "Good Bot", profileType: .bot, status: .completed,
+            output: "useful data", artifacts: [],
+            metadata: .simple(start: Date(), end: Date(), output: "")
+        )
+        let failed = NodeResultEnvelope(
+            taskID: UUID(), nodeID: UUID(), sourceProfileID: UUID(),
+            profileName: "Bad Bot", profileType: .bot,
+            status: .failed(.modelError(provider: "test", error: "crash")),
+            output: "garbage", artifacts: [],
+            metadata: .simple(start: Date(), end: Date(), output: "")
+        )
+
+        let result = ContextCompressor.compileForWorkflow(results: [completed, failed], includeFailures: true)
+        XCTAssertTrue(result.contains("useful data"), "Completed output should be included")
+        XCTAssertTrue(result.contains("Bad Bot"), "Failed upstream should be annotated and included")
+        XCTAssertTrue(result.contains("---"), "Two usable upstreams should be separated by ---")
     }
 
     // MARK: - Group 14: Error Routing with Success
@@ -1648,7 +1747,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let cond1 = scenario.addConditionNode(
             name: "First Filter",
             rules: [ConditionRule(label: "Pass", field: .upstreamOutput, op: .isNotEmpty, value: "")],
-            fallbackLabel: "Fail"
+            fallbackLabel: "Fail",
+            // Emit the routing message (not passthrough) so cond2 can match "route" in it.
+            passthroughContent: false
         )
         // Cond2 checks for "route" which IS in Cond1's output ("Condition (pattern): route → Pass")
         let cond2 = scenario.addConditionNode(
@@ -2054,13 +2155,18 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let scenario = WorkflowTestScenario()
         let loop = scenario.addLoopNodeWithoutBody(name: "Broken Loop")
 
-        let events = try await execute(scenario)
-
-        // Loop should fail — no body workflow configured
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertTrue(failed.contains(where: { $0.nodeID == loop }), "Loop without body should fail")
-        XCTAssertTrue(failed.first(where: { $0.nodeID == loop })!.error.contains("no body"),
-                      "Error should mention missing body")
+        // Pre-flight validation rejects a loop with no body workflow configured.
+        do {
+            _ = try await execute(scenario)
+            XCTFail("Expected validationFailed for a loop with no body")
+        } catch let error as WorkflowError {
+            guard case .validationFailed(let issues, _) = error else {
+                XCTFail("Expected validationFailed, got \(error)")
+                return
+            }
+            XCTAssertTrue(issues.contains(where: { $0.nodeID == loop }),
+                          "Validation should flag the body-less loop node")
+        }
     }
 
     func testLoopNode_WritesCounterVariables() async throws {
@@ -2457,7 +2563,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
 
         // All terminals failed → error message
         let errors = events.compactMap { e -> String? in
-            if case .error(let msg) = e { return msg }
+            if case .error(let err) = e { return err.message }
             return nil
         }
         XCTAssertTrue(errors.contains(where: { $0.contains("all terminal nodes failed") }),

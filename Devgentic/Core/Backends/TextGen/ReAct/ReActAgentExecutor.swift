@@ -52,6 +52,18 @@ actor ReActAgentExecutor: Executor {
                 }
                 let currentConstraints = Set(sessionState.negativeConstraints)
 
+                // Hoisted above the do-block (like sessionState) so the cancellation/fatal
+                // catch blocks can also flush. Emits the run's accumulated usage before ANY
+                // terminal exit — previously only the happy-path exit emitted `.tokenUsage`,
+                // so circuit-breaker / exhaustion / cancel / fatal exits dropped the whole
+                // run's accounting (audit gap #3). Captures the var by reference.
+                var accumulatedTokenUsage = TokenUsage()
+                let flushTokenUsage = {
+                    if accumulatedTokenUsage.totalTokens > 0 {
+                        continuation.yield(.tokenUsage(accumulatedTokenUsage))
+                    }
+                }
+
                 // Install trace/span context so all DGLogger calls inside the executor
                 // (and downstream components — mediator, parser, circuit breaker) auto-stamp
                 // their LogEntry with the trace IDs for post-hoc correlation.
@@ -62,12 +74,11 @@ actor ReActAgentExecutor: Executor {
                 ) {
                 do {
                     logger.info("🚀 ReAct Execution Initiated. Model Instance: \(String(describing: model))")
-                    
+
                     let spyModel = APISpyModel(inner: model)
-                    
+
                     var currentIteration = 0
                     var latestClarification: ClarificationContext? = nil
-                    var accumulatedTokenUsage = TokenUsage()
                     var executionSummary = ExecutionSummary(originalGoal: input.userInput)
                     let executionTrace = input.traceContext
 
@@ -83,13 +94,17 @@ actor ReActAgentExecutor: Executor {
                     
                     var memoryStrategy = input.workingMemory
                     var previousScratchpadLength = 0
+                    // Components are built from SEPARATE policy tiers — the legacy
+                    // single-knob wiring (retryPolicy.maxRetries driving all three
+                    // caps) now lives only inside the resolver's compatibility shim.
                     var circuitBreaker = CognitiveCircuitBreaker(
-                        maxConsecutiveToolFailures: input.retryPolicy.maxRetries,
-                        maxRepetitiveActions: input.retryPolicy.maxRetries
+                        maxConsecutiveToolFailures: input.resiliencePolicy.loop.maxConsecutiveToolFailures,
+                        maxRepetitiveActions: input.resiliencePolicy.loop.maxRepetitiveActions
                     )
                     var retryStrategy = LLMRetryStrategy(
-                        maxConsecutiveParseFailures: input.retryPolicy.maxRetries,
-                        backoffStrategy: input.retryPolicy.backoffStrategy
+                        maxConsecutiveParseFailures: input.resiliencePolicy.cognitive.maxParseFailures,
+                        backoffStrategy: input.resiliencePolicy.transport.backoffStrategy,
+                        transport: input.resiliencePolicy.transport
                     )
                     let toolMediator = ToolExecutionMediator()
                     let terminationEvaluator = EpisodeTerminationEvaluator()
@@ -105,6 +120,17 @@ actor ReActAgentExecutor: Executor {
                     // legacy `<working_memory>` user-message path.
                     let nativeGenerator: NativeStructuredGenerator? = input.generatorStrategy as? NativeStructuredGenerator
                     var liveConversationTurns: [[String: Any]] = []
+                    // #22: native-payload (liveConversationTurns) compaction bookkeeping.
+                    // The scratchpad budget governs only the legacy <working_memory> path;
+                    // the native turn array is bounded at the compaction site instead.
+                    // `nativePrefixCount` = the seeded system+history+kickoff turns that must
+                    // never be compacted (captured once at iter-1 seeding). `didInjectFullBudgetAlert`
+                    // gates the synthesis nudge to once (re-appending it every iteration was
+                    // the bug this fixes). `compactedExchangesTotal` feeds the honest marker.
+                    var nativePrefixCount = 0
+                    var compactedExchangesTotal = 0
+                    var didInjectFullBudgetAlert = false
+                    let nativeKeepRecentExchanges = 3
 
                     // --- G6: Reading-Tool Gate ---
                     // `update_project_context` is hidden from the tool schema until the agent
@@ -125,6 +151,22 @@ actor ReActAgentExecutor: Executor {
                     // models keep the stricter default.
                     let readingGateThreshold: Int = (input.modelTier == .small) ? 1 : 2
                     var readingGateLoggedUnlock = false
+
+                    // #21: Read the user personal profile ONCE, before the loop, and inject it on
+                    // EVERY iteration via `context` below. On the native path it's folded into the
+                    // stable system-prompt prefix at iter-1 seeding (later iters append only); on the
+                    // legacy path the prompt is rebuilt each iteration, so a cached value keeps the
+                    // profile from vanishing after iter 1 — without re-hitting MainActor/UserDefaults
+                    // per iteration. Suppressed in workflow mode (nodes use task+input, not personal context).
+                    let userProfile: String?
+                    if input.workflowContext == nil {
+                        userProfile = await MainActor.run {
+                            guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
+                            return UserPersonalService.shared.getProfileForInjection()
+                        }
+                    } else {
+                        userProfile = nil
+                    }
 
                     // --- Start Episode ---
                     // [G3/G5] When wrapped by a capability (Planning, Reflexion), the wrapper
@@ -147,9 +189,6 @@ actor ReActAgentExecutor: Executor {
                             logger.warning("Rate limit approaching. Throttling for \(Int(projectedWait))s.")
                             let waitMsg = "Throttling for \(Int(projectedWait))s to respect \(input.rateLimitCategory) limits..."
                             continuation.yield(.thought(waitMsg))
-                            let traceHandler: (AgentTraceLog) -> Void = { log in
-                        logger.info("[AGENT-TRACE] Step \(log.stepNumber) (\(log.state.headline)): \(log.content) (span: \(log.spanID))")
-                            }
                             onTraceUpdate(AgentTraceLog(
                                 traceID: executionTrace.traceID,
                                 spanID: executionTrace.spanID,
@@ -163,7 +202,7 @@ actor ReActAgentExecutor: Executor {
                         await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         
                         let iterationSpan = executionTrace.newSpan()
-                        var iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
+                        let iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
                         
                         await TraceRecorder.shared.beginSpan(context: iterationSpan, name: "iteration_\(currentIteration)", kind: .iteration)
                         
@@ -178,18 +217,9 @@ actor ReActAgentExecutor: Executor {
                             userName: NSUserName(),
                             currentDate: Date().formatted(date: .numeric, time: .shortened)
                         )
-                        
-                        // Read User Personal profile for prompt injection (first iteration only to save tokens).
-                        // Suppressed in workflow mode — workflow nodes operate on task+input, not personal context.
-                        let userProfile: String?
-                        if input.workflowContext == nil, currentIteration == 1 {
-                            userProfile = await MainActor.run {
-                                guard UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) else { return nil }
-                                return UserPersonalService.shared.getProfileForInjection()
-                            }
-                        } else {
-                            userProfile = nil
-                        }
+
+                        // `userProfile` is read ONCE before the loop (#21) and injected into
+                        // `context` below on every iteration.
 
                         // G6: Filter gated tools from the schema until prerequisites are met.
                         // When the list doesn't contain a gated tool (e.g. non-Code profile),
@@ -229,22 +259,49 @@ actor ReActAgentExecutor: Executor {
                         if currentIteration == 1, let nativeGen = nativeGenerator {
                             let canonicalMessages = nativeGen.compileMessages(from: context)
                             liveConversationTurns = canonicalMessages.map { nativeGen.toolTurnAdapter.normalizeCanonical(message: $0) }
+
+                            // Capability-seeded context (Planning dependency results, Reflexion
+                            // prior-trial output) lives only in the working-memory scratchpad,
+                            // which compileMessages excludes on the native path — in-run
+                            // observations flow as tool turns instead, but pre-run seeds have no
+                            // tool turns to ride. Fold the iter-1 scratchpad into the kickoff
+                            // user turn so seeds reach native providers. Nothing in-run has been
+                            // recorded yet, so the scratchpad here is exactly the seeds; unseeded
+                            // runs hit the empty sentinel and the kickoff turn stays byte-identical
+                            // (KV-cache prefix unchanged). Sentinel literal matches PromptBuilder's
+                            // working-memory guard.
+                            let seededContext = context.compiledScratchpad
+                            let hasSeededContext = !seededContext.isEmpty && seededContext != "No actions taken yet."
+                            let kickoffText = hasSeededContext
+                                ? PromptWrapping.xml.section("prior_context", content: seededContext) + "\n\n" + input.userInput
+                                : input.userInput
+
                             // Pre-resolve attached image bytes (async) so the sync adapter
                             // can serialize them into the kickoff user turn natively. Empty
                             // → byte-identical text turn (KV-cache prefix unchanged). A failed
                             // resolve throws → surfaced as an execution error, never dropped.
                             let resolvedUserImages = try await resolveUserImages(input.userPayload)
                             liveConversationTurns.append(
-                                nativeGen.toolTurnAdapter.userTurn(text: input.userInput, images: resolvedUserImages)
+                                nativeGen.toolTurnAdapter.userTurn(text: kickoffText, images: resolvedUserImages)
                             )
-                            logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns, \(resolvedUserImages.count) image(s))")
+                            // #22: everything seeded so far (system + history + kickoff) is the
+                            // protected prefix — compaction never touches indices below this.
+                            nativePrefixCount = liveConversationTurns.count
+                            logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns, \(resolvedUserImages.count) image(s), priorContext=\(hasSeededContext ? "\(seededContext.count) chars" : "none"))")
                         }
 
                         try Task.checkCancellation()
 
                         // --- Memory Pressure Check ---
+                        // #22: this scratchpad-budget warning is for the legacy <working_memory>
+                        // path ONLY. On the native turn path the scratchpad isn't what's sent —
+                        // `liveConversationTurns` is — so `budgetUtilization` (and any "older
+                        // observations are being evicted" claim) would be dishonest here. Native
+                        // pressure is measured and reported truthfully at the compaction site
+                        // below, after each iteration's turns are appended. `utilization` stays in
+                        // scope for the per-iteration logging line further down.
                         let utilization = memoryStrategy.budgetUtilization
-                        if utilization > 0.75 {
+                        if nativeGenerator == nil, utilization > 0.75 {
                             let pct = Int(utilization * 100)
                             let message = utilization >= 1.0
                                 ? "Memory pressure: \(pct)% of scratchpad budget used — older observations are being evicted."
@@ -260,9 +317,6 @@ actor ReActAgentExecutor: Executor {
                                     + "Prioritize synthesizing a final answer from available context "
                                     + "rather than calling additional tools."
                                 memoryStrategy.recordSystemAlert(msg: memoryAlert)
-                                if let adapter = nativeGenerator?.toolTurnAdapter {
-                                    liveConversationTurns.append(adapter.systemAlertTurn(message: memoryAlert))
-                                }
                             }
                         }
 
@@ -331,18 +385,44 @@ actor ReActAgentExecutor: Executor {
                             retryStrategy.resetParseFailures()
                             
                         } catch {
+                            // User cancellation is not an LLM error — exit to the
+                            // dedicated CancellationError catch instead of letting it
+                            // increment retry counters and flash a parse warning. A cancel
+                            // surfaces as URLError(.cancelled) (not a Swift CancellationError),
+                            // so also normalize on `Task.isCancelled`.
+                            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+
                             // --- Error Retry Handling ---
                             let action = retryStrategy.handleError(error)
                             switch action {
                             case .throttle(let seconds, let message):
-                                await GlobalRateLimiter.shared.drainAndPenalize(key: input.rateLimitKey, category: input.rateLimitCategory, penaltySeconds: seconds)
+                                // chip task_70f0522b: avoid the 429 double-drain. CloudRequestPipeline
+                                // already drains the bucket for a cloud 429 (it throws CloudProviderError
+                                // only after draining). Drain here ONLY for providers that bypass the
+                                // pipeline (Ollama/local → LLMProviderError.httpError), so the penalty
+                                // isn't applied twice. The retry SLEEP below still happens either way.
+                                if !(error is CloudProviderError) {
+                                    await GlobalRateLimiter.shared.drainAndPenalize(key: input.rateLimitKey, category: input.rateLimitCategory, penaltySeconds: seconds)
+                                }
                                 continuation.yield(.warning(category: .throttle, message: message))
-                                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                                // `seconds` is sanitized upstream (finite, ≥0, ≤1h) —
+                                // the guard is cheap insurance against the trapping
+                                // UInt64(negative/NaN) conversion.
+                                if seconds > 0, seconds.isFinite {
+                                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                                }
                                 currentIteration -= 1
                                 continue cognitiveLoop
 
-                            case .networkRetry(let message):
+                            case .networkRetry(let message, let delaySeconds):
                                 continuation.yield(.warning(category: .retry, message: message))
+                                // Strategy-owned backoff. Bounded by the transport
+                                // budget — exhaustion arrives as `.fatal`, so this can
+                                // no longer loop forever (audit gap #5). Cancellation
+                                // during the sleep is caught at the loop-top check.
+                                if delaySeconds > 0 {
+                                    try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+                                }
                                 currentIteration -= 1
                                 continue cognitiveLoop
 
@@ -360,6 +440,7 @@ actor ReActAgentExecutor: Executor {
                                 let reloaded = await MLXService.shared.reloadCurrentModel()
                                 if !reloaded {
                                     continuation.yield(.content("The model was unloaded and could not be reloaded automatically. Please try again."))
+                                    flushTokenUsage()
                                     continuation.yield(.executionFinished(outcome: .failed, reason: "Model reload failed"))
                                     continuation.finish()
                                     return
@@ -391,6 +472,7 @@ actor ReActAgentExecutor: Executor {
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED")
                                 }
                                 continuation.yield(.content(reason))
+                                flushTokenUsage()
                                 continuation.yield(.executionFinished(outcome: .failed, reason: reason))
                                 continuation.finish()
                                 return
@@ -416,6 +498,37 @@ actor ReActAgentExecutor: Executor {
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED (capability)")
                                 }
                                 continuation.yield(.error(.init(reason)))
+                                flushTokenUsage()
+                                continuation.yield(.executionFinished(outcome: .failed, reason: reason))
+                                continuation.finish()
+                                return
+
+                            case .fatal(let reason, let category):
+                                // Deterministic provider failure (auth, bad model id,
+                                // context overflow, exhausted retry budget). The reason
+                                // is already user-facing and the category already honest
+                                // — render an error card and stop. Previously these fell
+                                // into parse-failure handling: 3 futile retries, a
+                                // "try rephrasing" message, and `.parseExhausted`
+                                // telemetry (audit gap #5).
+                                let classified = ClassifiedAgentError.synthetic(
+                                    category: category,
+                                    origin: "ReActAgentExecutor.retryStrategy.fatal",
+                                    message: reason,
+                                    context: ["iteration": "\(currentIteration)"]
+                                )
+                                await TraceRecorder.shared.emitAgentError(
+                                    span: input.traceContext,
+                                    error: classified,
+                                    iteration: currentIteration
+                                )
+                                if !input.suppressEpisodeManagement {
+                                    sessionState.closeActiveEpisode(outcome: .failed, message: reason)
+                                    await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
+                                    logState.info("💾 Auto-Patched Active Episode to: FAILED (provider fatal)")
+                                }
+                                continuation.yield(.error(.init(reason)))
+                                flushTokenUsage()
                                 continuation.yield(.executionFinished(outcome: .failed, reason: reason))
                                 continuation.finish()
                                 return
@@ -485,6 +598,7 @@ actor ReActAgentExecutor: Executor {
                                         iteration: currentIteration
                                     )
                                     continuation.yield(.error(.init(abortReason)))
+                                    flushTokenUsage()
                                     continuation.yield(.executionFinished(outcome: .failed, reason: abortReason))
                                     continuation.finish()
                                     return
@@ -619,15 +733,18 @@ actor ReActAgentExecutor: Executor {
                         // User-denied tool calls ALSO get promoted to a system alert so the
                         // "do not retry" directive renders at the end of the scratchpad
                         // (high-attention position) instead of buried in the observation list.
-                        // Detection is via the canonical denial string produced by
-                        // `ToolExecutionResult.userDenied`.
+                        // Native mirroring is deferred until after this iteration's
+                        // assistant/tool turns are appended — turn order is chronological,
+                        // unlike the scratchpad, which always renders alerts last. (Without
+                        // any mirror this emphasis only ever reached legacy-path models.)
+                        var pendingDenialAlerts: [String] = []
                         for obs in observations {
                             memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
 
-                            if !obs.isSuccess && obs.result.hasPrefix("System Security: User explicitly denied") {
-                                memoryStrategy.recordSystemAlert(
-                                    msg: "User DENIED tool '\(obs.toolName)' with the attempted arguments. DO NOT retry this exact action — either choose a different tool, finalize with what you have, or explain the limitation."
-                                )
+                            if obs.failureCategory == .userDenied {
+                                let denialAlert = "User DENIED tool '\(obs.toolName)' with the attempted arguments. DO NOT retry this exact action — either choose a different tool, finalize with what you have, or explain the limitation."
+                                memoryStrategy.recordSystemAlert(msg: denialAlert)
+                                pendingDenialAlerts.append(denialAlert)
                             }
                         }
 
@@ -651,15 +768,66 @@ actor ReActAgentExecutor: Executor {
                                 let s = OutputSanitizer.sanitizeForUI(step.reasoning)
                                 return s.isEmpty ? nil : s
                             }()
+                            // Serialize the assistant turn from the EXECUTED calls only.
+                            // executeToolCalls drops calls without producing observations
+                            // (exact-duplicate dedup, same-path write dedup, final_answer
+                            // siblings) — serializing the full step.toolCalls would leave
+                            // tool_use ids with no tool_result, which Claude/OpenAI reject
+                            // with a 400 and Gemini rejects as a functionCall/functionResponse
+                            // count mismatch. Filtering keeps both sides of the pairing
+                            // converged on the observation set; dropped calls were never
+                            // executed, so omitting them from history is the honest record
+                            // (the model may legitimately re-issue them).
+                            let executedCallIds = Set(observations.map(\.toolCallId))
+                            let executedCalls = step.toolCalls.filter { executedCallIds.contains($0.id) }
                             liveConversationTurns.append(
                                 nativeGen.toolTurnAdapter.assistantTurn(
-                                    toolCalls: step.toolCalls,
+                                    toolCalls: executedCalls,
                                     reasoning: sanitizedReasoning
                                 )
                             )
                             liveConversationTurns.append(
                                 contentsOf: nativeGen.toolTurnAdapter.toolResultTurns(observations: truncatedObservations)
                             )
+                            // Denial emphasis follows the tool results it refers to —
+                            // chronological parity with the scratchpad's end-of-prompt alerts.
+                            for alert in pendingDenialAlerts {
+                                liveConversationTurns.append(nativeGen.toolTurnAdapter.systemAlertTurn(message: alert))
+                            }
+
+                            // #22: bound the native payload. All tool_use/tool_result pairing for
+                            // this iteration is complete here, so dropping the oldest whole
+                            // exchanges can't orphan an id. Compaction runs every iteration the
+                            // payload is over budget (it must, to bound growth), but the UI
+                            // warning + synthesis nudge surface ONCE: once a run is steadily over
+                            // budget (e.g. an oversized prefix), it evicts an exchange every
+                            // iteration, and re-yielding the warning / re-appending the nudge turn
+                            // each time would just be noise (the nudge turn would itself grow the
+                            // payload — the exact every-iteration bug this fix removes). The
+                            // in-context summary marker keeps the running count honest for the model.
+                            if input.nativeContextBudgetChars > 0 {
+                                let droppedNow = compactNativeConversation(
+                                    &liveConversationTurns,
+                                    adapter: nativeGen.toolTurnAdapter,
+                                    budgetChars: input.nativeContextBudgetChars,
+                                    protectedPrefixCount: nativePrefixCount,
+                                    keepRecentExchanges: nativeKeepRecentExchanges,
+                                    cumulativeDropped: compactedExchangesTotal
+                                )
+                                if droppedNow > 0 {
+                                    compactedExchangesTotal += droppedNow
+                                    logger.info("🧹 [Native] Compacted \(droppedNow) tool exchange(s) (\(compactedExchangesTotal) total) to fit context budget.")
+                                    if !didInjectFullBudgetAlert {
+                                        didInjectFullBudgetAlert = true
+                                        continuation.yield(.warning(category: .memoryPressure, message: "Memory pressure: older tool observations are being summarized to fit the model's context window."))
+                                        let nudge = "Working memory is near the context limit and older observations have been summarized out. "
+                                            + "Prioritize synthesizing a final answer from available context "
+                                            + "rather than calling additional tools."
+                                        memoryStrategy.recordSystemAlert(msg: nudge)
+                                        liveConversationTurns.append(nativeGen.toolTurnAdapter.systemAlertTurn(message: nudge))
+                                    }
+                                }
+                            }
                         }
 
                         // Wire ask_user responses to latestClarification for prompt injection
@@ -670,6 +838,13 @@ actor ReActAgentExecutor: Executor {
 
                         var shouldAbort = false
                         var abortReason = ""
+                        // Category for the classified abort error. Repetitive-action is the
+                        // historical default; the ask_user idle gate overrides to .cbIdleLimit.
+                        var abortCategory: AgentErrorCategory = .cbRepetitiveAction
+                        // Loop-hygiene aborts (ask_user idle exhaustion) bypass the user's
+                        // ErrorRecovery.onToolFailure tolerance — that policy governs tool
+                        // failures, not interrogation loops.
+                        var abortBypassesRecoveryPolicy = false
 
                         for obs in observations {
                             let isSuccess = obs.isSuccess
@@ -679,7 +854,7 @@ actor ReActAgentExecutor: Executor {
                             // Any other failure goes through the general 3-strike tool-failure
                             // counter. Denials still increment the general counter too, so
                             // mixed denial+failure patterns hit the 3-strike limit normally.
-                            let isDenial = !isSuccess && obs.result.hasPrefix("System Security: User explicitly denied")
+                            let isDenial = obs.failureCategory == .userDenied
                             let resultAction: CircuitBreakerAction = isDenial
                                 ? circuitBreaker.recordDenial()
                                 : circuitBreaker.recordToolResult(isSuccess: isSuccess)
@@ -689,8 +864,39 @@ actor ReActAgentExecutor: Executor {
                                 abortReason = reason
                             }
 
-                            if !isSuccess {
+                            // Only genuinely hallucinated names (not in the registry) enter
+                            // the prompt's "DO NOT USE" ban list. Ordinary failures — file
+                            // not found, timeouts, denials, rejected final_answer — are
+                            // retryable by design; banning the tool for them contradicts
+                            // the corrective observation the model just received.
+                            if obs.failureCategory == .notFound {
                                 circuitBreaker.recordHallucination(obs.toolName)
+                            }
+                        }
+
+                        // --- Ask-User Friction Gate ---
+                        // Bounds consecutive interrogation: nudge the model past the ask_user
+                        // limit, abort at the idle limit. Counters reset only on real tool
+                        // progress (see the resetCountersOnSuccess gate below), so a run that
+                        // does nothing but question the user can't ride to maxIterations.
+                        for obs in observations where obs.toolName == "ask_user" {
+                            switch circuitBreaker.evaluateAskUser() {
+                            case .intervene(let systemMessage):
+                                continuation.yield(.warning(
+                                    category: .circuitBreaker,
+                                    message: "Repeated clarification requests — nudging the model to proceed without asking again."
+                                ))
+                                memoryStrategy.recordSystemAlert(msg: systemMessage)
+                                if let adapter = nativeGenerator?.toolTurnAdapter {
+                                    liveConversationTurns.append(adapter.systemAlertTurn(message: systemMessage))
+                                }
+                            case .abort(let reason):
+                                shouldAbort = true
+                                abortReason = reason
+                                abortCategory = .cbIdleLimit
+                                abortBypassesRecoveryPolicy = true
+                            case .proceed, .proceedWithWarning:
+                                break
                             }
                         }
                         
@@ -715,13 +921,26 @@ actor ReActAgentExecutor: Executor {
                             if let adapter = nativeGenerator?.toolTurnAdapter {
                                 liveConversationTurns.append(adapter.systemAlertTurn(message: modelAlert))
                             }
-                        case .proceed, .intervene:
+                        case .intervene(let systemMessage):
+                            // No current producer returns .intervene from this evaluation,
+                            // but a breaker directive must never be silently dropped again
+                            // (audit gap #3) — route it like any other model alert.
+                            memoryStrategy.recordSystemAlert(msg: systemMessage)
+                            if let adapter = nativeGenerator?.toolTurnAdapter {
+                                liveConversationTurns.append(adapter.systemAlertTurn(message: systemMessage))
+                            }
+                        case .proceed:
                             break
                         }
 
                         if shouldAbort {
-                            // Consult ErrorRecovery.onToolFailure policy before aborting
-                            switch input.errorRecovery.onToolFailure {
+                            // Consult ErrorRecovery.onToolFailure policy before aborting —
+                            // unless the abort is loop hygiene (ask_user idle), which the
+                            // tolerance policy doesn't govern.
+                            let effectivePolicy: ToolFailurePolicy = abortBypassesRecoveryPolicy
+                                ? .abort
+                                : input.errorRecovery.onToolFailure
+                            switch effectivePolicy {
                             case .skipAndContinue:
                                 // Log the failure but let the agent continue reasoning
                                 continuation.yield(.thought("⚠️ Tool failures detected — skipping and continuing."))
@@ -748,15 +967,12 @@ actor ReActAgentExecutor: Executor {
                             case .abort:
                                 // Circuit-breaker abort path. Classify BEFORE emitting the
                                 // user-facing warning so the chain ID is available for
-                                // downstream error_chain_id correlation. The CB trigger could
-                                // be repetitive-action, consecutive-fail, or tool-retry-limit;
-                                // we use `.cbRepetitiveAction` as the typical default, since
-                                // that's the most common source of circuit-breaker aborts.
-                                // If we want finer classification, the breaker could return
-                                // the triggering category explicitly.
+                                // downstream error_chain_id correlation. `abortCategory`
+                                // carries the trigger: .cbRepetitiveAction for tool-loop
+                                // aborts, .cbIdleLimit for ask_user idle exhaustion.
                                 executionSummary.markComplete(failureReason: abortReason)
                                 let classified = ClassifiedAgentError.synthetic(
-                                    category: .cbRepetitiveAction,
+                                    category: abortCategory,
                                     origin: "ReActAgentExecutor.circuitBreakerAbort",
                                     message: "Circuit breaker triggered: \(abortReason)",
                                     context: ["iteration": "\(currentIteration)"]
@@ -773,7 +989,8 @@ actor ReActAgentExecutor: Executor {
                                     summary: executionSummary,
                                     personaInstructions: input.instructions,
                                     originalQuery: input.userInput,
-                                    forceSynthesis: true
+                                    forceSynthesis: true,
+                                    onUsage: { accumulatedTokenUsage.accumulate($0) }
                                 )
                                 if !input.suppressEpisodeManagement {
                                     sessionState.closeActiveEpisode(outcome: .failed, message: response)
@@ -781,14 +998,22 @@ actor ReActAgentExecutor: Executor {
                                     logState.info("💾 Auto-Patched Active Episode to: FAILED")
                                 }
                                 continuation.yield(.content(response))
+                                flushTokenUsage()
                                 continuation.yield(.executionFinished(outcome: .failed, reason: abortReason))
                                 continuation.finish()
                                 return
                             }
                         }
 
-                        circuitBreaker.resetCountersOnSuccess()
-                        
+                        // Reset ask-user/idle friction only when the iteration made real tool
+                        // progress — an iteration that only asked another question is not
+                        // progress, and an unconditional reset would zero the friction the
+                        // ask-user gate above just accumulated.
+                        let madeToolProgress = observations.contains { $0.isSuccess && $0.toolName != "ask_user" }
+                        if madeToolProgress {
+                            circuitBreaker.resetCountersOnSuccess()
+                        }
+
                         onTraceUpdate(AgentTraceLog(
                             traceID: iterationSpan.traceID,
                             spanID: iterationSpan.spanID,
@@ -847,6 +1072,7 @@ actor ReActAgentExecutor: Executor {
                                 iteration: currentIteration
                             )
                             continuation.yield(.error(.init(failureMsg)))
+                            flushTokenUsage()
                             continuation.yield(.executionFinished(outcome: .failed, reason: failureMsg))
                             continuation.finish()
                             return
@@ -877,7 +1103,8 @@ actor ReActAgentExecutor: Executor {
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
                         isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
-                        forceSynthesis: input.responseSynthesisEnabled
+                        forceSynthesis: input.responseSynthesisEnabled,
+                        onUsage: { accumulatedTokenUsage.accumulate($0) }
                     )
 
                     if !input.suppressEpisodeManagement {
@@ -921,6 +1148,7 @@ actor ReActAgentExecutor: Executor {
                     // Without this, cancelled messages show an empty bubble with action
                     // buttons as if the agent completed normally.
                     continuation.yield(.content("*Operation stopped by user.*"))
+                    flushTokenUsage()
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
@@ -947,6 +1175,7 @@ actor ReActAgentExecutor: Executor {
                         error: classified
                     )
                     await ExecutionSuspensionService.shared.cancel(for: input.conversationID)
+                    flushTokenUsage()
                     continuation.yield(.executionFinished(outcome: .failed, reason: classified.message))
                     continuation.finish(throwing: error)
                 }
@@ -960,6 +1189,94 @@ actor ReActAgentExecutor: Executor {
 }
 
 // MARK: - G12 Native-Turn Helpers
+
+/// Approximate serialized character footprint of a native turn dict — recursively sums
+/// string lengths and dictionary keys. Used to budget the native conversation payload
+/// (`liveConversationTurns`) without paying a full JSON-serialization cost per check (#22).
+/// `internal` (not `fileprivate`) so the compaction logic is directly unit-testable.
+func approximateTurnChars(_ value: Any) -> Int {
+    switch value {
+    case let s as String:
+        return s.count
+    case let dict as [String: Any]:
+        return dict.reduce(0) { $0 + $1.key.count + approximateTurnChars($1.value) }
+    case let array as [Any]:
+        return array.reduce(0) { $0 + approximateTurnChars($1) }
+    case let number as NSNumber:
+        return number.stringValue.count
+    default:
+        return 0
+    }
+}
+
+/// Compacts the native conversation payload when it outgrows `budgetChars`, dropping the
+/// OLDEST whole tool exchanges and replacing the dropped span with one summary marker
+/// turn. Returns the number of exchanges dropped this call (0 = nothing safely
+/// compactable / already under budget). (#22)
+///
+/// An "exchange" begins at an assistant-tool-call turn (`adapter.classifyTurn ==
+/// .toolCallAssistant`) and runs up to the next one — so it always carries the
+/// assistant turn together with its paired `tool_result` turn(s) and any trailing alert
+/// turns. Cutting only at these boundaries is pairing-safe by construction: an assistant
+/// turn is never separated from its results (which Claude/OpenAI 400 and Gemini
+/// count-mismatch on). Even if a result turn were misclassified, contiguity with its
+/// assistant turn keeps the pair on the same side of the cut.
+///
+/// The protected prefix (`0 ..< protectedPrefixCount` = system + history + kickoff) is
+/// never touched, and the most recent `keepRecentExchanges` exchanges are always kept
+/// intact. Dropping from the front necessarily breaks the KV-cache prefix from the cut
+/// point — the intended trade when the alternative is overflowing the context window.
+/// `internal` (not `fileprivate`) so the compaction logic is directly unit-testable.
+func compactNativeConversation(
+    _ turns: inout [[String: Any]],
+    adapter: any ToolTurnAdapter,
+    budgetChars: Int,
+    protectedPrefixCount: Int,
+    keepRecentExchanges: Int,
+    cumulativeDropped: Int
+) -> Int {
+    guard budgetChars > 0 else { return 0 }
+    // Always keep at least one recent exchange — a keep-floor of 0 would make
+    // `maxDroppable == exchangeStarts.count` and index `exchangeStarts[count]` out of
+    // bounds below. (Production passes 3; the clamp hardens the exposed internal helper.)
+    let keepRecent = max(1, keepRecentExchanges)
+    let totalChars = turns.reduce(0) { $0 + approximateTurnChars($1) }
+    guard totalChars > budgetChars else { return 0 }
+
+    // Exchange-start indices = assistant(tool_calls) turns after the protected prefix.
+    let prefix = min(max(0, protectedPrefixCount), turns.count)
+    var exchangeStarts: [Int] = []
+    for i in prefix..<turns.count where adapter.classifyTurn(turns[i]) == .toolCallAssistant {
+        exchangeStarts.append(i)
+    }
+    // Need more exchanges than we promise to keep, else nothing is safely droppable.
+    guard exchangeStarts.count > keepRecent else { return 0 }
+
+    // Drop oldest exchanges until under budget, never below the keep-recent floor.
+    // `cut` walks forward to the start of the first KEPT exchange; everything in
+    // [prefix, cut) — leading alert turns plus the dropped exchanges — is removed.
+    let maxDroppable = exchangeStarts.count - keepRecent
+    let markerChars = 200 // conservative footprint of the inserted summary marker turn
+    var removed = 0
+    var cut = prefix
+    var dropped = 0
+    for k in 1...maxDroppable {
+        let blockEnd = exchangeStarts[k] // start of the (k)-th-from-oldest kept candidate
+        while cut < blockEnd {
+            removed += approximateTurnChars(turns[cut])
+            cut += 1
+        }
+        dropped = k
+        if totalChars - removed + markerChars <= budgetChars { break }
+    }
+    guard dropped > 0, cut > prefix else { return 0 }
+
+    let marker = adapter.systemAlertTurn(
+        message: "[Context note: \(cumulativeDropped + dropped) earlier tool exchange(s) were summarized out to stay within the context window. Re-run a tool if you need that detail again.]"
+    )
+    turns.replaceSubrange(prefix..<cut, with: [marker])
+    return dropped
+}
 
 /// Reorders observations to match the positional order of the assistant's original
 /// `PendingToolCall`s. Gemini matches `functionResponse` parts back to `functionCall`
@@ -1027,7 +1344,8 @@ fileprivate extension ToolObservation {
             output: output,
             artifacts: artifacts,
             isTerminalSignal: isTerminalSignal,
-            terminalKind: terminalKind
+            terminalKind: terminalKind,
+            failureCategory: failureCategory
         )
     }
 }

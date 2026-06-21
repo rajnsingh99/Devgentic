@@ -63,6 +63,64 @@ final class PlanningCapabilityIntegrationTests: XCTestCase {
         XCTAssertEqual(parsed[1].toolHints, ["read"])
     }
 
+    // MARK: - #16: plan prompt carries instructions + history
+
+    /// Minimal SemanticContext for exercising PlanGeneratorStrategy.generatePlan directly.
+    private func makePlanContext(instructions: String?, recentHistory: String?, query: String) -> SemanticContext {
+        SemanticContext(
+            instructions: instructions,
+            environmentFacts: EnvironmentFacts(osVersion: "macOS", shellType: "zsh", userName: "t", currentDate: "2026-06-20"),
+            longTermMemory: StaticGroundingMemory(ragContext: ""),
+            recentHistory: recentHistory,
+            nativeHistoryTurns: nil,
+            originalQuery: query,
+            currentIteration: 0,
+            compiledScratchpad: "",
+            latestClarification: nil,
+            negativeConstraints: [],
+            hallucinatedTools: [],
+            availableTools: [],
+            userProfile: nil,
+            skillManifests: nil,
+            taskDescription: nil,
+            promptLayerConfig: .agent,
+            workflowContext: nil
+        )
+    }
+
+    func testPlanPrompt_IncludesInstructionsAndHistory() async throws {
+        // #16: the plan-generation prompt must carry the agent's instructions + recent history so
+        // the planner has the same context the executor will (e.g. to resolve "the other folder").
+        let provider = MockLLMProvider(generateResponses: ["1. First step\n2. Second step"])
+        let strategy = PlanGeneratorStrategy()
+        let context = makePlanContext(
+            instructions: "PLAN_SENTINEL_INSTRUCTIONS",
+            recentHistory: "PLAN_SENTINEL_HISTORY",
+            query: "Now do the same for the other folder"
+        )
+
+        _ = try await strategy.generatePlan(model: provider, context: context)
+
+        let prompt = provider.receivedGenerateMessages.first?.first?["content"] ?? ""
+        XCTAssertTrue(prompt.contains("PLAN_SENTINEL_INSTRUCTIONS"), "Plan prompt should include the agent's instructions")
+        XCTAssertTrue(prompt.contains("PLAN_SENTINEL_HISTORY"), "Plan prompt should include the recent conversation history")
+        XCTAssertTrue(prompt.contains("Now do the same for the other folder"), "Plan prompt should still include the task")
+    }
+
+    func testPlanPrompt_OmitsContextSectionsWhenAbsent() async throws {
+        // Control: no instructions/history → no section tags (context-free prompt unchanged).
+        let provider = MockLLMProvider(generateResponses: ["1. Step"])
+        let strategy = PlanGeneratorStrategy()
+        let context = makePlanContext(instructions: nil, recentHistory: "   ", query: "Do a thing")
+
+        _ = try await strategy.generatePlan(model: provider, context: context)
+
+        let prompt = provider.receivedGenerateMessages.first?.first?["content"] ?? ""
+        XCTAssertFalse(prompt.contains("<instructions>"), "No instructions → no instructions section")
+        XCTAssertFalse(prompt.contains("<conversation_history>"), "Blank history → no history section")
+        XCTAssertTrue(prompt.contains("Do a thing"))
+    }
+
     // MARK: - Basic Planning Execution
 
     func testPlanning_TwoSequentialSubtasks_BothExecute() async throws {
@@ -231,5 +289,46 @@ final class PlanningCapabilityIntegrationTests: XCTestCase {
 
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "Should produce content even when plan generation fails")
+    }
+
+    // MARK: - Plan Generation Cancellation (chip task_61dd9583)
+
+    func testPlanning_CancelDuringPlanGen_PropagatesNotSwallowed() async throws {
+        // chip task_61dd9583 (#18-B class): a Stop during plan generation must PROPAGATE — the
+        // plan-gen catch must not fold CancellationError into a single-task fallback and keep
+        // running. The run should end cancelled and never execute any subtask.
+        let tool = TestToolFactory.make(name: "search", output: "Found it")
+        let provider = PlanGenCancellingMock()
+
+        let executor = makePlanningExecutor()
+        let input = TestAgentInputFactory.make(query: "Find something", tools: [tool])
+
+        let stream = executor.execute(model: provider, input: input) { _ in }
+        let events = try await StreamCollector.collect(from: stream)
+
+        XCTAssertEqual(provider.cognitiveCallCount, 0,
+                       "Plan-gen cancel must not proceed to subtask execution")
+        let cancelled = events.contains { if case .executionFinished(.cancelled, _) = $0 { return true }; return false }
+        XCTAssertTrue(cancelled, "Cancel during plan generation must end the run cancelled, not continue")
+    }
+}
+
+/// Throws `CancellationError` on the plan-generation `generate` call (simulating Stop during
+/// plan gen), and counts cognitive-step calls to prove no subtask ran. (chip task_61dd9583)
+private final class PlanGenCancellingMock: LLMProvider, @unchecked Sendable {
+    let modelName = "plangen-cancel-mock"
+    private(set) var cognitiveCallCount = 0
+
+    func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
+        cognitiveCallCount += 1
+        return ModernCognitiveStep(reasoning: "No more scripted steps.")
+    }
+
+    func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        throw CancellationError()
+    }
+
+    func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { $0.finish() }
     }
 }

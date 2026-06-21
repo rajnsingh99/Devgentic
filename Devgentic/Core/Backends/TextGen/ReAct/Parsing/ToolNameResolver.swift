@@ -154,10 +154,12 @@ struct ToolNameResolver: Sendable {
             )
         }
 
-        // 3. Fuzzy match — only promote if args fit
+        // 3. Fuzzy match — only promote if args fit AND the names are length-compatible
+        // (#15.4: a typo keeps near-equal lengths; the length gate filters prefix-fragment
+        // matches that Jaro-Winkler's prefix boost over-scores).
         let candidates = registeredTools
             .map { (tool: $0, score: Self.jaroWinkler(emittedName, $0.name)) }
-            .filter { $0.score >= Self.fuzzyThreshold }
+            .filter { $0.score >= Self.fuzzyThreshold && Self.lengthCompatible(emittedName, $0.tool.name) }
             .sorted { $0.score > $1.score }
 
         for (tool, score) in candidates {
@@ -196,6 +198,20 @@ struct ToolNameResolver: Sendable {
 
         logger.warning("❓ Unknown tool '\(emittedName)'; suggestions: \(suggestions.isEmpty ? "<none>" : suggestions.joined(separator: ", "))")
         return .unknown(attempted: emittedName, suggestions: Array(suggestions))
+    }
+
+    // MARK: - Length Gate
+
+    /// Length-aware gate for fuzzy matches (#15.4). Jaro-Winkler's prefix boost can over-score
+    /// a short emitted name against a much longer tool name (a prefix fragment, e.g. `read` →
+    /// `read_file_recursive`, not a typo). Real typos keep near-equal lengths, so require the
+    /// shorter name to be at least half the longer and at least 3 chars. The target tool's
+    /// arg-schema check (in `resolve`) remains the primary guard against destructive remaps.
+    static func lengthCompatible(_ a: String, _ b: String) -> Bool {
+        let shorter = min(a.count, b.count)
+        let longer = max(a.count, b.count)
+        guard longer > 0 else { return false }
+        return shorter >= 3 && Double(shorter) / Double(longer) >= 0.5
     }
 
     // MARK: - Jaro-Winkler Similarity

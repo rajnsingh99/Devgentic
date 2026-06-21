@@ -220,6 +220,9 @@ final class ConversationManagementCoordinator {
     func deleteConversation(conversationID: UUID) {
         guard let vm = viewModel else { return }
         persistenceService.deleteConversation(with: conversationID)
+        // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
+        // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
+        try? TraceStore.shared?.deleteTraces(forConversationID: conversationID.uuidString)
         vm.workflowExecutionStates.removeValue(forKey: conversationID)
         vm.workflowRunHistory.removeValue(forKey: conversationID)
         WorkflowRunHistoryStore.shared.clearHistory(forConversation: conversationID)
@@ -232,6 +235,7 @@ final class ConversationManagementCoordinator {
         guard !ids.isEmpty, let vm = viewModel else { return }
         for id in ids {
             persistenceService.deleteConversation(with: id)
+            try? TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)
             vm.workflowExecutionStates.removeValue(forKey: id)
             vm.workflowRunHistory.removeValue(forKey: id)
             WorkflowRunHistoryStore.shared.clearHistory(forConversation: id)

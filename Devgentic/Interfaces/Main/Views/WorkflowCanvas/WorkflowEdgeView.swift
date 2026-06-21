@@ -21,7 +21,6 @@ struct WorkflowEdgeView: View {
     let onDelete: () -> Void
 
     @Environment(\.appTheme) private var theme
-    @State private var isHovering = false
 
     private var midPoint: CGPoint {
         // Evaluate the midpoint for a symmetric cubic Bezier S-curve
@@ -33,29 +32,27 @@ struct WorkflowEdgeView: View {
 
     var body: some View {
         ZStack {
-            // Invisible wider hit area for selection and hovering
+            // Invisible wider hit area for selection
             bezierPath
-                .stroke(Color.clear, lineWidth: 24)
-                .contentShape(bezierPath.stroke(style: StrokeStyle(lineWidth: 24)))
-                .onHover { hovering in
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        isHovering = hovering
-                    }
-                }
+                .stroke(Color.black.opacity(0.001), lineWidth: 24)
                 .onTapGesture(perform: onTap)
 
             // Visible edge line
             bezierPath
                 .stroke(
-                    theme.secondaryText.opacity(isHovering ? 0.8 : 0.5),
-                    style: StrokeStyle(lineWidth: isHovering ? 2.5 : 1.5, lineCap: .round)
+                    isSelected ? theme.accentColor : theme.secondaryText.opacity(0.5),
+                    style: StrokeStyle(
+                        lineWidth: isSelected ? 2.5 : 1.5,
+                        lineCap: .round,
+                        dash: isSelected ? [6, 4] : []
+                    )
                 )
 
             // Arrowhead at target
             arrowHead
 
-            // Delete Button at the center on hover
-            if isHovering {
+            // Delete Button at the center on selection
+            if isSelected {
                 Button(action: onDelete) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(.body))
@@ -64,14 +61,6 @@ struct WorkflowEdgeView: View {
                 }
                 .buttonStyle(.plain)
                 .position(midPoint)
-                // Keep the edge in hovered state when the mouse is explicitly over the button
-                .onHover { btnHover in
-                    if btnHover {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            isHovering = true
-                        }
-                    }
-                }
                 .accessibilityLabel("Delete connection")
                 .transition(.scale.combined(with: .opacity))
             }
@@ -84,7 +73,7 @@ struct WorkflowEdgeView: View {
 
     private var arrowHead: some View {
         Self.makeArrowPath(at: targetPoint)
-            .fill(theme.secondaryText.opacity(isHovering ? 0.8 : 0.5))
+            .fill(isSelected ? theme.accentColor : theme.secondaryText.opacity(0.5))
     }
 
     static func makeArrowPath(at target: CGPoint) -> Path {

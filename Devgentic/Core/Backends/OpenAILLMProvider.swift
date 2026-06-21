@@ -82,6 +82,10 @@ struct OpenAILLMProvider: LLMProvider {
     // MARK: - Generate
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        try await generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema).text
+    }
+
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         var body: [String: Any] = [
             "model": config.modelName,
             "messages": messages,
@@ -125,7 +129,7 @@ struct OpenAILLMProvider: LLMProvider {
         }
 
         let content = message["content"] as? String ?? ""
-        return content
+        return (content, json.flatMap { TokenUsage.fromOpenAI($0) })
     }
 
     // MARK: - Multimodal (Phase 3 — native image input)
@@ -140,19 +144,14 @@ struct OpenAILLMProvider: LLMProvider {
                 out.append(["role": msg.role, "content": msg.content.textContent])
                 continue
             }
-            var content: [[String: Any]] = []
-            for block in msg.content {
-                switch block {
-                case .text(let s):
-                    if !s.isEmpty { content.append(["type": "text", "text": s]) }
-                case .image(let img):
-                    let data = try await img.reference.resolve()
-                    content.append(["type": "image_url", "image_url": ["url": "data:\(img.mimeType);base64,\(data.base64EncodedString())"]])
-                default:
-                    let t = block.textFallback
-                    if !t.isEmpty { content.append(["type": "text", "text": t]) }
+            let content = try await MultimodalTranslator.translateBlocks(
+                msg.content,
+                text: { ["type": "text", "text": $0] as [String: Any] },
+                image: { mimeType, base64 in
+                    ["type": "image_url",
+                     "image_url": ["url": "data:\(mimeType);base64,\(base64)"]] as [String: Any]
                 }
-            }
+            )
             out.append(["role": msg.role, "content": content])
         }
         return out
@@ -322,49 +321,59 @@ struct OpenAILLMProvider: LLMProvider {
     // MARK: - Streaming
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    var body: [String: Any] = [
-                        "model": config.modelName,
-                        "messages": messages,
-                        "stream": true
-                    ]
+        streamWithUsage(messages: messages, tools: tools, onUsage: nil)
+    }
 
-                    applyGenerationParams(to: &body)
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        // Transport (read loop, cancellation, stall timeout) is owned by SSEStreamParser.
+        SSEStreamParser.stream(
+            openBytes: {
+                var body: [String: Any] = [
+                    "model": self.config.modelName,
+                    "messages": messages,
+                    "stream": true,
+                    // Ask the API to append a terminal usage-only chunk so real token
+                    // counts are available on the stream (#10b). Harmless when ignored.
+                    "stream_options": ["include_usage": true]
+                ]
+                self.applyGenerationParams(to: &body)
+                // `tools` are ignored on the bot stream (strictly conversational, like
+                // Claude/Gemini) — tool-calling is the agent path, and the stream decode
+                // only surfaces text deltas anyway.
 
-                    if let tools = tools, !tools.isEmpty {
-                        body["tools"] = tools
-                    }
+                var request = self.makeRequest()
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                    var request = makeRequest()
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (bytes, _) = try await CloudRequestPipeline.executeStream(
+                    request: request, provider: .openAI, rateLimitKey: self.config.rateLimitKey
+                )
+                return bytes
+            },
+            onUsage: onUsage,
+            extractUsage: { line, _ in
+                guard line.hasPrefix("data: ") else { return nil }
+                let payload = String(line.dropFirst(6))
+                guard payload != "[DONE]",
+                      let data = payload.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                // `usage` is present only on the terminal include_usage chunk.
+                return TokenUsage.fromOpenAI(json)
+            },
+            handleLine: { line, _ in
+                guard line.hasPrefix("data: ") else { return .skip }
+                let payload = String(line.dropFirst(6))
 
-                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+                if payload == "[DONE]" { return .finish }
 
-                    // Parse SSE (Server-Sent Events) stream
-                    for try await line in bytes.lines {
-                        guard line.hasPrefix("data: ") else { continue }
-                        let payload = String(line.dropFirst(6))
-
-                        if payload == "[DONE]" { break }
-
-                        guard let chunkData = payload.data(using: .utf8),
-                              let chunk = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
-                              let choices = chunk["choices"] as? [[String: Any]],
-                              let delta = choices.first?["delta"] as? [String: Any],
-                              let content = delta["content"] as? String else {
-                            continue
-                        }
-
-                        continuation.yield(content)
-                    }
-
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                guard let chunkData = payload.data(using: .utf8),
+                      let chunk = try? JSONSerialization.jsonObject(with: chunkData) as? [String: Any],
+                      let choices = chunk["choices"] as? [[String: Any]],
+                      let delta = choices.first?["delta"] as? [String: Any],
+                      let content = delta["content"] as? String else {
+                    return .skip
                 }
+                return .emit(content)
             }
-        }
+        )
     }
 }

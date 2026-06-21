@@ -37,16 +37,22 @@ struct ImageGenExecutor: Sendable {
         capability: ImageModalitySupport,
         profile: BackendProfileModel,
         conversationID: UUID,
+        traceContext: TraceContext,
         options: ImageGenOptions
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
+                // Per-generation span — ImageGen previously recorded ZERO telemetry (Gap #7).
+                let genSpan = traceContext.newSpan()
+                await TraceRecorder.shared.beginSpan(context: genSpan, name: "imageGen", kind: .llmCall)
+                let genStart = Date()
                 do {
                     // STEP 1: FEASIBILITY CHECK
                     try checkFeasibility(intent: intent, capability: capability, profile: profile, continuation: continuation)
 
                     // STEP 2: GENERATE
                     let modelName = extractModelName(from: profile)
+                    await TraceRecorder.shared.emitLLMRequest(span: genSpan, model: modelName, messageCount: 1)
                     let thoughtId = UUID()
                     continuation.yield(.thought("Generating image with \(modelName)...", id: thoughtId))
                     continuation.yield(.mediaProgress(toolName: "imageGen", percent: 0.0, status: "Starting generation"))
@@ -91,19 +97,38 @@ struct ImageGenExecutor: Sendable {
                     continuation.yield(.mediaProgress(toolName: "imageGen", percent: 1.0, status: "Complete"))
                     continuation.yield(.artifactProduced(artifact))
 
+                    await TraceRecorder.shared.emitLLMResponse(span: genSpan, durationMs: Int(Date().timeIntervalSince(genStart) * 1000), preview: "image \(artifact.id)")
+                    await TraceRecorder.shared.endSpan(spanID: genSpan.spanID, status: .completed)
                     logger.info("Image generation complete: \(artifact.id)")
+                    continuation.yield(.executionFinished(outcome: .completed, reason: nil))
                     continuation.finish()
 
+                } catch is CancellationError {
+                    // User stop — no error card, and the outcome is `.cancelled`, not
+                    // `.failed` (audit #8).
+                    logger.notice("Image generation cancelled")
+                    await TraceRecorder.shared.endSpan(spanID: genSpan.spanID, status: .error)
+                    continuation.yield(.executionFinished(outcome: .cancelled, reason: "Cancelled by user"))
+                    continuation.finish()
                 } catch let error as ImageGenError {
                     logger.error("ImageGen error: \(error.localizedDescription)")
+                    await TraceRecorder.shared.endSpan(spanID: genSpan.spanID, status: .error)
+                    // Keep yielding `.error` (renders the category-aware card); also report a
+                    // failed terminal outcome so the trace status isn't recorded as `completed` (Gap #7).
                     continuation.yield(.error(.init(error.localizedDescription)))
+                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish()
                 } catch {
                     logger.error("Unexpected error during image generation: \(error.localizedDescription)")
+                    await TraceRecorder.shared.endSpan(spanID: genSpan.spanID, status: .error)
                     continuation.yield(.error("Image generation failed: \(error.localizedDescription)"))
+                    continuation.yield(.executionFinished(outcome: .failed, reason: error.localizedDescription))
                     continuation.finish()
                 }
             }
+            // Propagate stream teardown (user stop) into the producer — without this the
+            // generation kept running orphaned to completion after cancel (audit #8).
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 

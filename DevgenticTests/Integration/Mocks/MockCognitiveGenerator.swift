@@ -23,6 +23,12 @@ struct MockCognitiveGenerator: CognitiveGenerator {
         if context.compiledScratchpad != "No actions taken yet." {
             content += "\n\n<working_memory>\n\(context.compiledScratchpad)\n</working_memory>"
         }
+        // Mirror PromptBuilder's hallucinated-tools guardrail section so tests can
+        // verify what enters the "DO NOT USE" ban list via the captured messages.
+        if !context.hallucinatedTools.isEmpty {
+            let body = "DO NOT USE:\n" + context.hallucinatedTools.sorted().map { "- \($0)" }.joined(separator: "\n")
+            content += "\n\n<hallucinated_tools>\n\(body)\n</hallucinated_tools>"
+        }
         return [["role": "user", "content": content]]
     }
 

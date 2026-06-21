@@ -33,7 +33,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     private func recordObservations(_ memory: inout WindowedLinearMemory, count: Int, resultPrefix: String = "Result", resultLength: Int = 50) {
         for i in 1...count {
             let result = String(repeating: "x", count: resultLength)
-            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", result: "\(resultPrefix) \(i): \(result)", artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", params: "", result: "\(resultPrefix) \(i): \(result)", artifacts: [])
         }
     }
 
@@ -91,7 +91,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     func testClear_ResetsEntries() {
         var memory = makeMemory()
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: "result", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: "result", artifacts: [])
         XCTAssertNotEqual(memory.compileForPrompt(), "No actions taken yet.")
 
         memory.clear()
@@ -100,7 +100,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     func testRecordObservation_AppearsInCompilation() {
         var memory = makeMemory()
-        memory.recordObservation(stepId: 1, toolCallId: "call_1", toolName: "read_file", result: "file contents here", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "call_1", toolName: "read_file", params: "", result: "file contents here", artifacts: [])
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("[Step 1]"))
@@ -127,7 +127,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     func testPerEntryCap_TruncatesLargeResults() {
         var memory = makeMemory(perEntryCap: 100)
         let longResult = String(repeating: "A", count: 500)
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: longResult, artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: longResult, artifacts: [])
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("...[truncated]"), "Long results should be truncated")
@@ -138,7 +138,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         let cap = 200
         var memory = makeMemory(perEntryCap: cap)
         let longResult = String(repeating: "B", count: 1000)
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: longResult, artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: longResult, artifacts: [])
 
         let compiled = memory.compileForPrompt()
         // The stored result (visible in compiled) should not exceed perEntryCap
@@ -153,7 +153,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     func testSmallResults_NoTruncation() {
         var memory = makeMemory(perEntryCap: 500)
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: "short result", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: "short result", artifacts: [])
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("short result"))
@@ -166,7 +166,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         var memory = makeMemory(fullFidelityWindow: 2)
         // Record 5 observations — last 2 should be full fidelity
         for i in 1...5 {
-            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", result: "Result for step \(i)", artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", params: "", result: "Result for step \(i)", artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -178,7 +178,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     func testOldEntries_CompressedToOneLiner() {
         var memory = makeMemory(fullFidelityWindow: 2)
         for i in 1...5 {
-            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", result: "Result \(i)", artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", params: "", result: "Result \(i)", artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -190,7 +190,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     func testSeparator_PresentWhenBothOldAndRecentExist() {
         var memory = makeMemory(fullFidelityWindow: 2)
         for i in 1...4 {
-            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", result: "R\(i)", artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", params: "", result: "R\(i)", artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -200,7 +200,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     func testSeparator_AbsentWhenAllRecent() {
         var memory = makeMemory(fullFidelityWindow: 5)
         for i in 1...3 {
-            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", result: "R\(i)", artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "call_\(i)", toolName: "tool_\(i)", params: "", result: "R\(i)", artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -213,7 +213,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         // Tiny budget: 300 chars — will force eviction quickly
         var memory = makeMemory(totalBudget: 300, perEntryCap: 100, fullFidelityWindow: 1)
         for i in 1...10 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", result: "R\(i) " + String(repeating: "x", count: 50), artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: "R\(i) " + String(repeating: "x", count: 50), artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -223,7 +223,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     func testEviction_NeverEvictsRecentObservations() {
         var memory = makeMemory(totalBudget: 200, perEntryCap: 80, fullFidelityWindow: 2)
         for i in 1...8 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", result: "R\(i) data", artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: "R\(i) data", artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -234,7 +234,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
     func testEviction_MarkerIncludesCount() {
         var memory = makeMemory(totalBudget: 150, perEntryCap: 60, fullFidelityWindow: 1)
         for i in 1...6 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", result: String(repeating: "x", count: 40), artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: String(repeating: "x", count: 40), artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -246,7 +246,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         // Budget so tiny that ALL old entries are evicted, leaving only recent + eviction marker
         var memory = makeMemory(totalBudget: 100, perEntryCap: 50, fullFidelityWindow: 1)
         for i in 1...5 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", result: String(repeating: "y", count: 30), artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "t\(i)", params: "", result: String(repeating: "y", count: 30), artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -274,7 +274,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     func testSystemAlerts_RenderedAtEnd() {
         var memory = makeMemory()
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: "result", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: "result", artifacts: [])
         memory.recordSystemAlert(msg: "Alert message")
 
         let compiled = memory.compileForPrompt()
@@ -292,10 +292,10 @@ final class WindowedLinearMemoryTests: XCTestCase {
         var memory = makeMemory(fullFidelityWindow: 1)
         let errorMsg = "System Error: Tool not found. 'search_flights' does not exist."
         for i in 1...3 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "search_flights", result: errorMsg, artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "search_flights", params: "", result: errorMsg, artifacts: [])
         }
         // Add one more observation so the errors are in the "old" section
-        memory.recordObservation(stepId: 4, toolCallId: "c4", toolName: "web_search", result: "Found flights", artifacts: [])
+        memory.recordObservation(stepId: 4, toolCallId: "c4", toolName: "web_search", params: "", result: "Found flights", artifacts: [])
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("failed 3x"), "Consecutive identical errors should be collapsed")
@@ -304,9 +304,9 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     func testErrorDedup_DifferentToolNames_NotCollapsed() {
         var memory = makeMemory(fullFidelityWindow: 1)
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool_a", result: "System Error: failed", artifacts: [])
-        memory.recordObservation(stepId: 2, toolCallId: "c2", toolName: "tool_b", result: "System Error: failed", artifacts: [])
-        memory.recordObservation(stepId: 3, toolCallId: "c3", toolName: "web_search", result: "OK", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool_a", params: "", result: "System Error: failed", artifacts: [])
+        memory.recordObservation(stepId: 2, toolCallId: "c2", toolName: "tool_b", params: "", result: "System Error: failed", artifacts: [])
+        memory.recordObservation(stepId: 3, toolCallId: "c3", toolName: "web_search", params: "", result: "OK", artifacts: [])
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("[Step 1] tool_a"))
@@ -316,10 +316,10 @@ final class WindowedLinearMemoryTests: XCTestCase {
 
     func testErrorDedup_SuccessInterrupts_NotCollapsed() {
         var memory = makeMemory(fullFidelityWindow: 1)
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: "System Error: timeout", artifacts: [])
-        memory.recordObservation(stepId: 2, toolCallId: "c2", toolName: "tool", result: "Success: found it", artifacts: [])
-        memory.recordObservation(stepId: 3, toolCallId: "c3", toolName: "tool", result: "System Error: timeout", artifacts: [])
-        memory.recordObservation(stepId: 4, toolCallId: "c4", toolName: "web_search", result: "OK", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: "System Error: timeout", artifacts: [])
+        memory.recordObservation(stepId: 2, toolCallId: "c2", toolName: "tool", params: "", result: "Success: found it", artifacts: [])
+        memory.recordObservation(stepId: 3, toolCallId: "c3", toolName: "tool", params: "", result: "System Error: timeout", artifacts: [])
+        memory.recordObservation(stepId: 4, toolCallId: "c4", toolName: "web_search", params: "", result: "OK", artifacts: [])
 
         let compiled = memory.compileForPrompt()
         XCTAssertFalse(compiled.contains("failed 2x"), "Non-consecutive errors should not be collapsed")
@@ -330,7 +330,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         var memory = makeMemory(fullFidelityWindow: 3)
         let errorMsg = "System Error: not found"
         for i in 1...3 {
-            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "tool", result: errorMsg, artifacts: [])
+            memory.recordObservation(stepId: i, toolCallId: "c\(i)", toolName: "tool", params: "", result: errorMsg, artifacts: [])
         }
 
         let compiled = memory.compileForPrompt()
@@ -350,18 +350,18 @@ final class WindowedLinearMemoryTests: XCTestCase {
         let util0 = memory.budgetUtilization
         XCTAssertEqual(util0, 0.0)
 
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: String(repeating: "x", count: 200), artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: String(repeating: "x", count: 200), artifacts: [])
         let util1 = memory.budgetUtilization
         XCTAssertGreaterThan(util1, 0.0)
 
-        memory.recordObservation(stepId: 2, toolCallId: "c2", toolName: "tool", result: String(repeating: "y", count: 200), artifacts: [])
+        memory.recordObservation(stepId: 2, toolCallId: "c2", toolName: "tool", params: "", result: String(repeating: "y", count: 200), artifacts: [])
         let util2 = memory.budgetUtilization
         XCTAssertGreaterThan(util2, util1, "Utilization should increase with more entries")
     }
 
     func testBudgetUtilization_ZeroBudget_ReturnsZero() {
         var memory = makeMemory(totalBudget: 0)
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", result: "data", artifacts: [])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "tool", params: "", result: "data", artifacts: [])
         XCTAssertEqual(memory.budgetUtilization, 0.0)
     }
 
@@ -371,7 +371,7 @@ final class WindowedLinearMemoryTests: XCTestCase {
         var memory = makeMemory(fullFidelityWindow: 3)
         // Create a dummy artifact
         let artifact = MediaArtifact(kind: .image, reference: .ephemeralData(Data()), mimeType: "image/png")
-        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "screen_capture", result: "Screenshot saved", artifacts: [artifact, artifact])
+        memory.recordObservation(stepId: 1, toolCallId: "c1", toolName: "screen_capture", params: "", result: "Screenshot saved", artifacts: [artifact, artifact])
 
         let compiled = memory.compileForPrompt()
         XCTAssertTrue(compiled.contains("[2 artifact(s)]"))

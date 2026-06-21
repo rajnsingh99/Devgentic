@@ -124,8 +124,11 @@ final class ReActExecutorIntegrationTests: XCTestCase {
         let stream = executor.execute(model: provider, input: input) { _ in }
         let events = try await StreamCollector.collect(from: stream)
 
-        // Should have a memory pressure thought (budgetUtilization estimate > 0.75)
-        let hasMemoryWarning = StreamCollector.hasThoughtContaining("Memory pressure", in: events)
+        // This run uses MockCognitiveGenerator → the LEGACY <working_memory> path
+        // (nativeGenerator == nil), so the scratchpad budgetUtilization > 0.75 drives the
+        // pressure signal. The executor emits it as a `.warning(.memoryPressure, …)`, NOT a
+        // `.thought` — assert on the warning channel (#22 / chip task_64f22dd2).
+        let hasMemoryWarning = StreamCollector.hasWarningContaining("Memory pressure", in: events)
         XCTAssertTrue(hasMemoryWarning, "Should emit memory pressure warning with tiny budget")
     }
 

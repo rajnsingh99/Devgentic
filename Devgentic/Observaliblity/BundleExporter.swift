@@ -76,6 +76,11 @@ enum BundleExporter {
         )
         try writeJSON(manifest, to: stagingDir.appendingPathComponent("manifest.json"), sanitize: false)
 
+        // For a single-trace scope, anchor the logs/metrics lookback to when the run
+        // actually started (not export time), so a report filed hours later still
+        // contains the run's logs (Gap #18). nil for conversation/recent scopes.
+        let traceWindowAnchor = resolveTraceAnchor(for: scope)
+
         // --- Each section is gated on the Includes set ---
         if includes.contains(.trace) {
             try await writeTrace(scope: scope, to: stagingDir, level: sanitizationLevel)
@@ -84,10 +89,10 @@ enum BundleExporter {
             try await writeConfigSnapshot(scope: scope, to: stagingDir, level: sanitizationLevel)
         }
         if includes.contains(.logs) {
-            try await writeLogs(scope: scope, to: stagingDir, level: sanitizationLevel)
+            try await writeLogs(scope: scope, anchor: traceWindowAnchor, to: stagingDir, level: sanitizationLevel)
         }
         if includes.contains(.metrics) {
-            try writeMetrics(scope: scope, to: stagingDir, level: sanitizationLevel)
+            try writeMetrics(scope: scope, anchor: traceWindowAnchor, to: stagingDir, level: sanitizationLevel)
         }
         if includes.contains(.environment) {
             try writeEnvironment(to: stagingDir, level: sanitizationLevel)
@@ -102,6 +107,9 @@ enum BundleExporter {
                 to: stagingDir,
                 level: sanitizationLevel
             )
+        }
+        if includes.contains(.crashes) {
+            writeCrashes(scope: scope, anchor: traceWindowAnchor, to: stagingDir, level: sanitizationLevel)
         }
 
         // --- Human-readable sanitization notice ---
@@ -200,11 +208,14 @@ enum BundleExporter {
     /// consumers.
     private struct TraceExportPayload: Codable {
         let schemaVersion: String
-        let traces: [TraceRecord]
+        let traces: [TraceExportDTO]
 
         init(traces: [TraceRecord]) {
-            self.schemaVersion = "1"
-            self.traces = traces
+            // Bumped to "2": the payload now carries the full rootSpans → spans → events
+            // tree via `TraceExportDTO`, instead of a hollow row-only `TraceRecord` whose
+            // CodingKeys dropped every span/event at encode time (Gap #2).
+            self.schemaVersion = "2"
+            self.traces = traces.map(TraceExportDTO.init)
         }
     }
 
@@ -254,10 +265,11 @@ enum BundleExporter {
 
     private static func writeLogs(
         scope: DiagnosticBundle.Scope,
+        anchor: Date?,
         to dir: URL,
         level: TelemetrySanitizer.Level
     ) async throws {
-        let since = logsSince(for: scope)
+        let since = anchor?.addingTimeInterval(-3600) ?? logsSince(for: scope)
         // Pull full export (persisted + buffer, deduped).
         let entries = await LogRecorder.shared.export(since: since, minLevel: .info)
 
@@ -279,6 +291,14 @@ enum BundleExporter {
         try output.write(to: logDir.appendingPathComponent("recent.jsonl"), atomically: true, encoding: .utf8)
     }
 
+    /// The lookback anchor for logs/metrics: the trace's actual start time for a
+    /// single-trace scope (so the window follows the run, not the export moment),
+    /// nil otherwise (conversation/recent keep their own export-time-relative windows).
+    private static func resolveTraceAnchor(for scope: DiagnosticBundle.Scope) -> Date? {
+        guard case .trace(let traceID) = scope, let store = TraceStore.shared else { return nil }
+        return try? store.fetchTrace(traceID: traceID)?.startedAt
+    }
+
     private static func logsSince(for scope: DiagnosticBundle.Scope) -> Date {
         switch scope {
         case .trace:
@@ -295,16 +315,20 @@ enum BundleExporter {
 
     private static func writeMetrics(
         scope: DiagnosticBundle.Scope,
+        anchor: Date?,
         to dir: URL,
         level: TelemetrySanitizer.Level
     ) throws {
-        let since: Date = {
+        let since: Date
+        if let anchor {
+            since = anchor.addingTimeInterval(-3600)
+        } else {
             switch scope {
-            case .trace: return Date().addingTimeInterval(-24 * 3600)
-            case .conversation: return Date().addingTimeInterval(-7 * 24 * 3600)
-            case .recent(let hours): return Date().addingTimeInterval(-Double(hours) * 3600)
+            case .trace: since = Date().addingTimeInterval(-24 * 3600)
+            case .conversation: since = Date().addingTimeInterval(-7 * 24 * 3600)
+            case .recent(let hours): since = Date().addingTimeInterval(-Double(hours) * 3600)
             }
-        }()
+        }
         let snapshot = MetricsAggregator.shared.snapshot(since: since)
 
         let metricsDir = dir.appendingPathComponent("metrics")
@@ -464,6 +488,40 @@ enum BundleExporter {
         if includeScreenshot, let imgData = feedback.screenshotData {
             try imgData.write(to: fbDir.appendingPathComponent("screenshot.png"))
         }
+    }
+
+    // MARK: - Crashes section (§12.1)
+
+    /// Folds the app's crash/hang reports into the bundle: this app's `.ips`/`.hang`
+    /// files from ~/Library/Logs/DiagnosticReports (readable because un-sandboxed) plus
+    /// persisted MetricKit payloads. Window matches the logs section (trace start − 1h
+    /// when trace-scoped). Reports are text; each passes the sanitizer before writing —
+    /// `.ips` files are full of user paths. Best-effort: an unreadable report is skipped,
+    /// never fails the export. No crashes → no crashes/ directory (predictable layout
+    /// matters less than not implying a crash where there was none).
+    private static func writeCrashes(
+        scope: DiagnosticBundle.Scope,
+        anchor: Date?,
+        to dir: URL,
+        level: TelemetrySanitizer.Level
+    ) {
+        let since = anchor?.addingTimeInterval(-3600) ?? logsSince(for: scope)
+        let reports = CrashDiagnosticsCollector.harvestCrashReports(since: since)
+        guard !reports.isEmpty else { return }
+
+        let crashDir = dir.appendingPathComponent("crashes")
+        guard (try? FileManager.default.createDirectory(at: crashDir, withIntermediateDirectories: true)) != nil else { return }
+
+        var written = 0
+        for report in reports {
+            guard let raw = try? String(contentsOf: report, encoding: .utf8) else { continue }
+            let sanitized = TelemetrySanitizer.sanitizeFull(raw, level: level)
+            if (try? sanitized.write(to: crashDir.appendingPathComponent(report.lastPathComponent),
+                                     atomically: true, encoding: .utf8)) != nil {
+                written += 1
+            }
+        }
+        logger.info("Bundle crashes section: \(written)/\(reports.count) report(s) included (since \(since)).")
     }
 
     // MARK: - Sanitization notice
@@ -651,6 +709,7 @@ private struct EncodableModelStats: Codable {
         let completedCount: Int
         let failedCount: Int
         let cancelledCount: Int
+        let interruptedCount: Int
         let successRate: Double
         let avgDurationMs: Int?
     }
@@ -665,6 +724,7 @@ private struct EncodableModelStats: Codable {
                 completedCount: $0.completedCount,
                 failedCount: $0.failedCount,
                 cancelledCount: $0.cancelledCount,
+                interruptedCount: $0.interruptedCount,
                 successRate: $0.successRate,
                 avgDurationMs: $0.avgDurationMs
             )

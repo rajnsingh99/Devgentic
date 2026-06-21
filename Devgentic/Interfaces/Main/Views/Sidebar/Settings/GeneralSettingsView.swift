@@ -19,6 +19,7 @@ struct GeneralSettingsView: View {
     @AppStorage(AppSettings.speechLanguageKey) private var selectedLanguage: String = ""
     @AppStorage(AppSettings.speechAutoStopOnSilenceKey) private var autoStopOnSilence: Bool = true
     @AppStorage(AppSettings.developerModeKey) private var developerMode: Bool = false
+    @AppStorage(AppSettings.diagnosticsEnabledKey) private var diagnosticsEnabled: Bool = true
     @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
     // Download/delete confirmation state
@@ -29,6 +30,12 @@ struct GeneralSettingsView: View {
     /// Tracks the last valid (downloaded) model so the picker can revert on cancel.
     /// Initialized from @AppStorage on first appear (#14).
     @State private var previousModelId: String?
+
+    /// Human-readable footprint of the local trace database, loaded lazily on appear.
+    @State private var diagnosticsStorageText: String = "—"
+
+    /// Presents the read-only diagnostic-bundle viewer (maintainer tool).
+    @State private var showBundleViewer = false
 
     // Available Whisper models (shared catalog)
     private var availableModels: [WhisperModelInfo] { WhisperModelCatalog.availableModels }
@@ -76,7 +83,53 @@ struct GeneralSettingsView: View {
                             .labelsHidden()
                             .tint(theme.accentColor)
                     }
+
+                    Divider().background(theme.dividerColor)
+
+                    SettingsRow(
+                        title: "Store Diagnostic Traces",
+                        description: "Records sanitized error and warning diagnostics — logs, error analytics, and crash reports — so problem reports contain enough detail to fix issues. Nothing leaves your Mac unless you export a report. Basic execution traces are always stored locally and purged after 30 days.",
+                        theme: theme
+                    ) {
+                        Toggle("", isOn: $diagnosticsEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(theme.accentColor)
+                    }
+
+                    Divider().background(theme.dividerColor)
+
+                    SettingsRow(
+                        title: "Diagnostics Storage",
+                        description: "On-disk size of the local trace database (traces, spans, and events powering the Report inspector and problem reports). Entries older than 30 days are purged automatically at launch.",
+                        theme: theme
+                    ) {
+                        Text(diagnosticsStorageText)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Divider().background(theme.dividerColor)
+
+                    SettingsRow(
+                        title: "Open Diagnostic Bundle…",
+                        description: "Inspect a diagnostic bundle (.zip) exported from another Devgentic install — view its trace, spans, and events. Read-only.",
+                        theme: theme
+                    ) {
+                        Button("Open…") { showBundleViewer = true }
+                    }
                 }
+                .task {
+                    guard let store = TraceStore.shared else {
+                        diagnosticsStorageText = "Unavailable"
+                        return
+                    }
+                    let bytes = store.databaseFileSizeBytes()
+                    let count = (try? store.traceCount()) ?? 0
+                    diagnosticsStorageText = "\(count) traces · " +
+                        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                }
+                .sheet(isPresented: $showBundleViewer) { BundleViewerView() }
 
                 // 2. Language Model Section
                 SettingsCard(title: "Language Model", icon: "text.bubble.fill", theme: theme) {

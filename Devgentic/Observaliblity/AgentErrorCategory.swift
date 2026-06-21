@@ -78,14 +78,17 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
     case parseExhausted             // all parser stages failed; no structured step produced
     case parseStageTransition       // primary→fallback→heuristic transition happened (informational)
 
-    // MARK: Provider / LLM layer (7)
-    case providerRateLimit          // HTTP 429 or equivalent throttle signal
+    // MARK: Provider / LLM layer (10)
+    case providerRateLimit          // HTTP 429 or equivalent throttle signal (being handled — informational)
     case providerTimeout            // connection/read/request timeout
     case providerAuth               // 401/403 — invalid key or insufficient permissions
     case providerServerError        // 5xx from provider
     case providerStreamError        // error mid-stream (partial response received)
     case providerModelNotFound      // requested model doesn't exist / unavailable
     case providerCapabilityMissing  // model can't do something requested (e.g., extended thinking)
+    case providerBadRequest         // deterministic non-429 4xx (malformed request, content policy)
+    case providerQuotaExhausted     // 429 persisted past the throttle budget — run-ending, user must act
+    case providerUnreachable        // connection refused / DNS failure — server not running or wrong endpoint
 
     // MARK: Tool execution (8) — aligned with ToolFailureCategory
     case toolNotFound               // hallucinated tool name not in registry
@@ -177,6 +180,7 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
         // Fatal: execution terminates
         case .parseExhausted,
              .providerAuth, .providerServerError, .providerModelNotFound, .providerCapabilityMissing,
+             .providerBadRequest, .providerQuotaExhausted, .providerUnreachable,
              .cbConsecutiveFail, .cbIdleLimit,
              .planGenFailed, .reflectionExhausted,
              .wfDepthExceeded, .wfEmpty, .wfCycle, .wfValidationFailed, .wfProfileNotFound,
@@ -195,7 +199,8 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
 
         case .providerRateLimit, .providerTimeout, .providerAuth,
              .providerServerError, .providerStreamError,
-             .providerModelNotFound, .providerCapabilityMissing:
+             .providerModelNotFound, .providerCapabilityMissing,
+             .providerBadRequest, .providerQuotaExhausted, .providerUnreachable:
             return .llm
 
         case .toolNotFound, .toolArgMissing, .toolArgInvalid, .toolPermissionDenied,
@@ -263,6 +268,9 @@ enum AgentErrorCategory: String, Codable, Sendable, CaseIterable, DatabaseValueC
         case .providerStreamError:       return "Stream Error"
         case .providerModelNotFound:     return "Model Not Found"
         case .providerCapabilityMissing: return "Capability Missing"
+        case .providerBadRequest:        return "Provider Rejected Request"
+        case .providerQuotaExhausted:    return "Quota Exhausted"
+        case .providerUnreachable:       return "Server Unreachable"
 
         case .toolNotFound:              return "Tool Not Found"
         case .toolArgMissing:            return "Missing Arg"

@@ -29,7 +29,7 @@ struct PlanGeneratorStrategy: Sendable {
     func generatePlan(
         model: any LLMProvider,
         context: SemanticContext
-    ) async throws -> [SubTask] {
+    ) async throws -> (plan: [SubTask], usage: TokenUsage) {
         let maxSteps = planningConfig.maxSubtasks
         let toolFilteringEnabled = planningConfig.subtaskToolFiltering
 
@@ -51,9 +51,27 @@ struct PlanGeneratorStrategy: Sendable {
             ? "\nIf a step maps to specific tools, add their names in [brackets] at the end."
             : ""
 
-        // Single user message — no system message.
-        // Attention-optimized: task (primacy) → tools (middle) → format instructions (recency).
-        let prompt = """
+        // #16: give the planner the same framing the executor will have — the agent's
+        // instructions (role/constraints) and the recent conversation history — so references
+        // like "now do the same for the other folder" resolve and the plan respects the agent's
+        // constraints. Both are omitted when empty, so a context-free plan call is unchanged.
+        let instructionsSection: String = {
+            guard let instr = context.instructions,
+                  !instr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+            return "<instructions>\n\(instr)\n</instructions>\n\n"
+        }()
+        let historySection: String = {
+            guard let history = context.recentHistory,
+                  !history.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+            return "<conversation_history>\n\(history)\n</conversation_history>\n\n"
+        }()
+        let contextNote = (instructionsSection.isEmpty && historySection.isEmpty)
+            ? ""
+            : " Use the instructions and conversation history above only as context — plan steps for the task only."
+
+        // Single user message — no system message. Order: context (instructions, history) →
+        // task → tools → format instructions (recency).
+        let prompt = instructionsSection + historySection + """
         <task>
         \(context.originalQuery)
         </task>
@@ -62,7 +80,7 @@ struct PlanGeneratorStrategy: Sendable {
         \(toolsSection)
         </tools>
 
-        Break this into at most \(maxSteps) numbered steps.
+        Break the task into at most \(maxSteps) numbered steps.\(contextNote)
         Each step should be one concrete action.\(bracketInstruction)
         Output ONLY the numbered list.
         """
@@ -71,10 +89,13 @@ struct PlanGeneratorStrategy: Sendable {
             ["role": "user", "content": prompt]
         ]
 
-        let response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
+        let (response, reportedUsage) = try await model.generateWithUsage(messages: messages, tools: nil, responseSchema: nil)
+        // Prefer the provider's real token counts; fall back to a chars÷4 estimate only when
+        // the provider didn't report usage (e.g. MLX), so plan generation is still counted (#10b).
+        let usage = reportedUsage ?? .estimated(inputChars: prompt.count, outputChars: response.count)
 
         let availableToolNames = Set(context.availableTools.map { $0.name.lowercased() })
-        return parsePlan(from: response, availableToolNames: availableToolNames)
+        return (parsePlan(from: response, availableToolNames: availableToolNames), usage)
     }
 
     // MARK: - Numbered List Parser

@@ -15,6 +15,9 @@ struct TerminalTool: DevgenticTool {
     let name = "execute_shell"
     let category = "System & Shell"
     let description = "Executes a non-interactive ZSH shell command on the host. Do not use sudo or interactive commands."
+    // #19: a successful command can legitimately emit stderr beginning with "error" (tsc,
+    // git, a failing build) — that's a result, not a tool failure. Opt out of content-sniffing.
+    let outputMayContainErrorText = true
     
     // NEW: Session Context injected by AgentConnect
     let conversationID: UUID?

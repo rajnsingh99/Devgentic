@@ -58,8 +58,8 @@ class EvaluationLogger {
                 traceID: log.traceID,
                 timestamp: log.timestamp,
                 eventType: eventType,
-                content: log.content,
-                detailJSON: detailJSON,
+                content: TelemetrySanitizer.sanitize(log.content),
+                detailJSON: detailJSON.map { TelemetrySanitizer.sanitize($0) },
                 severity: severity
             ))
         }

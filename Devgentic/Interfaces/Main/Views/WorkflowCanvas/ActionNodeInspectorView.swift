@@ -362,7 +362,7 @@ struct ActionNodeInspectorView: View {
                 ) {
                     if let t = hardTimeout {
                         HStack(spacing: 8) {
-                            Stepper("\(Int(t))s", value: Binding(get: { t }, set: { hardTimeout = $0 }), in: 5...600, step: 5)
+                            Stepper("\(Int(t))s", value: Binding(get: { t }, set: { hardTimeout = $0 }), in: 5...3600, step: 5)
                                 .fixedSize()
                             Button("Reset") { hardTimeout = nil }
                                 .font(.system(size: 10)).buttonStyle(.bordered).controlSize(.small)

@@ -31,6 +31,9 @@
 //          │   ├── message.txt
 //          │   ├── rating.json
 //          │   └── screenshot.png               (only if includes.screenshot)
+//          ├── crashes/                         (only if includes.crashes AND reports exist)
+//          │   ├── <ProcessName>-<date>.ips     (sanitized system crash reports)
+//          │   └── metrickit-<date>.json        (sanitized MetricKit diagnostic payloads)
 //          └── SANITIZATION_NOTICE.txt          (plain-text statement of redactions)
 //
 //  Extensibility: adding a new section is two lines — an `Includes` case and a
@@ -135,13 +138,17 @@ enum DiagnosticBundle {
         /// Screenshot PNG (requires userFeedback).
         static let screenshot     = Includes(rawValue: 1 << 7)
 
+        /// Crash & hang reports (§12.1): the app's `.ips`/`.hang` files from
+        /// ~/Library/Logs/DiagnosticReports + persisted MetricKit payloads, sanitized.
+        static let crashes        = Includes(rawValue: 1 << 8)
+
         // MARK: Presets
 
         /// Everything available — maximum diagnostic value. What developers should
         /// pick when investigating their own issues.
         static let full: Includes = [
             .trace, .configSnapshot, .logs, .metrics,
-            .environment, .preferences
+            .environment, .preferences, .crashes
         ]
 
         /// Bare minimum for a reproducible bug — no behavioral metrics, no logs.
@@ -150,9 +157,10 @@ enum DiagnosticBundle {
 
         /// Presets for the user-feedback flow — trace + config + logs + environment,
         /// plus the feedback/rating if available. No metrics dashboard data since
-        /// that's dev-oriented.
+        /// that's dev-oriented. Crashes included: "it crashed" is the report this
+        /// flow most needs to answer.
         static let userReport: Includes = [
-            .trace, .configSnapshot, .logs, .environment, .userFeedback
+            .trace, .configSnapshot, .logs, .environment, .userFeedback, .crashes
         ]
 
         /// Human-readable rawValue names — used to populate `Manifest.includes`.
@@ -166,6 +174,7 @@ enum DiagnosticBundle {
             if contains(.preferences)    { names.append("preferences") }
             if contains(.userFeedback)   { names.append("user_feedback") }
             if contains(.screenshot)     { names.append("screenshot") }
+            if contains(.crashes)        { names.append("crashes") }
             return names
         }
     }

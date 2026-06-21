@@ -55,7 +55,20 @@ final class BackoffStrategyTests: XCTestCase {
     }
 
     func testExponentialBackoff_CapsAt64Seconds() {
-        var strategy = LLMRetryStrategy(maxConsecutiveParseFailures: 20, backoffStrategy: .exponential)
+        // The default cloud throttle budget (5) goes fatal before the cap is
+        // reachable; use a wider budget so this test isolates the CAP MATH.
+        // The budget contract itself is covered by LLMRetryStrategyTests.
+        let wideBudget = TransportResiliencePolicy(
+            providerClass: .cloud,
+            maxTransientRetries: 3,
+            maxThrottleRetries: 10,
+            baseBackoff: 1.0,
+            maxBackoff: 64.0,
+            connectionRefusedIsFatal: false,
+            endpointHint: nil,
+            backoffStrategy: .exponential
+        )
+        var strategy = LLMRetryStrategy(maxConsecutiveParseFailures: 20, backoffStrategy: .exponential, transport: wideBudget)
         var lastDelay: TimeInterval = 0
 
         // Fire 8 consecutive 429s — retries 1-8

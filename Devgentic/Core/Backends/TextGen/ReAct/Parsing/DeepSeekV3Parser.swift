@@ -159,27 +159,7 @@ struct DeepSeekV3Parser: CognitiveParserProtocol {
 
     /// Balanced-brace extraction for bare JSON object fallback.
     private func extractBalancedJSONObject(from text: String) -> String? {
-        guard let openIdx = text.firstIndex(of: "{") else { return nil }
-
-        var depth = 0
-        var inString = false
-        var escaped = false
-
-        for idx in text[openIdx...].indices {
-            let c = text[idx]
-            if escaped { escaped = false; continue }
-            if c == "\\" && inString { escaped = true; continue }
-            if c == "\"" { inString.toggle(); continue }
-            if inString { continue }
-            if c == "{" { depth += 1 }
-            else if c == "}" {
-                depth -= 1
-                if depth == 0 {
-                    return String(text[openIdx...idx])
-                }
-            }
-        }
-        return nil
+        BalancedJSONScanner.firstObject(in: text).map(String.init)
     }
 
     private func decodeArguments(from jsonString: String) -> [String: JSONValue]? {

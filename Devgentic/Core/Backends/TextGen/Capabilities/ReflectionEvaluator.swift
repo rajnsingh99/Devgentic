@@ -23,7 +23,7 @@ struct ReflectionEvaluator: Sendable {
         originalGoal: String,
         model: any LLMProvider,
         trial: Int
-    ) async throws -> ReflectionResult {
+    ) async throws -> (result: ReflectionResult, usage: TokenUsage) {
 
         // Compute context-aware tool result budget
         let contextWindow = KnownModelContextWindows.lookup(model.modelName) ?? 8192
@@ -60,16 +60,25 @@ struct ReflectionEvaluator: Sendable {
         ]
 
         do {
-            let response = try await model.generate(messages: messages, tools: nil, responseSchema: nil)
-            return parseReflection(from: response, trial: trial)
+            let (response, reportedUsage) = try await model.generateWithUsage(messages: messages, tools: nil, responseSchema: nil)
+            // Prefer the provider's real token counts; fall back to a chars÷4 estimate only when
+            // the provider didn't report usage (e.g. MLX), so the eval call is still counted (#10b).
+            let usage = reportedUsage ?? .estimated(inputChars: prompt.count, outputChars: response.count)
+            return (parseReflection(from: response, trial: trial), usage)
+        } catch is CancellationError {
+            // #18 (B): cancellation must propagate, not be swallowed. Folding it into a
+            // "not acceptable" verdict would record a bogus "evaluation failed" critique
+            // into reflexion memory and delay the user's Stop by a trial boundary. Mirrors
+            // the trial-stream catch in SelfReflectionCapability.
+            throw CancellationError()
         } catch {
             logger.warning("Reflection LLM call failed: \(error.localizedDescription). Defaulting to not acceptable.")
-            return ReflectionResult(
+            return (ReflectionResult(
                 isAcceptable: false,
                 critique: "Reflection evaluation failed due to LLM error: \(error.localizedDescription)",
                 suggestedRevisions: "Retry the same approach with more careful tool usage.",
                 trial: trial
-            )
+            ), TokenUsage())
         }
     }
 

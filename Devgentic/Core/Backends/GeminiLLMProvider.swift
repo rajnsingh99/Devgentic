@@ -66,6 +66,10 @@ struct GeminiLLMProvider: LLMProvider {
     // MARK: - Agent Flow (NativeAPI Tool Interception)
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        try await generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema).text
+    }
+
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         let (contents, systemInstruction) = translateMessages(messages)
 
         var body: [String: Any] = ["contents": contents]
@@ -82,11 +86,9 @@ struct GeminiLLMProvider: LLMProvider {
             body["generationConfig"] = generationConfig
         }
 
-        let url = try buildURL(endpoint: ":generateContent", apiKey: config.apiKey)
+        let url = try buildURL(endpoint: ":generateContent")
 
-        var request = URLRequest(url: url, timeoutInterval: config.timeout)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var request = makeRequest(url: url)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
@@ -137,13 +139,14 @@ struct GeminiLLMProvider: LLMProvider {
         }
 
         // If the model called a tool, intercept and return the synthesized LeanCognitiveStep JSON string
+        let usage = json.flatMap { TokenUsage.fromGemini($0) }
         if let syntheticStep = syntheticStep {
             let syntheticData = try JSONSerialization.data(withJSONObject: syntheticStep)
-            return String(data: syntheticData, encoding: .utf8) ?? "{}"
+            return (String(data: syntheticData, encoding: .utf8) ?? "{}", usage)
         }
 
         // Otherwise, return standard text (Task Completion / User Clarification)
-        return textResponse
+        return (textResponse, usage)
     }
 
     // MARK: - Multimodal (Phase 3 — native image input)
@@ -156,19 +159,13 @@ struct GeminiLLMProvider: LLMProvider {
         var systemParts: [[String: Any]] = []
 
         for msg in payload {
-            var parts: [[String: Any]] = []
-            for block in msg.content {
-                switch block {
-                case .text(let s):
-                    if !s.isEmpty { parts.append(["text": s]) }
-                case .image(let img):
-                    let data = try await img.reference.resolve()
-                    parts.append(["inlineData": ["mimeType": img.mimeType, "data": data.base64EncodedString()]])
-                default:
-                    let t = block.textFallback
-                    if !t.isEmpty { parts.append(["text": t]) }
+            let parts = try await MultimodalTranslator.translateBlocks(
+                msg.content,
+                text: { ["text": $0] as [String: Any] },
+                image: { mimeType, base64 in
+                    ["inlineData": ["mimeType": mimeType, "data": base64]] as [String: Any]
                 }
-            }
+            )
             if msg.role == "system" {
                 systemParts.append(contentsOf: parts)
             } else {
@@ -191,10 +188,8 @@ struct GeminiLLMProvider: LLMProvider {
         if let tools = tools, !tools.isEmpty { body["tools"] = tools }
         if let generationConfig = buildGenerationConfig() { body["generationConfig"] = generationConfig }
 
-        let url = try buildURL(endpoint: ":generateContent", apiKey: config.apiKey)
-        var request = URLRequest(url: url, timeoutInterval: config.timeout)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let url = try buildURL(endpoint: ":generateContent")
+        var request = makeRequest(url: url)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
@@ -235,11 +230,9 @@ struct GeminiLLMProvider: LLMProvider {
         // Enabled for models that support internal reasoning traces (e.g. Gemini 2.0 Thinking)
         body["thinking_config"] = ["include_thoughts": true]
 
-        let url = try buildURL(endpoint: ":generateContent", apiKey: config.apiKey)
+        let url = try buildURL(endpoint: ":generateContent")
 
-        var request = URLRequest(url: url, timeoutInterval: config.timeout)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var request = makeRequest(url: url)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
@@ -333,10 +326,8 @@ struct GeminiLLMProvider: LLMProvider {
 
         body["thinking_config"] = ["include_thoughts": true]
 
-        let url = try buildURL(endpoint: ":generateContent", apiKey: config.apiKey)
-        var request = URLRequest(url: url, timeoutInterval: config.timeout)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let url = try buildURL(endpoint: ":generateContent")
+        var request = makeRequest(url: url)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
@@ -388,58 +379,64 @@ struct GeminiLLMProvider: LLMProvider {
     // MARK: - Bot Flow (Streaming)
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    let (contents, systemInstruction) = translateMessages(messages)
+        streamWithUsage(messages: messages, tools: tools, onUsage: nil)
+    }
 
-                    var body: [String: Any] = ["contents": contents]
-                    if let systemInstruction = systemInstruction {
-                        body["systemInstruction"] = systemInstruction
-                    }
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        // Transport (read loop, cancellation, stall timeout) is owned by SSEStreamParser.
+        SSEStreamParser.stream(
+            openBytes: {
+                let (contents, systemInstruction) = self.translateMessages(messages)
 
-                    if let generationConfig = buildGenerationConfig() {
-                        body["generationConfig"] = generationConfig
-                    }
-
-                    // We intentionally ignore `tools` here to guarantee the Bot flow remains strictly conversational
-
-                    let url = try buildURL(endpoint: ":streamGenerateContent", apiKey: config.apiKey, streamFormat: "sse")
-
-                    var request = URLRequest(url: url, timeoutInterval: config.timeout)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .geminiFlash, rateLimitKey: config.rateLimitKey)
-
-                    // Parse Server-Sent Events (SSE)
-                    for try await line in bytes.lines {
-                        guard line.hasPrefix("data: ") else { continue }
-                        let payload = String(line.dropFirst(6))
-
-                        if payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-
-                        guard let data = payload.data(using: .utf8),
-                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let candidates = json["candidates"] as? [[String: Any]],
-                              let firstCandidate = candidates.first,
-                              let content = firstCandidate["content"] as? [String: Any],
-                              let parts = content["parts"] as? [[String: Any]],
-                              let firstPart = parts.first,
-                              let text = firstPart["text"] as? String else {
-                            continue
-                        }
-
-                        continuation.yield(text)
-                    }
-
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                var body: [String: Any] = ["contents": contents]
+                if let systemInstruction = systemInstruction {
+                    body["systemInstruction"] = systemInstruction
                 }
+                if let generationConfig = self.buildGenerationConfig() {
+                    body["generationConfig"] = generationConfig
+                }
+
+                // `tools` are intentionally ignored here so the Bot flow stays strictly conversational.
+                let url = try self.buildURL(endpoint: ":streamGenerateContent", streamFormat: "sse")
+
+                var request = self.makeRequest(url: url)
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (bytes, _) = try await CloudRequestPipeline.executeStream(
+                    request: request, provider: .geminiFlash, rateLimitKey: self.config.rateLimitKey
+                )
+                return bytes
+            },
+            onUsage: onUsage,
+            extractUsage: { line, _ in
+                guard line.hasPrefix("data: ") else { return nil }
+                let payload = String(line.dropFirst(6))
+                guard let data = payload.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                // usageMetadata is cumulative; count only the final chunk (the one carrying
+                // a finishReason) so earlier chunks don't double-count.
+                let hasFinish = (json["candidates"] as? [[String: Any]])?.first?["finishReason"] != nil
+                return hasFinish ? TokenUsage.fromGemini(json) : nil
+            },
+            handleLine: { line, _ in
+                guard line.hasPrefix("data: ") else { return .skip }
+                let payload = String(line.dropFirst(6))
+
+                if payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .skip }
+
+                guard let data = payload.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let candidates = json["candidates"] as? [[String: Any]],
+                      let firstCandidate = candidates.first,
+                      let content = firstCandidate["content"] as? [String: Any],
+                      let parts = content["parts"] as? [[String: Any]],
+                      let firstPart = parts.first,
+                      let text = firstPart["text"] as? String else {
+                    return .skip
+                }
+                return .emit(text)
             }
-        }
+        )
     }
 
     // MARK: - Private Helpers
@@ -476,22 +473,19 @@ struct GeminiLLMProvider: LLMProvider {
     }
 
     /// Constructs the final URL with necessary query parameters.
-    private func buildURL(endpoint: String, apiKey: String?, streamFormat: String? = nil) throws -> URL {
+    /// Builds the request URL. The API key is intentionally NOT placed here — it
+    /// goes in the `x-goog-api-key` header (see `makeRequest`) so the secret never
+    /// lands in the URL, where it would leak into Google/proxy access logs, OS
+    /// network logging, and failing-URL error userInfo. Only the non-secret
+    /// `alt=sse` stream marker is a query item.
+    private func buildURL(endpoint: String, streamFormat: String? = nil) throws -> URL {
         let fullPath = config.baseURL.absoluteString + endpoint
         guard var components = URLComponents(string: fullPath) else {
             throw URLError(.badURL)
         }
 
-        var queryItems: [URLQueryItem] = []
-        if let key = apiKey {
-            queryItems.append(URLQueryItem(name: "key", value: key))
-        }
         if let alt = streamFormat {
-            queryItems.append(URLQueryItem(name: "alt", value: alt))
-        }
-
-        if !queryItems.isEmpty {
-            components.queryItems = queryItems
+            components.queryItems = [URLQueryItem(name: "alt", value: alt)]
         }
 
         guard let finalURL = components.url else {
@@ -499,5 +493,19 @@ struct GeminiLLMProvider: LLMProvider {
         }
 
         return finalURL
+    }
+
+    /// Builds a POST request with JSON content-type and the API key in the
+    /// `x-goog-api-key` header — Google's documented header alternative to `?key=`,
+    /// matching how Claude (`x-api-key`) and OpenAI (`Authorization`) pass theirs.
+    /// The caller sets `httpBody`.
+    private func makeRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url, timeoutInterval: config.timeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey = config.apiKey {
+            request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        }
+        return request
     }
 }

@@ -45,6 +45,12 @@ struct WorkflowRunDisplayData {
         let inputSourceLabel: String?
         let nodeTimeline: [TimelineEvent]
         let isStreaming: Bool
+        /// Whether this node kind produces a meaningful step-by-step timeline
+        /// (agent reasoning + tool calls, or an Action node's tool invocation).
+        /// Bots, image generators, and structural transform nodes are single-shot;
+        /// their timeline holds only incidental events (e.g. model-load thoughts),
+        /// so `WorkflowOutputView` hides the Timeline tab and shows Output directly.
+        let supportsTimeline: Bool
 
         enum NodeStatus: Sendable {
             case pending, running, completed, failed, skipped
@@ -104,7 +110,10 @@ struct WorkflowRunDisplayData {
                     input: nil,
                     inputSourceLabel: nil,
                     nodeTimeline: state.nodeTimelines[result.nodeID] ?? [],
-                    isStreaming: result.status == .running
+                    isStreaming: result.status == .running,
+                    // No layout available to resolve the node kind — preserve the
+                    // prior behavior of showing the toggle whenever a timeline exists.
+                    supportsTimeline: true
                 )
             }
         }
@@ -179,7 +188,8 @@ struct WorkflowRunDisplayData {
                     input: derivedInput,
                     inputSourceLabel: sourceLabel,
                     nodeTimeline: state.nodeTimelines[nodeID] ?? [],
-                    isStreaming: result.status == .running
+                    isStreaming: result.status == .running,
+                    supportsTimeline: kindSupportsTimeline(layoutNode.kind)
                 )
             }
 
@@ -194,7 +204,8 @@ struct WorkflowRunDisplayData {
                 input: derivedInput,
                 inputSourceLabel: sourceLabel,
                 nodeTimeline: [],
-                isStreaming: false
+                isStreaming: false,
+                supportsTimeline: kindSupportsTimeline(layoutNode.kind)
             )
         }
     }
@@ -208,10 +219,23 @@ struct WorkflowRunDisplayData {
     /// `WorkflowOutputView` can render the agent's reasoning/tool-call trace
     /// even after the run has finalized. Timelines are NOT persisted to disk,
     /// so an app restart drops them and only the static `Output` view remains.
+    ///
+    /// `layout` (the workflow's current layout) is used only to resolve each
+    /// node's kind so the Timeline tab can be hidden for single-shot nodes
+    /// (bots etc.). Node IDs are stable, so the live layout reliably classifies
+    /// a historical run's nodes; if it's missing the tab simply isn't suppressed.
     static func from(record: WorkflowRunRecord,
-                     liveTimelines: [UUID: [TimelineEvent]]? = nil) -> WorkflowRunDisplayData {
+                     liveTimelines: [UUID: [TimelineEvent]]? = nil,
+                     layout: WorkflowLayout? = nil) -> WorkflowRunDisplayData {
         let nodes = record.nodeResults.map { snapshot in
             let timeline = liveTimelines?[snapshot.nodeID] ?? []
+            let supportsTimeline: Bool = {
+                guard let layout else { return true }   // unknown layout → preserve prior behavior
+                guard let node = layout.nodes.first(where: { $0.id == snapshot.nodeID }) else {
+                    return false                        // node no longer in layout → treat as output-only
+                }
+                return kindSupportsTimeline(node.kind)
+            }()
             return NodeDisplayData(
                 id: snapshot.id,
                 nodeID: snapshot.nodeID,
@@ -222,7 +246,8 @@ struct WorkflowRunDisplayData {
                 input: snapshot.input,
                 inputSourceLabel: snapshot.inputSourceLabel,
                 nodeTimeline: timeline,
-                isStreaming: false
+                isStreaming: false,
+                supportsTimeline: supportsTimeline
             )
         }
         return WorkflowRunDisplayData(
@@ -242,6 +267,25 @@ struct WorkflowRunDisplayData {
     }
 
     // MARK: - Helpers
+
+    /// Whether a node kind has a meaningful reasoning/tool-call timeline worth
+    /// exposing via the Output/Timeline toggle. Agent profiles (including the
+    /// agentic Code and nested Workflow profile types) and Action nodes do; bots,
+    /// image generators, and structural transform nodes (condition/loop/code/gate/
+    /// trigger) are single-shot output, so their Timeline tab is hidden.
+    static func kindSupportsTimeline(_ kind: WorkflowNodeKind) -> Bool {
+        switch kind {
+        case .profile(_, let profileType):
+            switch profileType {
+            case .agent, .code, .workflow: return true
+            case .bot, .imageGen:          return false
+            }
+        case .action:
+            return true
+        case .condition, .loop, .code, .gate, .trigger:
+            return false
+        }
+    }
 
     private static func mapLiveStatus(_ s: WorkflowNodeResult.Status) -> NodeDisplayData.NodeStatus {
         switch s {

@@ -261,6 +261,24 @@ struct MainApplicationView: View {
         .onChange(of: viewModel.selectedConversationID) { _, _ in
             showModePicker = true
         }
+        // Unsaved workflow-edits guard: raised by `WorkflowEditGuard.attempt` when a
+        // navigation (switch conversation / interface / execution) is attempted while the
+        // workflow canvas has unsaved changes. Save → persist then proceed; Discard →
+        // revert then proceed; Cancel → stay.
+        .confirmationDialog(
+            "Unsaved Workflow Changes",
+            isPresented: Binding(
+                get: { viewModel.workflowEditGuard.isPrompting },
+                set: { if !$0 { viewModel.workflowEditGuard.cancel() } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Save Changes") { viewModel.workflowEditGuard.confirmSave() }
+            Button("Discard Changes", role: .destructive) { viewModel.workflowEditGuard.confirmDiscard() }
+            Button("Cancel", role: .cancel) { viewModel.workflowEditGuard.cancel() }
+        } message: {
+            Text("You have unsaved changes to this workflow. Save them before leaving?")
+        }
     }
 
     private var workflowEmptyState: some View {
@@ -360,6 +378,17 @@ private struct ModeTabButton: View {
                     Capsule()
                         .fill(.primary.opacity(0.1))
                         .matchedGeometryEffect(id: "activeModeIndicator", in: namespace)
+                }
+            }
+            // Unsaved-changes dot on the Workflow tab so the dirty state is visible even
+            // when the user is looking elsewhere (sidebar, other modes).
+            .overlay(alignment: .topTrailing) {
+                if mode == .workflow && viewModel.workflowEditGuard.hasUnsavedChanges {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 2, y: -1)
+                        .transition(.scale.combined(with: .opacity))
                 }
             }
         }

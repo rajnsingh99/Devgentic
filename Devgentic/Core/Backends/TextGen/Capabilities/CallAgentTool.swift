@@ -115,7 +115,7 @@ enum CallAgentTool {
                     let spawnedMemory = WindowedLinearMemory(
                         config: MemoryBudgetConfig.derive(contextWindow: 8192, tier: .small, maxIterations: maxIterations)
                     )
-                    let input = AgentInput(
+                    var input = AgentInput(
                         userInput: taskDescription,
                         chatHistory: [],
                         conversationID: conversationID,
@@ -128,6 +128,15 @@ enum CallAgentTool {
                         instructions: nil,
                         traceContext: traceContext
                     )
+                    // Sub-agents talk to the SAME provider as the parent — without
+                    // this they'd default to cloud-class transport policy and lose
+                    // e.g. Ollama's fast-fail "is the server running?" handling.
+                    input.resiliencePolicy = .resolved(for: ProviderClass(apiProvider: parentProvider))
+                    // #22: bound the spawned agent's native turn payload too (it runs the
+                    // same G12 native path on cloud/Ollama providers). Without this the
+                    // field defaults to 0 = compaction disabled, reintroducing unbounded
+                    // growth for delegated runs. Matches the 8192-window memory config above.
+                    input.nativeContextBudgetChars = max(8000, Int(Double(8192) * 0.75) * 4)
 
                     // Run plain ReAct — NO capabilities, NO call_agent
                     let executor = ReActAgentExecutor(maxIterations: maxIterations)

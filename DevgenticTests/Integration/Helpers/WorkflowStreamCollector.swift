@@ -36,7 +36,7 @@ enum WorkflowStreamCollector {
 
     static func nodeFailedEvents(from events: [AgentStreamEvent]) -> [(nodeID: UUID, profileName: String, error: String)] {
         events.compactMap { event in
-            if case .workflowNodeFailed(let nodeID, let name, let error) = event {
+            if case .workflowNodeFailed(let nodeID, let name, let error, _) = event {
                 return (nodeID, name, error)
             }
             return nil

@@ -15,8 +15,13 @@ struct ReportInspectorView: View {
     @Environment(\.appTheme) private var theme
 
     /// Phase F: controls presentation of the diagnostic bundle export sheet.
-    /// Triggered from the export button in DeveloperReportView.
+    /// Triggered from the export button in DeveloperReportView (full-includes preset)
+    /// and UserFeedbackView (`.userReport` preset + the entered feedback).
     @State private var showBundleExport: Bool = false
+
+    /// Feedback to attach to the next bundle export. Set by the user-feedback path;
+    /// nil for the developer path (which uses the full-includes preset).
+    @State private var pendingExportFeedback: UserFeedback?
 
     init(messageID: UUID, conversationID: UUID, traceID: String?) {
         _viewModel = State(initialValue: ReportViewModel(
@@ -37,7 +42,7 @@ struct ReportInspectorView: View {
             if isDeveloperMode {
                 DeveloperReportView(viewModel: viewModel, onExport: exportDeveloperReport)
             } else {
-                UserFeedbackView(viewModel: viewModel)
+                UserFeedbackView(viewModel: viewModel, onExport: exportUserFeedback)
             }
         }
         .frame(
@@ -52,7 +57,7 @@ struct ReportInspectorView: View {
             if let traceID = viewModel.activeTraceRecord?.traceID {
                 BundleExportSheet(
                     defaultScope: .trace(traceID: traceID),
-                    feedback: nil
+                    feedback: pendingExportFeedback
                 )
             }
         }
@@ -112,6 +117,17 @@ struct ReportInspectorView: View {
     /// behavior is upgraded.
     private func exportDeveloperReport() {
         guard viewModel.activeTraceRecord != nil else { return }
+        pendingExportFeedback = nil          // developer path → full-includes preset
+        showBundleExport = true
+    }
+
+    /// User-feedback path → the same sanitized bundle engine, preset to `.userReport`
+    /// and carrying the rating + message the user just entered. Replaces the deleted
+    /// `ReportExporter`, which wrote UNsanitized JSON despite the UI's "no personal data"
+    /// claim (Gaps #2, #3).
+    private func exportUserFeedback() {
+        guard viewModel.activeTraceRecord != nil else { return }
+        pendingExportFeedback = viewModel.userFeedback
         showBundleExport = true
     }
 }

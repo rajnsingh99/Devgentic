@@ -42,6 +42,10 @@ struct AgentConfig: Codable, Hashable, Sendable {
     var executionTimeout: TimeInterval?
     var retryPolicy: RetryPolicy?
     var errorRecovery: ErrorRecovery?
+    /// Per-tier resilience cap overrides (nil/all-Auto = inherit resolved defaults).
+    /// Decouples the parse / tool-failure / repetitive caps the legacy `retryPolicy`
+    /// conflated. Transport-tier budgets stay auto-derived from provider class.
+    var resilienceOverrides: ResilienceOverrides?
 
     // Capabilities
     var capabilities: AgentCapabilities
@@ -64,6 +68,7 @@ struct AgentConfig: Codable, Hashable, Sendable {
          executionTimeout: TimeInterval? = nil,
          retryPolicy: RetryPolicy? = nil,
          errorRecovery: ErrorRecovery? = nil,
+         resilienceOverrides: ResilienceOverrides? = nil,
          capabilities: AgentCapabilities = AgentCapabilities(),
          historyStrategy: HistoryStrategy? = nil,
          skillConfig: SkillFolderConfig? = nil,
@@ -77,6 +82,7 @@ struct AgentConfig: Codable, Hashable, Sendable {
         self.executionTimeout = executionTimeout
         self.retryPolicy = retryPolicy
         self.errorRecovery = errorRecovery
+        self.resilienceOverrides = resilienceOverrides
         self.capabilities = capabilities
         self.historyStrategy = historyStrategy
         self.skillConfig = skillConfig
@@ -128,7 +134,67 @@ struct ErrorRecovery: Codable, Hashable, Sendable {
         self.fallbackMessage = fallbackMessage
     }
 
+    // Backward-compat: tolerate missing/renamed keys per-field (same idiom as
+    // RetryPolicy above). With the synthesized decoder, one absent key here
+    // failed the whole ProfileDetails decode, which destructively collapses the
+    // profile to the default-bot fallback in BackendProfileSD.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.onToolFailure = (try? container.decode(ToolFailurePolicy.self, forKey: .onToolFailure)) ?? .abort
+        self.onIterationExhaustion = (try? container.decode(ExhaustionPolicy.self, forKey: .onIterationExhaustion)) ?? .synthesizeBestEffort
+        self.fallbackMessage = (try? container.decodeIfPresent(String.self, forKey: .fallbackMessage)) ?? nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case onToolFailure, onIterationExhaustion, fallbackMessage
+    }
+
     static let defaultFallbackMessage = "Try a completely different approach or answer from your own knowledge without using tools."
+}
+
+/// Per-tier resilience caps the user may override (Resilience architecture, Phase B).
+///
+/// Splits what the legacy single `RetryPolicy.maxRetries` knob conflated — it drove
+/// the parse-failure cap, the consecutive-tool-failure cap, AND the repetitive-action
+/// cap simultaneously. Each field here is optional: `nil` = inherit the resolved
+/// default (`ResolvedResiliencePolicy.resolved` falls back to `RetryPolicy.maxRetries`
+/// and then the provider-class default, so old profiles behave identically until a
+/// field is explicitly set). The transport tier (HTTP retries/backoff) stays
+/// auto-derived from provider class and is deliberately NOT exposed here.
+struct ResilienceOverrides: Codable, Hashable, Sendable {
+    /// Consecutive malformed-output failures tolerated before aborting. nil = Auto.
+    var maxParseFailures: Int?
+    /// Consecutive failed tool calls tolerated before the circuit breaker aborts. nil = Auto.
+    var maxConsecutiveToolFailures: Int?
+    /// Identical-iteration repetitions tolerated before aborting a degenerate loop. nil = Auto.
+    var maxRepetitiveActions: Int?
+
+    init(maxParseFailures: Int? = nil,
+         maxConsecutiveToolFailures: Int? = nil,
+         maxRepetitiveActions: Int? = nil) {
+        self.maxParseFailures = maxParseFailures
+        self.maxConsecutiveToolFailures = maxConsecutiveToolFailures
+        self.maxRepetitiveActions = maxRepetitiveActions
+    }
+
+    // Tolerant per-field decoder (same idiom as RetryPolicy/ErrorRecovery) so a
+    // future field or a renamed key can never collapse the enclosing profile decode.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.maxParseFailures = (try? container.decodeIfPresent(Int.self, forKey: .maxParseFailures)) ?? nil
+        self.maxConsecutiveToolFailures = (try? container.decodeIfPresent(Int.self, forKey: .maxConsecutiveToolFailures)) ?? nil
+        self.maxRepetitiveActions = (try? container.decodeIfPresent(Int.self, forKey: .maxRepetitiveActions)) ?? nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case maxParseFailures, maxConsecutiveToolFailures, maxRepetitiveActions
+    }
+
+    /// True when no field is set — used to omit the whole object on encode so an
+    /// all-Auto profile stays byte-identical to a pre-Phase-B one.
+    var isEmpty: Bool {
+        maxParseFailures == nil && maxConsecutiveToolFailures == nil && maxRepetitiveActions == nil
+    }
 }
 
 enum ToolFailurePolicy: String, Codable, Hashable, Sendable, CaseIterable, Identifiable {
@@ -297,6 +363,12 @@ struct WorkflowConfig: Codable, Hashable, Sendable {
     /// Default timeout per node in seconds. Overridden by per-node `WorkflowNodeConfig.hardTimeout`.
     var defaultNodeTimeout: TimeInterval?
 
+    /// Whether the per-node execution timeout is enforced at all. `nil`/`true` = on
+    /// (the historical behavior); `false` = NO timeout — nodes run unbounded. Opt-out
+    /// for long-running local-model nodes. A per-node `hardTimeout`, if explicitly set,
+    /// still applies even when this is off. Optional for backward-compatible decoding.
+    var nodeTimeoutEnabled: Bool?
+
     /// Default cascade behavior when a node fails. Overridden by per-node `WorkflowNodeConfig.onFailure`.
     var defaultFailurePolicy: NodeFailurePolicy?
 
@@ -319,6 +391,9 @@ struct WorkflowConfig: Codable, Hashable, Sendable {
     // MARK: - Resolved Defaults
 
     var resolvedNodeTimeout: TimeInterval { defaultNodeTimeout ?? 120 }
+    /// The workflow-default timeout to actually enforce on nodes that don't set their
+    /// own `hardTimeout`, or `nil` when the timeout is disabled (`nodeTimeoutEnabled == false`).
+    var effectiveNodeTimeout: TimeInterval? { (nodeTimeoutEnabled ?? true) ? resolvedNodeTimeout : nil }
     var resolvedFailurePolicy: NodeFailurePolicy { defaultFailurePolicy ?? .skipDependents }
     var resolvedMaxRetries: Int { defaultMaxRetries ?? 0 }
     var resolvedContextBudgetPerNode: Int { contextBudgetPerNode ?? 2000 }
@@ -424,7 +499,10 @@ enum ProfileMigrator {
         case "Plan & Execute":
             capabilities["planning"] = [
                 "maxSubtasks": 5,
-                "parallelSubtasks": true,
+                // #17: match the current default (parallel subtask execution is off — it's
+                // illusory under LLM-layer serialization and lacks cross-sibling HITL
+                // serialization). Was hardcoded true, an oversight when the default flipped.
+                "parallelSubtasks": false,
                 "subtaskToolFiltering": true
             ]
         case "Reflexion":
@@ -541,7 +619,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
         // Agent-specific
         case architecture // legacy — read for migration, never written
         case tools, description, knowledgeSources
-        case maxIterations, executionTimeout, retryPolicy, errorRecovery
+        case maxIterations, executionTimeout, retryPolicy, errorRecovery, resilienceOverrides
         case capabilities, historyStrategy, skillConfig
         // Workflow-specific
         case agentProfileIDs
@@ -575,6 +653,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             let executionTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .executionTimeout)
             let retryPolicy = try container.decodeIfPresent(RetryPolicy.self, forKey: .retryPolicy)
             let errorRecovery = try container.decodeIfPresent(ErrorRecovery.self, forKey: .errorRecovery)
+            let resilienceOverrides = try container.decodeIfPresent(ResilienceOverrides.self, forKey: .resilienceOverrides)
 
             // Decode capabilities — if missing (legacy v1), migrate from architecture string
             let capabilities: AgentCapabilities
@@ -606,6 +685,7 @@ enum ProfileDetails: Codable, Hashable, Sendable {
                 executionTimeout: executionTimeout,
                 retryPolicy: retryPolicy,
                 errorRecovery: errorRecovery,
+                resilienceOverrides: resilienceOverrides,
                 capabilities: capabilities,
                 historyStrategy: historyStrategy,
                 skillConfig: skillConfig
@@ -681,6 +761,10 @@ enum ProfileDetails: Codable, Hashable, Sendable {
             try container.encodeIfPresent(config.executionTimeout, forKey: .executionTimeout)
             try container.encodeIfPresent(config.retryPolicy, forKey: .retryPolicy)
             try container.encodeIfPresent(config.errorRecovery, forKey: .errorRecovery)
+            // Omit an all-Auto overrides object so unchanged profiles stay byte-identical to pre-Phase-B.
+            if let overrides = config.resilienceOverrides, !overrides.isEmpty {
+                try container.encode(overrides, forKey: .resilienceOverrides)
+            }
             try container.encode(config.capabilities, forKey: .capabilities)
             try container.encodeIfPresent(config.historyStrategy, forKey: .historyStrategy)
             try container.encodeIfPresent(config.skillConfig, forKey: .skillConfig)

@@ -26,6 +26,13 @@ import Foundation
     let isTerminalSignal: Bool
     let terminalKind: TerminalKind?
 
+    /// Structured failure cause (nil on success). Carries `ToolExecutionResult`'s
+    /// classification across the loop→executor seam so consumers branch on category
+    /// instead of `isSuccess` + string-prefix matching — without it, the executor
+    /// couldn't tell a hallucinated name from an ordinary failure and prompt-banned
+    /// every failed tool (audit gap #2).
+    let failureCategory: ToolFailureCategory?
+
     init(
         stepId: Int,
         toolCallId: String,
@@ -37,7 +44,8 @@ import Foundation
         output: String,
         artifacts: [MediaArtifact],
         isTerminalSignal: Bool = false,
-        terminalKind: TerminalKind? = nil
+        terminalKind: TerminalKind? = nil,
+        failureCategory: ToolFailureCategory? = nil
     ) {
         self.stepId = stepId
         self.toolCallId = toolCallId
@@ -50,6 +58,7 @@ import Foundation
         self.artifacts = artifacts
         self.isTerminalSignal = isTerminalSignal
         self.terminalKind = terminalKind
+        self.failureCategory = failureCategory
     }
 }
 
@@ -84,6 +93,18 @@ struct APISpyModel: LLMProvider {
     /// breaks the native-turn request shape before it ever reaches the real provider.
     func generateCognitiveStep(nativeMessages: [[String: Any]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         return try await inner.generateCognitiveStep(nativeMessages: nativeMessages, tools: tools)
+    }
+
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
+        return try await inner.generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema)
+    }
+
+    func generateWithUsage(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
+        return try await inner.generateWithUsage(payload: payload, tools: tools, responseSchema: responseSchema)
+    }
+
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        return inner.streamWithUsage(messages: messages, tools: tools, onUsage: onUsage)
     }
 }
 
@@ -234,7 +255,14 @@ protocol AgentToolProtocol: Sendable {
     
     /// The JSON schema describing the `Arguments` structure to the LLM.
     var parameterSchema: ToolParameters { get }
-    
+
+    /// True when this tool's SUCCESSFUL output may legitimately begin with or contain
+    /// "error"-shaped text — e.g. a shell tool surfacing stderr, or a build-error reader
+    /// whose whole purpose is to return compiler errors. Such tools opt out of
+    /// `ToolExecutionMediator`'s content-sniffing semantic-failure check: a non-throwing
+    /// return is treated as success (#19). Default: false.
+    var outputMayContainErrorText: Bool { get }
+
     /// The execution block.
     func call(arguments: Arguments) async throws -> String
 
@@ -244,6 +272,10 @@ protocol AgentToolProtocol: Sendable {
 }
 
 extension AgentToolProtocol {
+    /// Default: tools do NOT surface error-shaped text on success (so the semantic-failure
+    /// heuristic applies). Error-surfacing tools (shell, build diagnostics) override to true.
+    var outputMayContainErrorText: Bool { false }
+
     func execute(arguments: Arguments) async throws -> (output: String, artifacts: [MediaArtifact]) {
         let text = try await call(arguments: arguments)
         return (text, [])
@@ -274,6 +306,11 @@ struct AgentTool: Sendable {
     /// Custom message sent to the LLM when this tool times out. Nil uses the default timeout message.
     let timeoutMessage: String?
 
+    /// When true, the executor skips content-sniffing semantic-failure detection for this
+    /// tool — a non-throwing return is success even if the output looks like an error. Set
+    /// for tools whose legitimate output surfaces error text (shell, build diagnostics). (#19)
+    let contentMayLookLikeError: Bool
+
     /// The closure to execute the tool.
     /// Takes JSON Data (arguments) and returns text output + optional media artifacts.
     let run: @Sendable (Data) async throws -> (output: String, artifacts: [MediaArtifact])
@@ -286,6 +323,7 @@ struct AgentTool: Sendable {
         requiresConfirmation: Bool = false,
         timeout: TimeInterval? = nil,
         timeoutMessage: String? = nil,
+        contentMayLookLikeError: Bool = false,
         run: @escaping @Sendable (Data) async throws -> (output: String, artifacts: [MediaArtifact])
     ) {
         self.name = name
@@ -294,6 +332,7 @@ struct AgentTool: Sendable {
         self.requiresConfirmation = requiresConfirmation
         self.timeout = timeout
         self.timeoutMessage = timeoutMessage
+        self.contentMayLookLikeError = contentMayLookLikeError
         self.run = run
     }
 
@@ -305,6 +344,7 @@ struct AgentTool: Sendable {
         requiresConfirmation: Bool = false,
         timeout: TimeInterval? = nil,
         timeoutMessage: String? = nil,
+        contentMayLookLikeError: Bool = false,
         textOnlyRun: @escaping @Sendable (Data) async throws -> String
     ) {
         self.name = name
@@ -313,6 +353,7 @@ struct AgentTool: Sendable {
         self.requiresConfirmation = requiresConfirmation
         self.timeout = timeout
         self.timeoutMessage = timeoutMessage
+        self.contentMayLookLikeError = contentMayLookLikeError
         self.run = { data in
             let text = try await textOnlyRun(data)
             return (text, [])
@@ -346,7 +387,7 @@ enum ToolExecutionResult: Sendable, Equatable {
     case success(output: String, artifacts: [MediaArtifact] = [])
     case hallucinated(toolName: String, availableTools: [String])
     case userDenied(toolName: String)
-    case timedOut(toolName: String, duration: TimeInterval)
+    case timedOut(toolName: String, duration: TimeInterval, message: String? = nil)
     case semanticFailure(toolName: String, output: String) // E.g., null, empty, or explicit CLI errors
     case systemError(reason: String)
 
@@ -365,7 +406,10 @@ enum ToolExecutionResult: Sendable, Equatable {
             return "System Error: Tool not found. '\(toolName)' does not exist. Available tools: \(available.joined(separator: ", ")). Use ONLY these tools or provide a `finalAnswer`."
         case .userDenied(let toolName):
             return "System Security: User explicitly denied permission to execute tool '\(toolName)'. Do not retry this exact action."
-        case .timedOut(let toolName, let duration):
+        case .timedOut(let toolName, let duration, let message):
+            // A custom timeoutMessage (when set) is surfaced to the LLM; the result still
+            // classifies as a timeout failure (see `isSuccess` / `failureCategory`).
+            if let message, !message.isEmpty { return message }
             return "System Error: Tool '\(toolName)' timed out after \(Int(duration)) seconds. The operation took too long."
         case .semanticFailure(_, let output):
             return output.isEmpty ? "System Error: Empty tool response." : output
@@ -426,67 +470,91 @@ struct ToolArgumentError: Error, LocalizedError {
 // MARK: - Execution Input
 
 /// The standard payload required to initialize any Agent Executor.
+///
+/// Derivation contract: code that builds a sub-run input from an existing one
+/// (capability wrappers — Planning subtasks, Reflexion trials) MUST copy-and-
+/// mutate (`var derived = input; derived.field = …`) instead of calling the
+/// initializer with hand-forwarded fields. The init's defaulted parameters mean
+/// the compiler can't flag a forgotten forward, so re-initializing silently
+/// drops every field added after the call site was written (this is how
+/// `userPayload`/`modelTier`/`workflowContext` got lost — audit gap #7).
+/// Properties are `var` solely to enable this; value semantics keep each
+/// executor's copy isolated.
 struct AgentInput: Sendable {
-    let userInput: String
+    var userInput: String
 
     /// Multimodal user input (images, audio, etc.). Nil for text-only messages.
-    let userPayload: Payload?
+    var userPayload: Payload?
 
     // NOTE: Used ONLY by ChatExecutor (Bots). ReActAgentExecutor completely ignores this
     // to enforce the "Zero-History Context" architecture.
-    let chatHistory: [ChatMessage]
+    var chatHistory: [ChatMessage]
 
-    let conversationID: UUID
-    let tools: [AgentTool]
-    let longTermMemory: any LongTermMemoryStrategy
+    var conversationID: UUID
+    var tools: [AgentTool]
+    var longTermMemory: any LongTermMemoryStrategy
 
     // Architecture: Split-State (Active State + History)
-    let activeState: SessionGraph?
-    let recentHistory: String?
+    var activeState: SessionGraph?
+    var recentHistory: String?
 
     // [Step 3 Architecture Update]
-    let generatorStrategy: any CognitiveGenerator
-    let workingMemory: any WorkingMemoryStrategy
+    var generatorStrategy: any CognitiveGenerator
+    var workingMemory: any WorkingMemoryStrategy
 
     // [Phase 2 Rate Limiting — profile-scoped]
     // Bucket key derived from (provider + apiKey/baseURL) for profile-scoped rate limiting.
-    let rateLimitKey: String
-    let rateLimitCategory: RateLimitCategory
+    var rateLimitKey: String
+    var rateLimitCategory: RateLimitCategory
 
-    let instructions: String?
+    var instructions: String?
 
     // Skills — on-demand discovery layer
-    let skillManifests: [SkillManifest]?
-    let skillFolderPath: String?
+    var skillManifests: [SkillManifest]?
+    var skillFolderPath: String?
 
     // Resilience configuration from AgentConfig
-    let retryPolicy: RetryPolicy
-    let errorRecovery: ErrorRecovery
+    var retryPolicy: RetryPolicy
+    var errorRecovery: ErrorRecovery
+
+    /// Resolved three-tier resilience policy (transport/cognitive/loop). Resolved
+    /// ONCE at the AgentConnect seam from provider class + the legacy RetryPolicy;
+    /// minimal constructors (tests, call_agent) get cloud-class defaults derived
+    /// from their `retryPolicy` so the legacy maxRetries linkage is preserved.
+    var resiliencePolicy: ResolvedResiliencePolicy
 
     /// Whether IC-powered response synthesis is enabled for this run.
-    let responseSynthesisEnabled: Bool
+    var responseSynthesisEnabled: Bool
 
     /// Pre-built native history turns for providers that support turn-by-turn conversation.
     /// Nil when using XML episodic memory (non-native providers).
-    let nativeHistoryTurns: [[String: String]]?
+    var nativeHistoryTurns: [[String: String]]?
 
     /// [G3/G5] When true, the inner executor skips episode append/close because
     /// the wrapping capability (Planning or Reflexion) owns the episode lifecycle.
-    let suppressEpisodeManagement: Bool
+    var suppressEpisodeManagement: Bool
 
     /// Workflow execution context — non-nil when this agent is running as a node
     /// within a workflow DAG. Signals downstream components (generators, executors)
     /// to use the workflow-specific prompt pipeline: no RAG, no history, clean task+input.
-    let workflowContext: WorkflowExecutionContext?
+    var workflowContext: WorkflowExecutionContext?
 
     // The Trace Context for distributed observability
-    let traceContext: TraceContext
+    var traceContext: TraceContext
 
     /// Model tier derived from `LLMProviderConfig.modelMetadata?.tier`. Executors
     /// use this to tune iteration gates / thresholds for weaker models. Nil when
     /// the upstream config couldn't classify the model (cloud models without
     /// metadata default to medium behaviour at the call site).
-    let modelTier: ModelTier?
+    var modelTier: ModelTier?
+
+    /// Char budget for the native turn-by-turn conversation payload
+    /// (`liveConversationTurns`). Derived from the model context window at the
+    /// AgentConnect seam (~75% as chars). The ReAct loop compacts the oldest tool
+    /// exchanges once the payload exceeds this, bounding native-path growth that the
+    /// scratchpad budget (which the native path never sends) doesn't constrain.
+    /// 0 = disabled (no compaction) — the default for minimal/test constructors. (#22)
+    var nativeContextBudgetChars: Int
 
     /// Resolved input: multimodal if available, text fallback otherwise.
     var resolvedPayload: Payload {
@@ -511,12 +579,14 @@ struct AgentInput: Sendable {
         skillFolderPath: String? = nil,
         retryPolicy: RetryPolicy = RetryPolicy(),
         errorRecovery: ErrorRecovery = ErrorRecovery(),
+        resiliencePolicy: ResolvedResiliencePolicy? = nil,
         responseSynthesisEnabled: Bool = false,
         nativeHistoryTurns: [[String: String]]? = nil,
         suppressEpisodeManagement: Bool = false,
         workflowContext: WorkflowExecutionContext? = nil,
         traceContext: TraceContext,
-        modelTier: ModelTier? = nil
+        modelTier: ModelTier? = nil,
+        nativeContextBudgetChars: Int = 0
     ) {
         self.userInput = userInput
         self.userPayload = userPayload
@@ -537,12 +607,14 @@ struct AgentInput: Sendable {
         self.skillFolderPath = skillFolderPath
         self.retryPolicy = retryPolicy
         self.errorRecovery = errorRecovery
+        self.resiliencePolicy = resiliencePolicy ?? .resolved(for: .cloud, legacy: retryPolicy)
         self.responseSynthesisEnabled = responseSynthesisEnabled
         self.nativeHistoryTurns = nativeHistoryTurns
         self.suppressEpisodeManagement = suppressEpisodeManagement
         self.workflowContext = workflowContext
         self.traceContext = traceContext
         self.modelTier = modelTier
+        self.nativeContextBudgetChars = nativeContextBudgetChars
     }
 }
 

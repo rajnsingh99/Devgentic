@@ -98,7 +98,10 @@ struct WorkflowDedicatedView: View {
             guard let state = executionState, state.runRecordID == record.id else { return nil }
             return state.nodeTimelines
         }()
-        return .from(record: record, liveTimelines: liveTimelines)
+        // Pass the current layout so the adapter can resolve node kinds and hide
+        // the Timeline tab for single-shot nodes (bots etc.).
+        let layout = WorkflowLayoutStore.shared.load(for: workflowProfileID)
+        return .from(record: record, liveTimelines: liveTimelines, layout: layout)
     }
 
     /// Auto-selects the in-flight run's record when it exists but nothing is
@@ -153,7 +156,7 @@ struct WorkflowDedicatedView: View {
             case .canvas:
                 ZStack {
                     if let binding = profileBinding {
-                        WorkflowCanvasView(profile: binding)
+                        WorkflowCanvasView(profile: binding, editGuard: viewModel.workflowEditGuard)
                     } else {
                         Text("Workflow profile not found")
                             .foregroundColor(theme.secondaryText)
@@ -621,8 +624,14 @@ struct WorkflowDedicatedView: View {
 
     private var canvasFloatingButton: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                viewMode = .execution
+            // Guarded: prompt Save/Discard/Cancel if the canvas has unsaved edits before
+            // showing the execution view (the executor runs the on-DISK layout, so a run
+            // with unsaved edits would silently use the stale workflow).
+            let binding = $viewMode
+            viewModel.workflowEditGuard.attempt {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    binding.wrappedValue = .execution
+                }
             }
         } label: {
             HStack(spacing: 6) {

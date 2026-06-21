@@ -195,7 +195,7 @@ class BackendOrchestrationService {
                     // image payload so vision-capable bot/agent profiles see them
                     // natively. D3: any unreadable image is reported (traced + notice),
                     // and the turn still answers (degrade).
-                    let (rawImagePayload, imageFailures) = self.buildImagePayload(from: files)
+                    let (rawImagePayload, imageFailures) = await self.buildImagePayload(from: files)
                     await self.reportFileFailures(imageFailures, span: context, continuation: continuation)
 
                     // Vision capability gate (LOCAL providers only — cloud keeps its
@@ -371,9 +371,12 @@ class BackendOrchestrationService {
                                 let mimeType = self.fileProcessorService.getFileMimeType(for: file.url)
                                 return self.fileProcessorService.isImageFile(mimeType: mimeType, url: file.url)
                             }
-                            let attachedImages: [Data]? = imageFiles.isEmpty ? nil : imageFiles.compactMap { file in
-                                try? Data(contentsOf: file.url)
-                            }
+                            // #24: read the image bytes OFF the main actor — same sync-`Data(contentsOf:)`
+                            // hitch as `buildImagePayload`, here on the image-gen intent path.
+                            let imageURLs = imageFiles.map(\.url)
+                            let attachedImages: [Data]? = imageURLs.isEmpty ? nil : await Task.detached(priority: .userInitiated) {
+                                imageURLs.compactMap { try? Data(contentsOf: $0) }
+                            }.value
 
                             let intent = await ImageIntentResolver.resolve(
                                 userQuery: userQuery,
@@ -406,6 +409,7 @@ class BackendOrchestrationService {
                                 capability: capability,
                                 profile: currentConfig.profile,
                                 conversationID: conversationID,
+                                traceContext: context,
                                 options: options
                             )
 
@@ -575,24 +579,38 @@ class BackendOrchestrationService {
     /// into ephemeral references; the provider resolves+encodes at send time.
     /// Returns nil when no images are attached. A file that can't be read is logged
     /// and skipped (it still appears in the document path's skipped-files notice).
-    private func buildImagePayload(from files: [FileSystemItem]) -> (payload: Payload?, failures: [FileRetrievalError]) {
-        var blocks: [MessageBlock] = []
-        var failures: [FileRetrievalError] = []
+    private func buildImagePayload(from files: [FileSystemItem]) async -> (payload: Payload?, failures: [FileRetrievalError]) {
+        // Determine which files are images + their mime types on the main actor — these are
+        // cheap UTType lookups. Capture only Sendable values for the off-actor read below.
+        var items: [(url: URL, mime: String, name: String)] = []
         for file in files {
             let mime = fileProcessorService.getFileMimeType(for: file.url)
             guard fileProcessorService.isImageFile(mimeType: mime, url: file.url) else { continue }
-            let didAccess = file.url.startAccessingSecurityScopedResource()
-            defer { if didAccess { file.url.stopAccessingSecurityScopedResource() } }
-            do {
-                let data = try Data(contentsOf: file.url)
-                blocks.append(.image(ImagePayload(reference: .ephemeralData(data), mimeType: mime, alt: file.name)))
-            } catch {
-                // Never silent: report the image read failure (chat degrades — the
-                // turn still answers, just without this image).
-                failures.append(.imageResolutionFailed(path: file.url.path, underlying: error.localizedDescription))
-            }
+            items.append((file.url, mime, file.name))
         }
-        return (blocks.isEmpty ? nil : blocks, failures)
+        guard !items.isEmpty else { return (nil, []) }
+
+        // #24: read the bytes OFF the main actor. `Data(contentsOf:)` is synchronous disk I/O
+        // that would hitch the UI for large image attachments (this service is `@MainActor`).
+        // Security-scoped access brackets the read inside the detached work so it stays valid
+        // for the read's duration.
+        return await Task.detached(priority: .userInitiated) {
+            var blocks: [MessageBlock] = []
+            var failures: [FileRetrievalError] = []
+            for item in items {
+                let didAccess = item.url.startAccessingSecurityScopedResource()
+                defer { if didAccess { item.url.stopAccessingSecurityScopedResource() } }
+                do {
+                    let data = try Data(contentsOf: item.url)
+                    blocks.append(.image(ImagePayload(reference: .ephemeralData(data), mimeType: item.mime, alt: item.name)))
+                } catch {
+                    // Never silent: report the image read failure (chat degrades — the
+                    // turn still answers, just without this image).
+                    failures.append(.imageResolutionFailed(path: item.url.path, underlying: error.localizedDescription))
+                }
+            }
+            return (blocks.isEmpty ? nil : blocks, failures)
+        }.value
     }
 
     /// Extracts text from attached documents for direct injection. Returns the

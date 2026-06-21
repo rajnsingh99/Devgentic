@@ -20,6 +20,11 @@ private let logger = DGLogger(category: "WorkflowCanvasView")
 struct WorkflowCanvasView: View {
     @Binding var profile: BackendProfileModel
     var onDelete: ((UUID) -> Void)? = nil
+    /// Optional navigation guard. Provided by `WorkflowDedicatedView` (main interface) so
+    /// leaving a dirty canvas (switch conversation/interface/execution) prompts
+    /// Save/Discard/Cancel. Nil in the profile-editor context, which uses its own
+    /// `ProfileEditBuffer` discard guard instead.
+    let editGuard: WorkflowEditGuard?
     @Environment(BackendProfileService.self) var profileService
     @Environment(\.appTheme) private var theme
 
@@ -32,9 +37,10 @@ struct WorkflowCanvasView: View {
     @State private var scrollMonitor: Any?
     #endif
 
-    init(profile: Binding<BackendProfileModel>, onDelete: ((UUID) -> Void)? = nil) {
+    init(profile: Binding<BackendProfileModel>, onDelete: ((UUID) -> Void)? = nil, editGuard: WorkflowEditGuard? = nil) {
         self._profile = profile
         self.onDelete = onDelete
+        self.editGuard = editGuard
         self._canvasState = State(wrappedValue: WorkflowCanvasState(profileID: profile.wrappedValue.id))
     }
 
@@ -115,17 +121,25 @@ struct WorkflowCanvasView: View {
         }
         .onAppear {
             loadLayout()
+            registerEditGuard()
             #if canImport(AppKit) && !targetEnvironment(macCatalyst)
             setupScrollMonitor()
             #endif
         }
+        .onChange(of: canvasState.hasUnsavedChanges) { _, dirty in
+            // Mirror the canvas dirty-state into the nav guard (drives the tab dot +
+            // whether navigation defers behind the Save/Discard/Cancel prompt).
+            editGuard?.hasUnsavedChanges = dirty
+        }
         .onDisappear {
+            editGuard?.unregister()
             #if canImport(AppKit) && !targetEnvironment(macCatalyst)
             removeScrollMonitor()
             #endif
         }
         .onChange(of: profile.id) {
             loadLayout()
+            registerEditGuard()
         }
         .onDeleteCommand {
             canvasState.deleteSelected()
@@ -379,6 +393,18 @@ struct WorkflowCanvasView: View {
             uniquingKeysWith: { first, _ in first }
         )
         canvasState.load(from: layout)
+    }
+
+    /// Installs (or refreshes) this canvas's hooks into the nav guard so Save/Discard
+    /// from the navigation prompt operate on THIS canvas's layout. No-op outside the
+    /// main interface (editGuard is nil in the profile editor, which has its own guard).
+    private func registerEditGuard() {
+        guard let editGuard else { return }
+        editGuard.hasUnsavedChanges = canvasState.hasUnsavedChanges
+        editGuard.register(
+            save: { saveLayout() },
+            discard: { canvasState.revert() }
+        )
     }
 
     private func saveLayout() {

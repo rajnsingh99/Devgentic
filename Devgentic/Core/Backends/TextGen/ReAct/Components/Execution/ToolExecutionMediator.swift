@@ -14,7 +14,13 @@ private let logToolExecution = DGLogger(category: "ToolExecution")
 /// Encapsulates the serialization of tool parameters, metric recording,
 /// hallucination catching, Human-In-The-Loop (HITL) suspension, and Pre-flight Permissions.
 struct ToolExecutionMediator: ToolDispatching {
-    
+
+    /// Default per-tool timeout (seconds) for the agent path when a tool doesn't set its own.
+    /// Bounds a hung tool so it can't stall the ReAct loop indefinitely (#20); mirrors the
+    /// workflow path's hard-timeout default (workflow uses 120s; the agent uses 60s).
+    /// Injectable so tests can exercise the default-timeout path without a real-time wait.
+    var defaultToolTimeout: TimeInterval = 60
+
     // MARK: - Preparation & HITL
     
     func prepareDispatch(
@@ -67,7 +73,12 @@ struct ToolExecutionMediator: ToolDispatching {
                 let hasPermissions = await PermissionManager.shared.ensurePermissions(for: requiredPermissions)
                 
                 if !hasPermissions {
-                    let msg = "System Error: Missing required macOS permissions. Please ask the user to grant access in System Settings -> Privacy & Security."
+                    // No "System Error:" prefix here — `.systemError`'s llmObservation
+                    // template prepends its own, and doubling it read as noise. The
+                    // "Missing required macOS permissions" marker is load-bearing:
+                    // `ToolExecutionResult.failureCategory` matches on it to classify
+                    // this as `.permissionRejected`.
+                    let msg = "Missing required macOS permissions. Please ask the user to grant access in System Settings -> Privacy & Security."
                     // Synthetic classification — no underlying Error to preserve, this is a
                     // detected condition. `.toolPermissionDenied` drives dashboards toward
                     // the "user needs to grant permission" remediation path.
@@ -91,7 +102,7 @@ struct ToolExecutionMediator: ToolDispatching {
                     // Fire-and-forget metrics recording for permission failure
                     let duration = Date().timeIntervalSince(startTime)
                     Task { @MainActor in
-                        MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: false, errorType: "Missing Permissions", context: toolSpan)
+                        MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: false, errorType: "Missing Permissions", durationMs: Int(duration * 1000), context: toolSpan)
                         MetricsManager.shared.record(duration: duration, for: "tool_latency", context: toolSpan)
                     }
                     return failResult
@@ -133,7 +144,7 @@ struct ToolExecutionMediator: ToolDispatching {
 
                 let duration = Date().timeIntervalSince(startTime)
                 Task { @MainActor in
-                    MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: false, errorType: errorMsg, context: toolSpan)
+                    MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: false, errorType: errorMsg, durationMs: Int(duration * 1000), context: toolSpan)
                     MetricsManager.shared.record(duration: duration, for: "tool_latency", context: toolSpan)
                 }
                 return result
@@ -151,25 +162,30 @@ struct ToolExecutionMediator: ToolDispatching {
 
                 let toolResult: (output: String, artifacts: [MediaArtifact])
 
-                if let perToolTimeout = tool.timeout {
-                    // Per-tool timeout race
-                    toolResult = try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
-                        group.addTask {
-                            try await tool.run(paramData)
-                        }
-                        group.addTask {
-                            try await Task.sleep(for: .seconds(perToolTimeout))
-                            throw PerToolTimeoutError(toolName: toolName, duration: perToolTimeout)
-                        }
-                        let first = try await group.next()!
-                        group.cancelAll()
-                        return first
+                // Always bound a tool call: use the per-tool timeout if the user set one, else
+                // the default — so a hung tool (e.g. an unresponsive MCP server) can't stall the
+                // ReAct loop indefinitely. Workflow nodes already default to a hard timeout;
+                // chat agents now match (#20).
+                let effectiveTimeout = tool.timeout ?? defaultToolTimeout
+                toolResult = try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
+                    group.addTask {
+                        try await tool.run(paramData)
                     }
-                } else {
-                    toolResult = try await tool.run(paramData)
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(effectiveTimeout))
+                        throw PerToolTimeoutError(toolName: toolName, duration: effectiveTimeout)
+                    }
+                    let first = try await group.next()!
+                    group.cancelAll()
+                    return first
                 }
 
-                let isSemanticFailure = Self.isSemanticFailure(toolResult.output)
+                // #19 (B): tools whose legitimate output surfaces error text (shell stderr,
+                // build-error readers) opt out of content-sniffing entirely — a non-throwing
+                // return is success; their genuine failures still surface by throwing.
+                let isSemanticFailure = tool.contentMayLookLikeError
+                    ? false
+                    : Self.isSemanticFailure(toolResult.output)
 
                 if isSemanticFailure {
                     // Enrich with recovery hints ONLY for errors that match a registered
@@ -188,12 +204,13 @@ struct ToolExecutionMediator: ToolDispatching {
                 }
 
             } catch let timeoutError as PerToolTimeoutError {
-                logToolExecution.warning("⏱️ Tool '\(toolName)' timed out after \(Int(timeoutError.duration))s (per-tool limit)")
-                if let customMessage = tool.timeoutMessage, !customMessage.isEmpty {
-                    result = .success(output: customMessage)
-                } else {
-                    result = .timedOut(toolName: toolName, duration: timeoutError.duration)
-                }
+                logToolExecution.warning("⏱️ Tool '\(toolName)' timed out after \(Int(timeoutError.duration))s")
+                // A timeout is a FAILURE even when a custom `timeoutMessage` is set: the message
+                // is surfaced to the LLM as the observation, but the result stays `.timedOut` so
+                // the circuit breaker, timeline, and trace record the timeout instead of a
+                // phantom success (#20).
+                let customMessage = (tool.timeoutMessage?.isEmpty == false) ? tool.timeoutMessage : nil
+                result = .timedOut(toolName: toolName, duration: timeoutError.duration, message: customMessage)
                 errorDescriptionForMetrics = "Per-tool timeout after \(Int(timeoutError.duration))s"
 
             } catch {
@@ -234,7 +251,7 @@ struct ToolExecutionMediator: ToolDispatching {
         
         // Fire-and-forget metrics recording
         Task { @MainActor in
-            MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: result.isSuccess, errorType: errorDescriptionForMetrics, context: toolSpan)
+            MetricsManager.shared.recordToolReliability(toolName: sanitizedName, isSuccess: result.isSuccess, errorType: errorDescriptionForMetrics, durationMs: Int(duration * 1000), context: toolSpan)
             MetricsManager.shared.record(duration: duration, for: "tool_latency", context: toolSpan)
         }
 
@@ -243,12 +260,41 @@ struct ToolExecutionMediator: ToolDispatching {
     
     // MARK: - Testable Static Helpers
 
+    /// Upper bound (chars) for the "error"-prefixed semantic-failure check. Intentional
+    /// soft-failure messages (e.g. `read_file` returning "Error: File not found") are short
+    /// single lines; legitimate error-CONTAINING content (logs, build output, code hits) is
+    /// typically far longer, so it stays classified as success. (#19)
+    static let maxSemanticErrorLength = 512
+
+    /// Heuristic for tools that report failure by RETURNING a string rather than throwing
+    /// (e.g. `read_file` → "Error: File not found"). Kept deliberately CONSERVATIVE (#19):
+    /// empty / "null" / "nil" are unambiguous "no result"; the "error" branch fires only on a
+    /// SHORT output shaped like an actual error message — "error" as a leading WORD followed by
+    /// ':' or whitespace ("Error:", "Error reading file: …"). So a successful read/search/log
+    /// whose CONTENT merely begins with "error" (a multi-KB build log, a code hit, "errors: 0")
+    /// is NOT misclassified. Tools that legitimately surface error text opt out earlier at the
+    /// call site via `AgentTool.contentMayLookLikeError`.
     static func isSemanticFailure(_ rawOutput: String) -> Bool {
         let trimmed = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty
-            || trimmed.lowercased().hasPrefix("error")
-            || trimmed.lowercased() == "null"
-            || trimmed.lowercased() == "nil"
+        if trimmed.isEmpty { return true }
+
+        let lower = trimmed.lowercased()
+        if lower == "null" || lower == "nil" { return true }
+
+        // "error"-shaped AND short enough to be a message rather than error-bearing content.
+        // The length bound is on the FIRST LINE, not the whole output: a real error message has
+        // a short header even when it interpolates a long body ("Error: <header>\n<details>"),
+        // whereas a multi-KB log that merely begins with "error" has a long first line. (#19)
+        if lower.hasPrefix("error") {
+            let firstLineLength = trimmed.prefix(while: { !$0.isNewline }).count
+            if firstLineLength <= Self.maxSemanticErrorLength {
+                let afterError = lower.dropFirst(5) // "error".count
+                guard let next = afterError.first else { return true } // bare "error"
+                return next == ":" || next.isWhitespace
+            }
+        }
+
+        return false
     }
 
     static func getRequiredPermissions(for toolName: String) -> [SystemPermission] {

@@ -25,6 +25,10 @@ struct OllamaLLMProvider: LLMProvider {
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
         // Upcast to [[String: Any]] and delegate — text-only, behaviour-identical.
+        try await postChat(messages: messages.map { $0 as [String: Any] }, tools: tools, responseSchema: responseSchema).text
+    }
+
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         try await postChat(messages: messages.map { $0 as [String: Any] }, tools: tools, responseSchema: responseSchema)
     }
 
@@ -46,12 +50,12 @@ struct OllamaLLMProvider: LLMProvider {
             if !images.isEmpty { msg["images"] = images }
             messages.append(msg)
         }
-        return try await postChat(messages: messages, tools: tools, responseSchema: responseSchema)
+        return try await postChat(messages: messages, tools: tools, responseSchema: responseSchema).text
     }
 
     /// Shared POST `/api/chat` (non-streaming) → extracted assistant content string.
     /// Accepts `[[String: Any]]` so callers can attach per-message `images` arrays.
-    private func postChat(messages: [[String: Any]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+    private func postChat(messages: [[String: Any]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         let url = config.baseURL.appendingPathComponent("api/chat")
         var request = URLRequest(url: url, timeoutInterval: config.timeout)
         request.httpMethod = "POST"
@@ -79,13 +83,13 @@ struct OllamaLLMProvider: LLMProvider {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, httpResponse) = try await CloudRequestPipeline.executeLocal(
+            request: request, rateLimitKey: config.rateLimitKey
+        )
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? "Unknown error"
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw LLMProviderError.httpError(status, body)
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw LLMProviderError.httpError(httpResponse.statusCode, errorBody)
         }
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -94,7 +98,7 @@ struct OllamaLLMProvider: LLMProvider {
         }
 
         let content = message["content"] as? String ?? ""
-        return content
+        return (content, json.flatMap { TokenUsage.fromOllama($0) })
     }
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
@@ -158,13 +162,14 @@ struct OllamaLLMProvider: LLMProvider {
         let requestBodyBytes = request.httpBody?.count ?? 0
 
         let httpStart = Date()
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, httpResponse) = try await CloudRequestPipeline.executeLocal(
+            request: request, rateLimitKey: config.rateLimitKey
+        )
         let httpWallDuration = Date().timeIntervalSince(httpStart)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        guard (200...299).contains(httpResponse.statusCode) else {
             let bodyStr = String(data: data, encoding: .utf8) ?? "Unknown error"
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let status = httpResponse.statusCode
 
             // Detect the specific "does not support thinking" 400 so the caller can auto-heal.
             if status == 400 && bodyStr.lowercased().contains("does not support thinking") {
@@ -292,33 +297,14 @@ struct OllamaLLMProvider: LLMProvider {
     /// If no balanced JSON block is found, returns `(content, "")` so callers
     /// can fall back to passing the original content to the parser.
     static func splitProseAndJSON(_ content: String) -> (prose: String, jsonBlock: String) {
-        var depth = 0
-        var startIndex: String.Index?
-        var inString = false
-        var prevChar: Character = "\0"
-        let openers: Set<Character> = ["{", "["]
-        let closers: Set<Character> = ["}", "]"]
-
-        for (index, char) in zip(content.indices, content) {
-            if char == "\"" && prevChar != "\\" {
-                inString.toggle()
-            }
-            if !inString {
-                if openers.contains(char) {
-                    if depth == 0 { startIndex = index }
-                    depth += 1
-                } else if closers.contains(char) {
-                    depth -= 1
-                    if depth == 0, let start = startIndex {
-                        let rawProse = String(content[..<start]).trimmingCharacters(in: .whitespacesAndNewlines)
-                        let jsonBlock = String(content[start...index])
-                        return (stripOrphanFences(rawProse), jsonBlock)
-                    }
-                }
-            }
-            prevChar = char
+        // String/escape-aware balanced-block split (#15). Replaces the old `prevChar != "\\"`
+        // scan, which mishandled `\\"` — an escaped backslash before a real closing quote.
+        let (proseSlice, blockSlice) = BalancedJSONScanner.splitProseAndBlock(in: content)
+        guard let block = blockSlice else {
+            return (stripOrphanFences(content.trimmingCharacters(in: .whitespacesAndNewlines)), "")
         }
-        return (stripOrphanFences(content.trimmingCharacters(in: .whitespacesAndNewlines)), "")
+        let prose = String(proseSlice).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (stripOrphanFences(prose), String(block))
     }
 
     /// Removes a leading ` ```json `/` ``` ` opener and trailing ` ``` ` closer
@@ -341,61 +327,61 @@ struct OllamaLLMProvider: LLMProvider {
     }
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    let url = config.baseURL.appendingPathComponent("api/chat")
-                    var request = URLRequest(url: url, timeoutInterval: config.timeout)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        streamWithUsage(messages: messages, tools: tools, onUsage: nil)
+    }
 
-                    var body: [String: Any] = [
-                        "model": config.modelName,
-                        "messages": messages,
-                        "stream": true
-                    ]
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        // Ollama streams newline-delimited JSON (not SSE). The shared transport owns the
+        // read loop, cancellation, and stall timeout (#13); the local rate-limit gate is
+        // applied by CloudRequestPipeline.executeLocalStream (#12).
+        SSEStreamParser.stream(
+            openBytes: {
+                let url = self.config.baseURL.appendingPathComponent("api/chat")
+                var request = URLRequest(url: url, timeoutInterval: self.config.timeout)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-                    if let options = config.options {
-                        body["options"] = mapToOllamaOptions(options)
-                    }
-
-                    // Ollama supports tools natively as well
-                    if let tools = tools, !tools.isEmpty {
-                        body["tools"] = tools
-                    }
-
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
-
-                    guard let httpResponse = response as? HTTPURLResponse,
-                          (200...299).contains(httpResponse.statusCode) else {
-                        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                        throw LLMProviderError.httpError(status, "Ollama streaming error")
-                    }
-
-                    // Ollama streams newline-delimited JSON objects
-                    for try await line in bytes.lines {
-                        guard !line.isEmpty,
-                              let lineData = line.data(using: .utf8),
-                              let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                              let message = json["message"] as? [String: Any],
-                              let content = message["content"] as? String else {
-                            continue
-                        }
-
-                        continuation.yield(content)
-
-                        // Check if Ollama signals completion
-                        if let done = json["done"] as? Bool, done { break }
-                    }
-
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                var body: [String: Any] = [
+                    "model": self.config.modelName,
+                    "messages": messages,
+                    "stream": true
+                ]
+                if let options = self.config.options {
+                    body["options"] = self.mapToOllamaOptions(options)
                 }
+                // `tools` are ignored on the bot stream (strictly conversational, like
+                // the cloud providers) — tool-calling is the agent path.
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (bytes, httpResponse) = try await CloudRequestPipeline.executeLocalStream(
+                    request: request, rateLimitKey: self.config.rateLimitKey
+                )
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    throw LLMProviderError.httpError(httpResponse.statusCode, "Ollama streaming error")
+                }
+                return bytes
+            },
+            onUsage: onUsage,
+            extractUsage: { line, _ in
+                guard let data = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      (json["done"] as? Bool) == true else { return nil }
+                return TokenUsage.fromOllama(json)
+            },
+            handleLine: { line, _ in
+                guard !line.isEmpty,
+                      let lineData = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                    return .skip
+                }
+                let content = (json["message"] as? [String: Any])?["content"] as? String ?? ""
+                let done = (json["done"] as? Bool) ?? false
+                if done {
+                    return content.isEmpty ? .finish : .emitThenFinish(content)
+                }
+                return content.isEmpty ? .skip : .emit(content)
             }
-        }
+        )
     }
     
     private func mapToOllamaOptions(_ options: [String: JSONValue]) -> [String: Any] {

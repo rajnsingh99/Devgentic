@@ -62,6 +62,11 @@ actor PlanningExecutorWrapper: Executor {
                     sessionState = await SessionGraphStore.shared.getActiveState(for: input.conversationID)
                 }
 
+                // #23: whether any answer content reached the UI. The cancel handler emits a
+                // placeholder only when the bubble would otherwise be empty (defensive — today
+                // content is yielded only at synthesis, immediately before finishing).
+                var didEmitContent = false
+
                 do {
                     logger.info("Planning capability initiated.")
 
@@ -133,11 +138,18 @@ actor PlanningExecutorWrapper: Executor {
                     var subtasks: [SubTask]
 
                     do {
-                        subtasks = try await planGenerator.generatePlan(model: spyModel, context: planContext)
+                        let planResult = try await planGenerator.generatePlan(model: spyModel, context: planContext)
+                        subtasks = planResult.plan
+                        continuation.yield(.tokenUsage(planResult.usage))
                         // Cap to configured max
                         if subtasks.count > config.maxSubtasks {
                             subtasks = Array(subtasks.prefix(config.maxSubtasks))
                         }
+                    } catch is CancellationError {
+                        // Stop must propagate, not be folded into a single-task fallback that keeps
+                        // running. Rethrow to the outer cancel handler (mirrors the #18-B fix in
+                        // ReflectionEvaluator + the subtask catches below). (chip task_61dd9583)
+                        throw CancellationError()
                     } catch {
                         logger.warning("Plan generation failed: \(error.localizedDescription). Using single-task fallback.")
                         subtasks = [SubTask(id: "step_1", description: input.userInput)]
@@ -295,7 +307,12 @@ actor PlanningExecutorWrapper: Executor {
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
                         isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
-                        forceSynthesis: input.responseSynthesisEnabled
+                        forceSynthesis: input.responseSynthesisEnabled,
+                        // Count the Phase-3 synthesis LLM cost — emitted as a usage event
+                        // like plan-generation and subtask usages above. Without this the
+                        // plan's final synthesis call was the one LLM cost dropped from the
+                        // run's token/cost rollup (audit #10).
+                        onUsage: { continuation.yield(.tokenUsage($0)) }
                     )
 
                     // Partial-failure detection: if all subtasks errored, treat as .failed
@@ -313,6 +330,7 @@ actor PlanningExecutorWrapper: Executor {
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     continuation.yield(.content(response))
+                    didEmitContent = true
                     continuation.yield(.executionFinished(outcome: terminalOutcome, reason: terminalReason))
                     continuation.finish()
 
@@ -322,6 +340,13 @@ actor PlanningExecutorWrapper: Executor {
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
+                    // #23: mirror ReActAgentExecutor's cancel placeholder so a cancelled
+                    // Plan&Execute run doesn't leave an empty bubble (the inner subtask
+                    // content is accumulated, not forwarded, so on a wrapper-level cancel
+                    // nothing has reached the UI). Guarded against double content.
+                    if !didEmitContent {
+                        continuation.yield(.content("*Operation stopped by user.*"))
+                    }
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {
@@ -371,6 +396,17 @@ actor PlanningExecutorWrapper: Executor {
         continuation.yield(.subtaskStarted(index: subtaskIndex, total: allSubtasks.count, description: subtask.description))
         continuation.yield(.thought("Subtask: \(subtask.description)"))
 
+        // Persist a subtask span so the inner executor's iteration spans attach to a real
+        // parent row instead of orphaning under the trace root (Gap #10). The success flag
+        // keeps the span status honest on throw/cancel exits (audit #9).
+        let subtaskSpan = input.traceContext.newSpan()
+        await TraceRecorder.shared.beginSpan(context: subtaskSpan, name: "subtask:\(subtaskIndex)", kind: .subtask)
+        var subtaskSucceeded = false
+        defer {
+            let status: SpanStatus = subtaskSucceeded ? .completed : .error
+            Task { await TraceRecorder.shared.endSpan(spanID: subtaskSpan.spanID, status: status) }
+        }
+
         // Optionally filter tools based on toolHints
         let filteredTools: [AgentTool]
         if config.subtaskToolFiltering, let hints = subtask.toolHints, !hints.isEmpty {
@@ -406,29 +442,15 @@ actor PlanningExecutorWrapper: Executor {
             logger.info("Seeded \(deps.count) dependency result(s) into working memory for subtask '\(subtask.id)'.")
         }
 
-        // Build subtask-scoped input
-        let subtaskInput = AgentInput(
-            userInput: subtask.description,
-            chatHistory: input.chatHistory,
-            conversationID: input.conversationID,
-            tools: filteredTools,
-            longTermMemory: input.longTermMemory,
-            activeState: input.activeState,
-            recentHistory: input.recentHistory,
-            generatorStrategy: input.generatorStrategy,
-            workingMemory: seededMemory,
-            rateLimitKey: input.rateLimitKey,
-            rateLimitCategory: input.rateLimitCategory,
-            instructions: input.instructions,
-            skillManifests: input.skillManifests,
-            skillFolderPath: input.skillFolderPath,
-            retryPolicy: input.retryPolicy,
-            errorRecovery: input.errorRecovery,
-            responseSynthesisEnabled: input.responseSynthesisEnabled,
-            nativeHistoryTurns: input.nativeHistoryTurns,
-            suppressEpisodeManagement: true,
-            traceContext: input.traceContext.newSpan()
-        )
+        // Build subtask-scoped input by copy-derivation (AgentInput contract):
+        // everything not overridden — userPayload images, modelTier, workflowContext,
+        // and any future field — is inherited from the parent run automatically.
+        var subtaskInput = input
+        subtaskInput.userInput = subtask.description
+        subtaskInput.tools = filteredTools
+        subtaskInput.workingMemory = seededMemory
+        subtaskInput.suppressEpisodeManagement = true
+        subtaskInput.traceContext = subtaskSpan
 
         // Delegate to inner executor
         let stream = innerExecutor.execute(model: model, input: subtaskInput, onTraceUpdate: onTraceUpdate)
@@ -476,6 +498,7 @@ actor PlanningExecutorWrapper: Executor {
             : String(output.prefix(150))
         continuation.yield(.subtaskCompleted(index: subtaskIndex, total: allSubtasks.count, summary: summary))
 
+        subtaskSucceeded = true
         return (output, toolResults)
     }
 

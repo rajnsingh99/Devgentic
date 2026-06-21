@@ -73,6 +73,23 @@ struct AppSettings {
     // Developer Mode
     static let developerModeKey = "developerMode"
 
+    // Diagnostics consent (default-ON opt-out)
+    /// Opt-out for on-device error/warning diagnostics: warning+ log buffering, v2 error-
+    /// analytics columns, and crash-diagnostic capture. NOTE: basic execution traces
+    /// (`beginTrace`/`emit`) are NOT gated — they always record locally (30-day purge) and
+    /// power the Report inspector; the Settings/PRIVACY copy says exactly that. Default-ON
+    /// (absence of the key means enabled). Developer mode additionally records info/debug
+    /// verbosity regardless of this flag.
+    static let diagnosticsEnabledKey = "diagnosticsEnabled"
+
+    /// One-time WelcomeView disclosure that on-device diagnostics are recorded.
+    static let diagnosticsDisclosureSeenKey = "diagnosticsDisclosureSeen"
+
+    /// Whether on-device diagnostic recording is enabled. Default-ON (opt-out).
+    static var diagnosticsRecordingEnabled: Bool {
+        UserDefaults.standard.object(forKey: diagnosticsEnabledKey) as? Bool ?? true
+    }
+
     // ChatOps — Slack
     static let chatOpsSlackBotTokenKey = "chatOpsSlackBotToken"
     static let chatOpsSlackAppTokenKey = "chatOpsSlackAppToken"

@@ -32,7 +32,10 @@ struct MistralXMLParser: CognitiveParserProtocol {
 
         if !toolCalls.isEmpty {
             logger.info("MistralXMLParser: Extracted \(toolCalls.count) tool call(s).")
-            return ModernCognitiveStep(reasoning: reasoning, toolCalls: toolCalls)
+            // Filter template-stub narration ("Calling X…") out of the with-tools reasoning so
+            // it doesn't pollute the working-memory scratchpad (#15 / G7). The termination path
+            // below is deliberately NOT filtered — there the text is the final answer.
+            return ModernCognitiveStep(reasoning: ReasoningQualityFilter.filter(reasoning), toolCalls: toolCalls)
         }
 
         // 3. No XML tool markers found — treat as a plain text (termination) response
@@ -107,19 +110,9 @@ struct MistralXMLParser: CognitiveParserProtocol {
             let segments = text.components(separatedBy: marker).dropFirst() // skip text before first marker
             for segment in segments {
                 let trimmed = segment.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let arrayStart = trimmed.firstIndex(of: "[") else { continue }
-                // Find matching ] for the opening [
-                var depth = 0
-                var endIdx: String.Index?
-                for idx in trimmed[arrayStart...].indices {
-                    if trimmed[idx] == "[" { depth += 1 }
-                    else if trimmed[idx] == "]" {
-                        depth -= 1
-                        if depth == 0 { endIdx = idx; break }
-                    }
-                }
-                guard let end = endIdx else { continue }
-                let arraySlice = trimmed[arrayStart...end]
+                // String/escape-aware balanced `[...]` scan (#15): a `]` inside a JSON string
+                // value must not terminate the array early (the old inline scan had no string-state).
+                guard let arraySlice = BalancedJSONScanner.firstArray(in: trimmed) else { continue }
                 guard let data = arraySlice.data(using: .utf8),
                       let calls = try? JSONDecoder().decode([MistralToolCall].self, from: data) else { continue }
                 results.append(contentsOf: calls.map {

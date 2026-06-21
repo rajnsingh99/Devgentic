@@ -161,15 +161,15 @@ struct AgentConfigDetailView: View {
         )
     }
 
-    private var retryPolicyBinding: Binding<RetryPolicy?> {
-        Binding<RetryPolicy?>(
+    private var resilienceOverridesBinding: Binding<ResilienceOverrides?> {
+        Binding<ResilienceOverrides?>(
             get: {
-                if case .agent(let config) = editBuffer.draft.details { return config.retryPolicy }
+                if case .agent(let config) = editBuffer.draft.details { return config.resilienceOverrides }
                 return nil
             },
             set: { newValue in
                 if case .agent(var config) = editBuffer.draft.details {
-                    config.retryPolicy = newValue
+                    config.resilienceOverrides = newValue
                     editBuffer.draft.details = .agent(config)
                 }
             }
@@ -668,7 +668,7 @@ struct AgentConfigDetailView: View {
                                 .foregroundColor(theme.primaryText)
 
                             ErrorRecoverySection(
-                                retryPolicy: retryPolicyBinding,
+                                resilienceOverrides: resilienceOverridesBinding,
                                 errorRecovery: errorRecoveryBinding
                             )
                             .padding(.leading, 12)

@@ -29,6 +29,7 @@
 
 import Foundation
 import GRDB
+import CryptoKit
 
 // MARK: - Sub-structs
 
@@ -342,10 +343,13 @@ struct TraceConfigSnapshot: Codable, Sendable {
 
     // MARK: - Helpers
 
-    /// SHA-256 hash, first 16 hex chars. Enough for equality joins; not cryptographic.
-    private static func shortHash(_ s: String) -> String {
-        let digest = s.data(using: .utf8)?.hashValue ?? 0
-        return String(format: "%016x", UInt64(bitPattern: Int64(digest)))
+    /// SHA-256 hash, first 8 bytes as 16 lowercase hex chars. Stable across launches
+    /// (unlike Swift's `hashValue`, whose `Hasher` seed is randomized per process),
+    /// so the cross-trace equality joins the partial index was built for actually work.
+    /// Enough for equality checks; not a cryptographic commitment.
+    static func shortHash(_ s: String) -> String {
+        let digest = SHA256.hash(data: Data(s.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Stringify a JSONValue for flat advancedConfig storage. Sensitive values

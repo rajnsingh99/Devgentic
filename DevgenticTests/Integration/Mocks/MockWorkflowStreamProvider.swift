@@ -141,6 +141,7 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
             chatHistory: [],
             conversationID: conversationID,
             ragContext: nil,
+            userPayload: nil,
             traceContext: traceContext,
             onTraceUpdate: onTraceUpdate
         )

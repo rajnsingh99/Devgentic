@@ -91,67 +91,80 @@ struct ExecutionLimitsSection: View {
 }
 
 struct ErrorRecoverySection: View {
-    @Binding var retryPolicy: RetryPolicy?
+    /// Per-tier resilience cap overrides. `nil`/all-Auto = inherit the resolved
+    /// defaults; transport-tier (HTTP retry/backoff) budgets are auto-derived from
+    /// the provider and intentionally not exposed here.
+    @Binding var resilienceOverrides: ResilienceOverrides?
     @Binding var errorRecovery: ErrorRecovery?
     @Environment(\.appTheme) private var theme
 
-    private var effectiveRetry: RetryPolicy { retryPolicy ?? RetryPolicy() }
+    /// The default each cap falls back to when left on Auto (matches
+    /// `ResolvedResiliencePolicy.resolved`'s `RetryPolicy()` default).
+    private let autoDefault = 3
+
+    private var effectiveOverrides: ResilienceOverrides { resilienceOverrides ?? ResilienceOverrides() }
     private var effectiveRecovery: ErrorRecovery { errorRecovery ?? ErrorRecovery() }
+
+    /// Mutates the overrides and collapses an all-Auto result back to `nil` so an
+    /// untouched profile never persists an empty overrides object.
+    private func updateOverrides(_ mutate: (inout ResilienceOverrides) -> Void) {
+        var updated = effectiveOverrides
+        mutate(&updated)
+        resilienceOverrides = updated.isEmpty ? nil : updated
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
 
-            // Parse Failure Retries
+            // Parse Failure Cap (cognitive tier) — was conflated with the tool and
+            // repetitive caps under one "Max Retries" knob; now isolated.
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("On Parse Failure")
                         .font(theme.fontBody.weight(.medium))
-                    Text("When the model returns unparseable output")
+                    Text("Retries when the model returns unparseable output")
                         .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
                 Spacer(minLength: 16)
 
-                Picker("", selection: Binding(
-                    get: { effectiveRetry.maxRetries },
-                    set: {
-                        var policy = effectiveRetry
-                        policy.maxRetries = $0
-                        retryPolicy = policy
-                    }
+                Picker("", selection: Binding<Int?>(
+                    get: { effectiveOverrides.maxParseFailures },
+                    set: { newValue in updateOverrides { $0.maxParseFailures = newValue } }
                 )) {
-                    Text("Retry 1x").tag(1)
-                    Text("Retry 3x").tag(3)
-                    Text("Retry 5x").tag(5)
+                    Text("Auto (\(autoDefault))").tag(Int?.none)
+                    Text("1").tag(Int?.some(1))
+                    Text("2").tag(Int?.some(2))
+                    Text("3").tag(Int?.some(3))
+                    Text("5").tag(Int?.some(5))
                 }
                 .labelsHidden()
                 .fixedSize()
             }
 
-            // Backoff Strategy
+            // Tool Failure Tolerance (loop tier) — how many consecutive tool failures
+            // the circuit breaker tolerates before aborting. Distinct from the policy
+            // below, which decides what to DO once tolerance is exhausted.
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Backoff Strategy")
+                    Text("Tool Failure Tolerance")
                         .font(theme.fontBody.weight(.medium))
-                    Text("Delay pattern between retries")
+                    Text("Consecutive tool failures before the agent gives up")
                         .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
 
                 Spacer(minLength: 16)
 
-                Picker("", selection: Binding(
-                    get: { effectiveRetry.backoffStrategy },
-                    set: {
-                        var policy = effectiveRetry
-                        policy.backoffStrategy = $0
-                        retryPolicy = policy
-                    }
+                Picker("", selection: Binding<Int?>(
+                    get: { effectiveOverrides.maxConsecutiveToolFailures },
+                    set: { newValue in updateOverrides { $0.maxConsecutiveToolFailures = newValue } }
                 )) {
-                    ForEach(BackoffStrategy.allCases, id: \.self) { strategy in
-                        Text(strategy.rawValue.capitalized).tag(strategy)
-                    }
+                    Text("Auto (\(autoDefault))").tag(Int?.none)
+                    Text("2").tag(Int?.some(2))
+                    Text("3").tag(Int?.some(3))
+                    Text("5").tag(Int?.some(5))
                 }
                 .labelsHidden()
                 .fixedSize()

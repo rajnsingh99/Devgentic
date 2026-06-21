@@ -72,7 +72,11 @@ actor TraceRecorder {
         modelName: String?
     ) {
         guard let store else { return }
-        
+
+        // §12.3 — stamp the build on every trace (config snapshots are chat-path-only),
+        // so the 30-day DB can be split by version after an update.
+        let info = Bundle.main.infoDictionary
+
         let record = TraceRecord(
             traceID: context.traceID,
             conversationID: conversationID.uuidString,
@@ -83,7 +87,9 @@ actor TraceRecorder {
             provider: context.profileInfo.provider?.rawValue,
             modelName: modelName,
             startedAt: context.requestStartTime,
-            status: .running
+            status: .running,
+            appVersion: info?["CFBundleShortVersionString"] as? String,
+            buildNumber: info?["CFBundleVersion"] as? String
         )
         
         do {
@@ -108,6 +114,40 @@ actor TraceRecorder {
         }
     }
     
+    /// Idempotently guarantees the span row for `context.spanID` exists — and
+    /// carries the caller's descriptive `name`/`kind` — so child spans emitted
+    /// against this context have a meaningful parent row in `spans`.
+    ///
+    /// Two flows reach executors with a root-level context:
+    /// - Chat pipeline: `beginTrace` already auto-created the root span as a
+    ///   generic "root" — this renames it to the caller's name (e.g.
+    ///   `workflow:<id8>`) while preserving its startedAt/status/endedAt.
+    /// - Headless flows (tests, nested sub-workflows, direct executor invocations):
+    ///   `beginTrace` never ran — this inserts the row.
+    /// Callers must use this, NOT `beginSpan`, for a context they did not create
+    /// via `newSpan()`: an unconditional insert collides with `beginTrace`'s row
+    /// (UNIQUE constraint on `spans.spanID`).
+    func ensureRootSpan(context: TraceContext, name: String, kind: SpanKind) {
+        guard let store else { return }
+
+        let span = Span(
+            spanID: context.spanID,
+            traceID: context.traceID,
+            parentSpanID: context.parentSpanID,
+            name: name,
+            kind: kind,
+            startedAt: Date(),
+            status: .running
+        )
+
+        do {
+            let inserted = try store.ensureSpan(span)
+            logger.debug("Ensured root span: \(name) [\(context.spanID)] (\(inserted ? "inserted" : "renamed existing"))")
+        } catch {
+            logger.error("Failed to ensure root span '\(name)': \(error.localizedDescription)")
+        }
+    }
+
     /// Records the start of a new span within a trace.
     func beginSpan(context: TraceContext, name: String, kind: SpanKind) {
         guard let store else { return }
@@ -151,7 +191,13 @@ actor TraceRecorder {
         let sanitizedError = error.map { TelemetrySanitizer.sanitize($0) }
 
         do {
-            try store.updateTrace(traceID: traceID, endedAt: Date(), status: status, errorSummary: sanitizedError)
+            let endedAt = Date()
+            try store.updateTrace(traceID: traceID, endedAt: endedAt, status: status, errorSummary: sanitizedError)
+            // Close any spans still open for this trace — notably the root span, which no
+            // executor ends on the chat path, plus any span leaked by an abnormal exit.
+            // Map the trace's terminal status onto the 3-case SpanStatus (Gap #13).
+            let spanStatus: SpanStatus = (status == .completed) ? .completed : .error
+            try store.closeOpenSpans(traceID: traceID, endedAt: endedAt, status: spanStatus)
             logger.debug("Ended trace: \(traceID) with status: \(status.rawValue)")
         } catch {
             logger.error("Failed to end trace \(traceID): \(error.localizedDescription)")
@@ -163,7 +209,27 @@ actor TraceRecorder {
             closedTraceIDs.removeAll()
         }
     }
-    
+
+    /// Records the run's accumulated token usage + estimated cost on the trace (D1).
+    /// Looks up the model from the trace row so callers needn't thread it. No-op for zero
+    /// usage. Call once at trace end.
+    func recordTokenUsage(traceID: String, usage: TokenUsage) {
+        guard let store, usage.totalTokens > 0 else { return }
+        let modelName = (try? store.fetchTrace(traceID: traceID))?.modelName
+        let cost = TokenPricing.estimatedCostUSD(model: modelName, usage: usage)
+        do {
+            try store.updateTraceTokens(
+                traceID: traceID,
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                estimatedCostUSD: cost,
+                estimated: usage.isEstimated
+            )
+        } catch {
+            logger.error("Failed to record token usage for trace \(traceID): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Event Recording (Fire-and-Forget)
     
     /// Appends an event to the buffer. Auto-flushes when batch size is reached.
@@ -186,14 +252,14 @@ actor TraceRecorder {
             spanID: span.spanID,
             traceID: span.traceID,
             eventType: .thought,
-            content: text,
+            content: TelemetrySanitizer.sanitize(text),
             severity: .info
         ))
     }
     
     /// Records a tool invocation.
     func emitToolCall(span: TraceContext, name: String, arguments: String) {
-        let detail: [String: Any] = ["tool_name": name, "arguments_preview": String(arguments.prefix(500))]
+        let detail: [String: Any] = ["tool_name": name, "arguments_preview": String(TelemetrySanitizer.sanitize(arguments).prefix(500))]
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
@@ -217,14 +283,16 @@ actor TraceRecorder {
             "tool_name": name,
             "is_success": success,
             "duration_ms": durationMs,
-            "output_preview": String(output.prefix(500))
+            "output_preview": String(TelemetrySanitizer.sanitize(output).prefix(500))
         ]
         // Dev-mode-gated v2 column population. Non-dev-mode users get the legacy
         // detailJSON representation; dev-mode users additionally get indexed columns
         // for fast dashboard aggregation. Failures without an explicit category
         // default to `.toolSemanticFail` (matches ToolExecutionMediator's
         // `isSemanticFailure` detection — empty output or error-shaped strings).
-        let devModeOn = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+        // v2 analytics columns are sanitized + non-PII (enums/ints), so record them whenever
+        // diagnostics are enabled (default-on), not just in developer mode (Gap #4).
+        let recordV2 = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey) || AppSettings.diagnosticsRecordingEnabled
         let inferredCategory: AgentErrorCategory? = success ? nil : .toolSemanticFail
 
         emit(SpanEvent(
@@ -234,9 +302,9 @@ actor TraceRecorder {
             content: "\(name): \(success ? "success" : "failed")",
             detailJSON: serializeDetail(detail),
             severity: success ? .info : .warning,
-            errorCategory: devModeOn ? inferredCategory : nil,
-            phase: devModeOn ? .tooling : nil,
-            durationMs: devModeOn ? durationMs : nil
+            errorCategory: recordV2 ? inferredCategory : nil,
+            phase: recordV2 ? .tooling : nil,
+            durationMs: recordV2 ? durationMs : nil
         ))
     }
     
@@ -257,7 +325,7 @@ actor TraceRecorder {
     func emitLLMResponse(span: TraceContext, durationMs: Int, preview: String) {
         let detail: [String: Any] = [
             "duration_ms": durationMs,
-            "response_preview": String(preview.prefix(300))
+            "response_preview": String(TelemetrySanitizer.sanitize(preview).prefix(300))
         ]
         emit(SpanEvent(
             spanID: span.spanID,
@@ -272,14 +340,14 @@ actor TraceRecorder {
     /// Records a parse error during cognitive step parsing.
     func emitParseError(span: TraceContext, rawOutput: String, error: String) {
         let detail: [String: Any] = [
-            "raw_output_preview": String(rawOutput.prefix(500)),
+            "raw_output_preview": String(TelemetrySanitizer.sanitize(rawOutput).prefix(500)),
             "error": TelemetrySanitizer.sanitize(error)
         ]
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
             eventType: .parseError,
-            content: "Parse error: \(error)",
+            content: "Parse error: \(TelemetrySanitizer.sanitize(error))",
             detailJSON: serializeDetail(detail),
             severity: .warning
         ))
@@ -300,13 +368,14 @@ actor TraceRecorder {
     
     /// Records a user interaction event (HITL permission, clarification).
     func emitUserInteraction(span: TraceContext, type: String, toolName: String?, outcome: String) {
-        var detail: [String: Any] = ["type": type, "outcome": outcome]
+        let safeOutcome = TelemetrySanitizer.sanitize(outcome)
+        var detail: [String: Any] = ["type": type, "outcome": safeOutcome]
         if let t = toolName { detail["tool"] = t }
         emit(SpanEvent(
             spanID: span.spanID,
             traceID: span.traceID,
             eventType: .userInteraction,
-            content: "\(type): \(outcome)",
+            content: "\(type): \(safeOutcome)",
             detailJSON: serializeDetail(detail),
             severity: .info
         ))
@@ -421,6 +490,9 @@ actor TraceRecorder {
         causedBy: Int64? = nil
     ) {
         let devModeOn = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+        // v2 columns (sanitized, non-PII) record whenever diagnostics are enabled; the
+        // heavier stack-signature diagnostics below stay developer-mode-only (Gap #4).
+        let recordV2 = devModeOn || AppSettings.diagnosticsRecordingEnabled
 
         // Message + context always sanitized at the strictest level that's compatible
         // with debug readability — redacts API keys/tokens but preserves paths' tails
@@ -476,11 +548,11 @@ actor TraceRecorder {
             content: sanitizedMessage,
             detailJSON: serializeDetail(detail),
             severity: severity,
-            errorCategory: devModeOn ? error.category : nil,
-            errorChainID:  devModeOn ? error.chainID  : nil,
-            phase:         devModeOn ? error.phase    : nil,
-            iterationNumber: devModeOn ? iteration    : nil,
-            causedByEventID: devModeOn ? causedBy     : nil,
+            errorCategory: recordV2 ? error.category : nil,
+            errorChainID:  recordV2 ? error.chainID  : nil,
+            phase:         recordV2 ? error.phase    : nil,
+            iterationNumber: recordV2 ? iteration    : nil,
+            causedByEventID: recordV2 ? causedBy     : nil,
             durationMs:    nil
         )
 
@@ -566,7 +638,16 @@ actor TraceRecorder {
     }
     
     // MARK: - Maintenance
-    
+
+    /// Flushes pending events synchronously and stops the periodic flush task. Called
+    /// from `applicationWillTerminate` so up to `flushInterval` of buffered span events
+    /// aren't lost on a graceful quit (mirrors `LogRecorder.prepareForTermination`).
+    func prepareForTermination() {
+        flushTask?.cancel()
+        flushTask = nil
+        flush()
+    }
+
     /// Purges traces older than the given date. Call periodically or at app launch.
     func purgeOlderThan(_ date: Date) {
         guard let store else { return }

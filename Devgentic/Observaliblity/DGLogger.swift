@@ -153,11 +153,23 @@ struct DGLogger: Sendable {
 
     // MARK: - Ring-buffer routing
 
-    /// Gated buffer write. Dev mode off → no-op (preserves production overhead = 0).
-    /// Dev mode on → sanitize message + metadata, snapshot current LogContext task-locals,
+    /// Gated buffer write. Warning/error are always persisted (unless the user opted out
+    /// of diagnostics), so a default-config user's incident is actually recorded; the
+    /// verbose info/notice/debug stream stays gated behind developer mode (Gap #4). Both
+    /// paths sanitize message + metadata, snapshot the current LogContext task-locals, and
     /// hand to LogRecorder.
+    /// Whether a log at `level` should be persisted to the ring buffer: warning/error
+    /// whenever diagnostics are enabled (default-on), everything in developer mode. Pure +
+    /// static so the un-gating policy is unit-testable without touching UserDefaults (Gap #4).
+    static func shouldPersist(level: LogLevel, developerMode: Bool, diagnosticsEnabled: Bool) -> Bool {
+        developerMode || (level >= .warning && diagnosticsEnabled)
+    }
+
     private func route(level: LogLevel, message: String, metadata: [String: String]) {
-        guard UserDefaults.standard.bool(forKey: AppSettings.developerModeKey) else { return }
+        let devMode = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
+        guard Self.shouldPersist(level: level,
+                                 developerMode: devMode,
+                                 diagnosticsEnabled: AppSettings.diagnosticsRecordingEnabled) else { return }
 
         let sanitizedMessage = TelemetrySanitizer.sanitizeFull(message, level: .standard)
 

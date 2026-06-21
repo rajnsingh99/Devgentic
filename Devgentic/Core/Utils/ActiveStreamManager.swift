@@ -429,7 +429,12 @@ final class ActiveStreamManager {
                     case .workflowNodeCompleted(let nodeID, let profileName, let summary):
                         agentMessage.thinkingHeadline = "\(profileName) completed"
                         let completedId = UUID()
-                        agentMessage.appendTimelineEvent(.thought(id: completedId, text: "✅ \(profileName): \(summary)"))
+                        // `summary` now carries the node's FULL output (for the per-node
+                        // Output panel + persistence via handleNodeCompleted). Keep the
+                        // orchestrator's aggregate thought log a brief milestone so it
+                        // isn't bloated by full node outputs.
+                        let summaryPreview = summary.count > 200 ? String(summary.prefix(200)) + "…" : summary
+                        agentMessage.appendTimelineEvent(.thought(id: completedId, text: "✅ \(profileName): \(summaryPreview)"))
                         logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(String(summary.prefix(200)))")
                         workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary)
 
@@ -558,7 +563,9 @@ final class ActiveStreamManager {
 
                     // MARK: Token Usage
                     case .tokenUsage(let usage):
-                        agentMessage.tokenUsage = usage
+                        // Accumulate (don't overwrite): a multi-node workflow emits one
+                        // event per node, so we want the run total, not just the last (D1).
+                        agentMessage.tokenUsage = (agentMessage.tokenUsage ?? TokenUsage()).accumulated(with: usage)
 
                     // MARK: Terminal Outcome
                     case .executionFinished(let outcome, let reason):
@@ -583,11 +590,23 @@ final class ActiveStreamManager {
                     wfState.handleFinalOutput(finalText)
                 }
 
+                // Stop-button race: cancelling the consumer tears the stream down before
+                // the producer's `.executionFinished(.cancelled)` can be consumed, so the
+                // outcome arrives as nil and the safety net would record `.completed`
+                // (audit #2). Stamp the honest outcome here.
+                if Task.isCancelled, agentMessage.terminalOutcome == nil {
+                    agentMessage.terminalOutcome = .cancelled
+                    agentMessage.terminalReason = agentMessage.terminalReason ?? "Cancelled by user"
+                }
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
 
             } catch is CancellationError {
                 logger.info("[STREAM_CANCELLED] traceID: \(agentMessage.traceID ?? "?"), messageID: \(agentMessage.id.uuidString.prefix(8))")
                 workflowExecutionState?.handleError("Cancelled")
+                if agentMessage.terminalOutcome == nil {
+                    agentMessage.terminalOutcome = .cancelled
+                    agentMessage.terminalReason = agentMessage.terminalReason ?? "Cancelled by user"
+                }
                 await self.finalizeMessage(agentMessage, conversationID: conversationID, error: nil)
             } catch {
                 logger.error("[STREAM_ERROR] traceID: \(agentMessage.traceID ?? "?"), messageID: \(agentMessage.id.uuidString.prefix(8)), error: \(error.localizedDescription)")
@@ -721,9 +740,21 @@ final class ActiveStreamManager {
         }
 
         if let traceID = message.traceID {
-            let traceStatus: TraceStatus = error != nil ? .error : .completed
-            logger.info("[TRACE_END] traceID: \(traceID), status: \(traceStatus == .completed ? "completed" : "error"), messageID: \(message.id.uuidString.prefix(8))")
-            await TraceRecorder.shared.endTrace(traceID: traceID, status: traceStatus, error: error?.localizedDescription)
+            // Derive the persisted trace status from how the run *actually* ended, not
+            // merely from whether an error was thrown. A thrown exception reaching this
+            // boundary is the most severe signal and always wins; otherwise we honor the
+            // `terminalOutcome` the executor reported via `.executionFinished` (set just
+            // above), so graceful failures (circuit-breaker, exhaustion, all-nodes-failed,
+            // ImageGen) and cancellations stop being recorded as `.completed`.
+            // `terminalReason` carries the human-readable cause for non-thrown failures;
+            // it is sanitized inside `endTrace`.
+            let traceStatus = TraceStatus.resolve(thrownError: error != nil, terminalOutcome: message.terminalOutcome)
+            let endErrorSummary = error?.localizedDescription ?? message.terminalReason
+            logger.info("[TRACE_END] traceID: \(traceID), status: \(traceStatus.rawValue), messageID: \(message.id.uuidString.prefix(8))")
+            await TraceRecorder.shared.endTrace(traceID: traceID, status: traceStatus, error: endErrorSummary)
+            if let usage = message.tokenUsage {
+                await TraceRecorder.shared.recordTokenUsage(traceID: traceID, usage: usage)
+            }
         }
         
         if let error = error {

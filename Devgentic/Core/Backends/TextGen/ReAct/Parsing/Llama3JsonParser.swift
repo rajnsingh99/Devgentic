@@ -107,36 +107,7 @@ struct Llama3JsonParser: CognitiveParserProtocol {
 
     /// Tracks string state so braces inside quoted strings don't affect depth.
     private func balancedJSONObjectRange(in text: String, startingAt: String.Index) -> Range<String.Index>? {
-        guard let openIdx = text[startingAt...].firstIndex(of: "{") else { return nil }
-
-        var depth = 0
-        var inString = false
-        var escaped = false
-
-        for idx in text[openIdx...].indices {
-            let c = text[idx]
-            if escaped {
-                escaped = false
-                continue
-            }
-            if c == "\\" && inString {
-                escaped = true
-                continue
-            }
-            if c == "\"" {
-                inString.toggle()
-                continue
-            }
-            if inString { continue }
-            if c == "{" { depth += 1 }
-            else if c == "}" {
-                depth -= 1
-                if depth == 0 {
-                    return openIdx..<text.index(after: idx)
-                }
-            }
-        }
-        return nil
+        BalancedJSONScanner.balancedRange(in: text, from: startingAt, opener: "{")
     }
 
     private func decodeToolCall(from jsonString: String) -> PendingToolCall? {

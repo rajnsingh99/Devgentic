@@ -2,7 +2,15 @@
 //  CognitiveCircuitBreakerTests.swift
 //  DevgenticTests
 //
-//  Tests for CognitiveCircuitBreaker — Gap B: Repetitive Action Detection.
+//  Tests for CognitiveCircuitBreaker. Contract under test (post G2/G3 + audit #3):
+//  - Iteration-level fingerprint: warn (.proceedWithWarning) on the 2nd identical
+//    iteration, abort on the 3rd.
+//  - Global per-tool frequency: 3× same tool+args+output across ANY iterations
+//    aborts — catches alternating-combo evasion; checked BEFORE the warning tier
+//    so aborts outrank warnings.
+//  - evaluateAskUser: intervene past the ask_user limit, abort at the idle limit.
+//  - Hooks without production callers (evaluateToolAttempt, evaluateMemoryHydration,
+//    recordClarificationResponse) were removed in the audit-#3 cleanup.
 //
 
 import XCTest
@@ -46,6 +54,23 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         if case .proceed = action3 {} else { XCTFail("Expected .proceed for unique action 3") }
     }
 
+    func testRepetitiveActions_WarningAtSecondIdenticalIteration() {
+        // G2 dual-channel warning: the 2nd identical iteration warns (UI + model
+        // alert) so the model can course-correct before the 3rd-strike abort.
+        var breaker = CognitiveCircuitBreaker()
+        let identicalObs = [makeObservation(toolName: "fs_smart_search", output: "No results")]
+
+        _ = breaker.evaluateRepetitiveActions(identicalObs)
+        let action2 = breaker.evaluateRepetitiveActions(identicalObs)
+
+        if case .proceedWithWarning(let uiMessage, let modelAlert) = action2 {
+            XCTAssertTrue(uiMessage.contains("fs_smart_search"), "UI warning should name the tool")
+            XCTAssertTrue(modelAlert.contains("final_answer"), "Model alert should offer the final_answer escape hatch")
+        } else {
+            XCTFail("Expected .proceedWithWarning on 2nd identical iteration, got \(action2)")
+        }
+    }
+
     func testRepetitiveActions_IdenticalObservations_AbortsAtThreshold() {
         var breaker = CognitiveCircuitBreaker()
         let identicalObs = [makeObservation(toolName: "fs_smart_search", params: "{\"search_term\":\"\"}", output: "No results found matching ''.")]
@@ -55,7 +80,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         let action3 = breaker.evaluateRepetitiveActions(identicalObs)
 
         if case .proceed = action1 {} else { XCTFail("Expected .proceed on 1st occurrence") }
-        if case .proceed = action2 {} else { XCTFail("Expected .proceed on 2nd occurrence") }
+        if case .proceedWithWarning = action2 {} else { XCTFail("Expected .proceedWithWarning on 2nd occurrence, got \(action2)") }
 
         // 3rd identical iteration should abort
         if case .abort(let reason) = action3 {
@@ -72,15 +97,15 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         let successResult = [makeObservation(toolName: "fs_smart_search", output: "Found: document.pdf")]
 
         _ = breaker.evaluateRepetitiveActions(emptyResult) // 1st
-        _ = breaker.evaluateRepetitiveActions(emptyResult) // 2nd
+        _ = breaker.evaluateRepetitiveActions(emptyResult) // 2nd (warns)
 
-        // Now a different output — should reset the counter
+        // Now a different output — fingerprint counter resets, no warning
         let action3 = breaker.evaluateRepetitiveActions(successResult)
-        if case .proceed = action3 {} else { XCTFail("Expected .proceed after output changed") }
+        if case .proceed = action3 {} else { XCTFail("Expected .proceed after output changed, got \(action3)") }
 
-        // One more identical (successResult) should be fine
+        // 2nd occurrence of the new pattern → warning tier again, not abort
         let action4 = breaker.evaluateRepetitiveActions(successResult)
-        if case .proceed = action4 {} else { XCTFail("Expected .proceed on 2nd occurrence of new pattern") }
+        if case .proceedWithWarning = action4 {} else { XCTFail("Expected .proceedWithWarning on 2nd occurrence of new pattern, got \(action4)") }
     }
 
     func testRepetitiveActions_MultipleToolsSameIteration() {
@@ -95,7 +120,7 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         let action3 = breaker.evaluateRepetitiveActions(multiToolObs)
 
         if case .proceed = action1 {} else { XCTFail("Expected .proceed on 1st") }
-        if case .proceed = action2 {} else { XCTFail("Expected .proceed on 2nd") }
+        if case .proceedWithWarning = action2 {} else { XCTFail("Expected .proceedWithWarning on 2nd, got \(action2)") }
         if case .abort = action3 {
             // pass — multi-tool repetition also detected
         } else {
@@ -103,43 +128,49 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         }
     }
 
-    func testRepetitiveActions_CounterResetAfterDifferentAction() {
+    func testRepetitiveActions_AlternatingEvasion_CaughtByGlobalLimit() {
+        // A model that interleaves a different action to reset the iteration-level
+        // fingerprint still trips the global per-tool cap: the same tool+args+output
+        // appearing 3× across ANY iterations aborts. (This pattern used to slip
+        // through before the G3 global-frequency check.)
         var breaker = CognitiveCircuitBreaker()
         let obs1 = [makeObservation(toolName: "fs_smart_search", output: "No results")]
 
-        _ = breaker.evaluateRepetitiveActions(obs1) // 1
-        _ = breaker.evaluateRepetitiveActions(obs1) // 2
+        _ = breaker.evaluateRepetitiveActions(obs1) // global count 1
+        _ = breaker.evaluateRepetitiveActions(obs1) // global count 2 (warns)
 
-        // Interrupt with a different tool
+        // Interrupt with a different tool — resets the iteration counter only
         _ = breaker.evaluateRepetitiveActions([makeObservation(toolName: "list_directory", output: "/Users/alice")])
 
-        // Back to obs1 — counter should have reset
-        let action4 = breaker.evaluateRepetitiveActions(obs1) // 1 (reset)
-        let action5 = breaker.evaluateRepetitiveActions(obs1) // 2
-        if case .proceed = action4 {} else { XCTFail("Expected .proceed after counter reset") }
-        if case .proceed = action5 {} else { XCTFail("Expected .proceed on 2nd after reset") }
-
-        // Now 3rd consecutive — should abort
-        let action6 = breaker.evaluateRepetitiveActions(obs1) // 3
-        if case .abort = action6 {} else { XCTFail("Expected .abort on 3rd consecutive") }
+        // Back to obs1: 3rd global occurrence → abort despite the interruption
+        let action4 = breaker.evaluateRepetitiveActions(obs1)
+        if case .abort(let reason) = action4 {
+            XCTAssertTrue(reason.contains("fs_smart_search"), "Abort should name the repeated tool, got: \(reason)")
+            XCTAssertTrue(reason.contains("3"), "Abort should mention the global count, got: \(reason)")
+        } else {
+            XCTFail("Expected .abort via global frequency cap on 3rd occurrence, got \(action4)")
+        }
     }
 
-    // MARK: - Existing Behavior Preserved
-
-    func testToolRetries_StillWorksAfterRepetitiveAddition() {
+    func testGlobalToolFrequency_AbortOutranksWarning() {
+        // The global check runs BEFORE the limit-1 warning tier. Construct an
+        // iteration that sits exactly on the warning tier (2nd identical multi-tool
+        // fingerprint) while a tool inside it hits the global cap (3rd occurrence):
+        // the abort must win. Under the old ordering this returned the warning and
+        // masked the abort until the next iteration.
         var breaker = CognitiveCircuitBreaker()
+        let coreObs = makeObservation(toolName: "read_file", params: "{\"path\":\"a.txt\"}", output: "contents")
+        let extraObs = makeObservation(toolName: "list_dir", output: "files")
 
-        // evaluateToolAttempt should still work independently
-        let action1 = breaker.evaluateToolAttempt(toolName: "read_file", paramsHash: 123)
-        let action2 = breaker.evaluateToolAttempt(toolName: "read_file", paramsHash: 123)
-        let action3 = breaker.evaluateToolAttempt(toolName: "read_file", paramsHash: 123)
+        _ = breaker.evaluateRepetitiveActions([coreObs])            // core global 1
+        _ = breaker.evaluateRepetitiveActions([coreObs, extraObs])  // core global 2, new fingerprint (counter 1)
+        let action3 = breaker.evaluateRepetitiveActions([coreObs, extraObs]) // core global 3, fingerprint counter 2 (warning tier)
 
-        if case .proceed = action1 {} else { XCTFail("Expected .proceed on 1st attempt") }
-        if case .proceed = action2 {} else { XCTFail("Expected .proceed on 2nd attempt") }
-        if case .intervene = action3 {
-            // pass — existing behavior preserved
+        if case .abort(let reason) = action3 {
+            XCTAssertTrue(reason.contains("read_file"), "Abort should mention the capped tool, got: \(reason)")
+            XCTAssertTrue(reason.contains("3"), "Abort should mention the count, got: \(reason)")
         } else {
-            XCTFail("Expected .intervene on 3rd attempt with same params")
+            XCTFail("Expected global-cap .abort to outrank the fingerprint warning, got \(action3)")
         }
     }
 
@@ -165,6 +196,8 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         if case .intervene(let msg) = action {
             XCTAssertTrue(msg.contains("ask_user") || msg.contains("asked the user"),
                           "Intervene message should mention ask_user")
+            XCTAssertTrue(msg.contains("final_answer"),
+                          "Intervene message should offer the final_answer escape hatch (not the legacy tool_name: null contract)")
         } else {
             XCTFail("Expected .intervene on exceeding ask_user limit, got \(action)")
         }
@@ -182,98 +215,6 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
             XCTAssertTrue(reason.contains("idle"), "Abort reason should mention idle steps")
         } else {
             XCTFail("Expected .abort at idle limit, got \(action)")
-        }
-    }
-
-    // MARK: - Memory Hydration Evaluation
-
-    func testEvaluateMemoryHydration_ProceedsBelowLimit() {
-        var breaker = CognitiveCircuitBreaker(maxConsecutiveIdle: 5)
-        let action = breaker.evaluateMemoryHydration()
-        if case .proceed = action {} else {
-            XCTFail("Expected .proceed on first memory hydration, got \(action)")
-        }
-    }
-
-    func testEvaluateMemoryHydration_AbortsAtIdleLimit() {
-        var breaker = CognitiveCircuitBreaker(maxConsecutiveIdle: 2)
-        _ = breaker.evaluateMemoryHydration() // idle = 1
-        let action = breaker.evaluateMemoryHydration() // idle = 2 → abort
-
-        if case .abort(let reason) = action {
-            XCTAssertTrue(reason.contains("idle") || reason.contains("memory"),
-                          "Abort should mention idle or memory")
-        } else {
-            XCTFail("Expected .abort at idle limit for memory hydration, got \(action)")
-        }
-    }
-
-    // MARK: - Clarification Response
-
-    func testRecordClarificationResponse_VagueTwice_Intervenes() {
-        var breaker = CognitiveCircuitBreaker()
-        _ = breaker.recordClarificationResponse(isVague: true)  // friction = 1
-        let action = breaker.recordClarificationResponse(isVague: true)  // friction = 2
-
-        if case .intervene(let msg) = action {
-            XCTAssertTrue(msg.contains("vague") || msg.contains("specific"),
-                          "Should ask for specific data")
-        } else {
-            XCTFail("Expected .intervene on 2nd vague response, got \(action)")
-        }
-    }
-
-    func testRecordClarificationResponse_VagueThenClear_Resets() {
-        var breaker = CognitiveCircuitBreaker()
-        _ = breaker.recordClarificationResponse(isVague: true)   // friction = 1
-        _ = breaker.recordClarificationResponse(isVague: false)  // friction = 0
-
-        // Next vague should be treated as first vague (friction starts at 1 again)
-        let action = breaker.recordClarificationResponse(isVague: true)  // friction = 1
-        if case .proceed = action {} else {
-            XCTFail("Expected .proceed after friction reset, got \(action)")
-        }
-    }
-
-    func testRecordClarificationResponse_ClearAlways_Proceeds() {
-        var breaker = CognitiveCircuitBreaker()
-        let action = breaker.recordClarificationResponse(isVague: false)
-        if case .proceed = action {} else {
-            XCTFail("Expected .proceed for clear response, got \(action)")
-        }
-        XCTAssertEqual(breaker.clarificationFriction, 0)
-    }
-
-    // MARK: - Global Tool Frequency
-
-    func testGlobalToolFrequency_AbortsAtGlobalLimit() {
-        var breaker = CognitiveCircuitBreaker()
-
-        // The global frequency limit is 5 (maxGlobalToolRepetitions).
-        // We need the SAME tool+args+output combo to appear 5 times across iterations.
-        // To avoid triggering iteration-level fingerprint (maxRepetitiveActions=3),
-        // we alternate the iteration fingerprint by adding a different secondary tool.
-        let coreObs = makeObservation(toolName: "read_file", params: "{\"path\":\"a.txt\"}", output: "contents")
-
-        // Iterations 1-2: same fingerprint (core only)
-        _ = breaker.evaluateRepetitiveActions([coreObs])
-        _ = breaker.evaluateRepetitiveActions([coreObs])
-
-        // Iteration 3: different fingerprint (core + extra)
-        let extraObs = makeObservation(toolName: "list_dir", output: "files")
-        _ = breaker.evaluateRepetitiveActions([coreObs, extraObs])
-
-        // Iteration 4: back to core only (resets iteration counter)
-        _ = breaker.evaluateRepetitiveActions([coreObs])
-
-        // Iteration 5: core appears for 5th time globally → should abort
-        let action = breaker.evaluateRepetitiveActions([coreObs])
-
-        if case .abort(let reason) = action {
-            XCTAssertTrue(reason.contains("read_file") || reason.contains("5"),
-                          "Abort should mention tool name or count, got: \(reason)")
-        } else {
-            XCTFail("Expected .abort on 5th global repetition, got \(action)")
         }
     }
 
@@ -298,20 +239,6 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         breaker.resetCountersOnSuccess()
         XCTAssertEqual(breaker.consecutiveAskUserCalls, 0)
         XCTAssertEqual(breaker.consecutiveIdleSteps, 0)
-        XCTAssertEqual(breaker.clarificationFriction, 0)
-    }
-
-    // MARK: - Tool Attempt Evaluation
-
-    func testEvaluateToolAttempt_DifferentParams_Proceeds() {
-        var breaker = CognitiveCircuitBreaker()
-        let action1 = breaker.evaluateToolAttempt(toolName: "read_file", paramsHash: 100)
-        let action2 = breaker.evaluateToolAttempt(toolName: "read_file", paramsHash: 200)
-        let action3 = breaker.evaluateToolAttempt(toolName: "read_file", paramsHash: 300)
-
-        if case .proceed = action1 {} else { XCTFail("Expected .proceed for unique params") }
-        if case .proceed = action2 {} else { XCTFail("Expected .proceed for unique params") }
-        if case .proceed = action3 {} else { XCTFail("Expected .proceed for unique params") }
     }
 
     // MARK: - Tool Result Recording

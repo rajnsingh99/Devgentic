@@ -184,14 +184,28 @@ struct TelemetrySanitizer {
 
     // MARK: - Regex helper
 
+    /// Compiled-regex cache. Previously every `replace` recompiled its `NSRegularExpression`
+    /// — ~29 compiles per `sanitizeFull(.standard)` call (§12.9). Now each (pattern, options)
+    /// pair compiles once. `NSRegularExpression` is thread-safe for matching and `NSCache`
+    /// is thread-safe, so concurrent sanitize calls are fine.
+    private static let regexCache = NSCache<NSString, NSRegularExpression>()
+
+    private static func cachedRegex(_ pattern: String, caseInsensitive: Bool) -> NSRegularExpression? {
+        let key = ((caseInsensitive ? "i|" : "s|") + pattern) as NSString
+        if let cached = regexCache.object(forKey: key) { return cached }
+        let options: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return nil }
+        regexCache.setObject(regex, forKey: key)
+        return regex
+    }
+
     /// Executes a regex replace. Returns the original string on regex-compile failure
     /// so a bad pattern never corrupts sanitization output.
     private static func replace(_ text: String,
                                 pattern: String,
                                 with template: String,
                                 caseInsensitive: Bool = false) -> String {
-        let options: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {
+        guard let regex = cachedRegex(pattern, caseInsensitive: caseInsensitive) else {
             return text
         }
         let range = NSRange(location: 0, length: text.utf16.count)

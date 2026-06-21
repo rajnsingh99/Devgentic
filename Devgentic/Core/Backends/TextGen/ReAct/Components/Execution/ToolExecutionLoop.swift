@@ -213,7 +213,8 @@ private func executeSingleTool(
             isSuccess: didAnswer,
             params: question,
             output: "User Response: \(answerText)",
-            artifacts: []
+            artifacts: [],
+            failureCategory: didAnswer ? nil : .cancelled
         )
     }
 
@@ -243,7 +244,8 @@ private func executeSingleTool(
                 isSuccess: false,
                 params: paramsString,
                 output: denialResult.llmObservation,
-                artifacts: []
+                artifacts: [],
+                failureCategory: .userDenied
             )
         }
     case .executed, .userDenied:
@@ -312,7 +314,8 @@ private func executeSingleTool(
         isSuccess: result.isSuccess,
         params: paramsString,
         output: result.llmObservation,
-        artifacts: result.artifacts
+        artifacts: result.artifacts,
+        failureCategory: result.failureCategory
     )
 }
 
@@ -478,7 +481,8 @@ private func buildFinalAnswerObservation(
             output: errMsg,
             artifacts: [],
             isTerminalSignal: false,
-            terminalKind: nil
+            terminalKind: nil,
+            failureCategory: .invalidArgs
         )
     }
 
@@ -499,7 +503,8 @@ private func buildFinalAnswerObservation(
             output: errMsg,
             artifacts: [],
             isTerminalSignal: false,
-            terminalKind: nil
+            terminalKind: nil,
+            failureCategory: .invalidArgs
         )
     }
 

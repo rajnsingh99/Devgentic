@@ -143,7 +143,8 @@ enum TestAgentInputFactory {
         maxIterations: Int = 15,
         errorRecovery: ErrorRecovery = ErrorRecovery(),
         retryPolicy: RetryPolicy = RetryPolicy(),
-        instructions: String? = nil
+        instructions: String? = nil,
+        generatorStrategy: (any CognitiveGenerator)? = nil
     ) -> AgentInput {
         let memory = workingMemory ?? WindowedLinearMemory(
             config: MemoryBudgetConfig.derive(contextWindow: 8192, tier: .small)
@@ -155,7 +156,7 @@ enum TestAgentInputFactory {
             conversationID: UUID(),
             tools: tools,
             longTermMemory: StaticGroundingMemory(ragContext: ""),
-            generatorStrategy: MockCognitiveGenerator(),
+            generatorStrategy: generatorStrategy ?? MockCognitiveGenerator(),
             workingMemory: memory,
             rateLimitKey: "test",
             rateLimitCategory: .local,
@@ -216,5 +217,19 @@ enum StreamCollector {
     /// Checks if any thought contains the given substring.
     static func hasThoughtContaining(_ substring: String, in events: [AgentStreamEvent]) -> Bool {
         thoughts(from: events).contains { $0.contains(substring) }
+    }
+
+    /// Extracts all `.warning` messages from collected events. (Memory-pressure,
+    /// circuit-breaker, parse-failure, etc. surface as `.warning`, NOT `.thought`.)
+    static func warnings(from events: [AgentStreamEvent]) -> [String] {
+        events.compactMap { event -> String? in
+            if case .warning(_, let message, _, _) = event { return message }
+            return nil
+        }
+    }
+
+    /// Checks if any warning contains the given substring.
+    static func hasWarningContaining(_ substring: String, in events: [AgentStreamEvent]) -> Bool {
+        warnings(from: events).contains { $0.contains(substring) }
     }
 }

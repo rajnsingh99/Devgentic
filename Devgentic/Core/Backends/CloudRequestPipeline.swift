@@ -162,6 +162,56 @@ struct CloudRequestPipeline: Sendable {
         return (bytes, httpResponse)
     }
 
+    // MARK: - Local Provider Variants
+
+    /// Local-provider (Ollama) variant of ``execute(request:provider:rateLimitKey:session:)``.
+    ///
+    /// Applies the same pre-request rate-limit gate (the `.local` bucket) and request-id
+    /// logging, but PRESERVES the caller's own status-code handling by returning the raw
+    /// `(Data, HTTPURLResponse)` instead of throwing `CloudProviderError`. Local providers
+    /// surface `LLMProviderError.httpError` — and capability-specific 400s like
+    /// "does not support tools" — themselves, and the resilience layer is deliberately
+    /// built around that (see `LLMRetryStrategyTests` "Ollama httpError Routing"), so we
+    /// must not convert their errors to the cloud type.
+    static func executeLocal(
+        request: URLRequest,
+        rateLimitKey: String,
+        session: URLSession = .shared
+    ) async throws -> (Data, HTTPURLResponse) {
+        await GlobalRateLimiter.shared.wait(forKey: rateLimitKey, category: .local)
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMProviderError.invalidResponse("Not an HTTP response")
+        }
+
+        if let requestId = extractRequestId(from: httpResponse) {
+            logger.info("[local] request-id: \(requestId) | status: \(httpResponse.statusCode)")
+        }
+        return (data, httpResponse)
+    }
+
+    /// Streaming counterpart of ``executeLocal(request:rateLimitKey:session:)``. Applies the
+    /// `.local` rate-limit gate and request-id logging, then returns the raw byte stream;
+    /// the caller validates the initial status and decodes the stream itself.
+    static func executeLocalStream(
+        request: URLRequest,
+        rateLimitKey: String,
+        session: URLSession = .shared
+    ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        await GlobalRateLimiter.shared.wait(forKey: rateLimitKey, category: .local)
+
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LLMProviderError.invalidResponse("Not an HTTP response")
+        }
+
+        if let requestId = extractRequestId(from: httpResponse) {
+            logger.info("[local] stream request-id: \(requestId) | status: \(httpResponse.statusCode)")
+        }
+        return (bytes, httpResponse)
+    }
+
     // MARK: - Header Extraction Helpers
 
     /// Extracts the provider-assigned request ID from response headers.

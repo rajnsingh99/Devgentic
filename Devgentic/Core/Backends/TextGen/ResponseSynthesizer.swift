@@ -48,7 +48,11 @@ struct ResponseSynthesizer {
         personaInstructions: String? = nil,
         originalQuery: String,
         isNativeFlow: Bool = false,
-        forceSynthesis: Bool = false
+        forceSynthesis: Bool = false,
+        // Called with an (estimated) token-usage figure ONLY when the LLM synthesis path
+        // runs — the native fast-path and deterministic fallbacks are free (D1). Optional
+        // so existing callers compile unchanged.
+        onUsage: ((TokenUsage) -> Void)? = nil
     ) async -> String {
 
         // =====================================================================
@@ -133,6 +137,8 @@ struct ResponseSynthesizer {
             // which could destroy legitimate markdown in the response.
             let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(response)
             guard !cleaned.isEmpty else { throw SynthesizerError.emptyResponse }
+            // Count this LLM synthesis call in the trace total (estimated; D1).
+            onUsage?(.estimated(inputChars: systemPrompt.count + prompt.count, outputChars: response.count))
             logger.info("✅ [Synthesizer] IC synthesis succeeded.")
             return cleaned
         } catch {

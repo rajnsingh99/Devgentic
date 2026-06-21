@@ -70,6 +70,23 @@ protocol LLMProvider: Sendable {
     /// Generates a cognitive step from multimodal ProviderMessages.
     /// Default implementation downgrades to legacy format.
     func generateCognitiveStep(payload: [ProviderMessage], tools: [[String: Any]]?) async throws -> ModernCognitiveStep
+
+    // MARK: - Usage-Reporting Overloads (#10b)
+
+    /// Like ``generate(messages:tools:responseSchema:)`` but also returns the provider-reported
+    /// token usage when the API exposes it. The default implementation reports `nil` usage (callers
+    /// then estimate via `chars/4`); cloud providers override to surface real counts so cost
+    /// accounting isn't tainted as estimated. A parallel method (mirroring the `payload:` /
+    /// `nativeMessages:` overloads), not a widening of the `-> String` signature.
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?)
+
+    /// Multimodal counterpart of ``generateWithUsage(messages:tools:responseSchema:)``.
+    func generateWithUsage(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?)
+
+    /// Like ``stream(messages:tools:)`` but invokes `onUsage` once with the provider-reported
+    /// token usage when the stream exposes it (the terminal SSE/usage event). The default
+    /// implementation calls `stream` and never invokes `onUsage` (caller then estimates).
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error>
 }
 
 extension LLMProvider {
@@ -81,6 +98,23 @@ extension LLMProvider {
     func generateCognitiveStep(payload: [ProviderMessage], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let legacyMessages = payload.map { $0.toLegacyDict() }
         return try await generateCognitiveStep(messages: legacyMessages, tools: tools)
+    }
+
+    // Default-downgrade: report no usage so callers fall back to estimation.
+    // Cloud providers override these to surface the API's real token counts (#10b).
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
+        let text = try await generate(messages: messages, tools: tools, responseSchema: responseSchema)
+        return (text, nil)
+    }
+
+    func generateWithUsage(payload: [ProviderMessage], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
+        let text = try await generate(payload: payload, tools: tools, responseSchema: responseSchema)
+        return (text, nil)
+    }
+
+    // Default-downgrade: stream without surfacing usage. Cloud providers override (#10b).
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        stream(messages: messages, tools: tools)
     }
 
     /// Default fallback — coerces native messages to legacy `[[String: String]]`.

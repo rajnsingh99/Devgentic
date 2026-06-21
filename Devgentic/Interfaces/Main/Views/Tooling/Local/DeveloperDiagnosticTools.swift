@@ -64,6 +64,9 @@ struct XcodeOrchestratorTool: DevgenticTool {
     let name = "xcode_orchestrator"
     let category = "Developer & Diagnostics"
     let description = "Performs Xcode tasks: clear DerivedData, build project, run tests, list schemes, open file in Xcode, or read build errors."
+    // #19: build/test/read_build_errors return raw compiler output that routinely begins with
+    // "error:" — surfacing those IS the tool's job, not a failure. Opt out of content-sniffing.
+    let outputMayContainErrorText = true
 
     struct Arguments: Decodable, Sendable {
         let action: String
@@ -103,6 +106,10 @@ struct XcodeOrchestratorTool: DevgenticTool {
     }
 
     func call(arguments: Arguments) async throws -> String {
+        // #19: this tool opts out of content-sniffing (`outputMayContainErrorText`) because its
+        // build/test/read_build_errors OUTPUT legitimately contains "error:". So its OWN
+        // operational / argument failures must THROW (not return an "Error:" string) — otherwise
+        // they'd be misread as success and never counted by the circuit breaker.
         switch arguments.action {
         case "clear_derived_data":
             let path = NSHomeDirectory() + "/Library/Developer/Xcode/DerivedData"
@@ -113,59 +120,59 @@ struct XcodeOrchestratorTool: DevgenticTool {
                 if (error as NSError).code == NSFileNoSuchFileError {
                     return "DerivedData already clean/empty."
                 }
-                return "Error clearing DerivedData: \(error)"
+                throw NSError(domain: "XcodeOrchestratorTool", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to clear DerivedData: \(error.localizedDescription)"])
             }
 
         case "build":
             guard let scheme = arguments.scheme else {
-                return "Error: 'scheme' required for build."
+                throw NSError(domain: "XcodeOrchestratorTool", code: 2, userInfo: [NSLocalizedDescriptionKey: "'scheme' is required for the 'build' action."])
             }
             var cmd = "xcodebuild -scheme \"\(scheme)\" build 2>&1 | tail -30"
             if let project = arguments.project {
                 cmd = "xcodebuild -project \"\(project)\" -scheme \"\(scheme)\" build 2>&1 | tail -30"
             }
-            return await xcodeShell(cmd)
+            return try await xcodeShell(cmd)
 
         case "test":
             guard let scheme = arguments.scheme else {
-                return "Error: 'scheme' required for test."
+                throw NSError(domain: "XcodeOrchestratorTool", code: 3, userInfo: [NSLocalizedDescriptionKey: "'scheme' is required for the 'test' action."])
             }
             var cmd = "xcodebuild -scheme \"\(scheme)\" test 2>&1 | tail -50"
             if let project = arguments.project {
                 cmd = "xcodebuild -project \"\(project)\" -scheme \"\(scheme)\" test 2>&1 | tail -50"
             }
-            return await xcodeShell(cmd)
+            return try await xcodeShell(cmd)
 
         case "list_schemes":
             var cmd = "xcodebuild -list 2>&1"
             if let project = arguments.project {
                 cmd = "xcodebuild -project \"\(project)\" -list 2>&1"
             }
-            return await xcodeShell(cmd)
+            return try await xcodeShell(cmd)
 
         case "open_file":
             guard let filePath = arguments.file_path else {
-                return "Error: 'file_path' required for open_file."
+                throw NSError(domain: "XcodeOrchestratorTool", code: 4, userInfo: [NSLocalizedDescriptionKey: "'file_path' is required for the 'open_file' action."])
             }
             let expandedPath = (filePath as NSString).expandingTildeInPath
             var cmd = "xed \"\(expandedPath)\""
             if let line = arguments.line {
                 cmd = "xed --line \(line) \"\(expandedPath)\""
             }
-            return await xcodeShell(cmd)
+            return try await xcodeShell(cmd)
 
         case "read_build_errors":
             let cmd = """
             find ~/Library/Developer/Xcode/DerivedData -name "*.xcactivitylog" -maxdepth 5 -type f -print0 | xargs -0 ls -t 2>/dev/null | head -1 | xargs -I{} gunzip -c {} 2>/dev/null | strings | grep -E "(error:|warning:)" | head -30
             """
-            return await xcodeShell(cmd)
+            return try await xcodeShell(cmd)
 
         default:
-            return "Unknown action '\(arguments.action)'."
+            throw NSError(domain: "XcodeOrchestratorTool", code: 5, userInfo: [NSLocalizedDescriptionKey: "Unknown action '\(arguments.action)'. Valid actions: clear_derived_data, build, test, list_schemes, open_file, read_build_errors."])
         }
     }
 
-    private func xcodeShell(_ cmd: String) async -> String {
+    private func xcodeShell(_ cmd: String) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-c", cmd]
@@ -182,7 +189,9 @@ struct XcodeOrchestratorTool: DevgenticTool {
             let result = output.count > maxOutput ? String(output.prefix(maxOutput)) + "\n...[Truncated]" : output
             return result
         } catch {
-            return "Error: \(error.localizedDescription)"
+            // Process couldn't launch — a genuine operational failure (throw, don't return,
+            // so the opted-out tool's real failures are still counted; #19).
+            throw error
         }
     }
 }

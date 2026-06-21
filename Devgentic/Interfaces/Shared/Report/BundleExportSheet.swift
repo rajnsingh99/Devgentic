@@ -16,6 +16,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct BundleExportSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -50,6 +51,7 @@ struct BundleExportSheet: View {
         var preferences: Bool
         var userFeedback: Bool
         var screenshot: Bool
+        var crashes: Bool
 
         func toOptionSet() -> DiagnosticBundle.Includes {
             var set: DiagnosticBundle.Includes = []
@@ -61,6 +63,7 @@ struct BundleExportSheet: View {
             if preferences    { set.insert(.preferences) }
             if userFeedback   { set.insert(.userFeedback) }
             if screenshot     { set.insert(.screenshot) }
+            if crashes        { set.insert(.crashes) }
             return set
         }
 
@@ -73,7 +76,8 @@ struct BundleExportSheet: View {
                 environment:    preset.contains(.environment),
                 preferences:    preset.contains(.preferences),
                 userFeedback:   preset.contains(.userFeedback),
-                screenshot:     preset.contains(.screenshot)
+                screenshot:     preset.contains(.screenshot),
+                crashes:        preset.contains(.crashes)
             )
         }
     }
@@ -177,6 +181,7 @@ struct BundleExportSheet: View {
                 Toggle("Aggregated metrics (last 7 days)",      isOn: $includes.metrics)
                 Toggle("Environment (hardware, OS, app version)", isOn: $includes.environment)
                 Toggle("Preferences (non-secret UserDefaults)", isOn: $includes.preferences)
+                Toggle("Crash & hang reports (sanitized)",      isOn: $includes.crashes)
                 if feedback != nil {
                     Divider().padding(.vertical, 4)
                     Toggle("User feedback (message + rating)",  isOn: $includes.userFeedback)
@@ -283,16 +288,19 @@ struct BundleExportSheet: View {
                 .font(.caption)
                 .foregroundColor(theme.tertiaryText)
 
-            HStack(spacing: 12) {
+            VStack(spacing: 10) {
+                HStack(spacing: 12) {
+                    Button("Save Bundle…") { saveBundle(result.zipURL) }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    Button("Report on GitHub") { reportOnGitHub(result) }
+                }
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([result.zipURL])
-                    dismiss()
                 }
-                .buttonStyle(.borderedProminent)
-                Button("Copy Path") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(result.zipURL.path, forType: .string)
-                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundColor(theme.secondaryText)
             }
             .padding(.top, 4)
         }
@@ -344,5 +352,53 @@ struct BundleExportSheet: View {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    /// Copies the staged zip (which lives in the temp dir and is wiped on reboot) to a
+    /// durable, user-chosen location via a save panel.
+    private func saveBundle(_ url: URL) {
+        let panel = NSSavePanel()
+        panel.title = "Save Diagnostic Bundle"
+        panel.nameFieldStringValue = url.lastPathComponent
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        do {
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.copyItem(at: url, to: dest)
+            dismiss()
+        } catch {
+            // Clear `result` so the error view actually shows — the body's success branch
+            // otherwise wins and the failure would be invisible (audit #11). Retry re-runs
+            // the export, which is safe (it just rebuilds the zip).
+            result = nil
+            errorMessage = "Couldn't save the bundle: \(error.localizedDescription)"
+        }
+    }
+
+    /// Opens a prefilled "new issue" on the public tracker. The bundle is NOT uploaded
+    /// automatically (no API token, and the user should review it first) — the body asks
+    /// the user to attach the zip they just saved.
+    private func reportOnGitHub(_ result: DiagnosticBundle.Result) {
+        let shortTrace = result.manifest.primaryTraceID.map { String($0.prefix(8)) } ?? "diagnostic"
+        let body = """
+        **What went wrong?**
+        <!-- Describe the problem here. -->
+
+        **Attach your diagnostic bundle:** drag the saved `\(result.zipURL.lastPathComponent)` zip onto this issue.
+
+        ---
+        - App: \(result.manifest.appVersion) (\(result.manifest.appBuildNumber))
+        - OS: \(result.manifest.osVersion)
+        - Trace: \(result.manifest.primaryTraceID ?? "—")
+        - Bundle: \(result.manifest.bundleID)
+        - Sanitization: \(result.manifest.sanitizationLevel)
+        """
+        var comps = URLComponents(string: GlobalConstants.issueTrackerNewIssueURL)
+        comps?.queryItems = [
+            URLQueryItem(name: "title", value: "Bug report: \(shortTrace)"),
+            URLQueryItem(name: "body", value: body)
+        ]
+        if let url = comps?.url { NSWorkspace.shared.open(url) }
     }
 }

@@ -87,6 +87,12 @@ struct LogEntry: Codable, Identifiable, Sendable {
 extension LogEntry: FetchableRecord, PersistableRecord, MutablePersistableRecord {
     static var databaseTableName: String { "log_entries" }
 
+    // Persist `timestamp` as REAL seconds-since-1970 (matching the `.double` column) so the
+    // 30-day `purgeLogEntriesOlderThan` (timestamp < ?) actually deletes. See `TraceRecord`
+    // for the full rationale; GRDB 7 spells these as `(for column:)` functions.
+    static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy { .timeIntervalSince1970 }
+    static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy { .timeIntervalSince1970 }
+
     enum Columns: String, ColumnExpression {
         case id, timestamp, level, subsystem, category, message
         case traceID, spanID, phase, metadataJSON

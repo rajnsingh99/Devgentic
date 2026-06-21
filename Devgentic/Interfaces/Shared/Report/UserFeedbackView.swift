@@ -10,10 +10,12 @@ import SwiftUI
 
 struct UserFeedbackView: View {
     @Bindable var viewModel: ReportViewModel
+    /// Opens the shared, sanitized diagnostic-bundle export (owned by ReportInspectorView),
+    /// carrying the rating + message entered here.
+    let onExport: () -> Void
     @Environment(\.appTheme) private var theme
     @Environment(\.dismiss) private var dismiss
 
-    @State private var didExport = false
     @FocusState private var isFeedbackFocused: Bool
 
     var body: some View {
@@ -121,9 +123,22 @@ struct UserFeedbackView: View {
     }
 
     private var statusBadge: some View {
-        let isError = viewModel.activeTraceRecord?.status == .error
-        let text = isError ? "Error" : "Completed"
-        let color: Color = isError ? theme.errorColor : .green
+        let text: String
+        let color: Color
+        switch viewModel.activeTraceRecord?.status ?? .completed {
+        case .completed:
+            text = "Completed"; color = .green
+        case .failed:
+            text = "Failed"; color = theme.errorColor
+        case .error:
+            text = "Error"; color = theme.errorColor
+        case .cancelled:
+            text = "Cancelled"; color = .gray
+        case .interrupted:
+            text = "Interrupted"; color = .orange
+        case .running:
+            text = "Running"; color = .blue
+        }
 
         return HStack(spacing: 4) {
             Circle()
@@ -265,53 +280,34 @@ struct UserFeedbackView: View {
     private var exportSection: some View {
         VStack(spacing: 12) {
             Button {
-                exportFeedback()
+                onExport()
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: didExport ? "checkmark.circle.fill" : "square.and.arrow.up")
+                    Image(systemName: "square.and.arrow.up")
                         .font(theme.fontBody)
-                    Text(didExport ? "Exported" : "Export Feedback Report")
+                    Text("Export Feedback Report")
                         .font(theme.fontSubheadline.weight(.medium))
                 }
-                .foregroundStyle(didExport ? .green : theme.accentColor)
+                .foregroundStyle(theme.accentColor)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(didExport ? theme.successColor.opacity(0.1) : theme.accentColor.opacity(0.1))
+                        .fill(theme.accentColor.opacity(0.1))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(didExport ? theme.successColor.opacity(0.3) : theme.accentColor.opacity(0.3), lineWidth: 1)
+                        .stroke(theme.accentColor.opacity(0.3), lineWidth: 1)
                 )
             }
             .buttonStyle(.plain)
             .disabled(viewModel.activeTraceRecord == nil)
 
-            Text("Exports a JSON file containing the execution trace and your feedback. No personal data is included.")
+            Text("Bundles the execution trace with your feedback. Sensitive data — file paths, API keys, emails — is redacted before anything is saved.")
                 .font(.system(.caption))
                 .foregroundStyle(theme.tertiaryText)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
-        }
-    }
-
-    // MARK: - Actions
-
-    private func exportFeedback() {
-        guard let trace = viewModel.activeTraceRecord else { return }
-
-        if let url = ReportExporter.export(
-            trace: trace,
-            summary: viewModel.summary,
-            isDeveloperMode: false,
-            feedback: viewModel.userFeedback
-        ) {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-            withAnimation(.easeInOut(duration: 0.2)) { didExport = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                withAnimation(.easeInOut(duration: 0.2)) { didExport = false }
-            }
         }
     }
 }

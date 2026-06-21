@@ -25,6 +25,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Captured before any trace can begin this session, so the orphan reconciliation
+        // below can never touch a trace created by the current process (it only reconciles
+        // traces that started earlier).
+        let launchInstant = Date()
+
+        // Crash detection (§12.1): consume the clean-exit sentinel BEFORE anything else —
+        // false means the previous session crashed or was force-killed (it never reached
+        // applicationWillTerminate). Feeds the reconciliation reason below. Then register
+        // for MetricKit diagnostics; payloads for a prior crash arrive shortly after.
+        let previousExitWasClean = CrashDiagnosticsCollector.consumeLaunchSentinel()
+        CrashDiagnosticsCollector.shared.start()
+        if !previousExitWasClean {
+            Self.logger.error("Previous session did not exit cleanly (crash or force-quit). MetricKit diagnostics, if any, arrive shortly; .ips reports are folded into diagnostic bundles.")
+        }
+
         // Set this delegate so UNUserNotificationCenter can deliver notifications
         // both when the app is in the foreground AND in the background.
         UNUserNotificationCenter.current().delegate = self
@@ -32,16 +47,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         setupHotkey()
         setupNotificationObserver()
 
-        // 30-day observability purge. Runs in a detached background task so startup
-        // isn't delayed by the SQLite DELETE on large archives. Age-based policy
-        // matches traces/spans retention (set once globally here; other tables
-        // cascade-delete via foreign keys).
+        // 30-day observability purge + orphan reconciliation. Runs in a detached
+        // background task so startup isn't delayed by the SQLite work on large archives.
         Task.detached(priority: .background) {
             guard let store = TraceStore.shared else { return }
-            let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
+            let cutoff = launchInstant.addingTimeInterval(-30 * 24 * 3600)
+
+            // Purge aged traces (+ cascaded spans/events/configs via FK). Previously only
+            // log_entries was purged here despite the comment's cascade claim, so
+            // traces.sqlite grew without bound (Gap #5).
+            do {
+                try store.purgeOlderThan(cutoff)
+            } catch {
+                Self.logger.error("Trace purge failed: \(error.localizedDescription)")
+            }
             if let purged = try? store.purgeLogEntriesOlderThan(cutoff), purged > 0 {
                 Self.logger.info("Purged \(purged) log entries older than 30 days.")
             }
+
+            // Stamp traces left `running` by a previous session (graceful quit or crash
+            // before endTrace ran) as `.interrupted`, so they stop lingering forever and
+            // skewing reliability stats (Gap #13). The clean-exit sentinel distinguishes
+            // crash/force-quit from a normal quit mid-run (§12.1).
+            let orphanReason = previousExitWasClean
+                ? "App quit during run (interrupted)"
+                : "App crashed or was force-quit during run"
+            if let reconciled = try? store.reconcileOrphanedTraces(
+                before: launchInstant,
+                reason: orphanReason
+            ), reconciled > 0 {
+                Self.logger.info("Reconciled \(reconciled) orphaned running trace(s) to .interrupted (\(orphanReason)).")
+            }
+
+            // Persisted MetricKit payloads follow the same 30-day retention as traces.
+            CrashDiagnosticsCollector.purgeDiagnostics(olderThan: cutoff)
         }
     }
 
@@ -73,43 +112,57 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         completionHandler()
     }
 
+    /// Async teardown with the run loop ALIVE. The previous approach — spawning `Task`s
+    /// in `applicationWillTerminate` and blocking the main thread on semaphores — could
+    /// never work: the tasks inherit MainActor, the semaphore wait blocks the main thread,
+    /// so the tasks never start, every wait burned its full timeout, and the process
+    /// exited with NO flush/disconnect having run (audit finding #1). `.terminateLater`
+    /// keeps the main actor processing while we tear down, then `reply` resumes quitting.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Self.logger.info("Application requested to terminate — running async teardown.")
+
+        // Synchronous, cheap teardown first: kill shell child processes.
+        ShellSessionManager.shared.cleanup()
+
+        Task { @MainActor in
+            // Race teardown against a watchdog so a hung MCP disconnect or DB write can
+            // never block quit for more than ~3s.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await Self.performAsyncTeardown() }
+                group.addTask { try? await Task.sleep(for: .seconds(3)) }
+                await group.next()
+                group.cancelAll()
+            }
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    /// Everything that needs `await` before quitting. Runs while the run loop is alive
+    /// (from `applicationShouldTerminate`), so MainActor-bound services are reachable.
+    private static func performAsyncTeardown() async {
+        // Disconnect MCP sessions so child processes (npx/uvx/etc.) don't get
+        // re-parented to launchd as orphans (SIGTERM, escalating to SIGKILL).
+        await MCPClientService.shared.disconnectAll()
+
+        // Flush observability buffers to SQLite (Gap #13): up to 5s of logs and 1s of
+        // span events are otherwise lost on quit.
+        await LogRecorder.shared.prepareForTermination()
+        await TraceRecorder.shared.prepareForTermination()
+
+        // Unload local models cleanly (App RAM + Ollama VRAM).
+        let stats = await MLXService.shared.unloadModel()
+        Self.logger.info("Termination MLX cleanup stats: \(stats)")
+        await OllamaService.shared.unloadModel()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         Self.logger.info("Application will terminate.")
 
-        // 1. Terminate any active shell processes to prevent zombies
-        ShellSessionManager.shared.cleanup()
-
-        // 1b. Disconnect all live MCP sessions so child processes (npx/uvx/etc.)
-        //     don't get re-parented to launchd as orphans. Each disconnect sends
-        //     SIGTERM; ShellProcess escalates to SIGKILL after 2s if needed.
-        let mcpDisconnectSem = DispatchSemaphore(value: 0)
-        Task { @MainActor in
-            await MCPClientService.shared.disconnectAll()
-            mcpDisconnectSem.signal()
-        }
-        _ = mcpDisconnectSem.wait(timeout: .now() + .milliseconds(500))
-
-        // 2. Flush observability buffers to SQLite before quit. The periodic flush
-        //    runs every 5s so we only lose ≤5s on an abrupt quit; this is best-effort
-        //    cleanup on graceful quit. We use a short DispatchSemaphore wait because
-        //    applicationWillTerminate returns immediately — without it, the flush
-        //    Task would be cancelled before completing.
-        let logFlushSem = DispatchSemaphore(value: 0)
-        Task {
-            await LogRecorder.shared.prepareForTermination()
-            logFlushSem.signal()
-        }
-        _ = logFlushSem.wait(timeout: .now() + .milliseconds(300))
-
-        // 3. Ensure models are unloaded cleanly
-        Task {
-            // Unload local MLX model from App RAM
-            let stats = await MLXService.shared.unloadModel()
-            Self.logger.info("Application Termination MLX Cleanup Stats: \(stats)")
-
-            // Unload Ollama model from VRAM (daemon)
-            await OllamaService.shared.unloadModel()
-        }
+        // Mark this session cleanly exited (§12.1) — async teardown already ran via
+        // applicationShouldTerminate. Crashes and force-quits never get here; the next
+        // launch reads the stale `false` and knows.
+        CrashDiagnosticsCollector.markCleanExit()
     }
 
     private func setupHotkey() {

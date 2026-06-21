@@ -63,10 +63,16 @@ final class ErrorRecoveryIntegrationTests: XCTestCase {
         let content = StreamCollector.contentText(from: events)
         XCTAssertFalse(content.isEmpty, "Abort mode should still produce synthesized content")
 
-        // Should emit circuit breaker thought
-        let thoughts = StreamCollector.thoughts(from: events)
-        let hasCircuitBreaker = thoughts.contains { $0.contains("Circuit breaker") || $0.contains("circuit breaker") || $0.contains("recovering") || $0.contains("Recovering") }
-        XCTAssertTrue(hasCircuitBreaker, "Should emit circuit breaker/recovery thought on abort")
+        // The circuit-breaker abort signal is now emitted as a `.warning` (category
+        // `.circuitBreaker`), not a `.thought` (chip task_64f22dd2 — the .thought→.warning
+        // drift). Assert on the structural category so the test doesn't depend on wording.
+        let hasCircuitBreakerSignal = events.contains { event in
+            if case .warning(let category, let message, _, _) = event {
+                return category == .circuitBreaker || message.localizedCaseInsensitiveContains("abort")
+            }
+            return false
+        }
+        XCTAssertTrue(hasCircuitBreakerSignal, "Should emit a circuit-breaker warning on abort")
     }
 
     // MARK: - Test 2: .skipAndContinue Mode

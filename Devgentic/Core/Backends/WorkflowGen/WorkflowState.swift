@@ -173,12 +173,18 @@ struct WorkflowState: Sendable {
                 structuredOutput: output.structuredOutput
             )
         }
-        let names = envelopes.map(\.profileName).joined(separator: ", ")
-        wfStateLogger.info("Upstream envelopes for node \(nodeID): \(envelopes.count) results from [\(names)]")
-        for env in envelopes {
+        // De-duplicate by upstream node. When a node has multiple edges from the same
+        // upstream (e.g. wired to both its default and `error` ports), an upstream with
+        // no explicit port activation (success) passes the port filter on every edge —
+        // keep a single envelope per upstream so its output isn't injected twice.
+        var seenUpstreams = Set<UUID>()
+        let dedupedEnvelopes = envelopes.filter { seenUpstreams.insert($0.nodeID).inserted }
+        let names = dedupedEnvelopes.map(\.profileName).joined(separator: ", ")
+        wfStateLogger.info("Upstream envelopes for node \(nodeID): \(dedupedEnvelopes.count) results from [\(names)]")
+        for env in dedupedEnvelopes {
             wfStateLogger.debug("  Upstream '\(env.profileName)': \(env.output.count) chars, preview: \(String(env.output.prefix(200)))")
         }
-        return envelopes
+        return dedupedEnvelopes
     }
 
     /// Whether a downstream node should execute based on upstream status and port activation.
@@ -227,13 +233,15 @@ struct WorkflowState: Sendable {
             }
 
             // No explicit port activation on upstream.
-            // Completed nodes: all edges pass through — no selective routing needed.
-            // This also provides backward compatibility for profile nodes whose
-            // edges were created with sourcePortLabel="error" (the only port previously).
+            // Completed nodes: every edge passes EXCEPT a dedicated `error` branch.
+            // An `error` edge fires only when the node actually FAILED (handled by
+            // the explicit-ports block above, since failure activates ["error"]);
+            // on success it never fires. Without this, an `error`-port handler would
+            // also run on success, because a succeeded node sets no explicit ports.
             // Non-completed (continueAll): only default edges pass; labeled routes
             // like "error" require explicit activation via setActiveOutputPorts.
             if isCompleted {
-                return true
+                return edge.sourcePortLabel != "error"
             }
             if let label = edge.sourcePortLabel, !label.isEmpty {
                 return false // Non-completed: block labeled edges without active port
@@ -241,23 +249,26 @@ struct WorkflowState: Sendable {
             return true
         }
 
-        // Join quantifier. Both modes are synchronizing — by the time this runs,
-        // leveled execution has already waited for every incoming branch in an
-        // earlier level to finish. They differ only in how many branches must be
-        // satisfied:
-        //   .all (AND-join, default) — every incoming branch must be satisfied.
-        //   .any (OR-join / merge)   — at least one satisfied branch is enough.
-        // When an OR-join runs on partial success, `upstreamResultEnvelopes`
-        // (port-filtered) + `ContextCompressor.compileForWorkflow` (completed-only)
-        // already ensure only the successful branches' outputs reach the node.
+        // Join quantifier — applied per UPSTREAM BRANCH, not per edge. An upstream
+        // activates exactly ONE port-outcome per run (a profile's success default vs
+        // its `error` port; a condition's single matched rule), so multiple edges
+        // from the SAME upstream are inherently OR: the branch is "live" if ANY of its
+        // edges fired. The quantifier then applies across distinct upstream branches:
+        //   .all (AND-join, default) — every upstream branch must be live.
+        //   .any (OR-join / merge)   — at least one live upstream branch is enough.
+        // This is what lets a node wired to both an upstream's default and `error`
+        // ports run whether that upstream succeeds or fails — per-edge AND would make
+        // it permanently unreachable (the two ports are mutually exclusive).
         let joinMode = targetNode?.nodeConfig?.joinMode ?? .all
+        let branchLive = Dictionary(grouping: incomingEdges, by: { $0.sourceNodeID })
+            .mapValues { edges in edges.contains(where: edgeIsSatisfied) }
         let result: Bool
         switch joinMode {
-        case .all: result = incomingEdges.allSatisfy(edgeIsSatisfied)
-        case .any: result = incomingEdges.contains(where: edgeIsSatisfied)
+        case .all: result = branchLive.values.allSatisfy { $0 }
+        case .any: result = branchLive.values.contains(true)
         }
 
-        wfStateLogger.info("Routing: '\(nodeName)' → \(result ? "EXECUTE" : "SKIP") (join: \(joinMode.rawValue), incoming edges: \(incomingEdges.count))")
+        wfStateLogger.info("Routing: '\(nodeName)' → \(result ? "EXECUTE" : "SKIP") (join: \(joinMode.rawValue), upstream branches: \(branchLive.count), incoming edges: \(incomingEdges.count))")
         return result
     }
 

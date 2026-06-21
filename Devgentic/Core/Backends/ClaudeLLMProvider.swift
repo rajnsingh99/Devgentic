@@ -101,6 +101,10 @@ struct ClaudeLLMProvider: LLMProvider {
     // MARK: - Agent Flow (NativeAPI Tool Interception)
 
     func generate(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> String {
+        try await generateWithUsage(messages: messages, tools: tools, responseSchema: responseSchema).text
+    }
+
+    func generateWithUsage(messages: [[String: String]], tools: [[String: Any]]?, responseSchema: Any?) async throws -> (text: String, usage: TokenUsage?) {
         let (systemPrompt, anthropicMessages) = translateMessages(messages)
 
         var body: [String: Any] = [
@@ -125,6 +129,7 @@ struct ClaudeLLMProvider: LLMProvider {
         let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let usage = json.flatMap { TokenUsage.fromAnthropic($0) }
 
         // Defensive check: warn if response was truncated by max_tokens limit
         if let stopReason = json?["stop_reason"] as? String, stopReason == "max_tokens" {
@@ -161,11 +166,11 @@ struct ClaudeLLMProvider: LLMProvider {
         // (generate() returns a single string — use generateCognitiveStep() for multi-tool support)
         if let firstStep = syntheticSteps.first {
             let syntheticData = try JSONSerialization.data(withJSONObject: firstStep)
-            return String(data: syntheticData, encoding: .utf8) ?? "{}"
+            return (String(data: syntheticData, encoding: .utf8) ?? "{}", usage)
         }
 
         // Otherwise, return standard text (Task Completion / User Clarification)
-        return textResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (textResponse.trimmingCharacters(in: .whitespacesAndNewlines), usage)
     }
 
     // MARK: - Multimodal (Phase 3 — native image input)
@@ -192,23 +197,14 @@ struct ClaudeLLMProvider: LLMProvider {
                 continue
             }
 
-            var blocks: [[String: Any]] = []
-            for block in msg.content {
-                switch block {
-                case .text(let s):
-                    if !s.isEmpty { blocks.append(["type": "text", "text": s]) }
-                case .image(let img):
-                    let data = try await img.reference.resolve()
-                    blocks.append([
-                        "type": "image",
-                        "source": ["type": "base64", "media_type": img.mimeType, "data": data.base64EncodedString()]
-                    ])
-                default:
-                    // audio/video/tool blocks aren't sent natively here — project to text.
-                    let t = block.textFallback
-                    if !t.isEmpty { blocks.append(["type": "text", "text": t]) }
+            let blocks = try await MultimodalTranslator.translateBlocks(
+                msg.content,
+                text: { ["type": "text", "text": $0] as [String: Any] },
+                image: { mimeType, base64 in
+                    ["type": "image",
+                     "source": ["type": "base64", "media_type": mimeType, "data": base64]] as [String: Any]
                 }
-            }
+            )
             anthropicMessages.append(["role": anthropicRole, "content": blocks])
         }
 
@@ -424,83 +420,96 @@ struct ClaudeLLMProvider: LLMProvider {
     // MARK: - Bot Flow (Streaming)
 
     func stream(messages: [[String: String]], tools: [[String: Any]]?) -> AsyncThrowingStream<String, Error> {
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    let (systemPrompt, anthropicMessages) = translateMessages(messages)
+        streamWithUsage(messages: messages, tools: tools, onUsage: nil)
+    }
 
-                    var body: [String: Any] = [
-                        "model": config.modelName,
-                        "messages": anthropicMessages,
-                        "max_tokens": maxTokens,
-                        "stream": true
-                    ]
+    func streamWithUsage(messages: [[String: String]], tools: [[String: Any]]?, onUsage: (@Sendable (TokenUsage) -> Void)?) -> AsyncThrowingStream<String, Error> {
+        // Transport (read loop, cancellation, stall timeout) is owned by SSEStreamParser;
+        // this provides only the request and the per-line SSE decode.
+        SSEStreamParser.stream(
+            openBytes: {
+                let (systemPrompt, anthropicMessages) = self.translateMessages(messages)
 
-                    applyGenerationParams(to: &body)
+                var body: [String: Any] = [
+                    "model": self.config.modelName,
+                    "messages": anthropicMessages,
+                    "max_tokens": self.maxTokens,
+                    "stream": true
+                ]
+                self.applyGenerationParams(to: &body)
+                if let systemPrompt = systemPrompt {
+                    body["system"] = systemPrompt
+                }
 
-                    if let systemPrompt = systemPrompt {
-                        body["system"] = systemPrompt
+                var request = self.makeRequest(streaming: true)
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (bytes, _) = try await CloudRequestPipeline.executeStream(
+                    request: request, provider: .anthropic, rateLimitKey: self.config.rateLimitKey
+                )
+                return bytes
+            },
+            onUsage: onUsage,
+            extractUsage: { line, event in
+                guard line.hasPrefix("data: ") else { return nil }
+                let payload = String(line.dropFirst(6))
+                guard let data = payload.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                // Claude streams usage split across events: input on `message_start`,
+                // final output on `message_delta`. Returned as partials; the parser sums them.
+                switch event {
+                case "message_start":
+                    if let message = json["message"] as? [String: Any],
+                       let usage = message["usage"] as? [String: Any],
+                       let input = usage["input_tokens"] as? Int {
+                        return TokenUsage(inputTokens: input, outputTokens: 0)
                     }
-
-                    var request = makeRequest(streaming: true)
-                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-                    let (bytes, _) = try await CloudRequestPipeline.executeStream(request: request, provider: .anthropic, rateLimitKey: config.rateLimitKey)
-
-                    // Parse Server-Sent Events (SSE)
-                    var currentEvent = ""
-
-                    for try await line in bytes.lines {
-                        if line.hasPrefix("event: ") {
-                            currentEvent = String(line.dropFirst(7)).trimmingCharacters(in: .whitespacesAndNewlines)
-                        } else if line.hasPrefix("data: ") {
-                            let payload = String(line.dropFirst(6))
-
-                            if currentEvent == "content_block_delta" {
-                                guard let data = payload.data(using: .utf8),
-                                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                                      let delta = json["delta"] as? [String: Any] else {
-                                    continue
-                                }
-
-                                let deltaType = delta["type"] as? String ?? ""
-
-                                if deltaType == "text_delta", let text = delta["text"] as? String {
-                                    // Standard text output
-                                    continuation.yield(text)
-                                } else if deltaType == "thinking_delta", let thinking = delta["thinking"] as? String {
-                                    // Extended thinking trace — yield for display
-                                    continuation.yield(thinking)
-                                } else if deltaType == "input_json_delta" {
-                                    // Tool use argument streaming — log but don't yield in bot mode
-                                    logger.debug("Stream tool argument delta received (bot mode ignores)")
-                                }
-                            } else if currentEvent == "message_stop" {
-                                // Clean termination signal
-                                break
-                            } else if currentEvent == "error" {
-                                logger.error("Anthropic stream returned an error event: \(payload)")
-
-                                var errorMessage = "Anthropic stream error"
-                                if let data = payload.data(using: .utf8),
-                                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                                   let errorObj = json["error"] as? [String: Any],
-                                   let msg = errorObj["message"] as? String {
-                                    errorMessage = msg
-                                }
-
-                                continuation.finish(throwing: LLMProviderError.invalidResponse(errorMessage))
-                                return
-                            }
-                        }
+                    return nil
+                case "message_delta":
+                    if let usage = json["usage"] as? [String: Any],
+                       let output = usage["output_tokens"] as? Int {
+                        return TokenUsage(inputTokens: 0, outputTokens: output)
                     }
+                    return nil
+                default:
+                    return nil
+                }
+            },
+            handleLine: { line, event in
+                guard line.hasPrefix("data: ") else { return .skip }
+                let payload = String(line.dropFirst(6))
 
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
+                switch event {
+                case "content_block_delta":
+                    guard let data = payload.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let delta = json["delta"] as? [String: Any] else {
+                        return .skip
+                    }
+                    let deltaType = delta["type"] as? String ?? ""
+                    if deltaType == "text_delta", let text = delta["text"] as? String {
+                        return .emit(text)
+                    } else if deltaType == "thinking_delta", let thinking = delta["thinking"] as? String {
+                        return .emit(thinking)
+                    }
+                    // input_json_delta (tool-call argument streaming) is ignored in bot mode.
+                    return .skip
+                case "message_stop":
+                    return .finish
+                case "error":
+                    var errorMessage = "Anthropic stream error"
+                    if let data = payload.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let errorObj = json["error"] as? [String: Any],
+                       let msg = errorObj["message"] as? String {
+                        errorMessage = msg
+                    }
+                    return .fail(LLMProviderError.invalidResponse(errorMessage))
+                default:
+                    return .skip
                 }
             }
-        }
+        )
     }
 
     // MARK: - Private Helpers

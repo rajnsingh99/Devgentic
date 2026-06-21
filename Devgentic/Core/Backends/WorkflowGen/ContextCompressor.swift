@@ -108,44 +108,60 @@ enum ContextCompressor {
     ///
     /// Unlike `compile()` (which adds metadata headers, step labels, and status lines),
     /// this method produces raw text that a downstream node can process without
-    /// knowing it's in a workflow. Only `.completed` results are included.
+    /// knowing it's in a workflow. Only `.completed` results are included by
+    /// default; pass `includeFailures: true` to also surface error-routed failed
+    /// upstreams (each annotated with its failure reason) so an error-handler node
+    /// can see what failed and any partial output.
     ///
     /// Output format:
     /// - Single upstream: raw text (no wrapper, no separator)
     /// - Multiple upstreams: text blocks separated by `\n\n---\n\n`
+    /// - A failed upstream (when included) is prefixed with a one-line failure note.
     ///
     /// - Parameters:
     ///   - results: Upstream `NodeResultEnvelope` values.
     ///   - budget: Maximum total characters (defaults to `maxTotalContextChars`).
     ///   - perNodeBudget: Maximum characters per upstream (defaults to `maxCharsPerUpstream`).
-    /// - Returns: Clean text ready for injection into `<input>` tag. Empty string if no completed results.
+    ///   - includeFailures: When true, `.failed` upstreams are included and annotated
+    ///     with their reason (used by error-recovery routing). Default false.
+    /// - Returns: Clean text ready for injection into `<input>` tag. Empty string if no usable results.
     static func compileForWorkflow(
         results: [NodeResultEnvelope],
         budget: Int = maxTotalContextChars,
-        perNodeBudget: Int = maxCharsPerUpstream
+        perNodeBudget: Int = maxCharsPerUpstream,
+        includeFailures: Bool = false
     ) -> String {
-        // Filter to only completed results — failed/skipped are handled by the executor's dependency logic
-        let completedResults = results.filter {
-            if case .completed = $0.status { return true }
-            return false
+        // Normally only completed results contribute — failed/skipped are handled
+        // by the executor's dependency logic. When `includeFailures` is set (the
+        // consumer is an error handler wired to an upstream's `error` port), failed
+        // results are included too and annotated below with their reason.
+        let usableResults = results.filter { result in
+            switch result.status {
+            case .completed:            return true
+            case .failed:               return includeFailures
+            case .canceled, .skipped:   return false
+            }
         }
 
-        guard !completedResults.isEmpty else {
-            compressorLogger.info("compileForWorkflow: no completed upstream results, returning empty")
+        guard !usableResults.isEmpty else {
+            compressorLogger.info("compileForWorkflow: no usable upstream results, returning empty")
             return ""
         }
 
-        let perResultBudget = min(perNodeBudget, budget / completedResults.count)
-        compressorLogger.info("compileForWorkflow: \(completedResults.count)/\(results.count) completed results, totalBudget=\(budget), perResultBudget=\(perResultBudget)")
+        let perResultBudget = min(perNodeBudget, budget / usableResults.count)
+        compressorLogger.info("compileForWorkflow: \(usableResults.count)/\(results.count) usable results (includeFailures=\(includeFailures)), totalBudget=\(budget), perResultBudget=\(perResultBudget)")
 
         var sections: [String] = []
 
-        for (index, result) in completedResults.enumerated() {
+        for (index, result) in usableResults.enumerated() {
             let originalSize = result.output.count
             let truncatedOutput: String
 
             if originalSize > perResultBudget {
+                // Append a visible marker so the downstream node (and its model) knows
+                // its input was cut, rather than silently receiving a partial output.
                 truncatedOutput = truncateAtBoundary(result.output, maxLength: perResultBudget)
+                    + "\n[... upstream output truncated to ~\(perResultBudget) characters ...]"
                 compressorLogger.info("  [\(index)] '\(result.profileName)': \(originalSize) chars → truncated to ~\(perResultBudget)")
             } else {
                 truncatedOutput = result.output
@@ -153,7 +169,14 @@ enum ContextCompressor {
             }
             compressorLogger.debug("  [\(index)] '\(result.profileName)' preview: \(String(result.output.prefix(200)))")
 
-            sections.append(truncatedOutput)
+            // Annotate an error-routed failed upstream so the downstream handler has
+            // the failure reason alongside whatever partial output was produced.
+            if case .failed(let reason) = result.status {
+                let note = "[Upstream node \"\(result.profileName)\" failed: \(reason.localizedDescription)]"
+                sections.append(truncatedOutput.isEmpty ? note : note + "\n\n" + truncatedOutput)
+            } else {
+                sections.append(truncatedOutput)
+            }
         }
 
         // Join: single result = raw text, multiple = separated by ---

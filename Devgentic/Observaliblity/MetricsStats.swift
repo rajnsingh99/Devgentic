@@ -65,13 +65,17 @@ struct ModelReliabilityStats: Sendable, Identifiable {
     let completedCount: Int
     let failedCount: Int
     let cancelledCount: Int
+    /// Runs that died with the app (quit/crash mid-run) — not the model's fault, so
+    /// excluded from the success-rate denominator (audit #6).
+    let interruptedCount: Int
     let avgDurationMs: Int?
 
     /// Composite key — enables listing multiple (provider, model) pairs.
     var id: String { "\(provider)::\(modelName)" }
     var successRate: Double {
-        guard totalRuns > 0 else { return 0 }
-        return Double(completedCount) / Double(totalRuns)
+        let attributable = totalRuns - interruptedCount
+        guard attributable > 0 else { return 0 }
+        return Double(completedCount) / Double(attributable)
     }
 }
 

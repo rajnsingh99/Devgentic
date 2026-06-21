@@ -166,4 +166,30 @@ final class MistralXMLParserTests: XCTestCase {
         XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
         XCTAssertEqual(result.toolCalls.first?.arguments["path"], .string("/tmp"))
     }
+
+    // MARK: - #15: ReasoningQualityFilter (G7) on the with-tools path
+
+    func testWithToolCall_StubReasoning_IsFiltered() {
+        // A small/Q4 model that narrates "Calling <tool>" before its tool call must NOT leak
+        // that stub into working memory — the with-tools reasoning is filtered (#15 / G7).
+        let input = """
+        Calling search_web
+        <tool_call>
+        {"name": "search_web", "arguments": {"query": "swift"}}
+        </tool_call>
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "search_web")
+        XCTAssertEqual(result.reasoning, "", "Stub narration must be filtered out of with-tools reasoning")
+    }
+
+    func testTermination_StubShapedText_IsPreserved() {
+        // The no-tools path's text IS the final answer — it must never be filtered, even when
+        // it happens to look stub-shaped (#15: only the with-tools reasoning is filtered).
+        let input = "Using it."
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertEqual(result.reasoning, "Using it.", "A short final answer must be preserved, not blanked")
+    }
 }

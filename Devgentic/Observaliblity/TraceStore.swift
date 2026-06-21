@@ -33,6 +33,10 @@ final class TraceStore: Sendable {
     }()
 
     private let dbPool: DatabasePool
+    /// Absolute path to the SQLite file backing `dbPool`. Stored so disk-size reporting
+    /// can also stat the `-wal`/`-shm` sidecars. Points at the standard Application
+    /// Support location for the production store, or a unique temp file for `inMemory`.
+    private let dbPath: String
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.devgentic", category: "TraceStore")
 
     // MARK: - Initialization
@@ -56,19 +60,27 @@ final class TraceStore: Sendable {
         }
         
         dbPool = try DatabasePool(path: dbPath, configuration: config)
-        
+        self.dbPath = dbPath
+
         try migrator.migrate(dbPool)
-        
+
         logger.info("TraceStore initialized at: \(dbPath)")
     }
     
-    /// For unit testing: create an in-memory database.
+    /// For unit testing: create an ephemeral, isolated database.
+    /// Backed by a unique temp file rather than `:memory:` — `DatabasePool`
+    /// requires WAL journaling, which SQLite cannot activate on an in-memory
+    /// database ("SQLite error 1: could not activate WAL Mode at path: :memory:").
     init(inMemory: Bool) throws {
         var config = Configuration()
         config.prepareDatabase { db in
             try db.execute(sql: "PRAGMA foreign_keys = ON")
         }
-        dbPool = try DatabasePool(path: ":memory:", configuration: config)
+        let tempPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("devgentic-tracestore-test-\(UUID().uuidString).sqlite")
+            .path
+        dbPool = try DatabasePool(path: tempPath, configuration: config)
+        self.dbPath = tempPath
         try migrator.migrate(dbPool)
     }
     
@@ -251,6 +263,55 @@ final class TraceStore: Sendable {
                           condition: Column("traceID") != nil)
         }
 
+        // v5: release attribution + token accounting + the missing span-events timestamp
+        // index. All additive/nullable — safe on populated v1–v4 databases.
+        migrator.registerMigration("v5_version_tokens_event_index") { db in
+            try db.alter(table: "traces") { t in
+                // §12.3 — build attribution on the trace itself. Config snapshots are
+                // captured only on the chat path, so headless/scheduler/sub-agent traces
+                // had no version anchor; these are stamped in `beginTrace`.
+                t.add(column: "appVersion", .text)
+                t.add(column: "buildNumber", .text)
+                // D1 — per-trace token totals + cost rollup, set at `endTrace`.
+                t.add(column: "inputTokens", .integer)
+                t.add(column: "outputTokens", .integer)
+                t.add(column: "estimatedCostUSD", .double)
+                t.add(column: "tokensEstimated", .boolean)
+            }
+            // #17 — span_events is filtered by timestamp in every metrics query but had no
+            // index (v4 added one only for log_entries).
+            try db.create(index: "idx_events_timestamp", on: "span_events", columns: ["timestamp"])
+        }
+
+        // v6: normalize legacy TEXT dates. Rows written before the GRDB date-strategy fix
+        // stored "YYYY-MM-DD HH:MM:SS.SSS" TEXT in these REAL columns. SQLite sorts TEXT
+        // above REAL, so such rows were IMMORTAL — `startedAt < cutoff` (purge, reconcile)
+        // never matched, while `startedAt >= since` (recent-bundle windows) ALWAYS matched,
+        // surfacing 1970-decoded garbage forever (audit #7). Convert parseable values to
+        // epoch seconds; drop the unsalvageable rest.
+        migrator.registerMigration("v6_normalize_legacy_text_dates") { db in
+            let targets: [(table: String, column: String, nullable: Bool)] = [
+                ("traces", "startedAt", false), ("traces", "endedAt", true),
+                ("spans", "startedAt", false), ("spans", "endedAt", true),
+                ("span_events", "timestamp", false),
+                ("log_entries", "timestamp", false)
+            ]
+            for t in targets {
+                try db.execute(sql: """
+                    UPDATE \(t.table) SET \(t.column) = CAST(strftime('%s', \(t.column)) AS REAL)
+                    WHERE typeof(\(t.column)) = 'text' AND strftime('%s', \(t.column)) IS NOT NULL
+                    """)
+                if t.nullable {
+                    try db.execute(sql: "UPDATE \(t.table) SET \(t.column) = NULL WHERE typeof(\(t.column)) = 'text'")
+                }
+            }
+            // Unparseable text in NOT NULL date columns = unsalvageable garbage rows.
+            try db.execute(sql: "DELETE FROM traces WHERE typeof(startedAt) = 'text'")   // cascades
+            try db.execute(sql: "DELETE FROM spans WHERE typeof(startedAt) = 'text'")    // cascades events
+            try db.execute(sql: "DELETE FROM span_events WHERE typeof(timestamp) = 'text'")
+            try db.execute(sql: "DELETE FROM log_entries WHERE typeof(timestamp) = 'text'")
+        }
+
         return migrator
     }
 
@@ -308,7 +369,10 @@ final class TraceStore: Sendable {
     /// - Returns: entries in ascending timestamp order (oldest first).
     func fetchLogEntries(since: Date, minLevel: LogLevel? = nil, limit: Int = 10_000) throws -> [LogEntry] {
         try dbPool.read { db in
-            var query = LogEntry.filter(LogEntry.Columns.timestamp >= since)
+            // Compare as epoch seconds: a raw `Date` in a query-interface expression encodes
+            // as a TEXT datetime (the record-level date strategy does NOT apply here), and
+            // TEXT never matches the REAL column — the filter silently returned nothing.
+            var query = LogEntry.filter(LogEntry.Columns.timestamp >= since.timeIntervalSince1970)
             if let minLevel {
                 // Level comparison: include entries whose LogLevel ordinal is >= minLevel.
                 // GRDB can't compare strings by rank natively, so we filter to the set
@@ -482,7 +546,9 @@ final class TraceStore: Sendable {
                     tc.modelName AS model_name,
                     COUNT(*) AS total,
                     SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                    SUM(CASE WHEN t.status = 'error' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN t.status IN ('error', 'failed') THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN t.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                    SUM(CASE WHEN t.status = 'interrupted' THEN 1 ELSE 0 END) AS interrupted,
                     AVG(CASE WHEN t.endedAt IS NOT NULL THEN (t.endedAt - t.startedAt) * 1000 END) AS avg_duration
                 FROM trace_configs tc
                 JOIN traces t ON t.traceID = tc.traceID
@@ -498,6 +564,8 @@ final class TraceStore: Sendable {
                 let total: Int = row["total"] ?? 0
                 let completed: Int = row["completed"] ?? 0
                 let failed: Int = row["failed"] ?? 0
+                let cancelled: Int = row["cancelled"] ?? 0
+                let interrupted: Int = row["interrupted"] ?? 0
                 let avgDuration: Double? = row["avg_duration"]
                 return ModelReliabilityStats(
                     provider: provider,
@@ -505,7 +573,11 @@ final class TraceStore: Sendable {
                     totalRuns: total,
                     completedCount: completed,
                     failedCount: failed,
-                    cancelledCount: total - completed - failed,
+                    cancelledCount: cancelled,
+                    // App-quit/crash mid-run — not the model's fault; excluded from the
+                    // success-rate denominator (audit #6). Any remaining leftover (total
+                    // minus the four buckets) is still-running traces from THIS session.
+                    interruptedCount: interrupted,
                     avgDurationMs: avgDuration.map { Int($0) }
                 )
             }
@@ -692,6 +764,34 @@ final class TraceStore: Sendable {
             try span.insert(db)
         }
     }
+
+    /// Inserts the span when no row with its `spanID` exists; when a row already
+    /// exists, refreshes its descriptive identity (`name`, `kind`) while preserving
+    /// its lifecycle fields (`startedAt`, `endedAt`, `status`, `metadataJSON`).
+    /// Lets a later, better-informed caller (e.g. the workflow executor naming the
+    /// root span `workflow:<id>`) improve on a generic placeholder (`beginTrace`'s
+    /// auto-created "root") without clobbering timing or completion state.
+    /// Check + write run in one transaction, so concurrent callers can't double-insert.
+    /// - Returns: `true` if the span was inserted, `false` if an existing row was refreshed.
+    @discardableResult
+    func ensureSpan(_ span: Span) throws -> Bool {
+        try dbPool.write { db in
+            let exists = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM spans WHERE spanID = ?)",
+                arguments: [span.spanID]
+            ) ?? false
+            guard !exists else {
+                try db.execute(
+                    sql: "UPDATE spans SET name = ?, kind = ? WHERE spanID = ?",
+                    arguments: [span.name, span.kind, span.spanID]
+                )
+                return false
+            }
+            try span.insert(db)
+            return true
+        }
+    }
     
     /// Inserts a batch of span events in a single transaction.
     func insertEvents(_ events: [SpanEvent]) throws {
@@ -703,16 +803,29 @@ final class TraceStore: Sendable {
         }
     }
     
-    /// Updates an existing span (e.g., setting endedAt, status).
+    /// Updates an existing span (e.g., setting endedAt, status). Only-if-open: spans end
+    /// exactly once — late fire-and-forget `endSpan` tasks (defer blocks) must not re-stamp
+    /// a span that `closeOpenSpans` already closed at trace end (audit #10).
     func updateSpan(spanID: String, endedAt: Date, status: SpanStatus) throws {
         try dbPool.write { db in
             try db.execute(
-                sql: "UPDATE spans SET endedAt = ?, status = ? WHERE spanID = ?",
+                sql: "UPDATE spans SET endedAt = ?, status = ? WHERE spanID = ? AND endedAt IS NULL",
                 arguments: [endedAt.timeIntervalSince1970, status.rawValue, spanID]
             )
         }
     }
-    
+
+    /// Persists per-trace token totals + cost rollup (observability D1). Called once at
+    /// trace end with the run's accumulated usage.
+    func updateTraceTokens(traceID: String, inputTokens: Int, outputTokens: Int, estimatedCostUSD: Double?, estimated: Bool) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE traces SET inputTokens = ?, outputTokens = ?, estimatedCostUSD = ?, tokensEstimated = ? WHERE traceID = ?",
+                arguments: [inputTokens, outputTokens, estimatedCostUSD, estimated, traceID]
+            )
+        }
+    }
+
     /// Updates an existing trace record on completion/error.
     func updateTrace(traceID: String, endedAt: Date, status: TraceStatus, errorSummary: String? = nil) throws {
         try dbPool.write { db in
@@ -878,6 +991,21 @@ final class TraceStore: Sendable {
     
     // MARK: - Maintenance
     
+    /// Deletes all traces for a conversation (FK cascades to spans/events/configs), plus
+    /// the conversation's log entries — `log_entries.traceID` has NO foreign key, so without
+    /// the explicit DELETE those content-bearing rows would outlive the conversation by up
+    /// to 30 days (audit #4). Called when the user deletes a conversation (§12.5).
+    func deleteTraces(forConversationID conversationID: String) throws {
+        try dbPool.write { db in
+            // Logs first — the subquery needs the trace rows to still exist.
+            try db.execute(
+                sql: "DELETE FROM log_entries WHERE traceID IN (SELECT traceID FROM traces WHERE conversationID = ?)",
+                arguments: [conversationID]
+            )
+            try db.execute(sql: "DELETE FROM traces WHERE conversationID = ?", arguments: [conversationID])
+        }
+    }
+
     /// Purges all traces older than the given date.
     func purgeOlderThan(_ date: Date) throws {
         try dbPool.write { db in
@@ -893,6 +1021,63 @@ final class TraceStore: Sendable {
     func traceCount() throws -> Int {
         try dbPool.read { db in
             try TraceRecord.fetchCount(db)
+        }
+    }
+
+    /// Closes any spans still open (`endedAt IS NULL`) for a trace, stamping the given
+    /// end time and status. Used by `endTrace` to close the root span (which no executor
+    /// ends on the chat path) and by orphan reconciliation to close spans abandoned by a
+    /// dead process — without this they linger `running` forever (Gap #13).
+    func closeOpenSpans(traceID: String, endedAt: Date, status: SpanStatus) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE spans SET endedAt = ?, status = ? WHERE traceID = ? AND endedAt IS NULL",
+                arguments: [endedAt.timeIntervalSince1970, status.rawValue, traceID]
+            )
+        }
+    }
+
+    /// Reconciles traces left `running` by a previous process (the app quit or crashed
+    /// mid-run, so `endTrace` never ran) to `.interrupted`, and closes their open spans.
+    /// Otherwise such traces linger `running` forever and pollute reliability stats (Gap #13).
+    ///
+    /// `before` MUST be a timestamp captured at launch, *before* this process creates any
+    /// trace: only traces that started earlier are touched, so a live trace from the
+    /// current process can never be clobbered. Returns the number of traces reconciled.
+    @discardableResult
+    func reconcileOrphanedTraces(before: Date, reason: String, now: Date = Date()) throws -> Int {
+        try dbPool.write { db in
+            // Close the orphans' still-open spans first (root + any leaked iteration spans).
+            try db.execute(
+                sql: """
+                    UPDATE spans SET endedAt = ?, status = 'error'
+                    WHERE endedAt IS NULL AND traceID IN (
+                        SELECT traceID FROM traces WHERE status = 'running' AND startedAt < ?
+                    )
+                    """,
+                arguments: [now.timeIntervalSince1970, before.timeIntervalSince1970]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE traces SET endedAt = ?, status = 'interrupted',
+                        errorSummary = COALESCE(errorSummary, ?)
+                    WHERE status = 'running' AND startedAt < ?
+                    """,
+                arguments: [now.timeIntervalSince1970, reason, before.timeIntervalSince1970]
+            )
+            return db.changesCount
+        }
+    }
+
+    /// Total on-disk footprint of the trace database, including the WAL and shared-memory
+    /// sidecars (which can dwarf the main file between checkpoints). For surfacing in
+    /// Settings so users can see what diagnostics cost on disk.
+    func databaseFileSizeBytes() -> Int64 {
+        let fm = FileManager.default
+        return [dbPath, dbPath + "-wal", dbPath + "-shm"].reduce(Int64(0)) { total, path in
+            let attrs = try? fm.attributesOfItem(atPath: path)
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            return total + size
         }
     }
 }

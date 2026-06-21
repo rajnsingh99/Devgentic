@@ -22,6 +22,7 @@ struct WorkflowConfigSheet: View {
     // MARK: - Execution Defaults
 
     @State private var nodeTimeout: Double = 120
+    @State private var nodeTimeoutEnabled: Bool = true
     @State private var failurePolicy: NodeFailurePolicy = .skipDependents
     @State private var maxRetries: Int = 0
 
@@ -201,23 +202,49 @@ struct WorkflowConfigSheet: View {
     private var executionDefaultsCard: some View {
         SettingsCard(title: "Execution Defaults", icon: "bolt.circle", theme: theme) {
             VStack(alignment: .leading, spacing: 10) {
-                // Default Node Timeout
+                // Default Node Timeout — opt-in. When off, nodes run unbounded.
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Default Node Timeout")
                             .font(theme.fontCaption.weight(.medium))
                             .foregroundColor(theme.primaryText)
                         Spacer()
-                        Text("\(Int(nodeTimeout))s")
+                        if nodeTimeoutEnabled {
+                            // Editable whole-number seconds (typed value isn't restricted to
+                            // the slider's 10s steps); clamps to the valid range on commit.
+                            TextField("", value: Binding<Int>(
+                                get: { Int(nodeTimeout) },
+                                set: { nodeTimeout = Double(min(3600, max(10, $0))) }
+                            ), format: .number)
+                            .labelsHidden()
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 52)
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(theme.secondaryText)
-                            .frame(width: 44, alignment: .trailing)
+                            .textFieldStyle(.roundedBorder)
+                            Text("s")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(theme.tertiaryText)
+                            if nodeTimeout >= 60 {
+                                Text("· \(Self.timeoutLabel(nodeTimeout))")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(theme.tertiaryText)
+                            }
+                        }
+                        Toggle("", isOn: $nodeTimeoutEnabled)
+                            .labelsHidden()
+                            .controlSize(.mini)
                     }
-                    Slider(value: $nodeTimeout, in: 10...600, step: 10)
-                        .controlSize(.small)
-                    Text("Maximum wall-clock time per node before timeout. Overridden by per-node hard timeout.")
-                        .font(.system(size: 10))
-                        .foregroundColor(theme.tertiaryText)
+                    if nodeTimeoutEnabled {
+                        Slider(value: $nodeTimeout, in: 10...3600, step: 10)
+                            .controlSize(.small)
+                        Text("Maximum wall-clock time per node before timeout (up to 60 min). Overridden by a per-node hard timeout.")
+                            .font(.system(size: 10))
+                            .foregroundColor(theme.tertiaryText)
+                    } else {
+                        Text("Off — nodes run until they finish. Useful for long-running local models, but a hung node won't be stopped automatically.")
+                            .font(.system(size: 10))
+                            .foregroundColor(theme.tertiaryText)
+                    }
                 }
 
                 Divider()
@@ -354,11 +381,20 @@ struct WorkflowConfigSheet: View {
         }
     }
 
+    /// Formats a timeout (seconds) compactly: "45s", "2m", "2m 30s", "60m".
+    private static func timeoutLabel(_ seconds: Double) -> String {
+        let s = Int(seconds)
+        guard s >= 60 else { return "\(s)s" }
+        let m = s / 60, r = s % 60
+        return r == 0 ? "\(m)m" : "\(m)m \(r)s"
+    }
+
     // MARK: - Load / Save
 
     private func loadFromProfile() {
         guard case .workflow(let config) = profile.details else { return }
         nodeTimeout = config.resolvedNodeTimeout
+        nodeTimeoutEnabled = config.nodeTimeoutEnabled ?? true
         failurePolicy = config.resolvedFailurePolicy
         maxRetries = config.resolvedMaxRetries
         contextBudgetPerNode = config.resolvedContextBudgetPerNode
@@ -376,6 +412,8 @@ struct WorkflowConfigSheet: View {
 
         // Store nil when value matches system default (keeps serialized data clean)
         config.defaultNodeTimeout = (nodeTimeout == 120) ? nil : nodeTimeout
+        // nil = default (enabled); false = explicitly disabled (no timeout).
+        config.nodeTimeoutEnabled = nodeTimeoutEnabled ? nil : false
         config.defaultFailurePolicy = (failurePolicy == .skipDependents) ? nil : failurePolicy
         config.defaultMaxRetries = (maxRetries == 0) ? nil : maxRetries
         config.contextBudgetPerNode = (contextBudgetPerNode == 2000) ? nil : contextBudgetPerNode

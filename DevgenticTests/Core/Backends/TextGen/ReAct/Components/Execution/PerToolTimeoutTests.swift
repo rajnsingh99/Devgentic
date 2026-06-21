@@ -56,7 +56,7 @@ final class PerToolTimeoutTests: XCTestCase {
             parentContext: traceContext
         )
 
-        if case .timedOut(let name, let duration) = result {
+        if case .timedOut(let name, let duration, _) = result {
             XCTAssertEqual(name, "slow_tool")
             XCTAssertEqual(duration, 0.1, accuracy: 0.01)
         } else {
@@ -64,8 +64,9 @@ final class PerToolTimeoutTests: XCTestCase {
         }
     }
 
-    func testToolExceedsTimeout_CustomMessage_ReturnsSuccessWithMessage() async {
-        // Tool that sleeps 10s, 0.1s timeout, but has a custom timeout message
+    func testToolExceedsTimeout_CustomMessage_ReturnsFailureWithMessage() async {
+        // Tool that sleeps 10s, 0.1s timeout, with a custom timeout message. The message is
+        // surfaced to the LLM, but the result must stay a FAILURE (.timedOut), not .success (#20).
         let tool = TestToolFactory.makeSlowWithTimeout(
             name: "custom_timeout_tool",
             delay: 10.0,
@@ -80,14 +81,17 @@ final class PerToolTimeoutTests: XCTestCase {
             parentContext: traceContext
         )
 
-        // Custom timeout message returns as .success, not .timedOut
-        XCTAssertTrue(result.isSuccess, "Custom timeout message should produce success result")
+        XCTAssertFalse(result.isSuccess, "A timeout must be a failure even with a custom message (#20)")
         XCTAssertTrue(result.llmObservation.contains("ran too long"),
-                      "Should use custom timeout message")
+                      "The custom timeout message should still be surfaced to the LLM")
+        guard case .timedOut = result else {
+            return XCTFail("Expected .timedOut (not .success), got \(result)")
+        }
     }
 
-    func testToolWithNilTimeout_NoTimeoutEnforced() async {
-        // Tool with NO timeout that takes 0.2s — should complete normally
+    func testToolWithNilTimeout_CompletesUnderDefault() async {
+        // Tool with NO explicit timeout that takes 0.2s. A default timeout now applies on the
+        // agent path (#20), but 0.2s is well under it, so the tool completes normally.
         let tool = TestToolFactory.makeSlow(
             name: "no_timeout_tool",
             delay: 0.2,
@@ -101,8 +105,31 @@ final class PerToolTimeoutTests: XCTestCase {
             parentContext: traceContext
         )
 
-        XCTAssertTrue(result.isSuccess, "Tool with nil timeout should complete normally")
+        XCTAssertTrue(result.isSuccess, "Tool completing under the default timeout should succeed")
         XCTAssertTrue(result.llmObservation.contains("Completed after delay"))
+    }
+
+    func testToolWithNilTimeout_DefaultTimeoutFires() async {
+        // Inject a tiny default so we can verify the agent-path default timeout actually bounds
+        // a hung tool that sets no explicit timeout (#20) — without a real 60s wait.
+        let mediator = ToolExecutionMediator(defaultToolTimeout: 0.1)
+        let tool = TestToolFactory.makeSlow(
+            name: "hung_tool",
+            delay: 10.0,
+            output: "should never be returned"
+        )
+
+        let result = await mediator.executePreparedTool(
+            toolName: "hung_tool",
+            arguments: makeArgs(),
+            availableTools: [tool],
+            parentContext: traceContext
+        )
+
+        XCTAssertFalse(result.isSuccess, "A tool with no explicit timeout must still be bounded by the default")
+        guard case .timedOut = result else {
+            return XCTFail("Expected .timedOut from the default timeout, got \(result)")
+        }
     }
 
     func testToolTimeout_LlmObservation_ContainsToolInfo() async {

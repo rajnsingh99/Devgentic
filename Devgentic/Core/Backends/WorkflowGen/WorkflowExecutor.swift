@@ -120,11 +120,13 @@ actor WorkflowExecutor: Executor {
                 try await WorkflowDepth.$current.withValue(WorkflowDepth.current + 1) {
                 await LogContext.with(traceID: traceContext.traceID, phase: .workflow) {
                 do {
-                    // Persist the workflow's root span so per-node child spans have
-                    // a parent that actually exists in the `spans` table. Without
-                    // this, fetchFullTrace's reconstruction orphans the per-node
-                    // spans (their parentSpanID points at a non-existent row).
-                    await TraceRecorder.shared.beginSpan(
+                    // Guarantee the workflow's root span exists so per-node child
+                    // spans have a parent row in `spans` (otherwise fetchFullTrace's
+                    // reconstruction orphans them). Idempotent ensure, NOT beginSpan:
+                    // in the chat flow `beginTrace` already created this row, and an
+                    // unconditional insert collided with it on every run
+                    // (UNIQUE constraint failed: spans.spanID).
+                    await TraceRecorder.shared.ensureRootSpan(
                         context: traceContext,
                         name: "workflow:\(profileID.uuidString.prefix(8))",
                         kind: .workflow
@@ -662,10 +664,17 @@ actor WorkflowExecutor: Executor {
         // --- Build Workflow Execution Context ---
         let baseTaskDescription = node.nodeConfig?.taskDescription ?? ""
         let isFirstNode = upstreamResults.isEmpty
+        // `includeFailures: true` lets an error-handler profile node (wired to a
+        // failed upstream's `error` port) actually receive that upstream's output
+        // + failure reason. This is safe regardless of routing: a failed envelope
+        // only reaches `upstreamResults` when port-filtering matched an active
+        // `error` port (i.e. genuine error routing) — normal success routing never
+        // surfaces failed upstreams here.
         let upstreamInput = ContextCompressor.compileForWorkflow(
             results: upstreamResults,
             budget: workflowConfig.resolvedTotalContextBudget,
-            perNodeBudget: workflowConfig.resolvedContextBudgetPerNode
+            perNodeBudget: workflowConfig.resolvedContextBudgetPerNode,
+            includeFailures: true
         )
 
         // For first nodes: merge userInput into taskDescription as a single directive.
@@ -681,12 +690,14 @@ actor WorkflowExecutor: Executor {
             effectiveTaskDescription = baseTaskDescription
         }
 
-        // Gather media/file artifacts from completed upstream nodes. Mirrors the
-        // completed-only filter `compileForWorkflow` applies to text, so artifacts
-        // and text stay consistent (and inactive condition branches, already
-        // port-filtered out of `upstreamResults`, contribute neither). De-duplicated
-        // by id so a diamond/OR-join (where two branches each forward the same
-        // ancestor artifact) doesn't list it twice in the manifest or extract it twice.
+        // Gather media/file artifacts from COMPLETED upstream nodes only. Note the
+        // intentional asymmetry with text: `compileForWorkflow(includeFailures:)`
+        // surfaces an error-routed failed upstream's text + reason to an error
+        // handler, but a failed node's partial/aborted media is rarely safe to
+        // forward, so artifacts stay completed-only. (Inactive condition branches,
+        // already port-filtered out of `upstreamResults`, contribute neither.)
+        // De-duplicated by id so a diamond/OR-join (where two branches each forward
+        // the same ancestor artifact) doesn't list it twice or extract it twice.
         let upstreamArtifacts: [MediaArtifact] = Self.forwardedArtifacts(
             own: [],
             upstream: upstreamResults
@@ -738,10 +749,12 @@ actor WorkflowExecutor: Executor {
 
         // --- Execute via AgentConnect (with timeout enforcement) ---
         // Priority: WorkflowNodeConfig.hardTimeout → agent executionTimeout → default 120s
-        let nodeTimeout: TimeInterval = {
+        // `nil` → no timeout (the workflow's node-timeout setting is disabled and the
+        // node sets no explicit `hardTimeout`); the node then runs unbounded.
+        let nodeTimeout: TimeInterval? = {
             if let hardTimeout = node.nodeConfig?.hardTimeout { return hardTimeout }
             if case .agent(let config) = profile.details, let t = config.executionTimeout { return t }
-            return workflowConfig.resolvedNodeTimeout
+            return workflowConfig.effectiveNodeTimeout
         }()
 
         var nodeOutput = ""
@@ -762,12 +775,15 @@ actor WorkflowExecutor: Executor {
             let streamResult = try await withThrowingTaskGroup(
                 of: (String, [ToolOutput], [MediaArtifact], ExecutionOutcome?, String?).self
             ) { group in
-                // Timeout sentinel
-                group.addTask {
-                    try await Task.sleep(for: .seconds(nodeTimeout))
-                    throw AgentExecutionError(reason: .executionTimeout(
-                        elapsed: nodeTimeout, limit: nodeTimeout
-                    ))
+                // Timeout sentinel — only when a timeout is configured. When disabled
+                // (`nodeTimeout == nil`) the group runs the stream task alone, unbounded.
+                if let nodeTimeout {
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(nodeTimeout))
+                        throw AgentExecutionError(reason: .executionTimeout(
+                            elapsed: nodeTimeout, limit: nodeTimeout
+                        ))
+                    }
                 }
 
                 // Actual stream consumption — accumulates state locally
@@ -963,9 +979,13 @@ actor WorkflowExecutor: Executor {
         // --- Emit Node Completion ---
         switch nodeStatus {
         case .completed:
-            let summary = String(nodeOutput.prefix(100)) + (nodeOutput.count > 100 ? "..." : "")
+            // Emit the FULL node output, not a 100-char teaser. The execution UI
+            // renders this as the node's Output panel and persists it in the run
+            // record — both need the complete text. Card-strip previews clip
+            // visually via line limits, and the orchestrator's aggregate thought
+            // log truncates its own preview (see ActiveStreamManager).
             await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .completed)
-            continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: summary))
+            continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: nodeOutput))
             logger.info("Node '\(displayName)' completed. Output: \(nodeOutput.count) chars, Duration: \(String(format: "%.1f", result.metadata.duration))s")
 
         case .failed(let reason):
@@ -1007,6 +1027,16 @@ actor WorkflowExecutor: Executor {
 
     /// Wraps `executeNode()` with WorkflowNodeConfig-driven retry logic.
     /// Retries up to `maxNodeRetries` times with `retryDelay` between attempts.
+    ///
+    /// Two-layer retry relationship (resilience architecture): this is the OUTER,
+    /// "business" retry — it re-runs the whole node task. Inside each attempt, the
+    /// node's agent/bot run has its own INNER transport retries (bounded by the
+    /// resolved `TransportResiliencePolicy`: ~3 transient + 5 throttle for cloud).
+    /// The two compose multiplicatively in the worst case (maxNodeRetries × inner
+    /// budget), but the product is bounded — never infinite — and `maxNodeRetries`
+    /// defaults to 0 (`WorkflowConfig.resolvedMaxRetries`), so transient transport
+    /// recovery is handled by the inner tier and node-level retries only stack when
+    /// a user explicitly opts in. Keep `maxNodeRetries` modest for flaky providers.
     private nonisolated static func executeProfileNodeWithRetry(
         node: WorkflowNode,
         profile: BackendProfileModel,
@@ -1090,9 +1120,13 @@ actor WorkflowExecutor: Executor {
     private nonisolated static func runToolWithTimeout(
         _ tool: AgentTool,
         args: Data,
-        timeout: TimeInterval
+        timeout: TimeInterval?
     ) async throws -> (output: String, artifacts: [MediaArtifact]) {
-        try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
+        // No timeout configured → run the tool unbounded.
+        guard let timeout else {
+            return try await tool.run(args)
+        }
+        return try await withThrowingTaskGroup(of: (String, [MediaArtifact]).self) { group in
             group.addTask { try await tool.run(args) }
             group.addTask {
                 try await Task.sleep(for: .seconds(timeout))
@@ -1155,6 +1189,16 @@ actor WorkflowExecutor: Executor {
         var status: NodeExecutionStatus = .completed
         // Artifacts the node itself produces (only Action nodes, via their tool).
         var producedArtifacts: [MediaArtifact] = []
+
+        // Per-structural-node span so condition/loop/code/gate/action nodes appear in the
+        // trace tree (mirrors the profile-node span) and Action-node tool results below
+        // attach to a real parent row (Gap #11). Status reflects the node's outcome.
+        let structSpan = traceContext.newSpan()
+        await TraceRecorder.shared.beginSpan(context: structSpan, name: "node:\(displayName)", kind: .workflowNode)
+        defer {
+            let spanStatus: SpanStatus = { if case .completed = status { return .completed } else { return .error } }()
+            Task { await TraceRecorder.shared.endSpan(spanID: structSpan.spanID, status: spanStatus) }
+        }
 
         let upstreamNames = upstreamResults.map(\.profileName).joined(separator: ", ")
         let upstreamTotalChars = upstreamResults.reduce(0) { $0 + $1.output.count }
@@ -1591,10 +1635,10 @@ actor WorkflowExecutor: Executor {
             // (#2) Retry — transient failures (network/MCP/timeout) retry up to
             // `maxNodeRetries`. Defaults: hardTimeout → workflow default (120s),
             // retries → workflow default (0). Both honor per-node overrides.
-            let nodeTimeout: TimeInterval = node.nodeConfig?.hardTimeout ?? workflowConfig.resolvedNodeTimeout
+            let nodeTimeout: TimeInterval? = node.nodeConfig?.hardTimeout ?? workflowConfig.effectiveNodeTimeout
             let maxRetries = node.nodeConfig?.maxNodeRetries ?? workflowConfig.resolvedMaxRetries
             let retryDelay = node.nodeConfig?.retryDelay ?? 0
-            logger.info("Action node '\(displayName)': invoking tool '\(toolRef.name)' (\(config.argumentBindings.count) binding(s), timeout \(Int(nodeTimeout))s, retries \(maxRetries))")
+            logger.info("Action node '\(displayName)': invoking tool '\(toolRef.name)' (\(config.argumentBindings.count) binding(s), timeout \(nodeTimeout.map { "\(Int($0))s" } ?? "off"), retries \(maxRetries))")
 
             var attempt = 0
             while true {
@@ -1603,6 +1647,9 @@ actor WorkflowExecutor: Executor {
                     output = toolOutput
                     producedArtifacts = toolArtifacts
                     let durationMs = Int(Date().timeIntervalSince(toolStart) * 1000)
+                    // Route through reliability stats — Action-node tools were invisible
+                    // to per-tool stats (they bypass ToolExecutionMediator) (Gap #11).
+                    await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: true, output: toolOutput, durationMs: durationMs)
                     continuation.yield(.toolSucceeded(
                         ToolOutput(toolName: toolRef.name, params: toolParams, output: toolOutput, isSuccess: true),
                         durationMs: durationMs, sourceNodeID: nodeID
@@ -1636,6 +1683,8 @@ actor WorkflowExecutor: Executor {
                     } else {
                         failureCategory = .executionThrew
                     }
+                    let durationMs = Int(Date().timeIntervalSince(toolStart) * 1000)
+                    await TraceRecorder.shared.emitToolResult(span: structSpan, name: toolRef.name, success: false, output: error.localizedDescription, durationMs: durationMs)
                     continuation.yield(.toolFailed(
                         ToolOutput(toolName: toolRef.name, params: toolParams, output: output, isSuccess: false),
                         category: failureCategory, sourceNodeID: nodeID
@@ -1651,7 +1700,9 @@ actor WorkflowExecutor: Executor {
         // Emit completion/failure
         switch status {
         case .completed:
-            var summary = String(output.prefix(100)) + (output.count > 100 ? "..." : "")
+            // Full output (see executeNode) — the display renders & persists it in
+            // full; previews clip downstream.
+            var summary = output
             // Enrich summary for loop nodes with iteration count
             if case .loop = node.kind,
                let counterStr = variableUpdates["__loop_\(nodeID.uuidString)_counter"] {

@@ -27,12 +27,13 @@ enum CircuitBreakerAction: Equatable, Sendable {
 
 /// Evaluates execution state to prevent infinite loops, hallucination spirals,
 /// and handles friction in user clarification requests.
+/// Every requirement here has a live executor call site — hooks without a caller
+/// were removed in the audit-#3 cleanup (per-tool retry caps are covered by
+/// `evaluateRepetitiveActions`' global-frequency check; memory hydration and
+/// clarification-vagueness no longer have producers).
 protocol CognitiveSafetyGuarding: Sendable {
     var hallucinatedTools: Set<String> { get }
-    
-    /// Evaluates if a tool has been retried too many times with the exact same parameters.
-    mutating func evaluateToolAttempt(toolName: String, paramsHash: Int) -> CircuitBreakerAction
-    
+
     /// Records the result of a tool execution and checks for consecutive failure limits.
     mutating func recordToolResult(isSuccess: Bool) -> CircuitBreakerAction
 
@@ -45,13 +46,7 @@ protocol CognitiveSafetyGuarding: Sendable {
 
     /// Evaluates the loop state when the agent asks for user clarification (prevents endless questioning).
     mutating func evaluateAskUser() -> CircuitBreakerAction
-    
-    /// Evaluates the loop state when the agent interacts with memory (prevents endless stalling).
-    mutating func evaluateMemoryHydration() -> CircuitBreakerAction
-    
-    /// Checks if the user's response was too vague repeatedly.
-    mutating func recordClarificationResponse(isVague: Bool) -> CircuitBreakerAction
-    
+
     mutating func recordHallucination(_ toolName: String)
     mutating func resetCountersOnSuccess()
 }
@@ -59,8 +54,16 @@ protocol CognitiveSafetyGuarding: Sendable {
 /// The resulting action the executor must take when encountering an LLM error.
 enum RetryAction: Equatable, Sendable {
     case throttle(seconds: TimeInterval, message: String)
-    case networkRetry(message: String)
+    /// Transient transport failure (5xx, timeout) — retry after `delaySeconds`.
+    /// Bounded by `TransportResiliencePolicy.maxTransientRetries`; the strategy
+    /// returns `.fatal` once the budget is exhausted.
+    case networkRetry(message: String, delaySeconds: TimeInterval)
     case parseRetry(systemAlert: String, attemptCount: Int, maxAttempts: Int)
+    /// Deterministic, non-retryable failure (auth, bad model id, context
+    /// overflow, malformed request, exhausted retry budget). The executor
+    /// renders an error card with the honest reason and classifies telemetry
+    /// with `category` — never the parse-failure path, never a retry.
+    case fatal(reason: String, category: AgentErrorCategory)
     /// The local model was unloaded (e.g., idle timer fired during HITL suspension).
     /// The executor should attempt to reload the model and retry the iteration.
     case modelReload(message: String)

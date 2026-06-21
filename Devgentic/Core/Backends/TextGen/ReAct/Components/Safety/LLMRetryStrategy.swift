@@ -3,6 +3,10 @@
 //  Devgentic
 //
 //  Created for ReAct Executor Modularization.
+//  Reworked for the Phase-A resilience architecture (audit #5): typed 4xx
+//  triage via ProviderErrorClassifier, bounded transient/throttle budgets from
+//  TransportResiliencePolicy, and honest `.fatal` verdicts for deterministic
+//  failures — provider errors never masquerade as model parse failures.
 //
 
 import Foundation
@@ -11,63 +15,58 @@ import OSLog
 private let logger = DGLogger(category: "LLMRetryStrategy")
 
 /// A concrete implementation of `LLMRetryHandling`.
-/// Parses errors thrown by the `CognitiveGenerator` (HTTP 429s, Timeouts, JSON Parse Failures)
-/// and dictates the retry backoff sequence to the orchestrator.
+/// Applies the resolved transport/cognitive retry budgets to errors thrown by
+/// the `CognitiveGenerator` and dictates the executor's next move.
 struct LLMRetryStrategy: LLMRetryHandling {
 
     private let maxConsecutiveParseFailures: Int
     private let backoffStrategy: BackoffStrategy
+    private let transport: TransportResiliencePolicy
 
-    private(set) var consecutiveRetries = 0
+    private(set) var consecutiveRetries = 0            // 429 throttles
     private(set) var consecutiveParseFailures = 0
+    private(set) var consecutiveTransientFailures = 0  // 5xx + timeouts + connection drops
 
-    init(maxConsecutiveParseFailures: Int = 3, backoffStrategy: BackoffStrategy = .exponential) {
+    init(
+        maxConsecutiveParseFailures: Int = 3,
+        backoffStrategy: BackoffStrategy = .exponential,
+        transport: TransportResiliencePolicy = ResolvedResiliencePolicy.resolved(for: .cloud).transport
+    ) {
         self.maxConsecutiveParseFailures = maxConsecutiveParseFailures
         self.backoffStrategy = backoffStrategy
+        self.transport = transport
     }
-    
+
     // MARK: - Error Handling
-    
+
     mutating func handleError(_ error: Error) -> RetryAction {
-        // --- Structured Cloud Provider Error (from CloudRequestPipeline) ---
-        // This is the preferred path for cloud providers (Anthropic, OpenAI, Gemini)
-        // which provides exact status codes and retry-after headers.
-        if let cloudError = error as? CloudProviderError {
-            if cloudError.statusCode == 429 {
-                consecutiveRetries += 1
-                let defaultBackoff: TimeInterval = switch backoffStrategy {
-                case .exponential: pow(2.0, Double(min(consecutiveRetries, 6)))
-                case .fixed: 2.0
-                }
-                let retryAfter = cloudError.retryAfterSeconds ?? defaultBackoff
-                let retrySecs = Int(retryAfter)
-                logger.warning("Cloud 429 (\(String(describing: cloudError.provider))). request-id: \(cloudError.requestId ?? "n/a"). Throttling for \(retrySecs)s.")
-                return .throttle(seconds: retryAfter, message: "🛑 API Quota Hit. Pausing for \(retrySecs)s...")
-            }
-            if cloudError.statusCode >= 500 {
-                logger.warning("Cloud server error (\(cloudError.statusCode)). request-id: \(cloudError.requestId ?? "n/a"). Retrying.")
-                return .networkRetry(message: "⏳ Server Error (\(cloudError.statusCode)). Retrying...")
-            }
-            // For 4xx errors other than 429 (e.g., 400 bad request, 401 auth),
-            // these are not retryable — fall through to parse failure handling.
+        // Recognized transport-level errors (structured CloudProviderError, Ollama
+        // LLMProviderError.httpError, or any URLError) classify through the shared
+        // vocabulary — the bot path's TransportRetrier uses the same function, so
+        // both agree by construction. A nil result means the error is NOT
+        // transport-level; we fall through to model/parse handling below.
+        if let verdict = ProviderErrorClassifier.classifyTransport(
+            error,
+            connectionRefusedIsFatal: transport.connectionRefusedIsFatal,
+            endpointHint: transport.endpointHint
+        ) {
+            let cloudError = error as? CloudProviderError
+            let providerLabel = cloudError.map { String(describing: $0.provider) } ?? "local"
+            return apply(verdict, requestId: cloudError?.requestId, providerLabel: providerLabel)
         }
 
-        // --- Legacy String-Based Detection (for local providers: Ollama, MLX) ---
+        // --- Legacy String-Based Detection (local providers, wrapped errors) ---
         let errorDesc = error.localizedDescription
         let isRateLimit = errorDesc.contains("429") || errorDesc.localizedCaseInsensitiveContains("rate limit")
-        let isTimeout = (error as? URLError)?.code == .timedOut || errorDesc.contains("timed out")
+        let isTimeout = errorDesc.contains("timed out")
 
         if isRateLimit {
-            consecutiveRetries += 1
-            let retryAfter = extractRetryAfter(from: error, consecutiveRetries: consecutiveRetries)
-            let retrySecs = Int(retryAfter)
-            logger.warning("Rate limit hit (HTTP 429). Throttling for \(retrySecs)s.")
-            return .throttle(seconds: retryAfter, message: "🛑 API Quota Hit. Pausing for \(retrySecs)s...")
+            let headerValue = extractRetryAfter(from: error)
+            return throttleAction(retryAfter: headerValue, requestId: nil, provider: "local")
         }
 
         if isTimeout {
-            logger.warning("Network timeout. Retrying request.")
-            return .networkRetry(message: "⏳ Network Timeout. Retrying request...")
+            return transientAction(detail: "request timed out", requestId: nil)
         }
 
         // Model was unloaded (e.g., idle timer fired during HITL suspension).
@@ -90,44 +89,117 @@ struct LLMRetryStrategy: LLMRetryHandling {
             return .capabilityFailure(reason: errorDesc)
         }
 
-        // Treat as a Parse Failure (e.g., model returned malformed JSON)
+        // Treat as a Parse Failure (e.g., model returned malformed JSON).
+        // This path is now reserved for what it was designed for: the MODEL's
+        // output being unprocessable — provider/transport errors are classified
+        // above and never reach here.
         consecutiveParseFailures += 1
-        
+
         // Local captures to prevent escaping mutating 'self' in OSLog autoclosure
         let currentFailures = consecutiveParseFailures
         let maxFailures = maxConsecutiveParseFailures
-        
+
         logger.error("Cognitive Generation Failed (\(currentFailures)/\(maxFailures)): \(errorDesc)")
-        
+
         if currentFailures >= maxFailures {
             logger.error("Maximum consecutive parse failures reached. Aborting execution.")
             return .abort(reason: "I'm having trouble processing this request right now — the model is returning responses I can't interpret. Please try rephrasing your request or switching to a different model.")
         }
-        
+
         let systemAlert = "Your last output failed validation (attempt \(currentFailures)/\(maxFailures)). You MUST output a valid JSON response containing `reasoning` and `toolCalls` (an array of tools). No prose or markdown fences (```json)."
-        
+
         return .parseRetry(
             systemAlert: systemAlert,
             attemptCount: currentFailures,
             maxAttempts: maxFailures
         )
     }
-    
+
     mutating func resetParseFailures() {
         consecutiveRetries = 0
         consecutiveParseFailures = 0
+        consecutiveTransientFailures = 0
     }
-    
-    // MARK: - Private Header Parsing
-    
-    private func extractRetryAfter(from error: Error, consecutiveRetries: Int) -> TimeInterval {
-        let fallback: TimeInterval = switch backoffStrategy {
-        case .exponential: pow(2.0, Double(min(consecutiveRetries, 6)))
+
+    // MARK: - Budgeted Verdict Application
+
+    /// Routes a classifier verdict through the stateful retry budgets.
+    private mutating func apply(_ verdict: ProviderErrorVerdict, requestId: String?, providerLabel: String) -> RetryAction {
+        switch verdict {
+        case .throttle(let retryAfter):
+            return throttleAction(retryAfter: retryAfter, requestId: requestId, provider: providerLabel)
+        case .transient(let detail):
+            return transientAction(detail: detail, requestId: requestId)
+        case .fatal(let reason, let category):
+            logger.error("Provider fatal (\(category.rawValue)): \(reason)")
+            return .fatal(reason: reason, category: category)
+        }
+    }
+
+    /// 429 handling: honor a SANE Retry-After (finite, non-negative, ≤1h) or fall
+    /// back to the configured backoff shape; give up past the throttle budget — a
+    /// 429 that persists through N waits is an exhausted quota, not a burst.
+    private mutating func throttleAction(retryAfter: TimeInterval?, requestId: String?, provider: String) -> RetryAction {
+        consecutiveRetries += 1
+
+        if consecutiveRetries > transport.maxThrottleRetries {
+            let requestRef = requestId.map { " request-id: \($0)." } ?? ""
+            logger.error("Rate limit persisted after \(transport.maxThrottleRetries) waits (\(provider)). Giving up.\(requestRef)")
+            // Billing guidance only makes sense for cloud quotas; a local server
+            // rate-limiting is a proxy/config situation.
+            let reason = transport.providerClass == .cloud
+                ? "The provider is still rate-limiting after \(transport.maxThrottleRetries) waits — the quota for this profile looks exhausted. Check your plan/billing with the provider, or switch profiles.\(requestRef)"
+                : "The model server is still rate-limiting after \(transport.maxThrottleRetries) waits. Check the server or proxy configuration.\(requestRef)"
+            return .fatal(reason: reason, category: .providerQuotaExhausted)
+        }
+
+        let defaultBackoff: TimeInterval = switch backoffStrategy {
+        case .exponential: min(pow(2.0, Double(min(consecutiveRetries, 6))), transport.maxBackoff)
         case .fixed: 2.0
         }
+        let wait = ProviderErrorClassifier.sanitizedRetryAfter(retryAfter) ?? defaultBackoff
+        logger.warning("429 (\(provider)). request-id: \(requestId ?? "n/a"). Throttling \(Int(wait))s (\(consecutiveRetries)/\(transport.maxThrottleRetries)).")
+        return .throttle(seconds: wait, message: "🛑 API Quota Hit. Pausing for \(Int(wait))s...")
+    }
+
+    /// Transient handling (5xx/timeouts/connection blips): bounded retries with
+    /// exponential backoff; honest `.fatal` once the budget is spent. Previously
+    /// this returned an uncapped, zero-delay `.networkRetry` — an infinite
+    /// hammer-loop during outages (audit gap #5).
+    private mutating func transientAction(detail: String, requestId: String?) -> RetryAction {
+        consecutiveTransientFailures += 1
+
+        if consecutiveTransientFailures > transport.maxTransientRetries {
+            // Only reachable at budget+1 — the counter and check move together.
+            let attempted = transport.maxTransientRetries
+            let requestRef = requestId.map { " request-id: \($0)." } ?? ""
+            logger.error("Transient failure persisted (\(detail)) after \(attempted) retries. Giving up.\(requestRef)")
+            let retriesSuffix = attempted > 0 ? " after \(attempted) retries" : ""
+            let reason: String = switch transport.providerClass {
+            case .cloud:
+                "The provider is unavailable (\(detail))\(retriesSuffix). Try again in a few minutes.\(requestRef)"
+            case .ollama:
+                "The model server is unavailable (\(detail))\(retriesSuffix). Check that the model is loaded and the server is healthy.\(requestRef)"
+            case .mlx:
+                "The local model failed (\(detail)). Try reloading the model or switching to a smaller one."
+            }
+            return .fatal(reason: reason, category: .providerServerError)
+        }
+
+        let delay = transport.transientDelay(attempt: consecutiveTransientFailures)
+        logger.warning("Transient failure (\(detail)). request-id: \(requestId ?? "n/a"). Retrying in \(Int(delay))s (\(consecutiveTransientFailures)/\(transport.maxTransientRetries)).")
+        return .networkRetry(
+            message: "⏳ \(detail) — retrying in \(Int(delay))s (\(consecutiveTransientFailures)/\(transport.maxTransientRetries))...",
+            delaySeconds: delay
+        )
+    }
+
+    // MARK: - Private Header Parsing
+
+    private func extractRetryAfter(from error: Error) -> TimeInterval? {
         let nsError = error as NSError
         let possibleKeys = ["headers", "HTTPHeaders", "com.alamofire.serialization.response.error.response.headers"]
-        
+
         for key in possibleKeys {
             if let headers = nsError.userInfo[key] as? [AnyHashable: Any] {
                 if let retryVal = headers["Retry-After"] as? String ?? headers["retry-after"] as? String {
@@ -135,14 +207,18 @@ struct LLMRetryStrategy: LLMRetryHandling {
                 }
             }
         }
-        return fallback
+        return nil
     }
-    
+
     private func parseRetryHeader(_ value: String) -> TimeInterval? {
         if let seconds = TimeInterval(value) { return seconds }
         let formatter = DateFormatter()
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        if let date = formatter.date(from: value) { return date.timeIntervalSinceNow }
+        formatter.locale = Locale(identifier: "en_US_POSIX") // HTTP-dates are English regardless of system locale
+        if let date = formatter.date(from: value) {
+            let interval = date.timeIntervalSinceNow
+            return interval > 0 ? interval : nil
+        }
         return nil
     }
 }

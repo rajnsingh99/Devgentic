@@ -132,10 +132,22 @@ final class MainApplicationViewModel {
         return profile.profileType
     }
 
+    /// Guards navigation away from a workflow canvas with unsaved edits. The active
+    /// `WorkflowCanvasView` registers its dirty-state + save/discard hooks here; the
+    /// navigation sites route their transition through `workflowEditGuard.attempt`.
+    let workflowEditGuard = WorkflowEditGuard()
+
     /// Switches to the given interface mode, clearing conversation and profile selection.
     /// This resets the view to either the Welcome screen (chat) or the Empty Workflow view (workflow).
+    /// Routed through `workflowEditGuard` so leaving a dirty workflow canvas prompts Save/Discard/Cancel.
     func switchInterfaceMode(to mode: InterfaceMode) {
         guard mode != interfaceMode else { return }
+        workflowEditGuard.attempt { [weak self] in
+            self?.performInterfaceSwitch(to: mode)
+        }
+    }
+
+    private func performInterfaceSwitch(to mode: InterfaceMode) {
         interfaceMode = mode
         clearAttachedFiles()
         selectedConversationID = nil

@@ -20,6 +20,9 @@ struct WelcomeView: View {
     @State private var showActions = false
     @State private var showShortcuts = false
 
+    /// One-time disclosure that on-device diagnostics are recorded (default-on, opt-out).
+    @AppStorage(AppSettings.diagnosticsDisclosureSeenKey) private var diagnosticsDisclosureSeen = false
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 0) {
@@ -76,6 +79,13 @@ struct WelcomeView: View {
                 keyboardHints
                     .opacity(showShortcuts ? 1 : 0)
                     .offset(y: showShortcuts ? 0 : 8)
+
+                // MARK: - First-run diagnostics disclosure
+                if !diagnosticsDisclosureSeen {
+                    Spacer().frame(height: 28)
+                    diagnosticsDisclosure
+                        .opacity(showShortcuts ? 1 : 0)
+                }
 
                 Spacer()
                     .frame(height: 40)
@@ -223,6 +233,38 @@ struct WelcomeView: View {
             KeyHint(keys: ["⇧", "⌘", "V"], label: "Voice", theme: theme)
         }
         .padding(.vertical, 8)
+    }
+
+    // MARK: - Diagnostics Disclosure (first run)
+
+    private var diagnosticsDisclosure: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.shield")
+                .font(.system(.caption))
+                .foregroundStyle(theme.secondaryText)
+            Text("Devgentic stores sanitized diagnostics on this Mac to help fix issues. Nothing is sent anywhere unless you export a report.")
+                .font(.system(.caption2))
+                .foregroundStyle(theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("Settings") { router.navigateToSettings(.general) }
+                .font(.caption2)
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.accentColor)
+            Button {
+                withAnimation { diagnosticsDisclosureSeen = true }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption2)
+                    .foregroundStyle(theme.tertiaryText)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(10)
+        .frame(maxWidth: 520)
+        .background(theme.surfaceOverlay.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Brief Generation

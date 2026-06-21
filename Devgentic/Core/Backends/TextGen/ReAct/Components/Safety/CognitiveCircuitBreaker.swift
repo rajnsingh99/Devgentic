@@ -10,11 +10,6 @@ import OSLog
 
 private let logger = DGLogger(category: "CircuitBreaker")
 
-struct ToolInvocationKey: Hashable, Sendable {
-    let toolName: String
-    let paramsHash: Int
-}
-
 /// A concrete implementation of `CognitiveSafetyGuarding`.
 /// Manages friction counters, loop prevention, and hallucination tracking.
 /// By returning `CircuitBreakerAction`, it dictates the orchestrator's next move.
@@ -24,7 +19,6 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
 
     private let maxConsecutiveAskUser: Int
     private let maxConsecutiveIdle: Int
-    private let maxToolRetries: Int
     let maxConsecutiveToolFailures: Int
     let maxRepetitiveActions: Int
 
@@ -37,24 +31,20 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     init(maxConsecutiveToolFailures: Int = 3,
          maxRepetitiveActions: Int = 3,
          maxConsecutiveAskUser: Int = 3,
-         maxConsecutiveIdle: Int = 5,
-         maxToolRetries: Int = 2) {
+         maxConsecutiveIdle: Int = 5) {
         self.maxConsecutiveToolFailures = maxConsecutiveToolFailures
         self.maxRepetitiveActions = maxRepetitiveActions
         self.maxConsecutiveAskUser = maxConsecutiveAskUser
         self.maxConsecutiveIdle = maxConsecutiveIdle
-        self.maxToolRetries = maxToolRetries
     }
 
     // MARK: - State Tracking
 
     private(set) var consecutiveToolFailures = 0
     private(set) var consecutiveDenials = 0
-    private(set) var clarificationFriction = 0
     private(set) var consecutiveAskUserCalls = 0
     private(set) var consecutiveIdleSteps = 0
     private(set) var hallucinatedTools: Set<String> = []
-    private(set) var recentInvocations: [ToolInvocationKey: Int] = [:]
 
     /// Tracks consecutive iterations where every tool call in the iteration
     /// produces the same fingerprint (tool + args hash + observation hash).
@@ -74,20 +64,7 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     private let maxGlobalToolRepetitions: Int = 3
     
     // MARK: - Tool Loop Evaluation
-    
-    mutating func evaluateToolAttempt(toolName: String, paramsHash: Int) -> CircuitBreakerAction {
-        let invocationKey = ToolInvocationKey(toolName: toolName, paramsHash: paramsHash)
-        recentInvocations[invocationKey, default: 0] += 1
-        
-        if recentInvocations[invocationKey]! > maxToolRetries {
-            logger.warning("🚫 Tool '\(toolName)' retried too many times. Intervening.")
-            let msg = "🚫 Tool '\(toolName)' already failed \(maxToolRetries) times with identical parameters. Skipping. Return tool_name: null immediately."
-            return .intervene(systemMessage: msg)
-        }
-        
-        return .proceed
-    }
-    
+
     mutating func recordToolResult(isSuccess: Bool) -> CircuitBreakerAction {
         if isSuccess {
             consecutiveToolFailures = 0
@@ -104,13 +81,6 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         if currentFailures >= maxFailures {
             logger.warning("🚫 Consecutive tool failure limit (\(maxFailures)) reached. Aborting.")
             return .abort(reason: "Reached \(maxFailures) consecutive tool failures without recovery.")
-        }
-
-        let totalAttempts = recentInvocations.values.reduce(0, +)
-        let allFailed = recentInvocations.values.allSatisfy { $0 >= 1 } && totalAttempts >= 2 && !hallucinatedTools.isEmpty
-
-        if allFailed {
-            return .intervene(systemMessage: "All tool attempts have failed. Consider returning tool_name: null to explain what tools are needed.")
         }
 
         return .proceed
@@ -207,6 +177,24 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             return .abort(reason: "Detected \(current) consecutive identical tool calls [\(toolNames)] with the same results. Breaking degenerate loop.")
         }
 
+        // --- Check 2: Per-tool global frequency (catches alternating combos) ---
+        // Runs BEFORE the limit-1 warning: aborts outrank warnings. With the old
+        // order, an iteration whose fingerprint counter sat at limit-1 returned the
+        // warning early and masked a global-cap abort until the next iteration.
+        // Tracks individual tool+args+output across ALL iterations — a model that
+        // alternates [read_file] and [read_file, list_directory] evades the
+        // iteration fingerprint but each read_file call is still identical.
+        // The increment already happened at the top of this method; here we
+        // only check whether any key has hit the cap.
+        for key in components {
+            let count = globalToolFrequency[key, default: 0]
+            if count >= maxGlobalToolRepetitions {
+                let toolName = key.components(separatedBy: "|").first ?? "unknown"
+                logger.warning("🔁 Global repetition limit: '\(toolName)' executed \(count) times with identical args+output. Aborting.")
+                return .abort(reason: "Tool '\(toolName)' has been called \(count) times with the same parameters and results across multiple iterations. Breaking stale loop.")
+            }
+        }
+
         if current == limit - 1 {
             let toolNames = observations.map(\.toolName).joined(separator: ", ")
             logger.info("⚠️ Repetitive action warning: [\(toolNames)] repeated \(current) times. One more will trigger abort.")
@@ -237,71 +225,38 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             return .proceedWithWarning(uiMessage: uiMessage, modelAlert: modelAlert)
         }
 
-        // --- Check 2: Per-tool global frequency (catches alternating combos) ---
-        // Tracks individual tool+args+output across ALL iterations. A model that
-        // alternates [read_file] and [read_file, list_directory] evades the
-        // iteration fingerprint but each read_file call is still identical.
-        // The increment already happened at the top of this method; here we
-        // only check whether any key has hit the cap.
-        for key in components {
-            let count = globalToolFrequency[key, default: 0]
-            if count >= maxGlobalToolRepetitions {
-                let toolName = key.components(separatedBy: "|").first ?? "unknown"
-                logger.warning("🔁 Global repetition limit: '\(toolName)' executed \(count) times with identical args+output. Aborting.")
-                return .abort(reason: "Tool '\(toolName)' has been called \(count) times with the same parameters and results across multiple iterations. Breaking stale loop.")
-            }
-        }
-
         return .proceed
     }
 
     // MARK: - Ask User & Idle Step Evaluation
-    
+
+    /// Bounds consecutive interrogation loops. Counters only reset via
+    /// `resetCountersOnSuccess`, which the executor gates on real (non-ask_user)
+    /// tool progress — asking another question is not progress.
     mutating func evaluateAskUser() -> CircuitBreakerAction {
         consecutiveAskUserCalls += 1
         consecutiveIdleSteps += 1
-        
+
         if consecutiveIdleSteps >= maxConsecutiveIdle {
-            return .abort(reason: "Max idle steps reached during user clarification.")
+            return .abort(reason: "Reached \(consecutiveIdleSteps) consecutive idle steps — the run is stuck in a clarification loop without tool progress.")
         }
-        
+
         if consecutiveAskUserCalls > maxConsecutiveAskUser {
-            let msg = "SYSTEM INTERVENTION: You have asked the user \(consecutiveAskUserCalls) questions without making progress. You MUST now return tool_name: null. Do NOT call ask_user."
+            let msg = "SYSTEM INTERVENTION: You have asked the user \(consecutiveAskUserCalls) questions without making progress. Stop asking. Either proceed using the available tools, or call `final_answer` with your best response based on what you already know. Do NOT call ask_user again."
             return .intervene(systemMessage: msg)
         }
-        
+
         return .proceed
     }
-    
-    mutating func evaluateMemoryHydration() -> CircuitBreakerAction {
-        consecutiveIdleSteps += 1
-        if consecutiveIdleSteps >= maxConsecutiveIdle {
-            return .abort(reason: "Max idle steps reached during memory hydration.")
-        }
-        return .proceed
-    }
-    
-    mutating func recordClarificationResponse(isVague: Bool) -> CircuitBreakerAction {
-        if isVague {
-            clarificationFriction += 1
-            if clarificationFriction > 1 {
-                return .intervene(systemMessage: "The user's response was vague. You MUST return tool_name: null explaining what specific data you are missing.")
-            }
-        } else {
-            clarificationFriction = 0
-        }
-        return .proceed
-    }
-    
+
     // MARK: - Metrics & Reset
-    
+
     mutating func recordHallucination(_ toolName: String) {
         hallucinatedTools.insert(toolName)
     }
-    
+
     mutating func resetCountersOnSuccess() {
         consecutiveAskUserCalls = 0
-        clarificationFriction = 0
         consecutiveIdleSteps = 0
     }
 

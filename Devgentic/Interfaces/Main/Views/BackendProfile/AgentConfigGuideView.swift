@@ -116,11 +116,11 @@ struct AgentConfigGuideView: View {
                     guideCard(title: "Error Recovery", icon: "arrow.clockwise") {
                         guideParagraph("These settings control how the agent handles failures during execution. They apply both when running standalone and as a workflow node.")
 
-                        guideSettingRow("On Parse Failure", "When the LLM returns output the system can't parse (malformed JSON, missing fields).\n\n\u{2022} Retry 1-5x: Resend with a correction hint. Usually succeeds on retry.\n\u{2022} Higher retry counts are useful for smaller/local models that parse less reliably.")
+                        guideSettingRow("On Parse Failure", "How many times to resend with a correction hint when the LLM returns output the system can't parse (malformed JSON, missing fields). This affects ONLY parse failures.\n\n\u{2022} Auto: a sensible default (3).\n\u{2022} Higher counts help smaller/local models that parse less reliably.\n\nNetwork issues (timeouts, rate limits, server errors) are handled automatically based on your provider and are not configured here.")
 
                         Divider().background(theme.dividerColor)
 
-                        guideSettingRow("Backoff Strategy", "Delay pattern between retries.\n\n\u{2022} Exponential: 1s, 2s, 4s, 8s... — best for rate-limited APIs\n\u{2022} Fixed: Constant 2s delay — simpler, predictable")
+                        guideSettingRow("Tool Failure Tolerance", "How many consecutive tool failures the agent tolerates before it gives up. Separate from the parse-failure setting above and from the policy below — this is the count; the policy decides what happens once the count is reached.\n\n\u{2022} Auto: a sensible default (3).")
 
                         Divider().background(theme.dividerColor)
 

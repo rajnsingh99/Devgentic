@@ -69,4 +69,99 @@ final class SemanticFailureDetectionTests: XCTestCase {
     func testIsSemanticFailure_NumericOutput_ReturnsFalse() {
         XCTAssertFalse(ToolExecutionMediator.isSemanticFailure("42"), "Numeric output should not be flagged as failure")
     }
+
+    // MARK: - #19 (A): narrowed "error" heuristic
+
+    func testIsSemanticFailure_LongErrorContainingContent_ReturnsFalse() {
+        // A multi-KB log/build output that merely BEGINS with "error" is legitimate content,
+        // not a tool failure. Pre-#19 the bare hasPrefix("error") flagged it.
+        let longLog = "error " + String(repeating: "x", count: 600)
+        XCTAssertFalse(ToolExecutionMediator.isSemanticFailure(longLog),
+                       "Long error-containing content (>maxSemanticErrorLength) must not be flagged")
+    }
+
+    func testIsSemanticFailure_ErrorNotALeadingWord_ReturnsFalse() {
+        // "errors"/"error_log" — "error" is not a standalone word followed by ':' or whitespace.
+        XCTAssertFalse(ToolExecutionMediator.isSemanticFailure("errors found: 0"))
+        XCTAssertFalse(ToolExecutionMediator.isSemanticFailure("error_log.txt opened"))
+    }
+
+    func testIsSemanticFailure_ErrorReadingShape_StillTrue() {
+        // Intentional soft-failure shapes real tools emit must still be caught.
+        XCTAssertTrue(ToolExecutionMediator.isSemanticFailure("Error reading file: no such file"))
+        XCTAssertTrue(ToolExecutionMediator.isSemanticFailure("error"), "bare 'error' token is a failure")
+    }
+
+    func testIsSemanticFailure_ErrorHeaderWithLongMultilineBody_StillTrue() {
+        // A soft-failure that interpolates a long body ("Error: <header>\n<2KB stderr>") has a
+        // SHORT first line and must still be flagged — the length bound is on the first line,
+        // not the whole output (#19, review fix #2). Whole length here far exceeds 512.
+        let interpolated = "Error: AppleScript failed\n" + String(repeating: "detail line\n", count: 80)
+        XCTAssertGreaterThan(interpolated.count, 512)
+        XCTAssertTrue(ToolExecutionMediator.isSemanticFailure(interpolated),
+                      "Error-headed soft-failure with a long body must still be flagged")
+    }
+
+    // MARK: - #19 (B): per-tool opt-out (contentMayLookLikeError)
+
+    private func emptySchema() -> ToolParameters {
+        SchemaBuilder.object(properties: [("input", "string", "in")], required: [])
+    }
+
+    func testExecutePreparedTool_OptOutTool_ErrorOutputIsSuccess() async {
+        // A tool that legitimately surfaces error text (contentMayLookLikeError = true)
+        // returning "error: ..." is a SUCCESS, not a semantic failure.
+        let mediator = ToolExecutionMediator()
+        let tool = AgentTool(
+            name: "shelly",
+            description: "shell",
+            parameters: emptySchema(),
+            contentMayLookLikeError: true,
+            textOnlyRun: { _ in "error: build failed with 3 errors" }
+        )
+        let result = await mediator.executePreparedTool(
+            toolName: "shelly",
+            arguments: ["input": .string("x")],
+            availableTools: [tool],
+            parentContext: TestTraceContext.make()
+        )
+        XCTAssertTrue(result.isSuccess, "Opt-out tool's error-shaped output should be success")
+    }
+
+    func testExecutePreparedTool_NonOptOutTool_ErrorOutputIsSemanticFailure() async {
+        // Control: the same output WITHOUT the opt-out is still a semantic failure.
+        let mediator = ToolExecutionMediator()
+        let tool = AgentTool(
+            name: "reader",
+            description: "reader",
+            parameters: emptySchema(),
+            textOnlyRun: { _ in "Error: File not found" }
+        )
+        let result = await mediator.executePreparedTool(
+            toolName: "reader",
+            arguments: ["input": .string("x")],
+            availableTools: [tool],
+            parentContext: TestTraceContext.make()
+        )
+        XCTAssertFalse(result.isSuccess, "Non-opt-out tool's 'Error:' output should be a semantic failure")
+        if case .semanticFailure = result {} else { XCTFail("Expected .semanticFailure, got \(result)") }
+    }
+
+    // MARK: - #19 (review fix #1): opted-out tool must THROW its operational failures
+
+    func testXcodeOrchestrator_MissingScheme_ThrowsNotReturns() async throws {
+        // XcodeOrchestratorTool opts out of content-sniffing (its build output legitimately
+        // contains "error:"), so its OWN argument/operational failures must THROW — otherwise
+        // the opt-out would silently mark them as success and the breaker would never count them.
+        let args = try JSONDecoder().decode(
+            XcodeOrchestratorTool.Arguments.self,
+            from: Data(#"{"action":"build"}"#.utf8)
+        )
+        do {
+            _ = try await XcodeOrchestratorTool().call(arguments: args)
+            XCTFail("build without a scheme must throw, not return an 'Error:' string")
+        } catch {
+            // expected — a thrown error becomes .systemError at the mediator (a counted failure)
+        }
+    }
 }

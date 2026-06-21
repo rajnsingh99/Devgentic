@@ -308,7 +308,7 @@ struct ProfileNodeInspectorView: View {
                         get: { current },
                         set: { hardTimeoutBinding.wrappedValue = $0 }
                     ),
-                    in: 10...600,
+                    in: 10...3600,
                     step: 10
                 )
                 .fixedSize()

@@ -224,4 +224,45 @@ final class ReActMarkdownParserTests: XCTestCase {
         XCTAssertEqual(result.toolCalls.count, 1)
         XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
     }
+
+    // MARK: - #15: ReasoningQualityFilter (G7) on the with-tools path
+
+    func testWithToolCall_StubThought_IsFiltered() {
+        // A stub Thought ("Calling <tool>") emitted alongside a tool call must be filtered so it
+        // doesn't pollute the working-memory scratchpad (#15 / G7).
+        let input = """
+        Thought: Calling list_directory
+        Action: list_directory
+        Action Input: {"path": "/tmp"}
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertEqual(result.toolCalls.first?.name, "list_directory")
+        XCTAssertEqual(result.reasoning, "", "Stub thought must be filtered out of with-tools reasoning")
+    }
+
+    func testTermination_StubShapedAnswer_IsPreserved() {
+        // The termination text IS the final answer — never filtered, even if it looks stub-shaped.
+        let input = """
+        Thought: Using it.
+        Action: None
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 0)
+        XCTAssertEqual(result.reasoning, "Using it.", "A short final answer must be preserved")
+    }
+
+    func testWithToolCall_RealReasoningStartingLikeStub_IsPreserved() {
+        // The filter is anchored + length-gated: a real sentence that merely STARTS like a stub
+        // must pass through untouched (guards against over-filtering).
+        let input = """
+        Thought: Calling the search API will let me verify the exact version before editing.
+        Action: search_web
+        Action Input: {"query": "version"}
+        """
+        let result = parser.parse(rawResponse: input)
+        XCTAssertEqual(result.toolCalls.count, 1)
+        XCTAssertTrue(result.reasoning.contains("verify the exact version"),
+                      "Real reasoning that starts like a stub must be preserved")
+    }
 }

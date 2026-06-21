@@ -125,107 +125,12 @@ final class CognitiveGeneratorPropertyTests: XCTestCase {
 
 final class WorkflowGeneratorRoutingTests: XCTestCase {
 
-    /// Builds a minimal WorkflowExecutionContext for testing.
-    private func makeWorkflowContext() -> WorkflowExecutionContext {
-        WorkflowExecutionContext(
-            taskDescription: "Test task",
-            upstreamInput: "test input",
-            isFirstNode: false,
-            nodeName: "test-node"
-        )
-    }
-
-    /// Builds a minimal SemanticContext for end-to-end workflow tests.
-    private func makeSemanticContext() -> SemanticContext {
-        SemanticContext(
-            instructions: "Test assistant",
-            environmentFacts: EnvironmentFacts(
-                osVersion: "macOS 15.4",
-                shellType: "zsh",
-                userName: "testuser",
-                currentDate: "2026-04-15"
-            ),
-            longTermMemory: StaticGroundingMemory(ragContext: ""),
-            recentHistory: nil,
-            nativeHistoryTurns: nil,
-            originalQuery: "Test query",
-            currentIteration: 1,
-            compiledScratchpad: "",
-            latestClarification: nil,
-            negativeConstraints: [],
-            hallucinatedTools: [],
-            availableTools: [],
-            userProfile: nil,
-            skillManifests: nil,
-            taskDescription: nil,
-            promptLayerConfig: .agent
-        )
-    }
-
-    // MARK: - Inner Generator Delegation
-
-    func testWorkflow_WrapsXMLNative_DelegatesDialectRules() {
-        let inner = XMLNativeStructuredGenerator()
-        let workflow = WorkflowCognitiveGenerator(
-            inner: inner,
-            workflowContext: makeWorkflowContext(),
-            isNativeFlow: false
-        )
-        XCTAssertEqual(workflow.dialectRules, inner.dialectRules,
-                       "Workflow should delegate dialectRules from inner XMLNativeStructuredGenerator")
-    }
-
-    func testWorkflow_WrapsXMLNative_DelegatesToolAdapter() {
-        let inner = XMLNativeStructuredGenerator()
-        let workflow = WorkflowCognitiveGenerator(
-            inner: inner,
-            workflowContext: makeWorkflowContext(),
-            isNativeFlow: false
-        )
-        XCTAssertTrue(workflow.toolAdapter is PromptedMarkdownAdapter,
-                      "Workflow should inherit PromptedMarkdownAdapter from inner XMLNativeStructuredGenerator")
-    }
-
-    func testWorkflow_WrapsMLXNative_DelegatesDialectRules() {
-        let inner = MLXNativeStructuredGenerator()
-        let workflow = WorkflowCognitiveGenerator(
-            inner: inner,
-            workflowContext: makeWorkflowContext(),
-            isNativeFlow: false
-        )
-        XCTAssertNotNil(workflow.dialectRules)
-        XCTAssertTrue(workflow.dialectRules?.contains("tool_calls") ?? false)
-    }
-
-    func testWorkflow_WrapsXML_DelegatesDialectRules() {
-        let inner = XMLStructuredGenerator()
-        let workflow = WorkflowCognitiveGenerator(
-            inner: inner,
-            workflowContext: makeWorkflowContext(),
-            isNativeFlow: false
-        )
-        XCTAssertTrue(workflow.dialectRules?.contains("<tool_call>") ?? false)
-    }
-
-    func testWorkflow_WrapsMarkdown_DelegatesDialectRules() {
-        let inner = MarkdownStructuredGenerator()
-        let workflow = WorkflowCognitiveGenerator(
-            inner: inner,
-            workflowContext: makeWorkflowContext(),
-            isNativeFlow: false
-        )
-        XCTAssertNotNil(workflow.dialectRules)
-    }
-
-    func testWorkflow_WrapsNative_NoDialectRules() {
-        let inner = NativeStructuredGenerator()
-        let workflow = WorkflowCognitiveGenerator(
-            inner: inner,
-            workflowContext: makeWorkflowContext(),
-            isNativeFlow: true
-        )
-        XCTAssertNil(workflow.dialectRules, "Native flow should have nil dialect rules")
-    }
+    // NOTE: The former `testWorkflow_Wraps*` tests (and their `makeWorkflowContext()`
+    // / `makeSemanticContext()` helpers) were removed — they exercised the deleted
+    // `WorkflowCognitiveGenerator` wrapper. Workflow node execution now threads
+    // context as a parameter (`AgentConnect.streamWorkflowNodeResponse` +
+    // `WorkflowExecutionContext`, reusing the agent/bot generator), and is covered
+    // end-to-end by `WorkflowExecutorIntegrationTests`.
 
     // MARK: - Parse Dialect Verification
     //

@@ -96,6 +96,12 @@ actor SelfReflectionExecutorWrapper: Executor {
                 }
                 var accumulatedConstraints = Set(sessionState.negativeConstraints)
 
+                // #23: whether any answer content reached the UI. The cancel handler emits a
+                // placeholder only when the bubble would otherwise be empty (defensive — today
+                // trial content is accumulated, not forwarded, and the final answer is yielded
+                // only after the loop, immediately before finishing).
+                var didEmitContent = false
+
                 do {
                     logger.info("Self-reflection capability initiated (maxTrials: \(self.config.maxTrials)).")
 
@@ -110,7 +116,8 @@ actor SelfReflectionExecutorWrapper: Executor {
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
 
                     var bestOutput: String = ""
-                    var bestTrial: Int = 0
+                    var bestTrial: Int = 0    // trial `bestOutput` came from (what ships)
+                    var trialsRun: Int = 0    // total trials executed (for honest trace count)
 
                     // =====================================================================
                     // OUTER LOOP: TRIALS
@@ -120,6 +127,18 @@ actor SelfReflectionExecutorWrapper: Executor {
                         try Task.checkCancellation()
 
                         let trialSpan = executionTrace.newSpan()
+                        // Persist the trial span so the inner executor's iteration spans
+                        // attach to a real parent row instead of orphaning (Gap #10). The
+                        // success flag keeps the status honest when the trial's stream
+                        // throws or is cancelled (audit #9); a RETRY verdict still counts
+                        // as a completed trial — the trial ran, the evaluator just wasn't
+                        // satisfied.
+                        await TraceRecorder.shared.beginSpan(context: trialSpan, name: "trial_\(trial)", kind: .subtask)
+                        var trialSucceeded = false
+                        defer {
+                            let status: SpanStatus = trialSucceeded ? .completed : .error
+                            Task { await TraceRecorder.shared.endSpan(spanID: trialSpan.spanID, status: status) }
+                        }
                         onTraceUpdate(AgentTraceLog(
                             traceID: trialSpan.traceID,
                             spanID: trialSpan.spanID,
@@ -150,45 +169,35 @@ actor SelfReflectionExecutorWrapper: Executor {
                         // Combined with the critique in instructions, the model gets
                         // both "what went wrong" and "what was already discovered".
                         var seededMemory = input.workingMemory
+                        // Seed with the best output so far (which may be from an earlier trial
+                        // than trial-1 if the immediately-prior trial failed — #18 A1).
                         if trial > 1 && !bestOutput.isEmpty {
                             seededMemory.recordObservation(
                                 stepId: 0,
-                                toolCallId: "trial_\(trial - 1)",
+                                toolCallId: "trial_\(bestTrial)",
                                 toolName: "prior_trial",
                                 params: "",
-                                result: "[Trial \(trial - 1) output]: \(bestOutput)",
+                                result: "[Trial \(bestTrial) output]: \(bestOutput)",
                                 artifacts: []
                             )
-                            logger.info("Seeded trial \(trial) working memory with trial \(trial - 1) output (\(bestOutput.count) chars).")
+                            logger.info("Seeded trial \(trial) working memory with trial \(bestTrial) output (\(bestOutput.count) chars).")
                         }
 
-                        let trialInput = AgentInput(
-                            userInput: input.userInput,
-                            chatHistory: input.chatHistory,
-                            conversationID: input.conversationID,
-                            tools: input.tools,
-                            longTermMemory: input.longTermMemory,
-                            activeState: SessionGraph(
-                                sessionID: sessionState.sessionID,
-                                episodes: sessionState.episodes,
-                                negativeConstraints: Array(accumulatedConstraints),
-                                workingMemory: sessionState.workingMemory
-                            ),
-                            recentHistory: input.recentHistory,
-                            generatorStrategy: input.generatorStrategy,
-                            workingMemory: seededMemory,
-                            rateLimitKey: input.rateLimitKey,
-                            rateLimitCategory: input.rateLimitCategory,
-                            instructions: trialInstructions.isEmpty ? nil : trialInstructions,
-                            skillManifests: input.skillManifests,
-                            skillFolderPath: input.skillFolderPath,
-                            retryPolicy: input.retryPolicy,
-                            errorRecovery: input.errorRecovery,
-                            responseSynthesisEnabled: input.responseSynthesisEnabled,
-                            nativeHistoryTurns: input.nativeHistoryTurns,
-                            suppressEpisodeManagement: true,
-                            traceContext: trialSpan
+                        // Trial-scoped input by copy-derivation (AgentInput contract):
+                        // everything not overridden — userPayload images, modelTier,
+                        // workflowContext, and any future field — is inherited from the
+                        // parent run automatically.
+                        var trialInput = input
+                        trialInput.activeState = SessionGraph(
+                            sessionID: sessionState.sessionID,
+                            episodes: sessionState.episodes,
+                            negativeConstraints: Array(accumulatedConstraints),
+                            workingMemory: sessionState.workingMemory
                         )
+                        trialInput.workingMemory = seededMemory
+                        trialInput.instructions = trialInstructions.isEmpty ? nil : trialInstructions
+                        trialInput.suppressEpisodeManagement = true
+                        trialInput.traceContext = trialSpan
 
                         // Delegate to inner executor for this trial
                         let stream = innerExecutor.execute(model: model, input: trialInput, onTraceUpdate: onTraceUpdate)
@@ -246,6 +255,7 @@ actor SelfReflectionExecutorWrapper: Executor {
                             }
                             trialSummary.finalAgentThought = trialOutput
                             trialSummary.markComplete()
+                            trialSucceeded = true
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
@@ -263,8 +273,17 @@ actor SelfReflectionExecutorWrapper: Executor {
                             trialSummary.markComplete(failureReason: error.localizedDescription)
                         }
 
-                        bestOutput = trialOutput
-                        bestTrial = trial
+                        trialsRun = trial
+                        // #18 (A1): don't let an empty or failed later trial clobber a good
+                        // earlier result. Keep the most recent NON-EMPTY output, and never let
+                        // a failed trial overwrite one that already succeeded (a trial can throw
+                        // mid-stream and leave trialOutput empty/partial — :250-265). True
+                        // best-SCORING selection across multiple non-empty trials is A2 (deferred:
+                        // needs a numeric score on the evaluator verdict).
+                        if !trialOutput.isEmpty && (trialSucceeded || bestOutput.isEmpty) {
+                            bestOutput = trialOutput
+                            bestTrial = trial
+                        }
 
                         // =============================================================
                         // REFLECTION PHASE
@@ -279,12 +298,13 @@ actor SelfReflectionExecutorWrapper: Executor {
                         await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
                         try Task.checkCancellation()  // [G7] Catch cancellation before reflection LLM call
 
-                        let reflection = try await reflectionEvaluator.evaluate(
+                        let (reflection, reflectionUsage) = try await reflectionEvaluator.evaluate(
                             summary: trialSummary,
                             originalGoal: input.userInput,
                             model: spyModel,
                             trial: trial
                         )
+                        continuation.yield(.tokenUsage(reflectionUsage))
 
                         if reflection.isAcceptable {
                             logger.info("Trial \(trial) accepted by reflection evaluator.")
@@ -324,12 +344,13 @@ actor SelfReflectionExecutorWrapper: Executor {
                         traceID: executionTrace.traceID,
                         spanID: executionTrace.newSpan().spanID,
                         parentSpanID: executionTrace.parentSpanID,
-                        stepNumber: bestTrial,
+                        stepNumber: trialsRun,
                         state: .thinking(.finalizing),
-                        content: "Self-reflection complete after \(bestTrial) trial(s)."
+                        content: "Self-reflection complete after \(trialsRun) trial(s)."
                     ))
 
                     continuation.yield(.content(bestOutput))
+                    didEmitContent = true
                     // Reuse `terminalOutcome` computed earlier for the episode close —
                     // empty best output after exhausting all trials means the reflection
                     // loop never produced acceptable content; that's `.failed`.
@@ -345,6 +366,13 @@ actor SelfReflectionExecutorWrapper: Executor {
                     sessionState.cancelActiveEpisode()
                     await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
                     continuation.yield(.thought("Cancelled by user."))
+                    // #23: mirror ReActAgentExecutor's cancel placeholder so a cancelled
+                    // Reflexion run doesn't leave an empty bubble (trial content is accumulated,
+                    // not forwarded, so on a wrapper-level cancel nothing has reached the UI).
+                    // Guarded against double content.
+                    if !didEmitContent {
+                        continuation.yield(.content("*Operation stopped by user.*"))
+                    }
                     continuation.yield(.executionFinished(outcome: .cancelled, reason: "User stopped the run"))
                     continuation.finish()
                 } catch {

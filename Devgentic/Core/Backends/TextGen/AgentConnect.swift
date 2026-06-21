@@ -238,7 +238,13 @@ class AgentConnect: @unchecked Sendable {
                     // Provision budget-aware Working Memory Strategy
                     let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
                     let workingMemory: any WorkingMemoryStrategy = WindowedLinearMemory(config: memoryConfig)
-                    
+
+                    // #22: native turn-payload budget (~75% of context window as chars).
+                    // Distinct from the small scratchpad budget above — the native path
+                    // sends the full conversation, so it gets the larger slice; the ReAct
+                    // loop compacts oldest tool exchanges past this to bound growth.
+                    let nativeContextBudgetChars = max(8000, Int(Double(contextWindow) * 0.75) * 4)
+
                     // Resolve history strategy from profile (default: .recentHistory)
                     let historyStrategy: HistoryStrategy
                     if case .agent(let agentConfig) = profile.details {
@@ -374,13 +380,28 @@ class AgentConnect: @unchecked Sendable {
                     // Extract resilience config from agent profile
                     let retryPolicy: RetryPolicy
                     let errorRecovery: ErrorRecovery
+                    let resilienceOverrides: ResilienceOverrides?
                     if case .agent(let agentConfig) = profile.details {
                         retryPolicy = agentConfig.retryPolicy ?? RetryPolicy()
                         errorRecovery = agentConfig.errorRecovery ?? ErrorRecovery()
+                        resilienceOverrides = agentConfig.resilienceOverrides
                     } else {
                         retryPolicy = RetryPolicy()
                         errorRecovery = ErrorRecovery()
+                        resilienceOverrides = nil
                     }
+
+                    // Resolve the three-tier resilience policy ONCE, here, where the
+                    // provider class is known. Transport budgets are provider-derived
+                    // (cloud: bounded patience; Ollama: connection-refused is fatal
+                    // with guidance; MLX: fast-fail); cognitive/loop caps take the
+                    // user's per-tier overrides, falling back to the legacy RetryPolicy.
+                    let resiliencePolicy = ResolvedResiliencePolicy.resolved(
+                        for: ProviderClass(apiProvider: llmConfig.apiProvider),
+                        overrides: resilienceOverrides,
+                        legacy: retryPolicy,
+                        endpointHint: llmConfig.baseURL
+                    )
 
                     // Resolve IC-powered response synthesis.
                     // Global toggle from Core Intelligence settings, gated on IC availability.
@@ -407,10 +428,12 @@ class AgentConnect: @unchecked Sendable {
                         skillFolderPath: skillFolderPath,
                         retryPolicy: retryPolicy,
                         errorRecovery: errorRecovery,
+                        resiliencePolicy: resiliencePolicy,
                         responseSynthesisEnabled: responseSynthesisEnabled,
                         nativeHistoryTurns: nativeHistoryTurns,
                         traceContext: traceContext,
-                        modelTier: llmConfig.modelMetadata?.tier
+                        modelTier: llmConfig.modelMetadata?.tier,
+                        nativeContextBudgetChars: nativeContextBudgetChars
                     )
 
                     // 8. Execute & Stream
@@ -629,16 +652,22 @@ class AgentConnect: @unchecked Sendable {
                         ?? 128_000)
                     let modelTier = llmConfig.modelMetadata?.tier ?? .medium
                     let memoryConfig = MemoryBudgetConfig.derive(contextWindow: contextWindow, tier: modelTier)
+                    // #22: native turn-payload budget (~75% of context window as chars) —
+                    // bounds liveConversationTurns growth on workflow agent nodes too.
+                    let nativeContextBudgetChars = max(8000, Int(Double(contextWindow) * 0.75) * 4)
 
                     // Resilience config
                     let retryPolicy: RetryPolicy
                     let errorRecovery: ErrorRecovery
+                    let resilienceOverrides: ResilienceOverrides?
                     if case .agent(let agentConfig) = profile.details {
                         retryPolicy = agentConfig.retryPolicy ?? RetryPolicy()
                         errorRecovery = agentConfig.errorRecovery ?? ErrorRecovery()
+                        resilienceOverrides = agentConfig.resilienceOverrides
                     } else {
                         retryPolicy = RetryPolicy()
                         errorRecovery = ErrorRecovery()
+                        resilienceOverrides = nil
                     }
 
                     // Image payload (Phase 3): upstream image artifacts become native
@@ -668,12 +697,19 @@ class AgentConnect: @unchecked Sendable {
                         skillFolderPath: skillFolderPath,
                         retryPolicy: retryPolicy,
                         errorRecovery: errorRecovery,
+                        resiliencePolicy: ResolvedResiliencePolicy.resolved(
+                            for: ProviderClass(apiProvider: llmConfig.apiProvider),
+                            overrides: resilienceOverrides,
+                            legacy: retryPolicy,
+                            endpointHint: llmConfig.baseURL
+                        ),
                         responseSynthesisEnabled: false,
                         nativeHistoryTurns: nil,
                         suppressEpisodeManagement: true,
                         workflowContext: workflowContext,
                         traceContext: traceContext,
-                        modelTier: llmConfig.modelMetadata?.tier
+                        modelTier: llmConfig.modelMetadata?.tier,
+                        nativeContextBudgetChars: nativeContextBudgetChars
                     )
 
                     logger.info("[Workflow] AgentInput: tools=\(activeTools.count), generator=\(type(of: generator)), node='\(workflowContext.nodeName)'")
@@ -865,7 +901,15 @@ class AgentConnect: @unchecked Sendable {
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Anthropic API Key is required."])
             }
-            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : ProviderDefaults.anthropicBaseURL
+            let baseURL: URL
+            if let baseURLString = llmConfig.baseURL {
+                guard let parsed = URL(string: baseURLString) else {
+                    throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid Anthropic Base URL: \(baseURLString)"])
+                }
+                baseURL = parsed
+            } else {
+                baseURL = ProviderDefaults.anthropicBaseURL
+            }
             var options: [String: JSONValue]? = nil
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
@@ -892,7 +936,15 @@ class AgentConnect: @unchecked Sendable {
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenAI API Key is required."])
             }
-            let baseURL = (llmConfig.baseURL != nil) ? URL(string: llmConfig.baseURL!)! : ProviderDefaults.openAIBaseURL
+            let baseURL: URL
+            if let baseURLString = llmConfig.baseURL {
+                guard let parsed = URL(string: baseURLString) else {
+                    throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid OpenAI Base URL: \(baseURLString)"])
+                }
+                baseURL = parsed
+            } else {
+                baseURL = ProviderDefaults.openAIBaseURL
+            }
             var options: [String: JSONValue]? = nil
             if let advConfig = llmConfig.advancedConfiguration {
                 options = advConfig
@@ -1052,7 +1104,8 @@ class AgentConnect: @unchecked Sendable {
             parameters: tool.parameterSchema,
             requiresConfirmation: requiresConfirmation,
             timeout: timeout,
-            timeoutMessage: timeoutMessage
+            timeoutMessage: timeoutMessage,
+            contentMayLookLikeError: tool.outputMayContainErrorText
         ) { dataArgs in
             let args: T.Arguments
             do {
@@ -1082,6 +1135,7 @@ class AgentConnect: @unchecked Sendable {
             requiresConfirmation: requiresConfirmation,
             timeout: timeout,
             timeoutMessage: timeoutMessage,
+            contentMayLookLikeError: tool.contentMayLookLikeError,
             run: tool.run
         )
     }
