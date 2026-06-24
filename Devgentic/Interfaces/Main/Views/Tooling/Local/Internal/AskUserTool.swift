@@ -28,6 +28,15 @@ struct AskUserTool: DevgenticTool {
     let name = "ask_user"
     let description = "Asks the user a clarifying question and waits for their response."
 
+    /// Whether to advertise the optional `options`/`multiline` fields in the schema. Disabled for
+    /// small/tiny local models, which tend to fumble the extra fields — truncating `question` to
+    /// dump the subject into `options`, or emitting `multiline` as a string. Capable models keep them.
+    let richFields: Bool
+
+    init(richFields: Bool = true) {
+        self.richFields = richFields
+    }
+
     // MARK: - Type Definitions
 
     struct Arguments: Decodable, Sendable {
@@ -71,12 +80,14 @@ struct AskUserTool: DevgenticTool {
     // MARK: - Schema
 
     var parameterSchema: ToolParameters {
-        return SchemaBuilder.object(
-            properties: [
-                ("question", "string", "The clarifying question to ask the user.")
-            ],
-            required: ["question"]
-        )
+        var properties: [(String, String, String)] = [
+            ("question", "string", "The clarifying question to ask the user.")
+        ]
+        if richFields {
+            properties.append(("options", "array", "Optional suggested answers shown as one-tap choice buttons (e.g. [\"Yes\",\"No\"]). Omit for a free-form answer."))
+            properties.append(("multiline", "boolean", "Set true when a long / multi-line answer is expected."))
+        }
+        return SchemaBuilder.object(properties: properties, required: ["question"])
     }
 
     // MARK: - Execution

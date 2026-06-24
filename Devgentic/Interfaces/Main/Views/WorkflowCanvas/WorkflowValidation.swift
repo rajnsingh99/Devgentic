@@ -309,12 +309,24 @@ enum WorkflowValidator {
         config: GateNodeConfig,
         issues: inout [WorkflowValidationIssue]
     ) {
-        if config.options.filter({ !$0.isEmpty }).count < 2 {
+        // [E1] Each option is an output port matched by exact string. Trim + de-dup so blanks/duplicates
+        // don't silently collapse into one routing port (where a single choice would fire two branches).
+        let trimmedOptions = config.options.map { $0.trimmingCharacters(in: .whitespaces) }
+        let nonBlank = trimmedOptions.filter { !$0.isEmpty }
+        if nonBlank.count < 2 {
             issues.append(WorkflowValidationIssue(
                 nodeID: node.id,
                 nodeName: node.displayName,
                 severity: .error,
-                message: "Gate requires at least 2 options."
+                message: "Gate requires at least 2 non-empty options."
+            ))
+        }
+        if Set(nonBlank).count != nonBlank.count {
+            issues.append(WorkflowValidationIssue(
+                nodeID: node.id,
+                nodeName: node.displayName,
+                severity: .warning,
+                message: "Gate has duplicate option labels — duplicates share one output port, so a choice routes both branches."
             ))
         }
         if config.prompt.trimmingCharacters(in: .whitespaces).isEmpty {

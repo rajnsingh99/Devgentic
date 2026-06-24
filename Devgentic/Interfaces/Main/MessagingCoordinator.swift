@@ -338,15 +338,23 @@ final class MessagingCoordinator {
 
         logger.info("User requested to cancel streaming for message: \(messageID.uuidString)")
         activeStreamManager.cancelStream(for: messageID)
+
+        // [HITL/P0] If a HITL banner is up for this conversation, drain the parked suspension
+        // immediately so Stop returns at once. The suspend* cancellation handlers cover the
+        // task-cancellation path; this also covers a suspension whose owning task isn't the one
+        // we just cancelled (defensive, idempotent — resume on a resolved op is a no-op).
+        if let conversationID = viewModel?.streamingMessage?.conversationId {
+            Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
+        }
     }
 
     // MARK: - [HITL] Human-in-the-Loop Permissions
 
     /// Submits the user's decision (Approve/Deny) for a pending tool execution.
-    func submitToolApproval(operationID: UUID, approved: Bool) {
-        logger.info("[HITL] Submitting approval decision: \(approved) for operation \(operationID)")
+    func submitToolApproval(operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil) {
+        logger.info("[HITL] Submitting approval decision: \(approved) for operation \(operationID)\(editedArguments != nil ? " (edited args)" : "")")
         Task {
-            await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved)
+            await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved, editedArguments: editedArguments)
         }
     }
 
@@ -363,6 +371,14 @@ final class MessagingCoordinator {
         logger.info("[PLAN_REVIEW] Submitting plan review for \(operationID), approved: \(editedPlan != nil)")
         Task {
             await ExecutionSuspensionService.shared.resumePlanReview(for: operationID, editedPlan: editedPlan)
+        }
+    }
+
+    /// [E1] Submits the user's chosen option for a pending workflow Gate — routes to that option's port.
+    func submitGateChoice(operationID: UUID, option: String) {
+        logger.info("[GATE] Submitting gate choice '\(option)' for operation \(operationID)")
+        Task {
+            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option)
         }
     }
 

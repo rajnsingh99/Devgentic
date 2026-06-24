@@ -74,22 +74,31 @@ enum WorkflowStreamCollector {
         }
     }
 
+    /// [E1] Gate requests emitted by the workflow (per-option routing replaced the old binary gate).
+    static func gateRequests(from events: [AgentStreamEvent]) -> [(prompt: String, options: [String], operationID: UUID)] {
+        events.compactMap { event -> (prompt: String, options: [String], operationID: UUID)? in
+            if case .requestGate(let prompt, let options, let opID, _, _) = event {
+                return (prompt, options, opID)
+            }
+            return nil
+        }
+    }
+
     // MARK: - Gate Helper
 
-    /// Consumes a workflow stream, auto-responding to the first gate with the given approval.
-    /// Includes a brief delay to allow the suspension to register before responding.
-    static func collectWithGateResponse(
+    /// Consumes a workflow stream, auto-responding to the first gate by choosing `option`. Passing
+    /// `nil` resolves the gate with no choice (simulating a timeout / cancel — the gate then fails).
+    /// A brief delay lets the suspension register before responding.
+    static func collectWithGateChoice(
         from stream: AsyncThrowingStream<AgentStreamEvent, Error>,
-        approved: Bool
+        choosing option: String?
     ) async throws -> [AgentStreamEvent] {
         var events: [AgentStreamEvent] = []
         for try await event in stream {
             events.append(event)
-            if case .requestConfirmation(_, _, let operationID, _) = event {
-                // Brief delay to let ExecutionSuspensionService.suspend() register
-                // the continuation before we call resume()
+            if case .requestGate(_, _, let operationID, _, _) = event {
                 try await Task.sleep(for: .milliseconds(50))
-                await ExecutionSuspensionService.shared.resume(for: operationID, approved: approved)
+                await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: option)
             }
         }
         return events

@@ -63,8 +63,8 @@ actor ChatOpsSecurityGate {
         case .newConversation, .freeText, .cancel, .switchConversation, .clarificationResponse:
             return tier == .standard || tier == .full
 
-        // Requires .full
-        case .approveHITL, .denyHITL:  // operationID ignored for tier check
+        // Requires .full — a gate choice unblocks downstream execution, like a tool approval.
+        case .approveHITL, .denyHITL, .gateChoiceHITL:  // operationID ignored for tier check
             return tier == .full
 
         // Pairing is always allowed (handled before normal command flow)
@@ -76,7 +76,7 @@ actor ChatOpsSecurityGate {
     /// Returns a user-friendly denial message for the given command.
     func denialMessage(for command: ChatOpsCommand, tier: ChatOpsSecurityTier) -> String {
         switch command {
-        case .approveHITL, .denyHITL:  // operationID ignored for tier check
+        case .approveHITL, .denyHITL, .gateChoiceHITL:  // operationID ignored for tier check
             return "Tool approval requires *Full Access* security tier.\nChange this in Devgentic → Settings → ChatOps."
         case .newConversation, .freeText, .cancel, .switchConversation, .clarificationResponse:
             return "This action requires at least *Standard* security tier.\nChange this in Devgentic → Settings → ChatOps."

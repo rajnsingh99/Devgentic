@@ -229,9 +229,12 @@ struct CodeNodeConfig: Codable, Hashable, Sendable {
 struct GateNodeConfig: Codable, Hashable, Sendable {
     /// Prompt displayed to the user when the gate suspends.
     var prompt: String = "Approve this workflow step?"
-    /// Approval options displayed as buttons.
+    /// Choice options, each rendered as a button and exposed as a same-named output port — the user's
+    /// choice routes the workflow to that port (E1 per-option branching).
     var options: [String] = ["Approve", "Reject"]
-    /// Timeout in seconds before auto-rejecting. Nil = default (300s).
+    /// Seconds before the gate auto-rejects (fails, no branch taken). Nil = no per-gate timeout: the gate
+    /// waits indefinitely and the execution container owns the deadline — Stop, the scheduled-run
+    /// deadline, or stopWorkflow (HITL D3). The banner shows a live countdown only when this is set.
     var timeout: TimeInterval? = nil
 }
 

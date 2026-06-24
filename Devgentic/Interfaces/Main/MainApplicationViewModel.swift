@@ -25,6 +25,9 @@ final class MainApplicationViewModel {
 
     // Dependencies are now injected and stored.
     @ObservationIgnored private(set) var activeStreamManager: ActiveStreamManager
+    /// [HITL/P1] Single source of truth for pending HITL across all interfaces. Views read it
+    /// (it is itself @Observable); ASM gets the reference injected in init for P2 enqueue.
+    @ObservationIgnored let interactionCenter = InteractionCenter()
     @ObservationIgnored private(set) var persistenceService: ChatPersistenceProtocol
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let chatHistoryViewModel: ChatHistoryViewModel
@@ -147,6 +150,30 @@ final class MainApplicationViewModel {
         }
     }
 
+    /// [HITL/P4] Navigate to a (possibly different-mode) conversation that has a pending HITL —
+    /// e.g. from the cross-conversation chip in `InteractionBannerStack`. Aligns `interfaceMode`
+    /// to the request's origin so the correct dedicated view + mode-filtered sidebar are shown
+    /// (not a contextually-wrong empty screen), and routes through `workflowEditGuard` so leaving
+    /// a dirty workflow canvas still prompts Save/Discard/Cancel.
+    func navigateToPendingInteraction(conversationID: UUID, interface: HITLOrigin.Interface) {
+        let targetMode: InterfaceMode = {
+            switch interface {
+            case .workflow:          return .workflow
+            case .code:              return .code
+            case .chat, .scheduled:  return .chat
+            }
+        }()
+        workflowEditGuard.attempt { [weak self] in
+            guard let self else { return }
+            // performInterfaceSwitch nulls selectedConversationID, so set the mode first
+            // (only when it actually differs) and select the target afterward.
+            if self.interfaceMode != targetMode {
+                self.performInterfaceSwitch(to: targetMode)
+            }
+            self.selectedConversationID = conversationID
+        }
+    }
+
     private func performInterfaceSwitch(to mode: InterfaceMode) {
         interfaceMode = mode
         clearAttachedFiles()
@@ -199,6 +226,10 @@ final class MainApplicationViewModel {
         self.fileProcessorService = fileProcessorService
         self.activeStreamManager = activeStreamManager
         self.chatHistoryViewModel = chatHistoryViewModel
+
+        // [HITL/P1] Hand the shared interaction queue to the stream manager (dead in P1 —
+        // ASM begins enqueueing in P2). The VM owns it; ASM holds the back-reference.
+        activeStreamManager.interactionCenter = interactionCenter
 
         logger.info("MainApplicationViewModel initialized.")
 
@@ -397,8 +428,8 @@ final class MainApplicationViewModel {
         messagingCoordinator.cancelStreamingResponse()
     }
 
-    func submitToolApproval(operationID: UUID, approved: Bool) {
-        messagingCoordinator.submitToolApproval(operationID: operationID, approved: approved)
+    func submitToolApproval(operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil) {
+        messagingCoordinator.submitToolApproval(operationID: operationID, approved: approved, editedArguments: editedArguments)
     }
 
     func submitClarificationResponse(operationID: UUID, response: String?) {
@@ -407,6 +438,10 @@ final class MainApplicationViewModel {
 
     func submitPlanReview(operationID: UUID, editedPlan: [SubTask]?) {
         messagingCoordinator.submitPlanReview(operationID: operationID, editedPlan: editedPlan)
+    }
+
+    func submitGateChoice(operationID: UUID, option: String) {
+        messagingCoordinator.submitGateChoice(operationID: operationID, option: option)
     }
 
     func submitRemoteMessage(

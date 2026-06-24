@@ -476,9 +476,9 @@ actor PlanningExecutorWrapper: Executor {
             case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
                 // [G9] Forward HITL permission requests — user must see these during subtasks.
                 continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: sourceNodeID))
-            case .requestClarification(let question, let operationID, let sourceNodeID):
+            case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
                 // [G9] Forward HITL clarification requests.
-                continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID))
+                continuation.yield(.requestClarification(question: question, operationID: operationID, sourceNodeID: sourceNodeID, options: options, multiline: multiline))
             case .error(let msg):
                 continuation.yield(.error(msg))
             case .warning(let cat, let msg, let relatedPath, _):

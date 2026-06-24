@@ -98,13 +98,44 @@ final class TelegramTransport: ChatOpsTransport, @unchecked Sendable {
 
             \(planList)
 
-            Please approve or edit this plan from the Mac app.
+            Tap to approve or reject (edit on the Mac app):
             """
+
+            // [D1] Approve/reject buttons — the kind-aware handleApproval routes these to resumePlanReview.
+            let keyboard = InlineKeyboardMarkup(
+                inline_keyboard: [[
+                    InlineKeyboardButton(text: "✅ Approve", callbackData: "hitl:approve:\(operationID.uuidString)"),
+                    InlineKeyboardButton(text: "❌ Reject", callbackData: "hitl:deny:\(operationID.uuidString)")
+                ]]
+            )
 
             let message = try await apiClient.sendMessage(
                 chatID: numericChatID,
                 text: messageText,
-                parseMode: nil
+                parseMode: nil,
+                replyMarkup: .inline(keyboard)
+            )
+            return "\(message.message_id)"
+
+        case .gate(let prompt, let options):
+            // [D1] One button per gate option; the tap routes back via "hitl:gate:<opID>:<idx>".
+            let messageText = """
+            🚦 Decision Required
+
+            \(prompt)
+
+            Choose an option:
+            """
+            let rows = options.enumerated().map { idx, opt in
+                [InlineKeyboardButton(text: String(opt.prefix(70)), callbackData: "hitl:gate:\(operationID.uuidString):\(idx)")]
+            }
+            let keyboard = InlineKeyboardMarkup(inline_keyboard: rows)
+
+            let message = try await apiClient.sendMessage(
+                chatID: numericChatID,
+                text: messageText,
+                parseMode: nil,
+                replyMarkup: .inline(keyboard)
             )
             return "\(message.message_id)"
         }

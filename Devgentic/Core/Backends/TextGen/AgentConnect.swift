@@ -180,7 +180,8 @@ class AgentConnect: @unchecked Sendable {
                         rateLimitKey: rateLimitKey,
                         rateLimitCategory: rateLimitCategory,
                         parentProvider: llmConfig.apiProvider,
-                        skillManifests: skillManifests
+                        skillManifests: skillManifests,
+                        modelTier: modelTier
                     )
 
                     // 5.5 Inject `final_answer` terminator for all tool-supporting flows.
@@ -628,7 +629,8 @@ class AgentConnect: @unchecked Sendable {
                         rateLimitKey: rateLimitKey,
                         rateLimitCategory: rateLimitCategory,
                         parentProvider: llmConfig.apiProvider,
-                        skillManifests: skillManifests
+                        skillManifests: skillManifests,
+                        modelTier: llmConfig.modelMetadata?.tier ?? .medium
                     )
 
                     // 6.5 Inject `final_answer` terminator for workflow nodes that run on
@@ -1019,7 +1021,8 @@ class AgentConnect: @unchecked Sendable {
         rateLimitKey: String? = nil,
         rateLimitCategory: RateLimitCategory? = nil,
         parentProvider: ApiProvider? = nil,
-        skillManifests: [SkillManifest]? = nil
+        skillManifests: [SkillManifest]? = nil,
+        modelTier: ModelTier = .medium
     ) async -> [AgentTool] {
 
         var activeTools: [AgentTool] = []
@@ -1032,7 +1035,11 @@ class AgentConnect: @unchecked Sendable {
         // RAG pipeline pre-request (contextualRAG / directInjection), and recent
         // turns are auto-injected via EpisodicHistoryFormatter XML. Keeping the
         // tool wasted a tool slot and caused small models to call it reflexively.
-        activeTools.append(wrapTool(AskUserTool(), requiresConfirmation: false))
+        // Small/tiny local models fumble the optional `options`/`multiline` fields (truncating the
+        // question to dump content into options, emitting `multiline` as a string), so advertise only
+        // `question` to them. Capable models keep the richer one-tap-choices schema.
+        let askUserRichFields = !(modelTier == .small || modelTier == .tiny)
+        activeTools.append(wrapTool(AskUserTool(richFields: askUserRichFields), requiresConfirmation: false))
 
         // -----------------------------------------------------------------
         // 2. Deep Episodic Memory (Delegated to Strategy)

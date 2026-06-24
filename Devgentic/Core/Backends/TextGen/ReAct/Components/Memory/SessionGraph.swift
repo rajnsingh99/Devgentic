@@ -166,21 +166,6 @@ struct SessionGraph: Sendable, Codable {
         self.workingMemory = workingMemory
     }
     
-    // MARK: - Legacy Compatibility Layer
-    // These properties ensure `ReActAgentExecutor` doesn't break during the transition.
-
-    var primaryGoal: String {
-        return episodes.last?.primaryGoal ?? "Waiting for user instruction..."
-    }
-
-    var subTasks: [MemoryAction] {
-        return episodes.last?.actions ?? []
-    }
-
-    func isPathForbidden(_ path: String) -> Bool {
-        return negativeConstraints.contains { path.contains($0) }
-    }
-
     // MARK: - Episode Lifecycle Operations
 
     /// Closes the active episode using the executor's typed `ExecutionOutcome`.

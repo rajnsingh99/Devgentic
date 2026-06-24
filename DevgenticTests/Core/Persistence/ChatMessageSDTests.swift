@@ -337,9 +337,6 @@ final class ChatMessageSDTests: XCTestCase {
         original.agentState = .thinking(.reasoning)
         original.thinkingHeadline = "Processing..."
         original.isStreaming = true
-        original.pendingInteraction = .toolConfirmation(
-            PendingToolConfirmation(id: UUID(), toolName: "bash", params: "{}")
-        )
 
         let sd = ChatMessageSD.from(original)
         let decoded = sd.toChatMessage()
@@ -348,7 +345,6 @@ final class ChatMessageSDTests: XCTestCase {
         XCTAssertEqual(decoded.agentState, .idle)
         XCTAssertNil(decoded.thinkingHeadline)
         XCTAssertFalse(decoded.isStreaming)
-        XCTAssertNil(decoded.pendingInteraction)
     }
 
     // MARK: - Timestamp Fidelity

@@ -235,7 +235,10 @@ actor TraceRecorder {
     /// Appends an event to the buffer. Auto-flushes when batch size is reached.
     /// Events for already-closed traces are silently dropped.
     func emit(_ event: SpanEvent) {
-        guard !closedTraceIDs.contains(event.traceID) else { return }
+        // [HITL/C1] A userInteraction event can arrive just after its trace closes (a HITL resolved on
+        // Stop/cancel ends the run + fires endTrace before the deferred emit). The root span row still
+        // exists, so let these through rather than silently dropping the decision span.
+        guard !closedTraceIDs.contains(event.traceID) || event.eventType == .userInteraction else { return }
 
         pendingEvents.append(event)
 
@@ -380,7 +383,64 @@ actor TraceRecorder {
             severity: .info
         ))
     }
-    
+
+    // MARK: - HITL Audit (C2 — durable, cross-restart)
+
+    /// [HITL/C2] Persist the RAISE of a HITL request to the durable audit table, so a request still
+    /// pending at app quit/crash survives (the launch reconcile pass stamps it `interrupted`). Covers
+    /// chat, code, and ALL workflow HITL including gates — independent of the C1 trace-span path.
+    func recordHITLRaised(
+        operationID: String,
+        conversationID: String,
+        interface: String,
+        type: String,
+        toolName: String?,
+        nodeName: String?,
+        title: String,
+        raisedAt: Date
+    ) {
+        guard let store else { return }
+        let record = HITLAuditRecord(
+            operationID: operationID,
+            conversationID: conversationID,
+            interface: interface,
+            type: type,
+            toolName: toolName,
+            nodeName: nodeName,
+            title: TelemetrySanitizer.sanitize(title),
+            raisedAt: raisedAt
+        )
+        do {
+            try store.insertHITLAudit(record)
+        } catch {
+            logger.error("HITL audit raise persist failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// [HITL/C2] Stamp the durable audit row with the resolution outcome + time. Keyed by operationID.
+    ///
+    /// The raise INSERT and this resolve are independent Tasks; the raise is created first but, on the
+    /// rare occasion this resolve reaches the store before the raise lands, the UPDATE matches 0 rows.
+    /// Retry briefly — the `await Task.sleep` yields this actor so the in-flight raise can complete —
+    /// rather than stranding the outcome, which the launch reconcile would otherwise mislabel
+    /// "interrupted". A 0-row result on an already-resolved row (late duplicate) just retries harmlessly.
+    func recordHITLResolved(operationID: String, outcome: String, resolvedAt: Date) async {
+        guard let store else { return }
+        let safeOutcome = TelemetrySanitizer.sanitize(outcome)
+        for attempt in 0..<3 {
+            do {
+                if try store.resolveHITLAudit(operationID: operationID, resolvedAt: resolvedAt, outcome: safeOutcome) > 0 {
+                    return
+                }
+            } catch {
+                logger.error("HITL audit resolve persist failed: \(error.localizedDescription)")
+                return
+            }
+            if attempt < 2 { try? await Task.sleep(for: .milliseconds(30)) }
+        }
+        logger.warning("HITL audit resolve found no pending row for op \(operationID) after retries.")
+    }
+
     /// Records a general error.
     func emitError(span: TraceContext, error: String, isRecoverable: Bool) {
         let detail: [String: Any] = [

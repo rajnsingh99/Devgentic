@@ -24,6 +24,10 @@ struct ConversationRowView: View {
     var isSelectionMode: Bool = false
     var isBatchSelected: Bool = false
 
+    /// [F2] This conversation has a pending HITL request — surface a "needs input" indicator in the
+    /// sidebar so an unfocused (or background/remote/scheduled) run that's waiting is discoverable.
+    var needsInput: Bool = false
+
     var body: some View {
         HStack(spacing: 0) {
             if isSelectionMode {
@@ -114,6 +118,15 @@ struct ConversationRowView: View {
                         .font(theme.fontSubheadline.weight(.medium))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
+
+                    // [F2] Pending HITL indicator — this conversation is waiting on the user.
+                    if needsInput {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(theme.warningColor)
+                            .help("Needs your input")
+                            .accessibilityLabel("Needs your input")
+                    }
 
                     Spacer()
 

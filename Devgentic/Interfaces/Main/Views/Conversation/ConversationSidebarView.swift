@@ -134,7 +134,8 @@ struct ConversationSidebarRow: View {
                 triggerDelete()
             },
             isSelectionMode: isSelectionMode,
-            isBatchSelected: selectedIDs.contains(conversation.id)
+            isBatchSelected: selectedIDs.contains(conversation.id),
+            needsInput: viewModel.interactionCenter.hasPending(for: conversation.id)   // [F2]
         )
         .contextMenu {
             contextMenuContent

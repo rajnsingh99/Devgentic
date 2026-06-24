@@ -283,8 +283,11 @@ class BackendOrchestrationService {
                             case .requestConfirmation(let toolName, _, _, _):
                                 logger.debug("[HITL] Permission requested for \(toolName)")
                                 continuation.yield(event)
-                            case .requestClarification(let question, _, _):
+                            case .requestClarification(let question, _, _, _, _):
                                 logger.debug("[ASK_USER] Clarification requested: \(question)")
+                                continuation.yield(event)
+                            case .requestGate(let prompt, _, _, _, _):
+                                logger.debug("[GATE] Decision requested: \(prompt)")
                                 continuation.yield(event)
                             case .error(let err):
                                 logger.debug("[ERROR] \(err)")

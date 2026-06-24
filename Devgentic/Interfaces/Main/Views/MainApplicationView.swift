@@ -221,13 +221,13 @@ struct MainApplicationView: View {
 
             // Input area container
             VStack(spacing: 0) {
-                // HITL banner — mounted for every mode EXCEPT workflow (which has its own
-                // WorkflowInteractionPanel rendered inside the workflow canvas). Any future
-                // non-workflow surface inherits HITL automatically without updating this gate.
-                if viewModel.interfaceMode != .workflow, let streamingMsg = viewModel.streamingMessage {
-                    StreamingMessageBannerWrapper(message: streamingMsg)
-                        .environment(viewModel)
-                }
+                // [HITL/P4] Unified banner stack — the SOLE HITL surface for every mode
+                // (chat / code / workflow). Shows InteractionCenter.current(for:) one at a time
+                // (FIFO) with source/node titles, plus a cross-conversation "needs input" chip.
+                // The legacy StreamingMessageBannerWrapper + the `interfaceMode != .workflow` gate
+                // were removed here in the P4 cutover.
+                InteractionBannerStack()
+                    .environment(viewModel)
 
                 ChatInputAreaView(
                     showContextArea: Bindable(viewModel).showContextArea,
@@ -401,25 +401,4 @@ private struct ModeTabButton: View {
     }
 }
 
-// MARK: - Streaming Message Banner Wrapper
-/// Wrapper that observes the unified `pendingInteraction` property on ChatMessage
-/// to show the sticky HITL banner above the chat input.
-private struct StreamingMessageBannerWrapper: View {
-    var message: ChatMessage
-    @Environment(MainApplicationViewModel.self) var viewModel
-
-    var body: some View {
-        Group {
-            if message.pendingInteraction != nil {
-                AgentInterruptBannerView(message: message)
-                    .environment(viewModel)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity),
-                        removal: .move(edge: .bottom).combined(with: .opacity)
-                    ))
-            }
-        }
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: message.pendingInteraction != nil)
-    }
-}
 

@@ -43,6 +43,14 @@ struct WorkflowDedicatedView: View {
         return viewModel.workflowExecutionStates[cid]
     }
 
+    /// [HITL/P4] Node IDs with a pending HITL on a live run — drives the "awaiting input"
+    /// badge on the run card (D2). Sourced from the unified InteractionCenter so it survives
+    /// the P5 removal of the legacy `WorkflowExecutionState.pendingInteractions` container.
+    private func awaitingNodeIDs(for data: WorkflowRunDisplayData) -> Set<UUID> {
+        guard data.isLive, let cid = conversationID else { return [] }
+        return Set(viewModel.interactionCenter.items(for: cid).compactMap { $0.origin.nodeID })
+    }
+
     /// Validation errors only (blocks execution).
     private var validationErrors: [WorkflowValidationIssue] {
         validationIssues.filter { $0.severity == .error }
@@ -243,20 +251,17 @@ struct WorkflowDedicatedView: View {
 
                 Divider().opacity(0.4)
 
-                // Agent cards strip with status-aware connectors
+                // Agent cards strip with status-aware connectors. Awaiting-input badges (D2)
+                // are driven by the unified InteractionCenter; the HITL request itself now
+                // renders in the shared above-input banner (P4 removed the in-canvas panel).
                 WorkflowOutcomeStripView(
                     displayData: data,
-                    selectedNodeID: $selectedNodeID
+                    selectedNodeID: $selectedNodeID,
+                    awaitingNodeIDs: awaitingNodeIDs(for: data),
+                    onAwaitingTap: { viewModel.interactionCenter.pulseBanner() }
                 )
 
                 Divider().opacity(0.4)
-
-                // Interaction panel (live runs only, if any pending HITL)
-                if data.isLive {
-                    if let state = executionState {
-                        WorkflowInteractionPanel(executionState: state)
-                    }
-                }
 
                 // Output area: selected node detail or final output
                 WorkflowOutputView(displayData: data, selectedNodeID: selectedNodeID)

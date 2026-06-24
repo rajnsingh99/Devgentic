@@ -217,8 +217,23 @@ final class ConversationManagementCoordinator {
         persistenceService.togglePinStatus(for: conversationId)
     }
 
+    /// [HITL/P5] Tear down any live run for a conversation before it is deleted. With the per-HITL
+    /// watchdog gone, a run parked on a HITL would otherwise strand forever (deletion is terminal —
+    /// there is no "switch back and answer"). Cancelling the stream cascades to the suspension's
+    /// cancellation handler (deny / nil); `cancel(for:)` (which also posts `.hitl*Resolved`) and
+    /// `resolveAll` are belt-and-suspenders so the unified queue is cleared even on the remote path.
+    private func drainLiveExecution(conversationID: UUID, vm: MainApplicationViewModel) {
+        vm.activeStreamManager.cancelStreams(forConversation: conversationID)
+        vm.interactionCenter.resolveAll(conversationID: conversationID)
+        Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
+        // Drop any "Always allow" session grants for this conversation (the persisted profile flip
+        // is the durable record; this is just the in-flight-run allowlist).
+        Task { await SessionToolApprovals.shared.clear(conversationID: conversationID) }
+    }
+
     func deleteConversation(conversationID: UUID) {
         guard let vm = viewModel else { return }
+        drainLiveExecution(conversationID: conversationID, vm: vm)
         persistenceService.deleteConversation(with: conversationID)
         // Privacy: delete the conversation's traces too (FK cascades spans/events/configs),
         // so its raw content doesn't linger in traces.sqlite after deletion (§12.5).
@@ -234,6 +249,7 @@ final class ConversationManagementCoordinator {
     func deleteMultipleConversations(ids: Set<UUID>) {
         guard !ids.isEmpty, let vm = viewModel else { return }
         for id in ids {
+            drainLiveExecution(conversationID: id, vm: vm)
             persistenceService.deleteConversation(with: id)
             try? TraceStore.shared?.deleteTraces(forConversationID: id.uuidString)
             vm.workflowExecutionStates.removeValue(forKey: id)

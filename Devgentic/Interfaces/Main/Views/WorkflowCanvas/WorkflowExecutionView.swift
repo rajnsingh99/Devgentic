@@ -67,9 +67,8 @@ final class WorkflowExecutionState {
     /// Keyed by nodeID, populated by ActiveStreamManager when sourceNodeID is present.
     var nodeTimelines: [UUID: [TimelineEvent]] = [:]
 
-    /// Pending HITL interactions from workflow nodes (multiple can be concurrent).
-    /// Keyed by operationID for fast lookup/removal on resolution.
-    var pendingInteractions: [UUID: WorkflowInteractionRequest] = [:]
+    // [HITL/P6] Workflow HITL moved to the unified InteractionCenter; the per-run
+    // pendingInteractions container + the in-canvas WorkflowInteractionPanel were removed.
 
     /// The user's typed input that kicked off this workflow run. Used as the
     /// "input" displayed on source nodes (those without upstream edges) in the
@@ -104,18 +103,6 @@ final class WorkflowExecutionState {
     /// Appends a timeline event to a specific node's timeline.
     func appendNodeTimelineEvent(_ event: TimelineEvent, for nodeID: UUID) {
         nodeTimelines[nodeID, default: []].append(event)
-    }
-
-    // MARK: - Workflow HITL Interactions
-
-    /// Registers a pending HITL interaction from a workflow node.
-    func addPendingInteraction(_ request: WorkflowInteractionRequest) {
-        pendingInteractions[request.id] = request
-    }
-
-    /// Removes a resolved interaction by its operationID.
-    func removePendingInteraction(operationID: UUID) {
-        pendingInteractions.removeValue(forKey: operationID)
     }
 
     // MARK: - Event Ingestion
@@ -204,7 +191,6 @@ final class WorkflowExecutionState {
         isRunning = false
         workflowError = nil
         nodeTimelines = [:]
-        pendingInteractions = [:]
         completedAt = nil
         runRecordID = nil
     }

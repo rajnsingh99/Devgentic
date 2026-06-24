@@ -36,7 +36,7 @@ struct AgentResponse: Codable, Equatable {
 struct ToolExecutionData: Equatable, Identifiable, Sendable {
     let id: UUID
     let name: String
-    let params: String
+    var params: String   // mutable: refreshed to the actually-executed params on completion (HITL edits)
     var output: String?
     var isSuccess: Bool?
     var failureCategory: ToolFailureCategory? = nil
@@ -254,48 +254,9 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     var agentState: AgentState = .idle
     var isThinkingExpanded: Bool = false
 
-    // MARK: - HITL Interaction State (Unified)
-    /// The single pending Human-in-the-Loop interaction for this message.
-    /// Only one interaction type can be active at a time.
-    var pendingInteraction: PendingInteraction? = nil
+    // [HITL/P6] Live HITL state moved entirely to the unified InteractionCenter (single source of
+    // truth). The per-message `pendingInteraction` container and its deprecated shims were removed.
 
-    // Deprecated shims — use `pendingInteraction` directly. Remove after full migration.
-    @available(*, deprecated, message: "Use pendingInteraction instead")
-    var pendingToolConfirmation: PendingToolConfirmation? {
-        get {
-            if case .toolConfirmation(let c) = pendingInteraction { return c }
-            return nil
-        }
-        set {
-            if let v = newValue { pendingInteraction = .toolConfirmation(v) }
-            else if case .toolConfirmation = pendingInteraction { pendingInteraction = nil }
-        }
-    }
-
-    @available(*, deprecated, message: "Use pendingInteraction instead")
-    var pendingClarification: PendingClarification? {
-        get {
-            if case .clarification(let c) = pendingInteraction { return c }
-            return nil
-        }
-        set {
-            if let v = newValue { pendingInteraction = .clarification(v) }
-            else if case .clarification = pendingInteraction { pendingInteraction = nil }
-        }
-    }
-
-    @available(*, deprecated, message: "Use pendingInteraction instead")
-    var pendingPlanReview: PendingPlanReview? {
-        get {
-            if case .planReview(let p) = pendingInteraction { return p }
-            return nil
-        }
-        set {
-            if let v = newValue { pendingInteraction = .planReview(v) }
-            else if case .planReview = pendingInteraction { pendingInteraction = nil }
-        }
-    }
-    
     // MARK: - RAG Indexing State
     // No longer polled; index occurs on stream completion.
 
@@ -414,8 +375,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         lhs.content == rhs.content &&
         lhs.isStreaming == rhs.isStreaming &&
         lhs.agentResponse == rhs.agentResponse &&
-        lhs.timelineEvents == rhs.timelineEvents &&
-        lhs.pendingInteraction == rhs.pendingInteraction
+        lhs.timelineEvents == rhs.timelineEvents
     }
     
     func beginStreamingResponse(from service: BackendOrchestrationService) {
@@ -476,7 +436,6 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.agentState = .idle
         self.cachedMarkdownBlocks = nil
         self.isThinkingExpanded = false
-        self.pendingInteraction = nil
     }
 
     func encode(to encoder: Encoder) throws {

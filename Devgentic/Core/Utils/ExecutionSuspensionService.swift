@@ -16,6 +16,7 @@ extension Notification.Name {
     static let hitlPermissionResolved = Notification.Name("hitlPermissionResolved")
     static let hitlClarificationResolved = Notification.Name("hitlClarificationResolved")
     static let hitlPlanReviewResolved = Notification.Name("hitlPlanReviewResolved")
+    static let hitlGateResolved = Notification.Name("hitlGateResolved")
 }
 
 /// UserInfo keys for HITL resolved notifications.
@@ -23,6 +24,10 @@ enum HITLResolvedKey {
     static let conversationID = "conversationID"
     static let operationID = "operationID"
     static let approved = "approved"
+    /// [HITL/C1] Precise, type-specific resolution outcome for the trace span:
+    /// permission → approved/denied, clarification → answered/skipped,
+    /// plan review → approved/rejected, any cancel/deadline → cancelled.
+    static let outcome = "outcome"
 }
 
 /// Manages the "Pause/Resume" state of Agent execution.
@@ -41,13 +46,17 @@ actor ExecutionSuspensionService {
     private var clarificationContinuations: [UUID: CheckedContinuation<String?, Never>] = [:]
     // Maps operationID -> continuation (plan review gates — no timeout)
     private var planReviewContinuations: [UUID: CheckedContinuation<[SubTask]?, Never>] = [:]
-    // Maps operationID -> timeout task
-    private var timeoutTasks: [UUID: Task<Void, Never>] = [:]
+    // [E1] Maps operationID -> continuation (workflow Gate — resumes with the chosen option, nil = none)
+    private var gateContinuations: [UUID: CheckedContinuation<String?, Never>] = [:]
     // Reverse lookup: operationID -> conversationID (for cancel-by-conversation)
     private var operationToConversation: [UUID: UUID] = [:]
+    // [HITL/A3] operationID -> user-edited tool arguments to apply on approval.
+    private var editedArgs: [UUID: [String: JSONValue]] = [:]
 
-    // Config: How long to wait before auto-denying (Seconds)
-    private let suspensionTimeout: TimeInterval = 300 // 5 Minutes
+    // [HITL/P5] No internal HITL watchdog. A pause waits INDEFINITELY; the execution CONTAINER
+    // owns the deadline — chat = none (drained by Stop / conversation close), workflow = node
+    // timeout, scheduled = a 10-minute max-run deadline. Every deadline arrives as Task
+    // cancellation, which the `withTaskCancellationHandler` blocks below resolve safely (deny / nil).
 
     private init() {}
 
@@ -64,24 +73,24 @@ actor ExecutionSuspensionService {
             logger.warning("[Suspension] Overwriting existing suspension for operation \(operationID). Auto-denying previous.")
             existing.resume(returning: false)
             activeContinuations.removeValue(forKey: operationID)
-            timeoutTasks[operationID]?.cancel()
         }
 
         operationToConversation[operationID] = conversationID
 
-        logger.info("[Suspension] Suspending operation \(operationID) for conversation: \(conversationID). Timeout: \(self.suspensionTimeout)s.")
+        logger.info("[Suspension] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
-        // Start the Watchdog Timer
-        let timeoutTask = Task { [weak self] in
-            let seconds = self?.suspensionTimeout ?? 300
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await self?.handleTimeout(for: operationID)
-        }
-        timeoutTasks[operationID] = timeoutTask
-
-        return await withCheckedContinuation { continuation in
-            activeContinuations[operationID] = continuation
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                activeContinuations[operationID] = continuation
+                // If cancellation already happened before we parked, deny right away.
+                if Task.isCancelled {
+                    resume(for: operationID, approved: false)
+                }
+            }
+        } onCancel: {
+            // Stop button / conversation close / container deadline must wake the parked
+            // await immediately rather than leaving it to the watchdog. Resolve as denied.
+            Task { await self.resume(for: operationID, approved: false) }
         }
     }
 
@@ -89,22 +98,32 @@ actor ExecutionSuspensionService {
     /// - Parameters:
     ///   - operationID: The unique operation identifier.
     ///   - approved: Whether the user clicked "Allow" (true) or "Deny" (false).
-    func resume(for operationID: UUID, approved: Bool) {
-        // Cancel the watchdog since user responded
-        timeoutTasks[operationID]?.cancel()
-        timeoutTasks.removeValue(forKey: operationID)
-
+    func resume(for operationID: UUID, approved: Bool, editedArguments: [String: JSONValue]? = nil) {
         let conversationID = operationToConversation.removeValue(forKey: operationID)
+
+        // [HITL/A3] Stash user edits to apply on approval; drop them on denial.
+        if approved, let editedArguments {
+            editedArgs[operationID] = editedArguments
+        } else {
+            editedArgs.removeValue(forKey: operationID)
+        }
 
         guard let continuation = activeContinuations.removeValue(forKey: operationID) else {
             logger.warning("[Suspension] Attempted to resume non-existent suspension for operation: \(operationID)")
+            editedArgs.removeValue(forKey: operationID)
             return
         }
 
         logger.info("[Suspension] Resuming operation \(operationID) with approval: \(approved)")
         continuation.resume(returning: approved)
 
-        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: approved])
+        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: approved, HITLResolvedKey.outcome: approved ? "approved" : "denied"])
+    }
+
+    /// [HITL/A3] Returns and clears any user-edited arguments for an approved tool, so dispatch runs
+    /// with the corrected values instead of the agent's originals. Nil if the user didn't edit.
+    func consumeEditedArguments(for operationID: UUID) -> [String: JSONValue]? {
+        editedArgs.removeValue(forKey: operationID)
     }
 
     // MARK: - Clarification Suspension (ask_user)
@@ -124,26 +143,22 @@ actor ExecutionSuspensionService {
 
         operationToConversation[operationID] = conversationID
 
-        logger.info("[Clarification] Suspending operation \(operationID) for conversation: \(conversationID).")
+        logger.info("[Clarification] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
 
-        let timeoutTask = Task { [weak self] in
-            let seconds = self?.suspensionTimeout ?? 300
-            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            await self?.handleClarificationTimeout(for: operationID)
-        }
-        timeoutTasks[operationID] = timeoutTask
-
-        return await withCheckedContinuation { continuation in
-            clarificationContinuations[operationID] = continuation
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                clarificationContinuations[operationID] = continuation
+                if Task.isCancelled {
+                    resumeClarification(for: operationID, userInput: nil)
+                }
+            }
+        } onCancel: {
+            Task { await self.resumeClarification(for: operationID, userInput: nil) }
         }
     }
 
     /// Resumes a clarification suspension with the user's text input.
     func resumeClarification(for operationID: UUID, userInput: String?) {
-        timeoutTasks[operationID]?.cancel()
-        timeoutTasks.removeValue(forKey: operationID)
-
         let conversationID = operationToConversation.removeValue(forKey: operationID)
 
         guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else {
@@ -154,20 +169,10 @@ actor ExecutionSuspensionService {
         logger.info("[Clarification] Resuming operation \(operationID) with user input.")
         continuation.resume(returning: userInput)
 
-        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID)
+        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: userInput != nil ? "answered" : "skipped"])
     }
 
-    private func handleClarificationTimeout(for operationID: UUID) {
-        logger.notice("[Clarification] ⏰ TIMEOUT for operation: \(operationID). Returning nil.")
-        let conversationID = operationToConversation.removeValue(forKey: operationID)
-        timeoutTasks.removeValue(forKey: operationID)
-        guard let continuation = clarificationContinuations.removeValue(forKey: operationID) else { return }
-        continuation.resume(returning: nil)
-
-        postResolved(name: .hitlClarificationResolved, operationID: operationID, conversationID: conversationID)
-    }
-
-    // MARK: - Plan Review Suspension (No Timeout)
+    // MARK: - Plan Review Suspension (indefinite — container owns the deadline)
 
     /// Pauses execution until the user reviews, edits, and approves the generated plan.
     /// Unlike tool confirmations, plan review has **no timeout** — it stays indefinitely.
@@ -187,9 +192,17 @@ actor ExecutionSuspensionService {
 
         logger.info("[PlanReview] Suspending operation \(operationID) for conversation: \(conversationID). No timeout — awaiting user action.")
 
-        // NO timeout task — plan review stays indefinitely until user acts or stream is cancelled
-        return await withCheckedContinuation { continuation in
-            planReviewContinuations[operationID] = continuation
+        // NO timeout task — plan review stays indefinitely until user acts, the stream is
+        // cancelled, or the execution container (workflow node / scheduled run) deadlines.
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<[SubTask]?, Never>) in
+                planReviewContinuations[operationID] = continuation
+                if Task.isCancelled {
+                    resumePlanReview(for: operationID, editedPlan: nil)
+                }
+            }
+        } onCancel: {
+            Task { await self.resumePlanReview(for: operationID, editedPlan: nil) }
         }
     }
 
@@ -205,7 +218,48 @@ actor ExecutionSuspensionService {
         logger.info("[PlanReview] Resuming operation \(operationID) with \(editedPlan != nil ? "approved plan (\(editedPlan!.count) subtasks)" : "rejection").")
         continuation.resume(returning: editedPlan)
 
-        postResolved(name: .hitlPlanReviewResolved, operationID: operationID, conversationID: conversationID)
+        postResolved(name: .hitlPlanReviewResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: editedPlan != nil ? "approved" : "rejected"])
+    }
+
+    // MARK: - Gate Suspension (workflow Gate — per-option routing, E1)
+
+    /// Pauses a workflow Gate node until the user picks an option (routes to that option's port) or the
+    /// gate is cancelled / times out. Returns the chosen option string, or `nil` if cancelled/timed out.
+    func suspendForGate(for operationID: UUID, conversationID: UUID) async -> String? {
+        if let existing = gateContinuations[operationID] {
+            logger.warning("[Gate] Overwriting existing gate suspension for operation \(operationID). Auto-cancelling previous.")
+            existing.resume(returning: nil)
+            gateContinuations.removeValue(forKey: operationID)
+        }
+
+        operationToConversation[operationID] = conversationID
+        logger.info("[Gate] Suspending operation \(operationID) for conversation: \(conversationID). Indefinite — container owns the deadline.")
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                gateContinuations[operationID] = continuation
+                if Task.isCancelled {
+                    resumeGate(for: operationID, chosenOption: nil)
+                }
+            }
+        } onCancel: {
+            Task { await self.resumeGate(for: operationID, chosenOption: nil) }
+        }
+    }
+
+    /// Resumes a gate suspension with the user's chosen option (nil = cancelled / timed out / rejected).
+    func resumeGate(for operationID: UUID, chosenOption: String?) {
+        let conversationID = operationToConversation.removeValue(forKey: operationID)
+
+        guard let continuation = gateContinuations.removeValue(forKey: operationID) else {
+            logger.warning("[Gate] Attempted to resume non-existent gate for operation: \(operationID)")
+            return
+        }
+
+        logger.info("[Gate] Resuming operation \(operationID) with choice: \(chosenOption ?? "<none>")")
+        continuation.resume(returning: chosenOption)
+
+        postResolved(name: .hitlGateResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: chosenOption ?? "cancelled"])
     }
 
     // MARK: - Cancellation & Status
@@ -217,37 +271,37 @@ actor ExecutionSuspensionService {
         let permissionOps = operationToConversation.filter { $0.value == conversationID }.map(\.key)
 
         for opID in permissionOps {
-            timeoutTasks[opID]?.cancel()
-            timeoutTasks.removeValue(forKey: opID)
             operationToConversation.removeValue(forKey: opID)
+            editedArgs.removeValue(forKey: opID)
 
+            // Post the matching resolved notification (mirrors resume*/timeout) so every surface —
+            // the legacy banners, the unified InteractionCenter, and the ChatOps remote mirror —
+            // clears immediately on cancel rather than relying on a downstream finalize backstop.
+            // This is what makes remote-Stop (no Mac task to tear down) dismiss the banner too.
             if let continuation = activeContinuations.removeValue(forKey: opID) {
                 logger.info("[Suspension] Force-cancelling permission for operation: \(opID)")
                 continuation.resume(returning: false)
+                postResolved(name: .hitlPermissionResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: false, HITLResolvedKey.outcome: "cancelled"])
             }
 
             if let continuation = clarificationContinuations.removeValue(forKey: opID) {
                 logger.info("[Suspension] Force-cancelling clarification for operation: \(opID)")
                 continuation.resume(returning: nil)
+                postResolved(name: .hitlClarificationResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: "cancelled"])
             }
 
             if let continuation = planReviewContinuations.removeValue(forKey: opID) {
                 logger.info("[Suspension] Force-cancelling plan review for operation: \(opID)")
                 continuation.resume(returning: nil)
+                postResolved(name: .hitlPlanReviewResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: "cancelled"])
+            }
+
+            if let continuation = gateContinuations.removeValue(forKey: opID) {
+                logger.info("[Suspension] Force-cancelling gate for operation: \(opID)")
+                continuation.resume(returning: nil)
+                postResolved(name: .hitlGateResolved, operationID: opID, conversationID: conversationID, extraInfo: [HITLResolvedKey.outcome: "cancelled"])
             }
         }
-    }
-
-    /// Internal handler for auto-denial
-    private func handleTimeout(for operationID: UUID) {
-        logger.notice("[Suspension] ⏰ TIMEOUT for operation: \(operationID). Auto-denying permission.")
-        let conversationID = operationToConversation.removeValue(forKey: operationID)
-        timeoutTasks.removeValue(forKey: operationID)
-
-        guard let continuation = activeContinuations.removeValue(forKey: operationID) else { return }
-        continuation.resume(returning: false)
-
-        postResolved(name: .hitlPermissionResolved, operationID: operationID, conversationID: conversationID, extraInfo: [HITLResolvedKey.approved: false])
     }
 
     /// Checks if a conversation has any pending suspension.

@@ -73,25 +73,9 @@ struct AgentBubbleContentView: View {
                     .accessibilityLabel("\(message.artifacts.count) tool results")
             }
 
-            // 3. HITL Interaction (unified)
-            if let interaction = message.pendingInteraction {
-                Group {
-                    switch interaction {
-                    case .toolConfirmation(let confirmation):
-                        PermissionRequestView(confirmation: confirmation, message: message)
-                            .accessibilityLabel("Permission request for \(confirmation.toolName)")
-                    case .clarification(let clarification):
-                        ClarificationRequestView(clarification: clarification, message: message)
-                            .accessibilityLabel("Clarification: \(clarification.question)")
-                    case .planReview(let planReview):
-                        PlanReviewRequestView(planReview: planReview, message: message)
-                            .accessibilityLabel("Plan review with \(planReview.subtasks.count) subtasks")
-                    }
-                }
-                .padding(.bottom, 8)
-                .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
-                .accessibilityElement(children: .combine)
-            }
+            // [HITL/P6] Live HITL now renders exclusively in the shared above-input
+            // InteractionBannerStack — the per-bubble request cards were removed with the
+            // ChatMessage.pendingInteraction container.
 
             // 4. CONTENT
             contentView

@@ -185,7 +185,12 @@ private func executeSingleTool(
     // Intercept ask_user
     if let question = AskUserInterceptor.extractQuestion(toolName: toolName, arguments: arguments) {
         let operationID = UUID()
-        continuation.yield(.requestClarification(question: question, operationID: operationID))
+        continuation.yield(.requestClarification(
+            question: question,
+            operationID: operationID,
+            options: AskUserInterceptor.extractOptions(arguments),
+            multiline: AskUserInterceptor.extractMultiline(arguments)
+        ))
 
         let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: operationID, conversationID: conversationID)
         let didAnswer = userResponse != nil
@@ -218,6 +223,10 @@ private func executeSingleTool(
         )
     }
 
+    // [HITL/A3] Default to the agent's arguments; replaced by user edits if the confirmation was edited.
+    var effectiveArguments = arguments
+    var effectiveParams = paramsString
+
     // Dispatch (handles HITL)
     let dispatchOutcome = toolMediator.prepareDispatch(
         toolName: toolName,
@@ -227,26 +236,38 @@ private func executeSingleTool(
 
     switch dispatchOutcome {
     case .requiresConfirmation(let ps):
-        let operationID = UUID()
-        continuation.yield(.requestConfirmation(toolName: toolName, params: ps, operationID: operationID))
+        // [HITL/Bug2] If the user already chose "Always allow" for this tool earlier in THIS run, skip
+        // the banner. The live tool set (with requiresConfirmation) was resolved at stream start, so the
+        // persisted profile flip only kicks in next run — the session allowlist covers the current one.
+        if await SessionToolApprovals.shared.isAllowed(toolName: toolName, conversationID: conversationID) {
+            logger.info("[HITL] '\(toolName)' auto-approved via session allowlist (Always allow earlier this run) — skipping banner.")
+        } else {
+            let operationID = UUID()
+            continuation.yield(.requestConfirmation(toolName: toolName, params: ps, operationID: operationID))
 
-        let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID)
-        if !approved {
-            let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
-            let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)
-            continuation.yield(.toolFailed(denialOutput, category: .userDenied))
-            return ToolObservation(
-                stepId: currentIteration,
-                toolCallId: toolCallId,
-                toolName: toolName,
-                result: denialResult.llmObservation,
-                summary: denialResult.llmObservation,
-                isSuccess: false,
-                params: paramsString,
-                output: denialResult.llmObservation,
-                artifacts: [],
-                failureCategory: .userDenied
-            )
+            let approved = await ExecutionSuspensionService.shared.suspend(for: operationID, conversationID: conversationID)
+            if approved, let edited = await ExecutionSuspensionService.shared.consumeEditedArguments(for: operationID) {
+                // [HITL/A3] The user corrected the arguments in the banner — run with those.
+                effectiveArguments = edited
+                effectiveParams = serializeToolParams(edited)
+            }
+            if !approved {
+                let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
+                let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)
+                continuation.yield(.toolFailed(denialOutput, category: .userDenied))
+                return ToolObservation(
+                    stepId: currentIteration,
+                    toolCallId: toolCallId,
+                    toolName: toolName,
+                    result: denialResult.llmObservation,
+                    summary: denialResult.llmObservation,
+                    isSuccess: false,
+                    params: paramsString,
+                    output: denialResult.llmObservation,
+                    artifacts: [],
+                    failureCategory: .userDenied
+                )
+            }
         }
     case .executed, .userDenied:
         break
@@ -256,14 +277,14 @@ private func executeSingleTool(
     // UI surfaces "spawned an agent" / "agent returned" distinct from a normal tool call.
     let isDelegation = toolName == "call_agent"
     if isDelegation {
-        let task = arguments["task"]?.stringValue ?? "unknown task"
+        let task = effectiveArguments["task"]?.stringValue ?? "unknown task"
         continuation.yield(.delegationStarted(task: task))
     }
 
     let dispatchStart = Date()
     let result = await toolMediator.executePreparedTool(
         toolName: toolName,
-        arguments: arguments,
+        arguments: effectiveArguments,
         availableTools: availableTools,
         parentContext: iterationSpan
     )
@@ -277,7 +298,7 @@ private func executeSingleTool(
     }
 
     // Emit structured success/failure — category drives negativeConstraints policy and UI affordance.
-    let output = ToolOutput(toolName: toolName, params: paramsString, output: result.llmObservation, isSuccess: result.isSuccess)
+    let output = ToolOutput(toolName: toolName, params: effectiveParams, output: result.llmObservation, isSuccess: result.isSuccess)
     if let category = result.failureCategory {
         continuation.yield(.toolFailed(output, category: category))
     } else {
@@ -411,9 +432,64 @@ func normalizePathArguments(_ params: [String: JSONValue]) -> [String: JSONValue
 }
 
 struct AskUserInterceptor {
+    /// Connector words a truncated question commonly dangles on. Weak local models sometimes stop
+    /// generating mid-sentence — emitting a value like "Could you please clarify what you mean by "
+    /// (valid JSON, just unfinished). We trim these so the stem can be re-terminated as a real question.
+    private static let danglingConnectors: Set<String> = [
+        "by", "the", "a", "an", "your", "my", "with", "for", "about",
+        "of", "to", "in", "on", "at", "as", "and", "or", "that"
+    ]
+
     static func extractQuestion(toolName: String, arguments: [String: JSONValue]) -> String? {
         guard toolName == "ask_user" else { return nil }
-        return arguments["question"]?.stringValue ?? "Please provide clarification to proceed."
+        return sanitizeQuestion(arguments["question"]?.stringValue ?? "")
+    }
+
+    /// Repairs an empty or visibly-unfinished clarification question so the user never sees a dead-end
+    /// prompt (e.g. "Could you please clarify what you mean by "). The model — not our parser — produces
+    /// these; we recover by trimming dangling connectors and re-terminating, or substituting a complete
+    /// fallback when nothing usable remains.
+    static func sanitizeQuestion(_ raw: String) -> String {
+        let fallback = "Could you clarify your request so I can continue?"
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return fallback }
+
+        // Already a well-formed prompt (ends in terminal punctuation) — leave it untouched.
+        if let last = text.last, "?.!".contains(last) { return text }
+
+        // No terminal punctuation: strip trailing dangling connector words ("...mean by" → "...mean").
+        var repaired = false
+        while let lastWord = text.split(separator: " ").last.map(String.init),
+              danglingConnectors.contains(lastWord.lowercased()) {
+            text = String(text.dropLast(lastWord.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            repaired = true
+            if text.isEmpty { break }
+        }
+
+        guard !text.isEmpty else { return fallback }
+        // If we removed a dangling tail, the remaining stem is a question — terminate it.
+        return repaired ? text + "?" : text
+    }
+
+    /// A5: optional one-tap answer choices the agent supplied (nil if none). Blank/whitespace
+    /// entries are dropped so they don't render as dead, inert chips.
+    static func extractOptions(_ arguments: [String: JSONValue]) -> [String]? {
+        let opts = arguments["options"]?.arrayValue?
+            .compactMap { $0.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty } ?? []
+        return opts.isEmpty ? nil : opts
+    }
+
+    /// A5: whether the agent expects a long / multi-line answer. Coerces the loose encodings weak
+    /// models emit — bool `true`, string `"1"`/`"true"`/`"yes"`, or a non-zero number — not just `.bool`.
+    static func extractMultiline(_ arguments: [String: JSONValue]) -> Bool {
+        guard let value = arguments["multiline"] else { return false }
+        if let b = value.boolValue { return b }
+        if let s = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            return ["1", "true", "yes", "y"].contains(s)
+        }
+        if let i = value.intValue { return i != 0 }
+        return false
     }
 }
 

@@ -125,8 +125,11 @@ final class SchedulerCoordinator {
         // Start stream and await completion.
         // Use a box to break the forward-capture cycle: the closure captures
         // `messageBox` (already declared), and we fill it after the call returns.
+        // [HITL/P5] Scheduled runs are UNATTENDED — bound them with a 10-minute container deadline.
+        let scheduledRunDeadline: TimeInterval = 600
         return await withCheckedContinuation { continuation in
             var messageBox: ChatMessage? = nil
+            var deadlineTask: Task<Void, Never>? = nil
             let agentMessage = activeStreamManager.startMessageStream(
                 withConfig: config,
                 conversationID: conversationID,
@@ -134,6 +137,7 @@ final class SchedulerCoordinator {
                 history: history,
                 files: fileItems,
                 onComplete: { [weak self] in
+                    deadlineTask?.cancel()
                     // Extract summary from the completed message.
                     let summary: String
                     switch messageBox?.content {
@@ -159,6 +163,19 @@ final class SchedulerCoordinator {
             // (ask_user / tool confirmation) for remotely-triggered work.
             vm.streamingMessageID = agentMessage.id
             vm.streamingMessage = agentMessage
+
+            // [HITL/P5] The deadline: if the unattended run is still going after 10 minutes
+            // (e.g. parked on a HITL nobody is there to answer, now that the per-HITL watchdog is
+            // gone), cancel the stream. Cancellation drains any parked suspension safely via the
+            // withTaskCancellationHandler (deny / nil) → the stream finalizes → onComplete fires.
+            let scheduledMessageID = agentMessage.id
+            deadlineTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(scheduledRunDeadline))
+                guard !Task.isCancelled, let self else { return }
+                logger.notice("[sendScheduledMessage] ⏰ \(Int(scheduledRunDeadline))s deadline hit for \(scheduledMessageID) — cancelling unattended run.")
+                self.activeStreamManager.cancelStream(for: scheduledMessageID)
+                await ExecutionSuspensionService.shared.cancel(for: conversationID)
+            }
         }
     }
 }

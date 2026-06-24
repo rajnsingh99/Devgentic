@@ -14,6 +14,8 @@ enum HITLType: Sendable {
     case toolConfirmation(toolName: String, params: String)
     case clarification(question: String)
     case planReview(subtaskDescriptions: [String])
+    /// [D1] Workflow Gate — rendered as one tappable button per option (callback `hitl:gate:<opID>:<idx>`).
+    case gate(prompt: String, options: [String])
 }
 
 // MARK: - Transport Protocol

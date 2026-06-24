@@ -312,7 +312,95 @@ final class TraceStore: Sendable {
             try db.execute(sql: "DELETE FROM log_entries WHERE typeof(timestamp) = 'text'")
         }
 
+        // v7: durable HITL audit (C2). One row per HITL request, written at raise and updated on
+        // resolve. Independent of traces (no FK) so it survives even when a trace is purged, and so a
+        // request pending at quit/crash persists for the launch reconcile pass. All additive.
+        migrator.registerMigration("v7_create_hitl_audit") { db in
+            try db.create(table: "hitl_audit") { t in
+                t.primaryKey("operationID", .text)
+                t.column("conversationID", .text).notNull()
+                t.column("interface", .text).notNull()
+                t.column("type", .text).notNull()
+                t.column("toolName", .text)
+                t.column("nodeName", .text)
+                t.column("title", .text).notNull()
+                t.column("raisedAt", .double).notNull()
+                t.column("resolvedAt", .double)
+                t.column("outcome", .text)
+            }
+            try db.create(index: "idx_hitl_audit_conversation", on: "hitl_audit", columns: ["conversationID"])
+            try db.create(index: "idx_hitl_audit_raisedAt", on: "hitl_audit", columns: ["raisedAt"])
+        }
+
         return migrator
+    }
+
+    // MARK: - HITL Audit (C2)
+
+    /// Inserts the raise-time HITL audit row. Uses `.replace` so a re-raised operationID (the
+    /// double-suspension safety path) overwrites rather than throwing on the primary key.
+    func insertHITLAudit(_ record: HITLAuditRecord) throws {
+        try dbPool.write { db in
+            try record.insert(db, onConflict: .replace)
+        }
+    }
+
+    /// Stamps an existing audit row with its resolution. Guards on `resolvedAt IS NULL` so a late
+    /// duplicate notification can't overwrite the real outcome with a stale one. Returns the number of
+    /// rows changed (0 = the raise row hasn't landed yet, or it was already resolved) so the caller can
+    /// retry the rare resolve-before-raise race rather than stranding the outcome.
+    @discardableResult
+    func resolveHITLAudit(operationID: String, resolvedAt: Date, outcome: String) throws -> Int {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE hitl_audit SET resolvedAt = ?, outcome = ? WHERE operationID = ? AND resolvedAt IS NULL",
+                arguments: [resolvedAt.timeIntervalSince1970, outcome, operationID]
+            )
+            return db.changesCount
+        }
+    }
+
+    /// Launch reconcile: any row still pending (`resolvedAt IS NULL`) that was raised before this
+    /// launch belongs to a previous session that quit/crashed mid-request — stamp it `interrupted`.
+    @discardableResult
+    func reconcileOrphanedHITL(before: Date, reason: String) throws -> Int {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE hitl_audit SET resolvedAt = ?, outcome = 'interrupted' WHERE resolvedAt IS NULL AND raisedAt < ?",
+                arguments: [before.timeIntervalSince1970, before.timeIntervalSince1970]
+            )
+            return db.changesCount
+        }
+    }
+
+    /// 30-day retention prune, mirroring the trace/log purges.
+    @discardableResult
+    func purgeHITLAuditOlderThan(_ date: Date) throws -> Int {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM hitl_audit WHERE raisedAt < ?", arguments: [date.timeIntervalSince1970])
+            return db.changesCount
+        }
+    }
+
+    /// Audit rows for one conversation, newest first.
+    func fetchHITLAudit(forConversationID conversationID: String) throws -> [HITLAuditRecord] {
+        try dbPool.read { db in
+            try HITLAuditRecord
+                .filter(HITLAuditRecord.Columns.conversationID == conversationID)
+                .order(HITLAuditRecord.Columns.raisedAt.desc)
+                .fetchAll(db)
+        }
+    }
+
+    /// Audit rows raised since a cutoff (for the diagnostic export / a future audit view), newest first.
+    func fetchHITLAuditSince(_ since: Date, limit: Int = 10_000) throws -> [HITLAuditRecord] {
+        try dbPool.read { db in
+            try HITLAuditRecord
+                .filter(HITLAuditRecord.Columns.raisedAt >= since.timeIntervalSince1970)
+                .order(HITLAuditRecord.Columns.raisedAt.desc)
+                .limit(limit)
+                .fetchAll(db)
+        }
     }
 
     // MARK: - Write Operations

@@ -79,6 +79,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 Self.logger.info("Reconciled \(reconciled) orphaned running trace(s) to .interrupted (\(orphanReason)).")
             }
 
+            // [HITL/C2] Same retention + orphan-reconcile for the durable HITL audit: prune aged rows,
+            // then stamp any request still pending from a previous session as `interrupted`.
+            if let purgedHITL = try? store.purgeHITLAuditOlderThan(cutoff), purgedHITL > 0 {
+                Self.logger.info("Purged \(purgedHITL) HITL audit record(s) older than 30 days.")
+            }
+            if let reconciledHITL = try? store.reconcileOrphanedHITL(
+                before: launchInstant,
+                reason: orphanReason
+            ), reconciledHITL > 0 {
+                Self.logger.info("Reconciled \(reconciledHITL) interrupted HITL audit record(s) (\(orphanReason)).")
+            }
+
             // Persisted MetricKit payloads follow the same 30-day retention as traces.
             CrashDiagnosticsCollector.purgeDiagnostics(olderThan: cutoff)
         }

@@ -29,13 +29,38 @@ final class ActiveStreamManager {
     @ObservationIgnored nonisolated(unsafe) private var permissionResolvedObserver: Any?
     @ObservationIgnored nonisolated(unsafe) private var clarificationResolvedObserver: Any?
     @ObservationIgnored nonisolated(unsafe) private var planReviewResolvedObserver: Any?
+    @ObservationIgnored nonisolated(unsafe) private var gateResolvedObserver: Any?
 
     @ObservationIgnored private let persistenceService: ChatPersistenceProtocol
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let backendOrchestrationService: BackendOrchestrationService
 
-    /// Delegate for RemoteMirrorService to observe stream lifecycle without Combine.
-    weak var mirrorDelegate: ActiveStreamMirrorDelegate?
+    /// [D2] Multicast stream-lifecycle delegates. Each active ChatOps transport (Telegram/Discord/Slack)
+    /// owns its own RemoteMirrorService and registers here. A single `weak var` let the last-started
+    /// transport clobber the others, so only ONE actually mirrored. Weak refs so a torn-down service
+    /// auto-clears.
+    private struct WeakMirror { weak var delegate: ActiveStreamMirrorDelegate? }
+    @ObservationIgnored private var mirrorDelegates: [WeakMirror] = []
+
+    /// Registers a mirror delegate (idempotent; prunes any dead refs).
+    func addMirrorDelegate(_ delegate: ActiveStreamMirrorDelegate) {
+        mirrorDelegates.removeAll { $0.delegate == nil || $0.delegate === delegate }
+        mirrorDelegates.append(WeakMirror(delegate: delegate))
+    }
+
+    /// Unregisters a mirror delegate (e.g. when a transport stops); also prunes dead refs.
+    func removeMirrorDelegate(_ delegate: ActiveStreamMirrorDelegate) {
+        mirrorDelegates.removeAll { $0.delegate == nil || $0.delegate === delegate }
+    }
+
+    /// The currently-live delegates (dead weak refs filtered out).
+    private var liveMirrorDelegates: [ActiveStreamMirrorDelegate] {
+        mirrorDelegates.compactMap { $0.delegate }
+    }
+
+    /// [HITL/P1] Unified pending-interaction queue, owned by MainApplicationViewModel and
+    /// injected after init. P1 only holds the reference (no writers yet); P2 wires enqueue.
+    @ObservationIgnored var interactionCenter: InteractionCenter?
 
     init(
         persistenceService: ChatPersistenceProtocol,
@@ -60,6 +85,9 @@ final class ActiveStreamManager {
         if let observer = planReviewResolvedObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = gateResolvedObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Cross-Surface HITL Sync
@@ -73,15 +101,27 @@ final class ActiveStreamManager {
             queue: .main
         ) { [weak self] notification in
             let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
+            let operationID = notification.userInfo?[HITLResolvedKey.operationID] as? UUID
             MainActor.assumeIsolated {
-                guard let self, let conversationID else { return }
-                // Find the active stream for this conversation and clear its pending confirmation
-                for (_, message) in self.activeStreams where message.conversationId == conversationID {
-                    if case .toolConfirmation = message.pendingInteraction {
-                        message.pendingInteraction = nil
+                guard let self else { return }
+                // [HITL/P5] InteractionCenter is the single source of truth — clear by operationID.
+                if let operationID { self.interactionCenter?.resolve(operationID: operationID) }
+                // [HITL/C1] Emit the resolution trace span (precise decision + wait duration).
+                let outcome = notification.userInfo?[HITLResolvedKey.outcome] as? String ?? "resolved"
+                self.emitHITLTraceSpan(operationID: operationID, outcome: outcome)
+                // [HITL/C2] Stamp the durable audit row with the same outcome (covers chat/code/workflow incl. gates).
+                if let operationID {
+                    Task { await TraceRecorder.shared.recordHITLResolved(operationID: operationID.uuidString, outcome: outcome, resolvedAt: Date()) }
+                }
+                // Nudge the active stream's thinking island forward immediately (subsequent stream
+                // events refine it) so the UI doesn't briefly look stuck on "waiting".
+                guard let conversationID else { return }
+                for (_, message) in self.activeStreams where message.conversationId == conversationID && message.isStreaming {
+                    // Only nudge a message that was actually awaiting input — don't clobber a
+                    // concurrent stream's accurate state in the same conversation.
+                    if case .interaction = message.agentState {
                         message.agentState = .thinking(.reflecting)
                         message.thinkingHeadline = "Processing..."
-                        logger.info("Cleared stale tool confirmation banner for conversation \(conversationID) (resolved externally).")
                     }
                 }
             }
@@ -93,15 +133,24 @@ final class ActiveStreamManager {
             queue: .main
         ) { [weak self] notification in
             let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
+            let operationID = notification.userInfo?[HITLResolvedKey.operationID] as? UUID
             MainActor.assumeIsolated {
-                guard let self, let conversationID else { return }
-                // Find the active stream for this conversation and clear its pending clarification
-                for (_, message) in self.activeStreams where message.conversationId == conversationID {
-                    if case .clarification = message.pendingInteraction {
-                        message.pendingInteraction = nil
+                guard let self else { return }
+                if let operationID { self.interactionCenter?.resolve(operationID: operationID) }
+                // [HITL/C1] Emit the resolution trace span (precise decision + wait duration).
+                let outcome = notification.userInfo?[HITLResolvedKey.outcome] as? String ?? "resolved"
+                self.emitHITLTraceSpan(operationID: operationID, outcome: outcome)
+                // [HITL/C2] Stamp the durable audit row with the same outcome (covers chat/code/workflow incl. gates).
+                if let operationID {
+                    Task { await TraceRecorder.shared.recordHITLResolved(operationID: operationID.uuidString, outcome: outcome, resolvedAt: Date()) }
+                }
+                guard let conversationID else { return }
+                for (_, message) in self.activeStreams where message.conversationId == conversationID && message.isStreaming {
+                    // Only nudge a message that was actually awaiting input — don't clobber a
+                    // concurrent stream's accurate state in the same conversation.
+                    if case .interaction = message.agentState {
                         message.agentState = .thinking(.reflecting)
                         message.thinkingHeadline = "Processing..."
-                        logger.info("Cleared stale clarification banner for conversation \(conversationID) (resolved externally).")
                     }
                 }
             }
@@ -113,22 +162,57 @@ final class ActiveStreamManager {
             queue: .main
         ) { [weak self] notification in
             let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
+            let operationID = notification.userInfo?[HITLResolvedKey.operationID] as? UUID
             MainActor.assumeIsolated {
-                guard let self, let conversationID else { return }
-                // Find the active stream for this conversation and clear its pending plan review
-                for (_, message) in self.activeStreams where message.conversationId == conversationID {
-                    if case .planReview = message.pendingInteraction {
-                        message.pendingInteraction = nil
+                guard let self else { return }
+                if let operationID { self.interactionCenter?.resolve(operationID: operationID) }
+                // [HITL/C1] Emit the resolution trace span (precise decision + wait duration).
+                let outcome = notification.userInfo?[HITLResolvedKey.outcome] as? String ?? "resolved"
+                self.emitHITLTraceSpan(operationID: operationID, outcome: outcome)
+                // [HITL/C2] Stamp the durable audit row with the same outcome (covers chat/code/workflow incl. gates).
+                if let operationID {
+                    Task { await TraceRecorder.shared.recordHITLResolved(operationID: operationID.uuidString, outcome: outcome, resolvedAt: Date()) }
+                }
+                guard let conversationID else { return }
+                for (_, message) in self.activeStreams where message.conversationId == conversationID && message.isStreaming {
+                    if case .interaction = message.agentState {
                         message.agentState = .thinking(.planning)
                         message.thinkingHeadline = "Executing plan..."
-                        logger.info("Cleared stale plan review banner for conversation \(conversationID) (resolved externally).")
+                    }
+                }
+            }
+        }
+
+        // [E1] Gate resolved (chosen option / cancelled) → clear banner + trace + audit, like the others.
+        gateResolvedObserver = NotificationCenter.default.addObserver(
+            forName: .hitlGateResolved,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let conversationID = notification.userInfo?[HITLResolvedKey.conversationID] as? UUID
+            let operationID = notification.userInfo?[HITLResolvedKey.operationID] as? UUID
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if let operationID { self.interactionCenter?.resolve(operationID: operationID) }
+                // [HITL/C1] Emit the resolution trace span (chosen option / cancelled + wait duration).
+                let outcome = notification.userInfo?[HITLResolvedKey.outcome] as? String ?? "resolved"
+                self.emitHITLTraceSpan(operationID: operationID, outcome: outcome)
+                // [HITL/C2] Stamp the durable audit row with the chosen option.
+                if let operationID {
+                    Task { await TraceRecorder.shared.recordHITLResolved(operationID: operationID.uuidString, outcome: outcome, resolvedAt: Date()) }
+                }
+                guard let conversationID else { return }
+                for (_, message) in self.activeStreams where message.conversationId == conversationID && message.isStreaming {
+                    if case .interaction = message.agentState {
+                        message.agentState = .thinking(.reflecting)
+                        message.thinkingHeadline = "Processing..."
                     }
                 }
             }
         }
     }
 
-    
+
     func startMessageStream(
         withConfig config: BackendRequestConfig,
         conversationID: UUID,
@@ -159,7 +243,9 @@ final class ActiveStreamManager {
         }
         
         activeStreams[agentMessage.id] = agentMessage
-        mirrorDelegate?.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
+        for delegate in liveMirrorDelegates {
+            delegate.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
+        }
 
         // Defer initial state mutations to the next run loop tick.
         // This prevents "Modifying state during view update" warnings when the returned
@@ -268,61 +354,58 @@ final class ActiveStreamManager {
                             agentMessage.appendTimelineEvent(toolEvent)
                         }
                         
-                    // [HITL] Phase 3: Handle Permission Requests
+                    // [HITL] Permission request → unified InteractionCenter (single source of truth).
+                    // Node attribution rides in the banner via the origin; the thinking-island
+                    // headline stays generic (the banner carries which node/agent is asking).
                     case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
-                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
-                            // Workflow mode — route to WorkflowInteractionPanel
-                            let runningNode = wfState.nodeResults.first(where: { $0.nodeID == nodeID })
-                            let recentTimeline = Array(wfState.nodeTimelines[nodeID]?.suffix(3) ?? [])
-                            let request = WorkflowInteractionRequest(
+                        agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
+                        agentMessage.agentState = .interaction(.permission(toolName: toolName))
+                        self.enqueueHITL(
+                            operationID: operationID,
+                            kind: .toolConfirmation(PendingToolConfirmation(
                                 id: operationID,
-                                nodeID: nodeID,
-                                nodeName: runningNode?.profileName ?? toolName,
-                                nodeKind: .gate(GateNodeConfig(prompt: toolName, options: [], timeout: nil)),
-                                requestType: .toolConfirmation(toolName: toolName, params: params),
-                                timestamp: Date(),
-                                recentTimeline: recentTimeline,
-                                upstreamNodeNames: []
-                            )
-                            wfState.addPendingInteraction(request)
-                            agentMessage.thinkingHeadline = "[\(runningNode?.profileName ?? "Node")] Waiting for approval..."
-                            agentMessage.agentState = .interaction(.permission(toolName: toolName))
-                        } else {
-                            // Normal agent mode
-                            agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
-                            agentMessage.agentState = .interaction(.permission(toolName: toolName))
-                            agentMessage.pendingInteraction = .toolConfirmation(
-                                PendingToolConfirmation(id: operationID, toolName: toolName, params: params)
-                            )
-                        }
+                                toolName: toolName,
+                                params: params,
+                                risk: HITLRiskTier.classify(toolName: toolName),
+                                arguments: JSONValue.parseStructured(params)
+                            )),
+                            conversationID: conversationID,
+                            profileType: config.profile.profileType,
+                            workflowState: workflowExecutionState,
+                            sourceNodeID: sourceNodeID,
+                            profileID: config.profile.id,
+                            traceContext: traceContext
+                        )
 
-                    // [ASK_USER] Handle Clarification Requests
-                    case .requestClarification(let question, let operationID, let sourceNodeID):
-                        if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
-                            // Workflow mode — route to WorkflowInteractionPanel
-                            let runningNode = wfState.nodeResults.first(where: { $0.nodeID == nodeID })
-                            let recentTimeline = Array(wfState.nodeTimelines[nodeID]?.suffix(3) ?? [])
-                            let request = WorkflowInteractionRequest(
-                                id: operationID,
-                                nodeID: nodeID,
-                                nodeName: runningNode?.profileName ?? "Agent",
-                                nodeKind: .profile(profileID: UUID(), profileType: .agent),
-                                requestType: .askUser(question: question),
-                                timestamp: Date(),
-                                recentTimeline: recentTimeline,
-                                upstreamNodeNames: []
-                            )
-                            wfState.addPendingInteraction(request)
-                            agentMessage.thinkingHeadline = "[\(runningNode?.profileName ?? "Node")] Asking you a question..."
-                            agentMessage.agentState = .interaction(.clarification)
-                        } else {
-                            // Normal agent mode
-                            agentMessage.thinkingHeadline = "Asking you a question..."
-                            agentMessage.agentState = .interaction(.clarification)
-                            agentMessage.pendingInteraction = .clarification(
-                                PendingClarification(id: operationID, question: question)
-                            )
-                        }
+                    // [ASK_USER] Clarification request → unified InteractionCenter.
+                    case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
+                        agentMessage.thinkingHeadline = "Asking you a question..."
+                        agentMessage.agentState = .interaction(.clarification)
+                        self.enqueueHITL(
+                            operationID: operationID,
+                            kind: .clarification(PendingClarification(id: operationID, question: question, options: options, multiline: multiline)),
+                            conversationID: conversationID,
+                            profileType: config.profile.profileType,
+                            workflowState: workflowExecutionState,
+                            sourceNodeID: sourceNodeID,
+                            profileID: config.profile.id,
+                            traceContext: traceContext
+                        )
+
+                    // [E1] Workflow Gate request → unified InteractionCenter as a `.gate` interaction.
+                    case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID):
+                        agentMessage.thinkingHeadline = "Waiting for your decision..."
+                        agentMessage.agentState = .interaction(.gate)
+                        self.enqueueHITL(
+                            operationID: operationID,
+                            kind: .gate(PendingGate(id: operationID, prompt: prompt, options: options, deadline: deadline)),
+                            conversationID: conversationID,
+                            profileType: config.profile.profileType,
+                            workflowState: workflowExecutionState,
+                            sourceNodeID: sourceNodeID,
+                            profileID: config.profile.id,
+                            traceContext: traceContext
+                        )
 
                     case .toolSucceeded(let output, let durationMs, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
@@ -335,7 +418,6 @@ final class ActiveStreamManager {
                             agentMessage: agentMessage,
                             workflowExecutionState: workflowExecutionState
                         )
-                        Self.clearMatchingPendingInteraction(toolName: output.toolName, agentMessage: agentMessage)
 
                     case .toolFailed(let output, let category, let suggestion, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
@@ -348,7 +430,6 @@ final class ActiveStreamManager {
                             agentMessage: agentMessage,
                             workflowExecutionState: workflowExecutionState
                         )
-                        Self.clearMatchingPendingInteraction(toolName: output.toolName, agentMessage: agentMessage)
                         if let s = suggestion {
                             logger.debug("[TOOL_FAILED] \(output.toolName) [\(category.rawValue)] suggestion: \(s)")
                         }
@@ -466,16 +547,23 @@ final class ActiveStreamManager {
                             id: UUID(), kind: .planGenerated, detail: "Planned \(count) subtask\(count == 1 ? "" : "s")"
                         ))
 
-                    case .requestPlanReview(let subtasks, let operationID):
+                    case .requestPlanReview(let subtasks, let operationID, let sourceNodeID):
                         agentMessage.thinkingHeadline = "Plan ready for review"
                         agentMessage.agentState = .interaction(.planReview)
-                        agentMessage.pendingInteraction = .planReview(
-                            PendingPlanReview(id: operationID, subtasks: subtasks)
-                        )
                         agentMessage.appendTimelineEvent(.capabilityMilestone(
                             id: UUID(), kind: .planReviewRequested,
                             detail: "Plan with \(subtasks.count) subtask\(subtasks.count == 1 ? "" : "s") awaiting approval"
                         ))
+                        self.enqueueHITL(
+                            operationID: operationID,
+                            kind: .planReview(PendingPlanReview(id: operationID, subtasks: subtasks)),
+                            conversationID: conversationID,
+                            profileType: config.profile.profileType,
+                            workflowState: workflowExecutionState,
+                            sourceNodeID: sourceNodeID,
+                            profileID: config.profile.id,
+                            traceContext: traceContext
+                        )
 
                     case .subtaskStarted(let index, let total, let description):
                         agentMessage.thinkingHeadline = "Subtask \(index)/\(total): \(description)"
@@ -635,6 +723,9 @@ final class ActiveStreamManager {
         workflowExecutionState: WorkflowExecutionState?
     ) {
         let updater: (inout ToolExecutionData) -> Void = { data in
+            // Refresh params to what ACTUALLY executed — when the user edits args in the HITL banner
+            // (A3), output.params carries the corrected values; the card was built from the originals.
+            data.params = output.params
             data.output = output.output
             data.isSuccess = output.isSuccess
             data.failureCategory = failureCategory
@@ -671,17 +762,104 @@ final class ActiveStreamManager {
         }
     }
 
-    /// Clears a pending HITL interaction iff it matches the tool that just completed.
-    /// Blanket clearing would deadlock sequential interactive tools.
-    private static func clearMatchingPendingInteraction(toolName: String, agentMessage: ChatMessage) {
-        switch agentMessage.pendingInteraction {
-        case .clarification where toolName == "ask_user":
-            agentMessage.pendingInteraction = nil
-        case .toolConfirmation(let pending) where pending.toolName == toolName:
-            agentMessage.pendingInteraction = nil
-        default:
-            break
+    /// [HITL/P5] Enqueue a HITL request into the unified `InteractionCenter` — the single source
+    /// of truth across chat / code / workflow / scheduled. Builds the source-attributed origin
+    /// (interface + workflow node identity + banner title). Replaces the retired per-message
+    /// `ChatMessage.pendingInteraction` and per-workflow `WorkflowExecutionState.pendingInteractions`.
+    private func enqueueHITL(
+        operationID: UUID,
+        kind: PendingInteraction,
+        conversationID: UUID,
+        profileType: ProfileType,
+        workflowState: WorkflowExecutionState?,
+        sourceNodeID: UUID?,
+        profileID: UUID?,
+        traceContext: TraceContext
+    ) {
+        guard let interactionCenter else { return }
+
+        let isWorkflow = workflowState != nil && sourceNodeID != nil
+        let interface: HITLOrigin.Interface = isWorkflow
+            ? .workflow
+            : (profileType == .code ? .code : .chat)
+
+        let nodeName: String? = sourceNodeID.flatMap { id in
+            workflowState?.nodeResults.first(where: { $0.nodeID == id })?.profileName
         }
+
+        let kindLabel: String = {
+            switch kind {
+            case .toolConfirmation: return "Permission required"
+            case .clarification:    return "Question"
+            case .planReview:       return "Plan review"
+            case .gate:             return "Decision required"
+            }
+        }()
+        let title = nodeName.map { "\($0) · \(kindLabel)" } ?? kindLabel
+
+        let origin = HITLOrigin(
+            interface: interface,
+            conversationID: conversationID,
+            nodeID: sourceNodeID,
+            nodeName: nodeName,
+            title: title,
+            profileID: profileID
+        )
+        interactionCenter.enqueue(PendingHITL(id: operationID, origin: origin, kind: kind))
+
+        // [HITL/C1] Record the raise for the trace span emitted on resolve — chat, code, and ALL workflow
+        // HITL including gates. Gates are now a first-class `.gate` interaction (WorkflowExecutor no longer
+        // emits its own span), so they are traced uniformly here with no double-emit to guard against.
+        let kindType: String
+        let kindToolName: String?
+        switch kind {
+        case .toolConfirmation(let c): kindType = "permission";    kindToolName = c.toolName
+        case .clarification:           kindType = "clarification"; kindToolName = nil
+        case .planReview:              kindType = "plan_review";   kindToolName = nil
+        case .gate:                    kindType = "gate";          kindToolName = nil
+        }
+
+        // Sample the raise instant ONCE, synchronously, so the C1 span and C2 audit share the exact
+        // same timestamp and neither drifts to whenever its deferred Task happens to run.
+        let raisedAt = Date()
+
+        hitlTraceInfo[operationID] = HITLTraceRecord(
+            context: traceContext, raisedAt: raisedAt, type: kindType, toolName: kindToolName
+        )
+
+        // [HITL/C2] Durable audit row, written at RAISE for EVERY HITL (incl. gates). A request still
+        // pending at quit/crash survives as resolvedAt=nil, which the launch reconcile stamps `interrupted`.
+        Task { await TraceRecorder.shared.recordHITLRaised(
+            operationID: operationID.uuidString,
+            conversationID: conversationID.uuidString,
+            interface: interface.rawValue,
+            type: kindType,
+            toolName: kindToolName,
+            nodeName: nodeName,
+            title: title,
+            raisedAt: raisedAt
+        ) }
+    }
+
+    /// [HITL/C1] In-flight HITL requests awaiting resolution, for the userInteraction trace span.
+    private struct HITLTraceRecord {
+        let context: TraceContext
+        let raisedAt: Date
+        let type: String
+        let toolName: String?
+    }
+    @ObservationIgnored private var hitlTraceInfo: [UUID: HITLTraceRecord] = [:]
+
+    /// [HITL/C1] Emit a `userInteraction` trace span when a HITL resolves — captures decision +
+    /// wait duration so chat HITL (previously span-less) is visible in the Report Inspector.
+    private func emitHITLTraceSpan(operationID: UUID?, outcome: String) {
+        guard let opID = operationID, let rec = hitlTraceInfo.removeValue(forKey: opID) else { return }
+        let waitMs = Int(Date().timeIntervalSince(rec.raisedAt) * 1000)
+        let context = rec.context
+        let type = rec.type
+        let tool = rec.toolName
+        let detailed = "\(outcome) · \(waitMs)ms"
+        Task { await TraceRecorder.shared.emitUserInteraction(span: context, type: type, toolName: tool, outcome: detailed) }
     }
 
     private func updateMessageContent(_ agentMessage: ChatMessage, with newTextChunk: String, isRegeneration: Bool) {
@@ -719,13 +897,33 @@ final class ActiveStreamManager {
         logger.info("Cancelling stream task for message ID: \(messageId.uuidString)")
         taskToCancel.cancel()
     }
+
+    /// [HITL/P5] Cancel any active stream(s) for a conversation. Used on conversation deletion so a
+    /// run parked on a HITL (which no longer has a per-HITL watchdog) doesn't strand — cancellation
+    /// cascades to the suspension's withTaskCancellationHandler (deny / nil) and then finalizes.
+    public func cancelStreams(forConversation conversationID: UUID) {
+        let messageIDs = activeStreams.filter { $0.value.conversationId == conversationID }.map(\.key)
+        for messageID in messageIDs {
+            cancelStream(for: messageID)
+        }
+    }
     
     
     private func finalizeMessage(_ message: ChatMessage, conversationID: UUID, error: Error?) async {
         message.isStreaming = false
         message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
-        message.pendingInteraction = nil
+        // [HITL/P5] No center drain here: a normally-finalized stream has no parked HITL (the agent
+        // can't complete while waiting), and cancel/error paths route through
+        // ExecutionSuspensionService.cancel(for:) which posts .hitl*Resolved → op-id resolve.
+        // A coarse resolveAll(conversationID:) here would wrongly clear a *concurrent* stream's
+        // still-parked HITL in the same conversation, so it is intentionally omitted.
+
+        // [HITL/Bug2] Scope "Always allow" session grants to the run that created them. A fresh run
+        // re-resolves tools from the (possibly changed) profile, so a stale grant must not survive to
+        // override a later re-enable. (Coarse per-conversation clear; a concurrent same-conversation
+        // run would at worst re-prompt once — benign, unlike wrongly resolving its parked HITL above.)
+        await SessionToolApprovals.shared.clear(conversationID: conversationID)
 
         // Terminal-outcome safety net: if no executor emitted `.executionFinished`
         // (legacy code path, early `continuation.finish()` in a catch block, or a
@@ -810,7 +1008,9 @@ final class ActiveStreamManager {
         }
         
         activeStreams.removeValue(forKey: message.id)
-        mirrorDelegate?.activeStreamManager(self, didEndStream: message)
+        for delegate in liveMirrorDelegates {
+            delegate.activeStreamManager(self, didEndStream: message)
+        }
 
         // Dispatch notification if app is in background
         let notifConversationID = conversationID

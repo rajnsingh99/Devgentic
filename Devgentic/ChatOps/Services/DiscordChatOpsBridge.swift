@@ -94,6 +94,10 @@ final class DiscordChatOpsBridge {
             await gatewayClient?.stop()
         }
 
+        // [D2] Detach the mirror service so a stopped transport stops mirroring, then drop the strong ref.
+        remoteMirrorService?.teardown()
+        remoteMirrorService = nil
+
         isRunning = false
         logger.info("DiscordChatOpsBridge stopped.")
     }
@@ -211,6 +215,9 @@ final class DiscordChatOpsBridge {
         case .denyHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
             return
+        case .gateChoiceHITL(let operationID, let optionIndex):
+            await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
+            return
         default:
             break
         }
@@ -239,12 +246,15 @@ final class DiscordChatOpsBridge {
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
         case .denyHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
+        case .gateChoiceHITL(let operationID, let optionIndex):
+            await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
         case .clarificationResponse(let text):
+            // [HITL/P6] Resolve the pending clarification's operationID from the unified InteractionCenter.
             if let convID = config.discordActiveConversationID,
-               let asm = viewModel?.activeStreamManager {
-                let pendingOpID = asm.activeStreams.values
-                    .first(where: { $0.conversationId == convID })?
-                    .pendingClarification?.id
+               let center = viewModel?.interactionCenter {
+                let pendingOpID = center.items(for: convID)
+                    .first(where: { if case .clarification = $0.kind { return true }; return false })?
+                    .id
                 if let opID = pendingOpID {
                     await remoteMirrorService?.handleClarification(operationID: opID, text: text)
                     awaitingClarification = false

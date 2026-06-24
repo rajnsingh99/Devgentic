@@ -79,7 +79,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
     /// Executes a workflow with gate auto-response.
     private func executeWithGate(
         _ scenario: WorkflowTestScenario,
-        approved: Bool,
+        choosing option: String?,
         userInput: String = "Test input"
     ) async throws -> [AgentStreamEvent] {
         let executor = WorkflowExecutor(workflowProfileID: UUID())
@@ -94,7 +94,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             profileMap: scenario.profileMap,
             streamProvider: mockProvider
         )
-        return try await WorkflowStreamCollector.collectWithGateResponse(from: stream, approved: approved)
+        return try await WorkflowStreamCollector.collectWithGateChoice(from: stream, choosing: option)
     }
 
     // MARK: - Group 1: Foundation
@@ -438,21 +438,21 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let botB = scenario.addBotNode(name: "Bot B")
 
         scenario.connect(from: botA, to: gate)
-        scenario.connect(from: gate, to: botB)
+        scenario.connect(from: gate, to: botB, portLabel: "Approve")   // botB on the "Approve" branch
 
         mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("data to approve")])
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("B processed")])
 
-        let events = try await executeWithGate(scenario, approved: true)
+        let events = try await executeWithGate(scenario, choosing: "Approve")
 
-        // Gate approved — Bot B should execute
+        // "Approve" chosen → its port routes to Bot B, which executes.
         let completed = WorkflowStreamCollector.nodeCompletedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(completed.contains(botB), "Bot B should execute after gate approval")
+        XCTAssertTrue(completed.contains(botB), "Bot B (Approve branch) should execute after choosing Approve")
 
-        // Confirmation request was emitted
-        let confirmations = WorkflowStreamCollector.confirmationRequests(from: events)
-        XCTAssertEqual(confirmations.count, 1)
-        XCTAssertTrue(confirmations[0].toolName.contains("Approval Gate"))
+        // The structured gate request was emitted with its options.
+        let gates = WorkflowStreamCollector.gateRequests(from: events)
+        XCTAssertEqual(gates.count, 1)
+        XCTAssertEqual(gates[0].options, ["Approve", "Reject"])
     }
 
     func testGate_Rejected_SkipsDownstream() async throws {
@@ -462,19 +462,16 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let botB = scenario.addBotNode(name: "Bot B")
 
         scenario.connect(from: botA, to: gate)
-        scenario.connect(from: gate, to: botB)
+        scenario.connect(from: gate, to: botB, portLabel: "Approve")   // botB only on the "Approve" branch
 
         mockProvider.scriptStream(for: scenario.profileID(for: botA)!, events: [.content("data")])
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("should not run")])
 
-        let events = try await executeWithGate(scenario, approved: false)
+        let events = try await executeWithGate(scenario, choosing: "Reject")
 
-        // Gate rejected — Bot B skipped
+        // "Reject" chosen → routes to the (unwired) Reject port, so the Approve-branch Bot B is skipped.
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botB), "Bot B should NOT execute after gate rejection")
-
-        let failed = WorkflowStreamCollector.nodeFailedEvents(from: events)
-        XCTAssertTrue(failed.contains(where: { $0.error.contains("rejected") }))
+        XCTAssertFalse(started.contains(botB), "Bot B (Approve branch) should NOT execute when Reject is chosen")
     }
 
     // MARK: - Group 6: Error Routing & Policies
@@ -952,11 +949,11 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         mockProvider.scriptStream(for: scenario.profileID(for: botB)!, events: [.content("should not run")])
         mockProvider.scriptStream(for: scenario.profileID(for: botC)!, events: [.content("should not run")])
 
-        let events = try await executeWithGate(scenario, approved: false)
+        // No choice (nil = timeout / cancel) → the gate FAILS; with stopWorkflow the whole run halts.
+        let events = try await executeWithGate(scenario, choosing: nil)
 
-        // Gate rejected + stopWorkflow → entire workflow halts
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertFalse(started.contains(botB), "Bot B should NOT run after gate rejection + stopWorkflow")
+        XCTAssertFalse(started.contains(botB), "Bot B should NOT run after gate failure + stopWorkflow")
         XCTAssertFalse(started.contains(botC), "Bot C should NOT run")
     }
 
@@ -1404,7 +1401,7 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
             return events
         }
 
-        // Give gate time to emit requestConfirmation, then cancel
+        // Give gate time to emit requestGate, then cancel
         try await Task.sleep(for: .milliseconds(300))
         task.cancel()
 
@@ -1419,9 +1416,9 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         XCTAssertFalse(mockProvider.invocations.contains(where: { $0.profileID == bProfileID }),
                        "Bot B should NOT execute when gate is cancelled")
 
-        // Gate confirmation request should have been emitted before cancel
-        let confirmations = WorkflowStreamCollector.confirmationRequests(from: collectedEvents)
-        XCTAssertTrue(confirmations.count <= 1, "Gate confirmation should have been emitted (or not if cancel was too fast)")
+        // Gate request should have been emitted before cancel
+        let gates = WorkflowStreamCollector.gateRequests(from: collectedEvents)
+        XCTAssertTrue(gates.count <= 1, "Gate request should have been emitted (or not if cancel was too fast)")
     }
 
     func testCancel_DoesNotInvokeDownstreamNodes() async throws {
@@ -1790,17 +1787,17 @@ final class WorkflowExecutorIntegrationTests: XCTestCase {
         let botRejected = scenario.addBotNode(name: "Rejected Bot")
 
         scenario.connect(from: code, to: gate)
-        scenario.connect(from: gate, to: condition)
+        scenario.connect(from: gate, to: condition, portLabel: "Approve")   // gate's "Approve" branch → condition
         scenario.connect(from: condition, to: botApproved, portLabel: "Approved")
         scenario.connect(from: condition, to: botRejected, portLabel: "Rejected")
 
         mockProvider.scriptStream(for: scenario.profileID(for: botApproved)!, events: [.content("approved!")])
         mockProvider.scriptStream(for: scenario.profileID(for: botRejected)!, events: [.content("rejected!")])
 
-        let events = try await executeWithGate(scenario, approved: true)
+        let events = try await executeWithGate(scenario, choosing: "Approve")
 
         let started = WorkflowStreamCollector.nodeStartedEvents(from: events).map(\.nodeID)
-        XCTAssertTrue(started.contains(botApproved), "Full structural chain: Code→Gate(approved)→Condition→Approved")
+        XCTAssertTrue(started.contains(botApproved), "Full structural chain: Code→Gate(Approve)→Condition→Approved")
         XCTAssertFalse(started.contains(botRejected))
     }
 

@@ -90,6 +90,10 @@ final class SlackChatOpsBridge {
             await socketClient?.stop()
         }
 
+        // [D2] Detach the mirror service so a stopped transport stops mirroring, then drop the strong ref.
+        remoteMirrorService?.teardown()
+        remoteMirrorService = nil
+
         isRunning = false
         logger.info("SlackChatOpsBridge stopped.")
     }
@@ -152,12 +156,24 @@ final class SlackChatOpsBridge {
         // Parse action_id using the same callback data format
         let command = ChatOpsCommand.parseSlack(actionID: action.action_id)
 
+        // [D1] Security: button taps must pass the same channel-authorization + tier gate as slash
+        // commands. This path previously bypassed BOTH — a HITL approve/deny/gate button could resolve
+        // below the .full tier or from an unauthorized channel.
+        guard await securityGate.authorizeSlack(channelID: channelID, config: config) else { return }
+        guard await securityGate.canExecute(command, tier: config.securityTier) else {
+            let msg = await securityGate.denialMessage(for: command, tier: config.securityTier)
+            _ = try? await apiClient?.postMessage(channel: channelID, text: msg)
+            return
+        }
+
         // Route HITL
         switch command {
         case .approveHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
         case .denyHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
+        case .gateChoiceHITL(let operationID, let optionIndex):
+            await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
         case .switchConversation(let uuid):
             await handleSwitchConversation(to: uuid, channelID: channelID)
         case .newConversation:
@@ -205,12 +221,15 @@ final class SlackChatOpsBridge {
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
         case .denyHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
+        case .gateChoiceHITL(let operationID, let optionIndex):
+            await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
         case .clarificationResponse(let text):
+            // [HITL/P6] Resolve the pending clarification's operationID from the unified InteractionCenter.
             if let convID = config.slackActiveConversationID,
-               let asm = viewModel?.activeStreamManager {
-                let pendingOpID = asm.activeStreams.values
-                    .first(where: { $0.conversationId == convID })?
-                    .pendingClarification?.id
+               let center = viewModel?.interactionCenter {
+                let pendingOpID = center.items(for: convID)
+                    .first(where: { if case .clarification = $0.kind { return true }; return false })?
+                    .id
                 if let opID = pendingOpID {
                     await remoteMirrorService?.handleClarification(operationID: opID, text: text)
                     awaitingClarification = false

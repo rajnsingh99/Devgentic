@@ -20,6 +20,10 @@ import SwiftUI
 struct WorkflowOutcomeStripView: View {
     let displayData: WorkflowRunDisplayData
     @Binding var selectedNodeID: UUID?
+    /// [HITL/P4] Node IDs currently awaiting a HITL response — render an "awaiting input" badge.
+    var awaitingNodeIDs: Set<UUID> = []
+    /// [HITL/E2] Fired when an "awaiting input" node is tapped — pulses the (always-visible) banner.
+    var onAwaitingTap: (() -> Void)? = nil
     @Environment(\.appTheme) private var theme
 
     var body: some View {
@@ -34,9 +38,14 @@ struct WorkflowOutcomeStripView: View {
                     WorkflowOutcomeCardView(
                         nodeData: nodeData,
                         isSelected: selectedNodeID == nodeData.nodeID,
+                        isAwaitingInput: awaitingNodeIDs.contains(nodeData.nodeID),
                         onTap: {
                             withAnimation(.easeInOut(duration: 0.15)) {
                                 selectedNodeID = nodeData.nodeID
+                            }
+                            // [HITL/E2] Tapping a node that needs input directs the eye to the banner.
+                            if awaitingNodeIDs.contains(nodeData.nodeID) {
+                                onAwaitingTap?()
                             }
                         }
                     )

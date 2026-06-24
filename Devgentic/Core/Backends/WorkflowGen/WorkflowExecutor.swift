@@ -834,8 +834,13 @@ actor WorkflowExecutor: Executor {
                         case .requestConfirmation(let toolName, let params, let operationID, _):
                             continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: nodeID))
 
-                        case .requestClarification(let question, let operationID, _):
-                            continuation.yield(.requestClarification(question: "[\(displayName)] \(question)", operationID: operationID, sourceNodeID: nodeID))
+                        case .requestClarification(let question, let operationID, _, let options, let multiline):
+                            continuation.yield(.requestClarification(question: "[\(displayName)] \(question)", operationID: operationID, sourceNodeID: nodeID, options: options, multiline: multiline))
+
+                        case .requestGate(let prompt, let options, let operationID, let deadline, _):
+                            // Gates are structural nodes, not profile-node output, so this is defensive —
+                            // forward it tagged with this node id if it ever surfaces here.
+                            continuation.yield(.requestGate(prompt: "[\(displayName)] \(prompt)", options: options, operationID: operationID, deadline: deadline, sourceNodeID: nodeID))
 
                         case .error(let errMsg):
                             // Prefix the node name but PRESERVE the structured error's
@@ -1488,83 +1493,74 @@ actor WorkflowExecutor: Executor {
             logger.info("Code node '\(displayName)' template transform: \(output.count) chars")
 
         case .gate(let config):
-            // HITL Gate — suspend execution and wait for user approval
+            // [E1] HITL Gate — suspend until the user picks an option; that choice routes the workflow
+            // to the matching output port (per-option branching, like a Condition node but human-decided).
             let operationID = UUID()
             let upstreamText = upstreamResults.map(\.output).joined(separator: "\n")
             logger.debug("Gate '\(displayName)' upstream content preview:\n\(String(upstreamText.prefix(300)))")
 
-            // Format gate params with options and upstream preview
-            let optionsDisplay = config.options.isEmpty ? "" : "\nOptions: \(config.options.joined(separator: " | "))"
-            let timeoutDisplay = config.timeout.map { "\nAuto-rejects in \(Int($0))s" } ?? ""
-            let gateParams = config.prompt + optionsDisplay + timeoutDisplay + "\n\nUpstream: " + String(upstreamText.prefix(200))
+            // [HITL/P5] A user-configured gate timeout is an explicit per-gate auto-decision — honor it
+            // as-is. With no configured timeout the gate waits INDEFINITELY: the execution container owns
+            // the deadline — Stop (cancel(for:)) for an attended run, the 10-min deadline for a scheduled
+            // run, or sibling cancelAll on stopWorkflow. Same model as chat.
+            let gateTimeout = config.timeout
+            let deadline = gateTimeout.map { Date().addingTimeInterval($0) }
 
-            // Emit confirmation request with gate prompt and options
-            continuation.yield(.requestConfirmation(
-                toolName: "Workflow Gate: \(displayName)",
-                params: gateParams,
+            // Emit the structured gate request — options render as one-tap buttons, `deadline` drives a
+            // live countdown in the banner.
+            continuation.yield(.requestGate(
+                prompt: config.prompt,
+                options: config.options,
                 operationID: operationID,
+                deadline: deadline,
                 sourceNodeID: nodeID
             ))
 
-            // Clamp gate timeout below the suspension service's internal timeout (300s)
-            // to avoid a race where the service's timeout fires first.
-            // If user configured a shorter timeout, use that; otherwise let the service's
-            // own 300s timeout handle it (no external timeout task needed).
-            let serviceTimeout: TimeInterval = 300
-            let gateTimeout = config.timeout.map { min($0, serviceTimeout - 1) }
-            logger.info("Gate node '\(displayName)' suspending for approval (operationID: \(operationID), timeout: \(gateTimeout.map { "\($0)s" } ?? "service default"))")
+            logger.info("Gate node '\(displayName)' suspending for choice (operationID: \(operationID), options: [\(config.options.joined(separator: " | "))], timeout: \(gateTimeout.map { "\($0)s" } ?? "indefinite — container-bounded"))")
 
-            let approved: Bool
+            let chosenOption: String?
             if let timeout = gateTimeout {
-                // User-configured timeout: race suspension against a sleep timer
+                // User-configured timeout: race the suspension against a sleep timer that auto-rejects.
                 do {
-                    approved = try await withThrowingTaskGroup(of: Bool.self) { group in
+                    chosenOption = try await withThrowingTaskGroup(of: String?.self) { group in
                         group.addTask {
-                            await ExecutionSuspensionService.shared.suspend(
-                                for: operationID,
-                                conversationID: conversationID
+                            await ExecutionSuspensionService.shared.suspendForGate(
+                                for: operationID, conversationID: conversationID
                             )
                         }
                         group.addTask {
                             try await Task.sleep(for: .seconds(timeout))
-                            // Timeout reached — force-resume with rejection
-                            await ExecutionSuspensionService.shared.resume(for: operationID, approved: false)
-                            return false
+                            await ExecutionSuspensionService.shared.resumeGate(for: operationID, chosenOption: nil)
+                            return nil
                         }
                         let result = try await group.next()!
                         group.cancelAll()
                         return result
                     }
                 } catch {
-                    approved = false
+                    chosenOption = nil
                 }
             } else {
-                // No user timeout — rely on the service's built-in 300s timeout
-                approved = await ExecutionSuspensionService.shared.suspend(
-                    for: operationID,
-                    conversationID: conversationID
+                chosenOption = await ExecutionSuspensionService.shared.suspendForGate(
+                    for: operationID, conversationID: conversationID
                 )
             }
 
-            if approved {
+            if let chosen = chosenOption {
+                // Route to the chosen option's output port; pass the upstream payload to that branch.
+                activePorts = [chosen]
                 output = upstreamText
-                logger.info("Gate node '\(displayName)' approved — passing through upstream text")
+                logger.info("Gate node '\(displayName)' → option '\(chosen)' (routing to its port)")
             } else {
-                output = "Gate rejected by user"
-                status = .failed(.modelError(provider: "workflow", error: "Gate '\(displayName)' rejected by user"))
-                logger.info("Gate node '\(displayName)' rejected")
+                // No choice (timeout / cancel / Stop) — the gate fails; no branch is taken.
+                output = "Gate not answered (timed out or cancelled)"
+                status = .failed(.modelError(provider: "workflow", error: "Gate '\(displayName)' was not answered"))
+                logger.info("Gate node '\(displayName)' unanswered — failing (no branch taken)")
             }
 
-            // P1-12: emit a user-interaction span event so gate approve/reject is
-            // visible in the Report Inspector and counted in dashboards. The
-            // `userInteraction` event type was defined in `TraceRecorder` but
-            // never called from any code path — this is the first emitter.
-            await TraceRecorder.shared.emitUserInteraction(
-                span: traceContext,
-                type: "workflow_gate",
-                toolName: displayName,
-                outcome: approved ? "approved" : "rejected"
-            )
+            // Gate HITL is now a first-class `.gate` interaction, traced uniformly by ActiveStreamManager
+            // (raise + resolve, with the chosen option as the outcome) — the manual span here is removed
+            // to avoid a double-emit.
 
         case .trigger:
             output = ""

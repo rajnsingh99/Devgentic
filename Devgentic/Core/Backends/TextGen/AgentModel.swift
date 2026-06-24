@@ -186,6 +186,7 @@ enum AgentState: Codable, Equatable, Sendable {
         case permission(toolName: String)
         case clarification
         case planReview
+        case gate
     }
     
     var category: AgentStateCategory {
@@ -208,6 +209,7 @@ enum AgentState: Codable, Equatable, Sendable {
         case .interaction(.permission(let tool)): return "Awaiting Permission: \(tool)"
         case .interaction(.clarification): return "Awaiting Clarification"
         case .interaction(.planReview): return "Awaiting Plan Approval"
+        case .interaction(.gate): return "Awaiting Decision"
         case .completed: return "Completed"
         case .error(let msg): return "Error: \(msg)"
         }
@@ -816,26 +818,4 @@ struct ReflectionResult: Sendable {
     let trial: Int
 }
 
-// MARK: - Supervisor Models
-
-struct WorkerTask: Sendable, Identifiable {
-    let id: String
-    let workerRole: String
-    let instruction: String
-    let assignedTools: [AgentTool]
-
-    init(id: String = UUID().uuidString, workerRole: String, instruction: String, assignedTools: [AgentTool]) {
-        self.id = id
-        self.workerRole = workerRole
-        self.instruction = instruction
-        self.assignedTools = assignedTools
-    }
-}
-
-struct WorkerResult: Sendable {
-    let workerId: String
-    let workerRole: String
-    let output: String
-    let isSuccess: Bool
-    let toolsUsed: [String]
-}
+// (Supervisor models WorkerTask/WorkerResult removed — the Supervisor executor was retired; H1 cleanup.)

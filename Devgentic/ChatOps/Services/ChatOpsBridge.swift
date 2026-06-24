@@ -28,7 +28,6 @@ final class ChatOpsBridge {
     private var apiClient: TelegramAPIClient?
     private var listener: TelegramListener?
     private let securityGate = ChatOpsSecurityGate()
-    private var hitlBridge: ChatOpsHITLBridge?
     private var telegramTransport: TelegramTransport?
     var remoteMirrorService: RemoteMirrorService?
     private let config = ChatOpsConfigManager.shared
@@ -37,6 +36,16 @@ final class ChatOpsBridge {
 
     private var listeningTask: Task<Void, Never>?
     private(set) var isRunning: Bool = false
+
+    /// [D1] True when a clarification is pending for the active conversation — decides whether an inbound
+    /// plain-text reply is parsed as a clarification answer vs a new message. Derived from the unified
+    /// InteractionCenter (the old ChatOpsHITLBridge.awaitingClarification was dead state — only a
+    /// never-posted notification set it, so Telegram clarification replies never registered).
+    private var isAwaitingClarification: Bool {
+        guard let convID = config.activeConversationID,
+              let center = viewModel?.interactionCenter else { return false }
+        return center.items(for: convID).contains { if case .clarification = $0.kind { return true }; return false }
+    }
 
     init(viewModel: MainApplicationViewModel) {
         self.viewModel = viewModel
@@ -58,7 +67,6 @@ final class ChatOpsBridge {
         self.apiClient = client
         self.listener = telegramListener
         self.telegramTransport = transport
-        self.hitlBridge = ChatOpsHITLBridge(apiClient: client, config: config)
 
         // Create RemoteMirrorService if ViewModel provides ActiveStreamManager
         if let asm = viewModel?.activeStreamManager {
@@ -93,7 +101,10 @@ final class ChatOpsBridge {
             await listener?.stop()
         }
 
-        hitlBridge?.reset()
+        // [D2] Detach the mirror service so a stopped transport stops mirroring, then drop the strong ref.
+        remoteMirrorService?.teardown()
+        remoteMirrorService = nil
+
         isRunning = false
         logger.info("ChatOpsBridge stopped.")
     }
@@ -113,7 +124,7 @@ final class ChatOpsBridge {
         let command = ChatOpsCommand.parse(
             text: update.message?.text,
             callbackData: update.callback_query?.data,
-            awaitingClarification: hitlBridge?.awaitingClarification ?? false
+            awaitingClarification: isAwaitingClarification
         )
 
         // 4. Tier enforcement
@@ -145,15 +156,16 @@ final class ChatOpsBridge {
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: true)
         case .denyHITL(let operationID):
             await remoteMirrorService?.handleApproval(operationID: operationID, approved: false)
+        case .gateChoiceHITL(let operationID, let optionIndex):
+            await remoteMirrorService?.handleGate(operationID: operationID, optionIndex: optionIndex)
         case .clarificationResponse(let text):
-            // For clarification responses, we need the operationID from the pending clarification.
-            // The RemoteMirrorService tracks this via the active conversation's pending state.
+            // [HITL/P6] Resolve the pending clarification's operationID from the unified
+            // InteractionCenter (single source of truth) for this conversation.
             if let convID = config.activeConversationID,
-               let asm = viewModel?.activeStreamManager {
-                // Find the active stream for this conversation and get its pending clarification operationID
-                let pendingOpID = asm.activeStreams.values
-                    .first(where: { $0.conversationId == convID })?
-                    .pendingClarification?.id
+               let center = viewModel?.interactionCenter {
+                let pendingOpID = center.items(for: convID)
+                    .first(where: { if case .clarification = $0.kind { return true }; return false })?
+                    .id
                 if let opID = pendingOpID {
                     await remoteMirrorService?.handleClarification(operationID: opID, text: text)
                 }
@@ -250,7 +262,7 @@ final class ChatOpsBridge {
 
         let allConversations = fetchRecentConversations(limit: 100)
         let tier = config.securityTier.rawValue
-        let hitlPending = hitlBridge?.awaitingClarification == true ? "Yes" : "No"
+        let hitlPending = isAwaitingClarification ? "Yes" : "No"
 
         let statusText = """
         📊 *Devgentic Status*
@@ -273,7 +285,6 @@ final class ChatOpsBridge {
 
         // Cancel any suspended HITL first
         await ExecutionSuspensionService.shared.cancel(for: conversationID)
-        hitlBridge?.reset()
 
         _ = try? await apiClient?.sendMessage(chatID: chatID, text: "🛑 Cancelled active agent for this conversation.")
         logger.info("Cancelled agent via Telegram for conversation \(conversationID.uuidString)")
@@ -310,7 +321,6 @@ final class ChatOpsBridge {
         }
 
         config.activeConversationID = uuid
-        hitlBridge?.reset()
 
         // Auto-navigate Mac UI to the switched conversation
         vm.selectedConversationID = uuid

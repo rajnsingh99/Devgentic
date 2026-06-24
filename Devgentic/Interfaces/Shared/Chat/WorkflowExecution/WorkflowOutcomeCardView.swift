@@ -16,6 +16,9 @@ import SwiftUI
 struct WorkflowOutcomeCardView: View {
     let nodeData: WorkflowRunDisplayData.NodeDisplayData
     let isSelected: Bool
+    /// [HITL/P4] When true, this node is paused awaiting a HITL response — the request itself
+    /// renders in the shared above-input banner; this badge points the user at the right node (D2).
+    var isAwaitingInput: Bool = false
     let onTap: () -> Void
 
     @Environment(\.appTheme) private var theme
@@ -111,17 +114,25 @@ struct WorkflowOutcomeCardView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 10)
 
-            // Footer: status label band
+            // Footer: status label band — or an "awaiting input" call-out when this node is
+            // paused on a HITL request (D2). The actual prompt lives in the shared banner.
             HStack(spacing: 6) {
-                Text(nodeData.status.label)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(statusColor)
+                if isAwaitingInput {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Needs your input")
+                        .font(.system(size: 11, weight: .semibold))
+                } else {
+                    Text(nodeData.status.label)
+                        .font(.system(size: 11, weight: .semibold))
+                }
                 Spacer(minLength: 0)
             }
+            .foregroundColor(isAwaitingInput ? theme.warningColor : statusColor)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(statusColor.opacity(0.08))
+            .background((isAwaitingInput ? theme.warningColor : statusColor).opacity(isAwaitingInput ? 0.14 : 0.08))
         }
         .frame(width: 240, height: 180)
         .background(
@@ -131,8 +142,9 @@ struct WorkflowOutcomeCardView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(
-                    isSelected ? statusColor : statusColor.opacity(isHovering ? 0.55 : 0.35),
-                    lineWidth: isSelected ? 2 : 1.5
+                    isAwaitingInput ? theme.warningColor
+                        : (isSelected ? statusColor : statusColor.opacity(isHovering ? 0.55 : 0.35)),
+                    lineWidth: (isAwaitingInput || isSelected) ? 2 : 1.5
                 )
         )
         .contentShape(RoundedRectangle(cornerRadius: 10))

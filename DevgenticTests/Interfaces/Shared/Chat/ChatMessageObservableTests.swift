@@ -194,116 +194,9 @@ final class ChatMessageObservableTests: XCTestCase {
         XCTAssertEqual(msg.artifacts[0].toolName, "bash")
     }
 
-    // MARK: - HITL Pending State
-
-    // MARK: - Unified Pending Interaction
-
-    func testPendingInteractionToolConfirmation() {
-        let msg = makeAgentMessage()
-        XCTAssertNil(msg.pendingInteraction)
-
-        let opId = UUID()
-        msg.pendingInteraction = .toolConfirmation(
-            PendingToolConfirmation(id: opId, toolName: "bash", params: "{\"cmd\": \"ls\"}")
-        )
-
-        XCTAssertNotNil(msg.pendingInteraction)
-        XCTAssertEqual(msg.pendingInteraction?.id, opId)
-        XCTAssertEqual(msg.pendingInteraction?.toolName, "bash")
-
-        // Verify deprecated shim still works
-        XCTAssertNotNil(msg.pendingToolConfirmation)
-        XCTAssertEqual(msg.pendingToolConfirmation?.toolName, "bash")
-        XCTAssertNil(msg.pendingClarification)
-        XCTAssertNil(msg.pendingPlanReview)
-
-        msg.pendingInteraction = nil
-        XCTAssertNil(msg.pendingInteraction)
-        XCTAssertNil(msg.pendingToolConfirmation)
-    }
-
-    func testPendingInteractionClarification() {
-        let msg = makeAgentMessage()
-        let opId = UUID()
-        msg.pendingInteraction = .clarification(
-            PendingClarification(id: opId, question: "Which file?")
-        )
-
-        XCTAssertNotNil(msg.pendingInteraction)
-        if case .clarification(let c) = msg.pendingInteraction {
-            XCTAssertEqual(c.question, "Which file?")
-        } else {
-            XCTFail("Expected clarification interaction")
-        }
-
-        // Verify deprecated shim
-        XCTAssertNotNil(msg.pendingClarification)
-        XCTAssertNil(msg.pendingToolConfirmation)
-    }
-
-    func testPendingInteractionPlanReview() {
-        let msg = makeAgentMessage()
-        let opId = UUID()
-        let subtask = SubTask(description: "Research APIs", status: .pending)
-        msg.pendingInteraction = .planReview(
-            PendingPlanReview(id: opId, subtasks: [subtask])
-        )
-
-        XCTAssertNotNil(msg.pendingInteraction)
-        if case .planReview(let p) = msg.pendingInteraction {
-            XCTAssertEqual(p.subtasks.count, 1)
-        } else {
-            XCTFail("Expected plan review interaction")
-        }
-
-        // Verify deprecated shim
-        XCTAssertNotNil(msg.pendingPlanReview)
-        XCTAssertNil(msg.pendingToolConfirmation)
-        XCTAssertNil(msg.pendingClarification)
-    }
-
-    func testPendingInteractionMutualExclusivity() {
-        let msg = makeAgentMessage()
-
-        // Set tool confirmation
-        msg.pendingInteraction = .toolConfirmation(
-            PendingToolConfirmation(id: UUID(), toolName: "bash", params: "{}")
-        )
-        XCTAssertNotNil(msg.pendingToolConfirmation)
-        XCTAssertNil(msg.pendingClarification)
-
-        // Replace with clarification — tool confirmation should be gone
-        msg.pendingInteraction = .clarification(
-            PendingClarification(id: UUID(), question: "Which?")
-        )
-        XCTAssertNil(msg.pendingToolConfirmation)
-        XCTAssertNotNil(msg.pendingClarification)
-
-        // Replace with plan review — clarification should be gone
-        msg.pendingInteraction = .planReview(
-            PendingPlanReview(id: UUID(), subtasks: [])
-        )
-        XCTAssertNil(msg.pendingClarification)
-        XCTAssertNotNil(msg.pendingPlanReview)
-    }
-
-    func testDeprecatedShimSetter() {
-        let msg = makeAgentMessage()
-
-        // Set via deprecated shim
-        msg.pendingToolConfirmation = PendingToolConfirmation(id: UUID(), toolName: "x", params: "{}")
-        XCTAssertNotNil(msg.pendingInteraction)
-        if case .toolConfirmation = msg.pendingInteraction {} else { XCTFail("Expected toolConfirmation") }
-
-        // Clear via deprecated shim
-        msg.pendingToolConfirmation = nil
-        XCTAssertNil(msg.pendingInteraction)
-
-        // Setting clarification via shim should clear existing tool confirmation
-        msg.pendingInteraction = .toolConfirmation(PendingToolConfirmation(id: UUID(), toolName: "y", params: "{}"))
-        msg.pendingClarification = PendingClarification(id: UUID(), question: "?")
-        if case .clarification = msg.pendingInteraction {} else { XCTFail("Expected clarification") }
-    }
+    // [HITL/P6] The `ChatMessage.pendingInteraction` property + its deprecated shims were removed in the
+    // P6 cutover; pending HITL now lives solely in `InteractionCenter`. The tests for that removed API
+    // were deleted here.
 
     // MARK: - AgentResponse Variant Management
 
@@ -353,16 +246,12 @@ final class ChatMessageObservableTests: XCTestCase {
         let original = makeAgentMessage()
         original.agentState = .thinking(.planning)
         original.thinkingHeadline = "Should not persist"
-        original.pendingInteraction = .toolConfirmation(
-            PendingToolConfirmation(id: UUID(), toolName: "x", params: "{}")
-        )
 
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(ChatMessage.self, from: data)
 
         XCTAssertEqual(decoded.agentState, .idle)
         XCTAssertNil(decoded.thinkingHeadline)
-        XCTAssertNil(decoded.pendingInteraction)
     }
 
     // MARK: - Schema Versioning

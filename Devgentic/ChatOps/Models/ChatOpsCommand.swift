@@ -20,6 +20,9 @@ enum ChatOpsCommand {
     case switchConversation(UUID)
     case approveHITL(operationID: UUID)
     case denyHITL(operationID: UUID)
+    /// [D1] A workflow Gate option button — `optionIndex` indexes into the gate's options (an index is
+    /// used, not the raw label, to stay within Telegram's 64-byte callback_data limit).
+    case gateChoiceHITL(operationID: UUID, optionIndex: Int)
 
     // Interactive responses
     case clarificationResponse(String)
@@ -192,6 +195,16 @@ enum ChatOpsCommand {
         if data.hasPrefix("hitl:deny:") {
             let uuidString = String(data.dropFirst("hitl:deny:".count))
             if let opID = UUID(uuidString: uuidString) { return .denyHITL(operationID: opID) }
+            return .unknown
+        }
+        // [D1] Gate option button: "hitl:gate:<operationID>:<optionIndex>"
+        if data.hasPrefix("hitl:gate:") {
+            let rest = String(data.dropFirst("hitl:gate:".count))   // "<UUID>:<idx>"
+            if let sep = rest.lastIndex(of: ":"),
+               let opID = UUID(uuidString: String(rest[rest.startIndex..<sep])),
+               let idx = Int(rest[rest.index(after: sep)...]) {
+                return .gateChoiceHITL(operationID: opID, optionIndex: idx)
+            }
             return .unknown
         }
 

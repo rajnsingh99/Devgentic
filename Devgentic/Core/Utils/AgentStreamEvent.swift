@@ -51,7 +51,11 @@ enum AgentStreamEvent: Sendable {
     /// - params: The parameters needed for the tool (e.g. path)
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
     case requestConfirmation(toolName: String, params: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
-    
+
+    /// [E1] A workflow Gate node is asking the user to pick one of `options`. The choice routes the
+    /// workflow to the matching output port. `deadline` is the absolute auto-reject time (live countdown).
+    case requestGate(prompt: String, options: [String], operationID: UUID = UUID(), deadline: Date? = nil, sourceNodeID: UUID? = nil)
+
     /// The tool executed successfully. Carries the observation payload for the LLM + UI.
     /// - durationMs: optional wall-clock execution time (from dispatch to completion)
     /// - sourceNodeID: When emitted from a workflow node, identifies which node produced this output.
@@ -71,7 +75,7 @@ enum AgentStreamEvent: Sendable {
     /// The agent needs clarification from the user before it can proceed.
     /// - question: The question to display to the user
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
+    case requestClarification(question: String, operationID: UUID = UUID(), sourceNodeID: UUID? = nil, options: [String]? = nil, multiline: Bool = false)
 
     /// A terminal error. Carries a `StructuredError` (category + message +
     /// optional relatedPath/suggestion). Legacy `.error("string")` call sites
@@ -158,7 +162,7 @@ enum AgentStreamEvent: Sendable {
     /// Execution is suspended until the user approves, edits, or rejects the plan.
     /// - subtasks: The generated subtask plan (user may edit before approving)
     /// - operationID: Unique identifier for this HITL operation (for multi-surface dedup)
-    case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID())
+    case requestPlanReview(subtasks: [SubTask], operationID: UUID = UUID(), sourceNodeID: UUID? = nil)
 
     // MARK: - History Compaction
 
@@ -354,16 +358,71 @@ extension ToolOutput: Codable {
     }
 }
 
+/// Severity classification for a tool-confirmation HITL (A1) — drives the banner accent/icon so a
+/// destructive `delete_file` no longer renders identically to a benign `list_directory`.
+enum HITLRiskTier: String, Sendable, Codable, Equatable, CaseIterable {
+    case safe        // read-only / idempotent — no state change
+    case moderate    // mutates state, generally recoverable
+    case destructive // irreversible or high-impact (delete, shell, applescript)
+
+    /// Short banner label.
+    var label: String {
+        switch self {
+        case .safe:        return "Read-only"
+        case .moderate:    return "Modifies"
+        case .destructive: return "Destructive"
+        }
+    }
+
+    /// SF Symbol for the risk badge.
+    var icon: String {
+        switch self {
+        case .safe:        return "eye"
+        case .moderate:    return "pencil"
+        case .destructive: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    /// Best-effort classification by tool name. Native tools are mapped explicitly; unknown / MCP
+    /// tools default to `.moderate`. (MCP annotation-driven refinement — `readOnlyHint` /
+    /// `destructiveHint` from `ToolAnnotations` — is a follow-on.)
+    static func classify(toolName: String) -> HITLRiskTier {
+        switch toolName {
+        case "delete_file", "execute_shell", "run_applescript", "fs_organize_batch":
+            return .destructive
+        case "write_file", "move_file", "copy_file", "create_folder", "fs_watch_folder":
+            return .moderate
+        case "read_file", "list_directory", "fs_smart_search", "fs_read_metadata",
+             "get_system_stats", "read_session_history", "web_search":
+            return .safe
+        default:
+            return .moderate
+        }
+    }
+}
+
 /// [HITL] Data Model for the Permission Card
 struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
     let id: UUID
     let toolName: String
     let params: String
+    /// A1: severity tier driving the banner's colour/icon.
+    let risk: HITLRiskTier
+    /// A1: structured arguments for an expandable, pretty-printed view (nil if `params` wasn't JSON).
+    let arguments: JSONValue?
 
-    init(id: UUID = UUID(), toolName: String, params: String) {
+    init(
+        id: UUID = UUID(),
+        toolName: String,
+        params: String,
+        risk: HITLRiskTier = .moderate,
+        arguments: JSONValue? = nil
+    ) {
         self.id = id
         self.toolName = toolName
         self.params = params
+        self.risk = risk
+        self.arguments = arguments
     }
 }
 
@@ -371,10 +430,16 @@ struct PendingToolConfirmation: Sendable, Identifiable, Codable, Equatable {
 struct PendingClarification: Sendable, Identifiable, Codable, Equatable {
     let id: UUID
     let question: String
+    /// A5: optional suggested answers rendered as one-tap choice buttons (nil/empty = free text).
+    let options: [String]?
+    /// A5: render a multi-line editor instead of a single-line field.
+    let multiline: Bool
 
-    init(id: UUID = UUID(), question: String) {
+    init(id: UUID = UUID(), question: String, options: [String]? = nil, multiline: Bool = false) {
         self.id = id
         self.question = question
+        self.options = options
+        self.multiline = multiline
     }
 }
 
@@ -389,6 +454,22 @@ struct PendingPlanReview: Sendable, Identifiable, Codable, Equatable {
     }
 }
 
+/// Data Model for a Workflow Gate HITL (E1). The user picks one of N options; that choice routes the
+/// workflow to the matching output port (per-option branching, like a Condition node but human-decided).
+struct PendingGate: Sendable, Identifiable, Codable, Equatable {
+    let id: UUID                // operationID for suspension correlation
+    let prompt: String
+    let options: [String]       // the choices; each maps to an output port of the same label
+    let deadline: Date?         // absolute auto-reject time for the live countdown (nil = indefinite)
+
+    init(id: UUID = UUID(), prompt: String, options: [String], deadline: Date? = nil) {
+        self.id = id
+        self.prompt = prompt
+        self.options = options
+        self.deadline = deadline
+    }
+}
+
 // MARK: - Unified HITL Interaction Enum
 
 /// A single enum representing all possible Human-in-the-Loop interaction types.
@@ -399,12 +480,14 @@ enum PendingInteraction: Sendable, Codable, Equatable, Identifiable {
     case toolConfirmation(PendingToolConfirmation)
     case clarification(PendingClarification)
     case planReview(PendingPlanReview)
+    case gate(PendingGate)
 
     var id: UUID {
         switch self {
         case .toolConfirmation(let c): return c.id
         case .clarification(let c): return c.id
         case .planReview(let p): return p.id
+        case .gate(let g): return g.id
         }
     }
 
@@ -415,5 +498,70 @@ enum PendingInteraction: Sendable, Codable, Equatable, Identifiable {
     var toolName: String? {
         if case .toolConfirmation(let c) = self { return c.toolName }
         return nil
+    }
+}
+
+// MARK: - Source-Attributed HITL (InteractionCenter model)
+
+/// Describes WHERE a HITL request originated so a single shared surface can title and route
+/// it correctly across the chat, code, and workflow interfaces. Minted at the stream-bridge
+/// boundary (`ActiveStreamManager`) where interface mode + workflow node identity are in scope.
+struct HITLOrigin: Sendable, Equatable, Codable {
+    enum Interface: String, Sendable, Codable {
+        case chat, code, workflow, scheduled
+    }
+
+    /// Which interface raised the request.
+    let interface: Interface
+    /// The conversation the request belongs to (filtering + cancel-by-conversation).
+    let conversationID: UUID
+    /// Workflow node identifier, when `interface == .workflow`; nil otherwise.
+    let nodeID: UUID?
+    /// Human-readable node / agent name for the banner subtitle (e.g. "Security Agent").
+    let nodeName: String?
+    /// Banner header text (e.g. "Security Agent · Question" or "Permission required").
+    let title: String
+    /// The originating agent profile id — lets "Always allow" (A4) flip the tool to auto-approve
+    /// in the right profile. nil when unknown.
+    let profileID: UUID?
+
+    init(
+        interface: Interface,
+        conversationID: UUID,
+        nodeID: UUID? = nil,
+        nodeName: String? = nil,
+        title: String,
+        profileID: UUID? = nil
+    ) {
+        self.interface = interface
+        self.conversationID = conversationID
+        self.nodeID = nodeID
+        self.nodeName = nodeName
+        self.title = title
+        self.profileID = profileID
+    }
+}
+
+/// A single pending Human-in-the-Loop request, source-attributed, queued by `InteractionCenter`.
+/// `id` IS the suspension `operationID` — the universal correlation key used to resume.
+struct PendingHITL: Identifiable, Sendable, Equatable, Codable {
+    let id: UUID                  // == operationID
+    let origin: HITLOrigin
+    let kind: PendingInteraction  // reuses the existing 3-case interaction vocabulary
+    let timestamp: Date
+    let upstreamNodeNames: [String]   // workflow context; empty for chat / code
+
+    init(
+        id: UUID,
+        origin: HITLOrigin,
+        kind: PendingInteraction,
+        timestamp: Date = Date(),
+        upstreamNodeNames: [String] = []
+    ) {
+        self.id = id
+        self.origin = origin
+        self.kind = kind
+        self.timestamp = timestamp
+        self.upstreamNodeNames = upstreamNodeNames
     }
 }

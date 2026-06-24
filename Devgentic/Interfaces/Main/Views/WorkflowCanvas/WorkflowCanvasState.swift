@@ -404,6 +404,9 @@ final class WorkflowCanvasState {
         case .action:
             // Default flow + an error port so tool failures can route downstream.
             return ["", "error"]
+        case .gate(let config):
+            // [E1] One output port per option — the user's choice routes to the matching port.
+            return config.options
         default:
             return [] // Structural nodes use single default port
         }
