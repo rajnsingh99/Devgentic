@@ -424,6 +424,11 @@ final class MainApplicationViewModel {
         messagingCoordinator.regenerateResponse(for: agentMessage)
     }
 
+    /// [G1 Piece 2] Resume a run that was parked on a HITL when the app last closed.
+    func resumeRun(for agentMessage: ChatMessage) {
+        messagingCoordinator.resumeRun(for: agentMessage)
+    }
+
     func cancelStreamingResponse() {
         messagingCoordinator.cancelStreamingResponse()
     }

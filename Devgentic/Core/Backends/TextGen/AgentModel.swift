@@ -541,6 +541,16 @@ struct AgentInput: Sendable {
     /// to use the workflow-specific prompt pipeline: no RAG, no history, clean task+input.
     var workflowContext: WorkflowExecutionContext?
 
+    /// [G1 Piece 2] Non-nil ONLY when resuming a parked-HITL run after restart. Carries the
+    /// reconstructed in-flight state (completed tool exchanges + the parked tool + loop bookkeeping)
+    /// rebuilt from the persisted message timeline. ReActAgentExecutor reads this to run the resume
+    /// preamble (seed prefix → replay completed exchanges → re-run the parked tool → continue at N+1);
+    /// every other executor ignores it. Set only for plain-ReAct native runs (the resume trigger
+    /// enforces scope). NOTE per the derivation contract above: capability sub-runs copy-and-mutate
+    /// `input`, so a wrapper would inherit this — out of scope today (resume excludes capabilities),
+    /// but a future capability-aware resume must null it on derived sub-inputs.
+    var resumeState: TimelineReconstruction?
+
     // The Trace Context for distributed observability
     var traceContext: TraceContext
 
@@ -586,6 +596,7 @@ struct AgentInput: Sendable {
         nativeHistoryTurns: [[String: String]]? = nil,
         suppressEpisodeManagement: Bool = false,
         workflowContext: WorkflowExecutionContext? = nil,
+        resumeState: TimelineReconstruction? = nil,
         traceContext: TraceContext,
         modelTier: ModelTier? = nil,
         nativeContextBudgetChars: Int = 0
@@ -614,6 +625,7 @@ struct AgentInput: Sendable {
         self.nativeHistoryTurns = nativeHistoryTurns
         self.suppressEpisodeManagement = suppressEpisodeManagement
         self.workflowContext = workflowContext
+        self.resumeState = resumeState
         self.traceContext = traceContext
         self.modelTier = modelTier
         self.nativeContextBudgetChars = nativeContextBudgetChars

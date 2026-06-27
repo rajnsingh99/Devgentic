@@ -441,6 +441,20 @@ actor TraceRecorder {
         logger.warning("HITL audit resolve found no pending row for op \(operationID) after retries.")
     }
 
+    /// [G1 Piece 2] A parked-then-interrupted HITL was successfully resumed — flip its audit row from
+    /// `interrupted` to `resumed` so the log reflects the recovery. No-op (logged) if no interrupted row
+    /// exists for this operationID (resolved cleanly before quit, or purged).
+    func recordHITLResumed(operationID: String) async {
+        guard let store else { return }
+        do {
+            if try store.markHITLAuditResumed(operationID: operationID) == 0 {
+                logger.info("HITL audit resume: no interrupted row for op \(operationID) (nothing to update).")
+            }
+        } catch {
+            logger.error("HITL audit resume persist failed: \(error.localizedDescription)")
+        }
+    }
+
     /// Records a general error.
     func emitError(span: TraceContext, error: String, isRecoverable: Bool) {
         let detail: [String: Any] = [

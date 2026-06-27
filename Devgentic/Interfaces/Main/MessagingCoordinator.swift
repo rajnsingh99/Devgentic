@@ -330,6 +330,133 @@ final class MessagingCoordinator {
         vm.streamingMessage = newStreamingMessage
     }
 
+    /// [G1 Piece 2] Resume an interrupted run after the app last closed. Rebuilds the in-flight reasoning
+    /// state from the persisted message timeline (`TimelineTurnReconstructor`) and re-enters the agent loop
+    /// by streaming back into the SAME bubble via `startMessageStream(updating:)`. Two cases:
+    ///   • `.parkedHITL` — the run was idle on a HITL banner; the dangling tool is re-raised + re-run.
+    ///   • `.streaming` — the run died mid-compute; the dangling (mid-execution) tool is DROPPED (its side
+    ///     effect may have partially happened, so it is not replayed or re-run) and the agent re-decides
+    ///     from the completed work.
+    /// Scope: plain-ReAct native agent profiles only; guards refuse a capability-wrapped profile or a
+    /// provider/dialect that drifted since the run started.
+    func resumeRun(for agentMessage: ChatMessage) {
+        guard let vm = viewModel else { return }
+
+        // Resume kind from the persisted lifecycle: parked (re-raise the dangling tool) vs streaming
+        // (drop the dangling tool). `.final` is not interrupted → nothing to resume.
+        let parkedOpID: UUID?
+        let isStreamingResume: Bool
+        switch agentMessage.lifecycleState {
+        case .parkedHITL(let opID):
+            parkedOpID = opID
+            isStreamingResume = false
+        case .streaming:
+            parkedOpID = nil
+            isStreamingResume = true
+        case .final:
+            logger.warning("[resumeRun] Message \(agentMessage.id.uuidString) is not interrupted — nothing to resume.")
+            return
+        }
+
+        // Recover the profile that produced this run (the per-variant backendEntityId, matching the
+        // selected variant — survives restart inside the persisted agentResponse).
+        guard let resp = agentMessage.agentResponse,
+              resp.variants.indices.contains(resp.selectedVariantIndex),
+              let profileID = resp.variants[resp.selectedVariantIndex].backendEntityId,
+              let profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID) else {
+            logger.error("[resumeRun] Could not recover the run's profile — cannot resume.")
+            return
+        }
+
+        // Scope: plain-ReAct agent profiles only (exclude capability-wrapped Planning/Reflexion — their
+        // wrapper owns iter-1 seeding + episode lifecycle, which the resume preamble would corrupt).
+        guard case .agent(let agentConfig) = profile.details,
+              agentConfig.capabilities.planning == nil,
+              agentConfig.capabilities.selfReflection == nil else {
+            logger.warning("[resumeRun] Resume supported only for plain-ReAct agent profiles; aborting.")
+            return
+        }
+
+        // Dialect / provider guard: the reconstructed native turns are only valid for the same provider
+        // family. If the profile's model was swapped since the park, refuse rather than feed mismatched
+        // turns to the wrong adapter.
+        guard let llm = profile.resolvedLLMConfig else {
+            logger.error("[resumeRun] Profile has no resolvable LLM config; aborting resume.")
+            return
+        }
+        if let stampedProvider = agentMessage.apiProvider, stampedProvider != llm.apiProvider.rawValue {
+            logger.warning("[resumeRun] Provider drift since park (\(stampedProvider) → \(llm.apiProvider.rawValue)); aborting resume.")
+            return
+        }
+        if let stampedDialect = agentMessage.modelDialect, stampedDialect != llm.modelDialect.rawValue {
+            logger.warning("[resumeRun] Dialect drift since park (\(stampedDialect) → \(llm.modelDialect.rawValue)); aborting resume.")
+            return
+        }
+
+        // Rebuild the in-flight state from the persisted timeline. Streaming resume DROPS the dangling
+        // tool; parked resume keeps it to re-raise.
+        let reconstruction = TimelineTurnReconstructor.reconstruct(
+            from: agentMessage.timelineEvents,
+            parkedOperationID: parkedOpID,
+            dropDanglingTool: isStreamingResume
+        )
+        // Parked resume needs the dangling tool to re-raise. Streaming resume drops it and continues from
+        // whatever completed work exists (possibly none → effectively a clean re-run of the task), so it
+        // has no such precondition.
+        if !isStreamingResume {
+            guard reconstruction.parkedTool != nil else {
+                logger.warning("[resumeRun] No parked tool found in timeline — cannot resume.")
+                return
+            }
+        }
+
+        guard let idx = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
+            logger.error("[resumeRun] Message not in the current conversation; aborting resume.")
+            return
+        }
+        // History strictly below this message + the originating user query (same slice regenerate uses).
+        let history = Array(chatHistoryViewModel.currentChatMessages.dropFirst(idx + 1).reversed())
+        let userQuery = chatHistoryViewModel.currentChatMessages[safe: idx + 1]?.content.textContent ?? ""
+
+        // Drop the stale dangling tool card (the parked tool, still marked isExecuting from before the
+        // quit) so the re-raised tool renders fresh instead of duplicating. Completed cards stay.
+        agentMessage.timelineEvents.removeAll { event in
+            if case .toolExecution(let data) = event { return data.isExecuting || data.output == nil }
+            return false
+        }
+
+        // Flip back to a live, streaming state — hides the interrupted chip, re-enables indicators.
+        agentMessage.isStreaming = true
+
+        // [G1] Reflect the recovery in the durable HITL audit: the parked HITL the launch reconcile
+        // stamped "interrupted" is now being resumed, so flip its row to "resumed". Parked-only — a
+        // streaming resume has no parked operationID and no HITL audit row to update.
+        if let opID = parkedOpID {
+            Task { await TraceRecorder.shared.recordHITLResumed(operationID: opID.uuidString) }
+        }
+
+        let streaming = activeStreamManager.startMessageStream(
+            withConfig: BackendRequestConfig(profile: profile),
+            conversationID: agentMessage.conversationId,
+            userQuery: userQuery,
+            history: history,
+            files: [],
+            updating: agentMessage,
+            resumeState: reconstruction,
+            onComplete: { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, let vm = self.viewModel else { return }
+                    vm.streamingMessageID = nil
+                    vm.streamingMessage = nil
+                    self.logger.info("[resumeRun] Resume stream completed for message \(agentMessage.id.uuidString).")
+                }
+            }
+        )
+
+        vm.streamingMessageID = streaming.id
+        vm.streamingMessage = streaming
+    }
+
     func cancelStreamingResponse() {
         guard let messageID = viewModel?.streamingMessageID else {
             logger.warning("cancelStreamingResponse called but no streamingMessageID is set.")

@@ -373,6 +373,22 @@ final class TraceStore: Sendable {
         }
     }
 
+    /// [G1 Piece 2] A parked-then-interrupted HITL was successfully resumed — flip its outcome from
+    /// `interrupted` to `resumed` so the audit log reflects the recovery instead of over-counting it as
+    /// an interruption. Guarded on `outcome = 'interrupted'` so it can ONLY rewrite a row the launch
+    /// reconcile stamped — never a genuine approve/deny/cancel outcome. Returns rows changed (0 = no
+    /// matching interrupted row, e.g. it had resolved cleanly before quit or was purged).
+    @discardableResult
+    func markHITLAuditResumed(operationID: String) throws -> Int {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE hitl_audit SET outcome = 'resumed' WHERE operationID = ? AND outcome = 'interrupted'",
+                arguments: [operationID]
+            )
+            return db.changesCount
+        }
+    }
+
     /// 30-day retention prune, mirroring the trace/log purges.
     @discardableResult
     func purgeHITLAuditOlderThan(_ date: Date) throws -> Int {

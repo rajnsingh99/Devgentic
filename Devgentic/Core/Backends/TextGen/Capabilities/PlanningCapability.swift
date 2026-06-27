@@ -463,9 +463,9 @@ actor PlanningExecutorWrapper: Executor {
                 output += text
             case .thought(let thought, _, _):
                 continuation.yield(.thought("  [\(subtask.id)] \(thought)"))
-            case .toolCall(let name, let params, _):
+            case .toolCall(let name, let params, _, let stepId):
                 // [G11] Forward tool invocation events so UI shows tool activity during subtasks.
-                continuation.yield(.toolCall(name: name, params: params))
+                continuation.yield(.toolCall(name: name, params: params, stepId: stepId))
             case .toolSucceeded(let toolOutput, let durationMs, _):
                 // [G4] Capture subtask tool results for synthesis aggregation.
                 toolResults.append(toolOutput)

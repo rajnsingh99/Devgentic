@@ -42,13 +42,17 @@ struct ToolExecutionData: Equatable, Identifiable, Sendable {
     var failureCategory: ToolFailureCategory? = nil
     var durationMs: Int? = nil
     var isExecuting: Bool
+    /// The agent iteration (ReAct step) this tool call belonged to. Lets a resumed run regroup a
+    /// flat timeline back into per-iteration assistant(tool_calls)→tool(result) turns (G1 Piece 2).
+    /// Optional + nil for legacy rows / non-ReAct paths.
+    var stepId: Int? = nil
 }
 
 // Backward-compatible Codable: persisted history from prior builds lacks
-// `failureCategory` and `durationMs` — decode them as optional and default to nil.
+// `failureCategory`, `durationMs`, and `stepId` — decode them as optional and default to nil.
 extension ToolExecutionData: Codable {
     enum CodingKeys: String, CodingKey {
-        case id, name, params, output, isSuccess, failureCategory, durationMs, isExecuting
+        case id, name, params, output, isSuccess, failureCategory, durationMs, isExecuting, stepId
     }
 
     init(from decoder: Decoder) throws {
@@ -61,6 +65,7 @@ extension ToolExecutionData: Codable {
         failureCategory = try c.decodeIfPresent(ToolFailureCategory.self, forKey: .failureCategory)
         durationMs = try c.decodeIfPresent(Int.self, forKey: .durationMs)
         isExecuting = try c.decode(Bool.self, forKey: .isExecuting)
+        stepId = try c.decodeIfPresent(Int.self, forKey: .stepId)
     }
 }
 
@@ -152,6 +157,49 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
     }
 }
 
+/// Lifecycle / persistence state of a message. For agent messages this distinguishes a
+/// fully-finished run from one that was still `.streaming` or `.parkedHITL` (awaiting the
+/// user) when the row was last written. After an unexpected restart, a persisted non-`.final`
+/// state is the durable "this run was interrupted" marker — and `.parkedHITL` additionally
+/// carries the operationID needed to later resume it (G1 Piece 2). Defaults to `.final` so
+/// every legacy row and user message reads as complete.
+enum MessageLifecycleState: Codable, Equatable, Sendable {
+    case final
+    case streaming
+    case parkedHITL(operationID: UUID)
+
+    /// Stable kind string for the split SwiftData columns (the operationID is stored separately).
+    var rawKind: String {
+        switch self {
+        case .final: return "final"
+        case .streaming: return "streaming"
+        case .parkedHITL: return "parkedHITL"
+        }
+    }
+
+    /// The parked HITL operationID, if any — the message↔HITL join key used to resume.
+    var parkedOperationID: UUID? {
+        if case .parkedHITL(let id) = self { return id }
+        return nil
+    }
+
+    /// Whether the run that produced this message did not reach a clean finish.
+    var isInterrupted: Bool { self != .final }
+
+    /// Rebuilds from the persisted `(rawKind, parkedOperationID)` pair. Unknown / absent kinds
+    /// decode as `.final`; a `.parkedHITL` that lost its operationID degrades to `.streaming`
+    /// (still interrupted, just not resumable).
+    static func restore(rawKind: String?, parkedOperationID: UUID?) -> MessageLifecycleState {
+        switch rawKind {
+        case "streaming": return .streaming
+        case "parkedHITL":
+            if let parkedOperationID { return .parkedHITL(operationID: parkedOperationID) }
+            return .streaming
+        default: return .final
+        }
+    }
+}
+
 @Observable
 final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
     let id: UUID
@@ -185,7 +233,22 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
 
     /// Optional human-readable reason accompanying `terminalOutcome`. Same nil semantics.
     var terminalReason: String? = nil
-    
+
+    // MARK: - Lifecycle / Run Identity (G1 Piece 1 — in-flight persistence)
+    /// `.streaming` while a run is in flight, `.parkedHITL(operationID:)` while it awaits the
+    /// user, `.final` once finished. Persisted (split into `lifecycleStateRaw` + `parkedOperationID`
+    /// columns) so an interrupted run is distinguishable from a finished one after restart and the
+    /// parked operationID survives. Defaults to `.final`.
+    var lifecycleState: MessageLifecycleState = .final
+
+    /// The provider/model/dialect that actually produced this message, captured immutably at run
+    /// start. `apiProvider`/`modelDialect` are the resume-safety guard (detect a model switch
+    /// between park and resume); all three give the UI an honest "which model ran" label even after
+    /// the originating profile is later edited. Nil for legacy rows / user messages.
+    var apiProvider: String? = nil
+    var modelName: String? = nil
+    var modelDialect: String? = nil
+
     // MARK: - Glass Box UI State (Gemini-Style)
     // These properties store the intermediate reasoning and tool outputs.
     // These properties derive chronological reasoning steps and tool outputs from timelineEvents.
@@ -399,6 +462,7 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         case agentResponse, isStreaming, attachedTextFiles, attachedImageFiles
         case timelineEvents, traceID, profileType, tokenUsage
         case terminalOutcome, terminalReason
+        case lifecycleState, apiProvider, modelName, modelDialect
     }
 
     /// Legacy keys only used for v1 migration — never encoded.
@@ -424,6 +488,10 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         self.tokenUsage = try container.decodeIfPresent(TokenUsage.self, forKey: .tokenUsage)
         self.terminalOutcome = try container.decodeIfPresent(ExecutionOutcome.self, forKey: .terminalOutcome)
         self.terminalReason = try container.decodeIfPresent(String.self, forKey: .terminalReason)
+        self.lifecycleState = try container.decodeIfPresent(MessageLifecycleState.self, forKey: .lifecycleState) ?? .final
+        self.apiProvider = try container.decodeIfPresent(String.self, forKey: .apiProvider)
+        self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
+        self.modelDialect = try container.decodeIfPresent(String.self, forKey: .modelDialect)
 
         if version == 1 {
             self.timelineEvents = try Self.migrateV1Timeline(from: decoder)
@@ -457,6 +525,10 @@ final class ChatMessage: Identifiable, Codable, Equatable, @unchecked Sendable {
         try container.encodeIfPresent(tokenUsage, forKey: .tokenUsage)
         try container.encodeIfPresent(terminalOutcome, forKey: .terminalOutcome)
         try container.encodeIfPresent(terminalReason, forKey: .terminalReason)
+        try container.encode(lifecycleState, forKey: .lifecycleState)
+        try container.encodeIfPresent(apiProvider, forKey: .apiProvider)
+        try container.encodeIfPresent(modelName, forKey: .modelName)
+        try container.encodeIfPresent(modelDialect, forKey: .modelDialect)
         // agentState, thoughts, artifacts are NOT encoded (transient / computed)
     }
 

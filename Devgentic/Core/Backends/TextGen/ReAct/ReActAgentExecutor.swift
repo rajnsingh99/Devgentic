@@ -171,7 +171,10 @@ actor ReActAgentExecutor: Executor {
                     // --- Start Episode ---
                     // [G3/G5] When wrapped by a capability (Planning, Reflexion), the wrapper
                     // owns the episode lifecycle. Skip to avoid N+1 duplicate episodes.
-                    if !input.suppressEpisodeManagement {
+                    // [G1 Piece 2] On resume, the original run already opened an active episode (loaded
+                    // from SessionGraphStore above); appending a second would double-count. The resumed
+                    // run continues that episode and closes it normally at the end.
+                    if !input.suppressEpisodeManagement && input.resumeState == nil {
                         logState.info("New Top-Level Request Detected: Appending new MemoryEpisode.")
                         sessionState.episodes.append(MemoryEpisode(primaryGoal: input.userInput, status: .active))
                         sessionState.workingMemory.removeValue(forKey: "current_focus")
@@ -288,6 +291,77 @@ actor ReActAgentExecutor: Executor {
                             // protected prefix — compaction never touches indices below this.
                             nativePrefixCount = liveConversationTurns.count
                             logger.info("🧵 [Native] Seeded liveConversationTurns (\(liveConversationTurns.count) initial turns, \(resolvedUserImages.count) image(s), priorContext=\(hasSeededContext ? "\(seededContext.count) chars" : "none"))")
+                        }
+
+                        // [G1 Piece 2] RESUME PREAMBLE — runs on iteration 1 for BOTH the native and the
+                        // legacy path. The reconstruction is dialect-agnostic, so we replay the completed
+                        // tool exchanges into whichever substrate this run uses:
+                        //   • native: append paired assistant→result turns to `liveConversationTurns`;
+                        //   • legacy: rely on the working-memory scratchpad the generator rebuilds each
+                        //     iteration (records below populate it) — no native turn-array exists.
+                        // Both also feed `executionSummary`. Then re-run the parked tool through the normal
+                        // HITL path and jump the loop to the parked iteration so the NEXT pass generates N+1.
+                        // Because this ALWAYS runs when resumeState is set (native OR legacy), a resumed run
+                        // can never silently fall through to a fresh re-run that would duplicate tools.
+                        if currentIteration == 1, let recon = input.resumeState {
+                            let nativeAdapter = nativeGenerator?.toolTurnAdapter
+                            logger.info("⏯️ [Resume] \(nativeAdapter != nil ? "native" : "legacy") replay of \(recon.completedSteps.count) completed step(s); parked=\(recon.parkedTool?.name ?? "none"); resumeIteration=\(recon.resumeIteration)")
+
+                            // 1. Replay completed exchanges. Native: append paired native turns. Both: record
+                            //    into working memory + summary (the legacy generator's scratchpad rebuild and
+                            //    end-of-run synthesis read these).
+                            for step in recon.completedSteps {
+                                if let nativeAdapter {
+                                    liveConversationTurns.append(nativeAdapter.assistantTurn(toolCalls: step.toolCalls, reasoning: step.reasoning))
+                                    liveConversationTurns.append(contentsOf: nativeAdapter.toolResultTurns(observations: step.observations))
+                                }
+                                if let reasoning = step.reasoning, !reasoning.isEmpty {
+                                    memoryStrategy.recordReasoning(stepId: step.stepId, text: reasoning)
+                                }
+                                for obs in step.observations {
+                                    executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
+                                    memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
+                                }
+                            }
+
+                            // 2. Restore the reading-gate counter so gated tools stay unlocked.
+                            readingToolSuccessCount = recon.readingToolSuccessCount
+
+                            // 3. Re-run the parked tool via the EXISTING (dialect-agnostic) path — re-raises
+                            //    the HITL banner (requestConfirmation/requestClarification → enqueueHITL →
+                            //    suspend) and returns the observation once the user responds.
+                            if let parked = recon.parkedTool {
+                                let parkedObs = try await executeToolCalls(
+                                    toolCalls: [parked],
+                                    availableTools: input.tools,
+                                    conversationID: input.conversationID,
+                                    currentIteration: recon.resumeIteration,
+                                    iterationSpan: iterationSpan,
+                                    toolMediator: toolMediator,
+                                    continuation: continuation,
+                                    onTraceUpdate: onTraceUpdate
+                                )
+                                if let nativeAdapter {
+                                    // Pairing-safe: only serialize calls that produced an observation
+                                    // (mirror of the loop's executedCallIds filter) so no orphaned tool_use.
+                                    let executedIds = Set(parkedObs.map(\.toolCallId))
+                                    let executedCalls = [parked].filter { executedIds.contains($0.id) }
+                                    if !executedCalls.isEmpty {
+                                        liveConversationTurns.append(nativeAdapter.assistantTurn(toolCalls: executedCalls, reasoning: nil))
+                                        liveConversationTurns.append(contentsOf: nativeAdapter.toolResultTurns(observations: parkedObs))
+                                    }
+                                }
+                                for obs in parkedObs {
+                                    if obs.isSuccess && readingToolNames.contains(obs.toolName) { readingToolSuccessCount += 1 }
+                                    executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
+                                    memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
+                                }
+                            }
+
+                            // 4. Jump to the parked iteration; the loop's `currentIteration += 1` makes the
+                            //    next generated step iteration N+1. Iter-1 native seeding won't re-run.
+                            currentIteration = recon.resumeIteration
+                            continue cognitiveLoop
                         }
 
                         try Task.checkCancellation()

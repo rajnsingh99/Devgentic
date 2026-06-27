@@ -38,6 +38,15 @@ final class ChatMessageSD {
     /// or iteration exhaustion, not just an opaque "failed" status.
     var terminalReason: String?
 
+    // G1 Piece 1 — lifecycle + run-identity persistence. All optional, so legacy rows
+    // (written before these columns existed) decode as nil → `MessageLifecycleState.restore`
+    // maps that to `.final`. `parkedOperationID` is the message↔HITL join key for resume.
+    var lifecycleStateRaw: String?
+    var parkedOperationID: String?
+    var apiProvider: String?
+    var modelName: String?
+    var modelDialect: String?
+
     var conversation: ConversationSD?
 
     @Relationship(deleteRule: .cascade)
@@ -79,6 +88,13 @@ final class ChatMessageSD {
 
         message.terminalOutcome = terminalOutcomeRaw.flatMap { ExecutionOutcome(rawValue: $0) }
         message.terminalReason = terminalReason
+        message.lifecycleState = .restore(
+            rawKind: lifecycleStateRaw,
+            parkedOperationID: parkedOperationID.flatMap { UUID(uuidString: $0) }
+        )
+        message.apiProvider = apiProvider
+        message.modelName = modelName
+        message.modelDialect = modelDialect
 
         return message
     }
@@ -104,7 +120,12 @@ final class ChatMessageSD {
             timelineEventsData: timelineEventsData,
             tokenUsageData: tokenUsageData,
             terminalOutcomeRaw: message.terminalOutcome?.rawValue,
-            terminalReason: message.terminalReason
+            terminalReason: message.terminalReason,
+            lifecycleStateRaw: message.lifecycleState.rawKind,
+            parkedOperationID: message.lifecycleState.parkedOperationID?.uuidString,
+            apiProvider: message.apiProvider,
+            modelName: message.modelName,
+            modelDialect: message.modelDialect
         )
 
         if let textFiles = message.attachedTextFiles {
@@ -120,7 +141,9 @@ final class ChatMessageSD {
     init(id: UUID, conversationId: UUID, timestamp: Date, senderType: String,
          traceID: String?, profileTypeRaw: String? = nil, contentData: Data,
          agentResponseData: Data?, timelineEventsData: Data?, tokenUsageData: Data? = nil,
-         terminalOutcomeRaw: String? = nil, terminalReason: String? = nil) {
+         terminalOutcomeRaw: String? = nil, terminalReason: String? = nil,
+         lifecycleStateRaw: String? = nil, parkedOperationID: String? = nil,
+         apiProvider: String? = nil, modelName: String? = nil, modelDialect: String? = nil) {
         self.id = id
         self.conversationId = conversationId
         self.timestamp = timestamp
@@ -133,5 +156,10 @@ final class ChatMessageSD {
         self.tokenUsageData = tokenUsageData
         self.terminalOutcomeRaw = terminalOutcomeRaw
         self.terminalReason = terminalReason
+        self.lifecycleStateRaw = lifecycleStateRaw
+        self.parkedOperationID = parkedOperationID
+        self.apiProvider = apiProvider
+        self.modelName = modelName
+        self.modelDialect = modelDialect
     }
 }

@@ -169,7 +169,7 @@ private func executeSingleTool(
     let paramsString = serializeToolParams(arguments)
 
     // Emit UI Event
-    continuation.yield(.toolCall(name: toolName, params: paramsString))
+    continuation.yield(.toolCall(name: toolName, params: paramsString, stepId: currentIteration))
 
     // Emit Trace Event
     onTraceUpdate(AgentTraceLog(
@@ -527,7 +527,7 @@ private func buildFinalAnswerObservation(
     let trimmed = rawAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
 
     // Emit standard UI events so the timeline shows the exit action.
-    continuation.yield(.toolCall(name: "final_answer", params: paramsString))
+    continuation.yield(.toolCall(name: "final_answer", params: paramsString, stepId: currentIteration))
     onTraceUpdate(AgentTraceLog(
         traceID: iterationSpan.traceID,
         spanID: iterationSpan.spanID,

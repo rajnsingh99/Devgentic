@@ -35,10 +35,11 @@ class AgentConnect: @unchecked Sendable {
         conversationID: UUID,
         ragContext: String? = nil,
         userPayload: Payload? = nil,
+        resumeState: TimelineReconstruction? = nil,
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
-        
+
         logger.info("Request reached TextGen Unified Pipeline for profile: \(profile.displayName)")
         
         return AsyncThrowingStream { continuation in
@@ -432,6 +433,7 @@ class AgentConnect: @unchecked Sendable {
                         resiliencePolicy: resiliencePolicy,
                         responseSynthesisEnabled: responseSynthesisEnabled,
                         nativeHistoryTurns: nativeHistoryTurns,
+                        resumeState: resumeState,
                         traceContext: traceContext,
                         modelTier: llmConfig.modelMetadata?.tier,
                         nativeContextBudgetChars: nativeContextBudgetChars

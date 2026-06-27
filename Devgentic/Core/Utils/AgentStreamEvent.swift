@@ -43,7 +43,9 @@ enum AgentStreamEvent: Sendable {
     /// - name: The tool name (e.g., "list_directory")
     /// - params: The raw JSON parameters being passed (for debugging/visibility)
     /// - sourceNodeID: When emitted from a workflow node, identifies which node invoked this tool.
-    case toolCall(name: String, params: String, sourceNodeID: UUID? = nil)
+    /// - stepId: The agent iteration (ReAct step) this call belongs to. Persisted onto the
+    ///   timeline so a resumed run can regroup a flat timeline into per-iteration turns (G1).
+    case toolCall(name: String, params: String, sourceNodeID: UUID? = nil, stepId: Int? = nil)
     
     /// [HITL] Phase 3: Explicit Permission Request
     /// The agent pauses and asks the user for permission to proceed.

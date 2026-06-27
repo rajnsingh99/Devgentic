@@ -73,6 +73,7 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
         conversationID: UUID,
         ragContext: String?,
         userPayload: Payload?,
+        resumeState: TimelineReconstruction?,
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
@@ -142,6 +143,7 @@ final class MockWorkflowStreamProvider: WorkflowStreamProvider, @unchecked Senda
             conversationID: conversationID,
             ragContext: nil,
             userPayload: nil,
+            resumeState: nil,
             traceContext: traceContext,
             onTraceUpdate: onTraceUpdate
         )

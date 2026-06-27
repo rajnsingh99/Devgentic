@@ -47,6 +47,7 @@ class BackendOrchestrationService {
         history: [ChatMessage],
         files: [FileSystemItem],
         context: TraceContext,
+        resumeState: TimelineReconstruction? = nil,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)? = nil
     ) -> AsyncThrowingStream<AgentStreamEvent, Error> {
 
@@ -250,7 +251,8 @@ class BackendOrchestrationService {
                             aggregatedTraceUpdate(log)
                         }
                         
-                        // AgentConnect handles the "New Request" flag internally for stream start
+                        // AgentConnect handles the "New Request" flag internally for stream start.
+                        // [G1 Piece 2] resumeState is non-nil only for a resumed parked-HITL agent run.
                         let stream = agentConnect.streamAgentResponse(
                             for: currentConfig.profile,
                             userInput: queryForRequest,
@@ -258,6 +260,7 @@ class BackendOrchestrationService {
                             conversationID: conversationID,
                             ragContext: ragContextString,
                             userPayload: attachedImagePayload,
+                            resumeState: resumeState,
                             traceContext: context,
                             onTraceUpdate: traceHandler
                         )
@@ -277,7 +280,7 @@ class BackendOrchestrationService {
                             case .toolSucceeded(let output, _, _), .toolFailed(let output, _, _, _):
                                 logger.debug("[ARTIFACT] \(output.toolName) - \(output.output.prefix(50))...")
                                 continuation.yield(event)
-                            case .toolCall(let name, let params, _):
+                            case .toolCall(let name, let params, _, _):
                                 logger.debug("[TOOL_CALL] \(name) params: \(params)")
                                 continuation.yield(event)
                             case .requestConfirmation(let toolName, _, _, _):

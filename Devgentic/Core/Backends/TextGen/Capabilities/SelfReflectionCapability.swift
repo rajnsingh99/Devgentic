@@ -212,9 +212,9 @@ actor SelfReflectionExecutorWrapper: Executor {
                                     trialOutput += text
                                 case .thought(let thought, _, _):
                                     continuation.yield(.thought("[Trial \(trial)] \(thought)"))
-                                case .toolCall(let name, let params, _):
+                                case .toolCall(let name, let params, _, let stepId):
                                     // [G11] Forward tool invocation events so UI shows tool activity during trials.
-                                    continuation.yield(.toolCall(name: name, params: params))
+                                    continuation.yield(.toolCall(name: name, params: params, stepId: stepId))
                                 case .toolSucceeded(let output, let durationMs, _):
                                     // [G1] Capture tool results so ReflectionEvaluator has full context.
                                     trialSummary.record(

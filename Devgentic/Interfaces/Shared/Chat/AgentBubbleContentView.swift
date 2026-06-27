@@ -65,6 +65,18 @@ struct AgentBubbleContentView: View {
                 SparkleLoadingView(headline: "Generating response...")
             }
 
+            // 1b. INTERRUPTED-RUN BADGE (G1 Piece 1)
+            // A reloaded message whose run never finalized — the app was force-quit or crashed while
+            // it was still streaming or parked on a HITL. `isStreaming` is false on a reloaded row, so
+            // this shows only post-restart, never for a live run; it pairs with the partial timeline
+            // above to explain why the response looks unfinished.
+            if !message.isStreaming, message.lifecycleState.isInterrupted {
+                InterruptedRunChip(
+                    wasParked: message.lifecycleState.parkedOperationID != nil,
+                    onResume: { mainAppViewModel.resumeRun(for: message) }
+                )
+            }
+
             // 2. ARTIFACTS
             if !message.artifacts.isEmpty && effectiveVariant == .dynamicIsland {
                 ToolArtifactsRow(artifacts: message.artifacts)
@@ -292,6 +304,67 @@ struct AgentBubbleContentView: View {
             return "Agent response: \(String(text.prefix(200)))"
         }
         return "Agent response"
+    }
+}
+
+// MARK: - Interrupted Run Chip
+
+/// [G1 Piece 1] Shown under a reloaded message whose run never finalized — the app was force-quit
+/// or crashed while it was still streaming or parked on a HITL. Subdued, like `TerminalOutcomeChip`:
+/// it explains why the response looks unfinished without alarming. Distinguishes a run that was
+/// waiting on the user (`.parkedHITL`) from one cut off mid-stream.
+struct InterruptedRunChip: View {
+    /// True when the run died while waiting for the user (a parked HITL) vs cut off mid-stream.
+    let wasParked: Bool
+    /// [G1 Piece 2] Resume action — present only when the run is parked AND resumable. Nil hides the
+    /// Resume button (a mid-stream cut-off run has no clean re-entry point and isn't resumable in v1).
+    var onResume: (() -> Void)? = nil
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: wasParked ? "pause.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.system(.caption, weight: .semibold))
+                .foregroundColor(theme.warningColor)
+                .frame(width: 16, alignment: .center)
+
+            Text(wasParked
+                 ? "Interrupted — this run was waiting for your input when the app closed."
+                 : "Interrupted — this response was cut off when the app closed.")
+                .font(.system(.caption, weight: .semibold))
+                .foregroundColor(theme.warningColor.opacity(0.95))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+
+            // Resume is offered for BOTH interruption types: parked (re-raise the dangling tool) and
+            // streaming/mid-compute (drop the dangling tool, continue from completed work).
+            if let onResume {
+                Button(action: onResume) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.circle.fill")
+                        Text("Resume")
+                    }
+                    .font(.system(.caption, weight: .semibold))
+                    .foregroundColor(theme.accentColor)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Resume interrupted run")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(theme.warningColor.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(theme.warningColor.opacity(0.22), lineWidth: 0.5)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(wasParked ? "Run interrupted while waiting for your input" : "Response interrupted before completion")
     }
 }
 

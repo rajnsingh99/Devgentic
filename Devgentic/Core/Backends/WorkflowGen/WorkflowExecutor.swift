@@ -828,8 +828,8 @@ actor WorkflowExecutor: Executor {
                         case .reasoning(let msg, let id, _):
                             continuation.yield(.reasoning("[\(displayName)] \(msg)", id: id, sourceNodeID: nodeID))
 
-                        case .toolCall(let name, let params, _):
-                            continuation.yield(.toolCall(name: name, params: params, sourceNodeID: nodeID))
+                        case .toolCall(let name, let params, _, let stepId):
+                            continuation.yield(.toolCall(name: name, params: params, sourceNodeID: nodeID, stepId: stepId))
 
                         case .requestConfirmation(let toolName, let params, let operationID, _):
                             continuation.yield(.requestConfirmation(toolName: toolName, params: params, operationID: operationID, sourceNodeID: nodeID))

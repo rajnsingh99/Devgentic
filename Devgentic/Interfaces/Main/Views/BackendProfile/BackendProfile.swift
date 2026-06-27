@@ -20,6 +20,20 @@ import Foundation
 // defined in BackendProfileSD.swift. This is functionally identical to the old struct.
 typealias BackendProfileModel = BackendProfileSnapshot
 
+extension BackendProfileSnapshot {
+    /// The single-model LLM config that drives a chat / agent / code run, if this profile has one.
+    /// `nil` for `.workflow` (each node resolves its own model) and `.imageGen`. Used to stamp the
+    /// run's model identity (provider / model / dialect) onto the produced message (G1 Piece 1).
+    var resolvedLLMConfig: ProviderConfig? {
+        switch details {
+        case .bot(let config): return config.llmConfig
+        case .agent(let config): return config.llmConfig
+        case .code(let config): return config.llmConfig
+        case .workflow, .imageGen: return nil
+        }
+    }
+}
+
 // MARK: - Type-Specific Config Structs
 
 /// Configuration for a simple Bot profile (LLM chat, no tools).

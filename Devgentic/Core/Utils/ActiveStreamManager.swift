@@ -32,6 +32,12 @@ final class ActiveStreamManager {
     @ObservationIgnored nonisolated(unsafe) private var gateResolvedObserver: Any?
 
     @ObservationIgnored private let persistenceService: ChatPersistenceProtocol
+
+    /// [G1 Piece 1] Per-message timestamp of the last in-flight flush, used to rate-limit the
+    /// token-path coalesced flush. Boundary flushes (tool start/finish, HITL park) pass
+    /// `immediate: true` and bypass this. Cleared when the message finalizes to bound the map.
+    @ObservationIgnored private var lastInFlightFlush: [UUID: Date] = [:]
+    private static let inFlightFlushInterval: TimeInterval = 2.0
     @ObservationIgnored private let fileProcessorService: FileProcessorService
     @ObservationIgnored private let backendOrchestrationService: BackendOrchestrationService
 
@@ -221,6 +227,7 @@ final class ActiveStreamManager {
         files: [FileSystemItem],
         updating existingMessage: ChatMessage? = nil,
         workflowExecutionState: WorkflowExecutionState? = nil,
+        resumeState: TimelineReconstruction? = nil,
         onComplete: @escaping () -> Void
     ) -> ChatMessage {
         
@@ -241,7 +248,19 @@ final class ActiveStreamManager {
             agentMessage.profileType = config.profile.profileType
             logger.notice("🚀 [STREAM_START] Created message \(agentMessage.id.uuidString) for conversation \(conversationID.uuidString).")
         }
-        
+
+        // [G1 Piece 1] Mark the run in-flight and stamp the model identity that's about to run.
+        // The lifecycle marker makes an interrupted (force-quit / crash) run distinguishable from a
+        // finished one after restart; the run-identity stamp records which model actually produced
+        // this message — the resume-safety guard plus an honest "which model ran" UI label even
+        // after the originating profile is later edited.
+        agentMessage.lifecycleState = .streaming
+        if let llm = config.profile.resolvedLLMConfig {
+            agentMessage.apiProvider = llm.apiProvider.rawValue
+            agentMessage.modelName = llm.modelName
+            agentMessage.modelDialect = llm.modelDialect.rawValue
+        }
+
         activeStreams[agentMessage.id] = agentMessage
         for delegate in liveMirrorDelegates {
             delegate.activeStreamManager(self, didStartStream: agentMessage, for: conversationID)
@@ -301,6 +320,7 @@ final class ActiveStreamManager {
                     history: history,
                     files: files,
                     context: traceContext,
+                    resumeState: resumeState,
                     onTraceUpdate: { _ in } // Trace logs are handled by events now
                 )
 
@@ -341,11 +361,11 @@ final class ActiveStreamManager {
                             agentMessage.appendTimelineEvent(reasoningEvent)
                         }
 
-                    case .toolCall(let name, let params, let sourceNodeID):
+                    case .toolCall(let name, let params, let sourceNodeID, let stepId):
                         agentMessage.thinkingHeadline = "Using tool: \(name)"
                         agentMessage.agentState = .acting(.tool(name: name))
                         let toolEvent = TimelineEvent.toolExecution(
-                            ToolExecutionData(id: UUID(), name: name, params: params, output: nil, isSuccess: nil, isExecuting: true)
+                            ToolExecutionData(id: UUID(), name: name, params: params, output: nil, isSuccess: nil, isExecuting: true, stepId: stepId)
                         )
                         if let wfState = workflowExecutionState, let nodeID = sourceNodeID {
                             wfState.appendNodeTimelineEvent(toolEvent, for: nodeID)
@@ -353,13 +373,21 @@ final class ActiveStreamManager {
                         } else {
                             agentMessage.appendTimelineEvent(toolEvent)
                         }
-                        
+                        // [G1 Piece 1] Boundary flush — a tool just started; persist so an interrupted
+                        // run shows it ran (and, when this is the parked tool, that it was in flight).
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
+
                     // [HITL] Permission request → unified InteractionCenter (single source of truth).
                     // Node attribution rides in the banner via the origin; the thinking-island
                     // headline stays generic (the banner carries which node/agent is asking).
                     case .requestConfirmation(let toolName, let params, let operationID, let sourceNodeID):
                         agentMessage.thinkingHeadline = "Waiting for approval: \(toolName)"
                         agentMessage.agentState = .interaction(.permission(toolName: toolName))
+                        // [G1 Piece 1] Park marker + the operationID join key, flushed immediately:
+                        // a run parked on approval can sit indefinitely, so this is the prime
+                        // restart case. Resume (Piece 2) re-raises the HITL from this persisted opID.
+                        agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         self.enqueueHITL(
                             operationID: operationID,
                             kind: .toolConfirmation(PendingToolConfirmation(
@@ -381,6 +409,8 @@ final class ActiveStreamManager {
                     case .requestClarification(let question, let operationID, let sourceNodeID, let options, let multiline):
                         agentMessage.thinkingHeadline = "Asking you a question..."
                         agentMessage.agentState = .interaction(.clarification)
+                        agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         self.enqueueHITL(
                             operationID: operationID,
                             kind: .clarification(PendingClarification(id: operationID, question: question, options: options, multiline: multiline)),
@@ -396,6 +426,8 @@ final class ActiveStreamManager {
                     case .requestGate(let prompt, let options, let operationID, let deadline, let sourceNodeID):
                         agentMessage.thinkingHeadline = "Waiting for your decision..."
                         agentMessage.agentState = .interaction(.gate)
+                        agentMessage.lifecycleState = .parkedHITL(operationID: operationID)
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         self.enqueueHITL(
                             operationID: operationID,
                             kind: .gate(PendingGate(id: operationID, prompt: prompt, options: options, deadline: deadline)),
@@ -418,6 +450,8 @@ final class ActiveStreamManager {
                             agentMessage: agentMessage,
                             workflowExecutionState: workflowExecutionState
                         )
+                        // [G1 Piece 1] Boundary flush — capture the completed tool's output durably.
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
 
                     case .toolFailed(let output, let category, let suggestion, let sourceNodeID):
                         agentMessage.agentState = .thinking(.reflecting)
@@ -430,6 +464,8 @@ final class ActiveStreamManager {
                             agentMessage: agentMessage,
                             workflowExecutionState: workflowExecutionState
                         )
+                        // [G1 Piece 1] Boundary flush — capture the failed tool's outcome durably.
+                        await self.flushInFlight(agentMessage, conversationID: conversationID, immediate: true)
                         if let s = suggestion {
                             logger.debug("[TOOL_FAILED] \(output.toolName) [\(category.rawValue)] suggestion: \(s)")
                         }
@@ -448,6 +484,9 @@ final class ActiveStreamManager {
                         let elapsed = -lastUpdateTime.timeIntervalSinceNow
                         if elapsed >= adaptiveInterval || tokenBuffer.count > 50 {
                             self.updateMessageContent(agentMessage, with: tokenBuffer, isRegeneration: isRegeneration)
+                            // [G1 Piece 1] Coalesced flush — persist streamed prose at most every
+                            // `inFlightFlushInterval`, so a long final answer isn't lost if interrupted.
+                            await self.flushInFlight(agentMessage, conversationID: conversationID)
 
                             // Adapt interval based on token throughput:
                             // High throughput (fast local models) → shorter interval (0.05s) for smooth streaming
@@ -909,8 +948,29 @@ final class ActiveStreamManager {
     }
     
     
+    /// [G1 Piece 1] Durably persist the in-flight agent message mid-run so an interrupted run
+    /// (force-quit / crash) survives with its partial timeline instead of vanishing on restart.
+    /// `addMessage` is an upsert-by-id, so repeated calls update one row rather than duplicating.
+    /// Boundary flushes (tool start/finish, HITL park) pass `immediate: true`; the token path
+    /// coalesces behind `inFlightFlushInterval`. No-ops if the task was cancelled (e.g. a
+    /// delete-conversation cascade is tearing the run down) so a late flush can't re-insert a row
+    /// that is being deleted.
+    private func flushInFlight(_ message: ChatMessage, conversationID: UUID, immediate: Bool = false) async {
+        if Task.isCancelled { return }
+        if !immediate, let last = lastInFlightFlush[message.id], -last.timeIntervalSinceNow < Self.inFlightFlushInterval {
+            return
+        }
+        lastInFlightFlush[message.id] = Date()
+        await persistenceService.addMessage(message, toConversation: conversationID)
+    }
+
     private func finalizeMessage(_ message: ChatMessage, conversationID: UUID, error: Error?) async {
         message.isStreaming = false
+        // [G1 Piece 1] A finalized run (success, error, or user Stop) is a clean terminal state —
+        // mark it `.final` so it is NOT mistaken for an interrupted run on restart. Only a process
+        // death that skips finalize leaves a persisted `.streaming` / `.parkedHITL` row behind.
+        message.lifecycleState = .final
+        lastInFlightFlush.removeValue(forKey: message.id)
         message.thinkingHeadline = nil // Clear the headline
         message.agentState = .idle
         // [HITL/P5] No center drain here: a normally-finalized stream has no parked HITL (the agent

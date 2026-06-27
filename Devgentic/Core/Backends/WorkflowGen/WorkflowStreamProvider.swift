@@ -23,6 +23,7 @@ protocol WorkflowStreamProvider: Sendable {
         conversationID: UUID,
         ragContext: String?,
         userPayload: Payload?,
+        resumeState: TimelineReconstruction?,
         traceContext: TraceContext,
         onTraceUpdate: (@Sendable (AgentTraceLog) -> Void)?
     ) -> AsyncThrowingStream<AgentStreamEvent, Error>
@@ -70,6 +71,7 @@ extension WorkflowStreamProvider {
             conversationID: conversationID,
             ragContext: nil,
             userPayload: nil,
+            resumeState: nil,
             traceContext: traceContext,
             onTraceUpdate: onTraceUpdate
         )
