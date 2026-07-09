@@ -117,8 +117,15 @@ struct UserFeedbackView: View {
                 }
                 .padding(.vertical, 12)
             }
-            .background(theme.surfaceOverlay)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(theme.surfaceOverlayStrong)
+                    .shadow(color: Color.black.opacity(0.1), radius: 5, x: 0, y: 2)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(theme.dividerColor.opacity(0.6), lineWidth: 1)
+            )
         }
     }
 
@@ -213,7 +220,7 @@ struct UserFeedbackView: View {
         let isSelected = viewModel.userFeedback.rating == rating
 
         return Button {
-            withAnimation(.easeOut(duration: 0.2)) {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
                 viewModel.userFeedback.rating = isSelected ? nil : rating
             }
         } label: {
@@ -223,17 +230,19 @@ struct UserFeedbackView: View {
                 Text(label)
                     .font(theme.fontSubheadline.weight(.medium))
             }
-            .foregroundStyle(isSelected ? activeColor : theme.secondaryText)
+            .foregroundStyle(isSelected ? .white : theme.secondaryText)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
+            .padding(.vertical, 12)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? activeColor.opacity(0.1) : theme.surfaceOverlay)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSelected ? activeColor : theme.surfaceOverlay)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isSelected ? activeColor.opacity(0.4) : theme.surfaceOverlayStrong, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isSelected ? activeColor.opacity(0.8) : theme.surfaceOverlayStrong, lineWidth: 1)
             )
+            .scaleEffect(isSelected ? 1.03 : 1.0)
+            .shadow(color: isSelected ? activeColor.opacity(0.3) : .clear, radius: 4, x: 0, y: 2)
         }
         .buttonStyle(.plain)
     }
@@ -255,18 +264,20 @@ struct UserFeedbackView: View {
             TextEditor(text: $viewModel.userFeedback.messageText)
                 .font(theme.fontSubheadline)
                 .scrollContentBackground(.hidden)
-                .padding(8)
-                .frame(minHeight: 80, maxHeight: 140)
+                .padding(12)
+                .frame(minHeight: 100, maxHeight: 160)
                 .background(theme.secondaryBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(
-                            isFeedbackFocused ? theme.streamingIndicator.opacity(0.45) : theme.dividerColor,
-                            lineWidth: 1
+                            isFeedbackFocused ? theme.streamingIndicator : theme.dividerColor,
+                            lineWidth: isFeedbackFocused ? 2 : 1
                         )
                 )
+                .shadow(color: isFeedbackFocused ? theme.streamingIndicator.opacity(0.3) : .clear, radius: 4, x: 0, y: 0)
                 .focused($isFeedbackFocused)
+                .animation(.easeInOut(duration: 0.2), value: isFeedbackFocused)
 
             Text("Describe what went wrong or what could be improved. This is bundled with the execution trace for debugging.")
                 .font(.system(.caption))

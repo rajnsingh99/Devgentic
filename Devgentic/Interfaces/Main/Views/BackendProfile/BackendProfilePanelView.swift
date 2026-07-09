@@ -319,14 +319,23 @@ struct ProfileRowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            // Selection Accent
-            if isSelected {
+            // Left rail = STATE: accent when selected or hovered; absent otherwise
+            if isSelected || isHovering {
                 RoundedRectangle(cornerRadius: 1.5)
-                    .fill(theme.accentColor)
+                    .fill(
+                        LinearGradient(
+                            colors: isSelected ? [theme.accentColor, theme.accentColor.opacity(0.45)] : [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
                     .frame(width: 3)
-                    .padding(.vertical, 8)
-                    .padding(.trailing, 8)
+                    .padding(.vertical, isSelected ? 2 : 5)
+                    .padding(.trailing, 4)
+                    .shadow(color: isSelected ? theme.accentColor.opacity(0.4) : .clear, radius: 4)
                     .transition(.opacity.combined(with: .scale))
+            } else {
+                Spacer().frame(width: 7)
             }
 
             HStack(spacing: 12) {
@@ -337,7 +346,7 @@ struct ProfileRowView: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(profile.displayName)
-                        .font(theme.fontSubheadline.weight(.medium))
+                        .font(theme.fontFootnote.weight(.medium))
                         .foregroundColor(theme.primaryText)
                     Text(profile.profileType.rawValue)
                         .font(.system(.caption))
@@ -347,16 +356,21 @@ struct ProfileRowView: View {
                 Spacer()
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             ZStack {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(theme.accentColor.opacity(0.12))
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(theme.accentColor.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(theme.accentColor.opacity(0.15), lineWidth: 0.5)
+                        )
+                        .shadow(color: theme.accentColor.opacity(0.05), radius: 4, x: 0, y: 0)
                 } else if isHovering {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(theme.surfaceOverlay)
                 }
             }
@@ -394,6 +408,7 @@ struct ProfileRowView: View {
                 Label("Delete", systemImage: "trash")
             }
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
     }
 
     private func iconName(for type: ProfileType) -> String {
@@ -401,13 +416,7 @@ struct ProfileRowView: View {
     }
 
     private func color(for type: ProfileType) -> Color {
-        switch type {
-        case .bot: return .blue
-        case .agent: return .green
-        case .workflow: return .purple
-        case .imageGen: return .orange
-        case .code: return .cyan
-        }
+        type.displayColor
     }
 }
 

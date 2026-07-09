@@ -21,6 +21,30 @@ import os
 
 private let logger = DGLogger(category: "ActivityBar")
 
+struct PulsingBadgeView: View {
+    let color: Color
+    @State private var isPulsing = false
+    
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(color.opacity(0.5), lineWidth: 1.5)
+                .frame(width: 12, height: 12)
+                .scaleEffect(isPulsing ? 1.5 : 0.8)
+                .opacity(isPulsing ? 0.0 : 0.8)
+            
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                isPulsing = true
+            }
+        }
+    }
+}
+
 struct HomeButton: View {
     @Environment(MainApplicationViewModel.self) var viewModel
     @Environment(MainViewRouter.self) var router
@@ -54,6 +78,7 @@ struct HomeButton: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(isHovering ? theme.surfaceOverlay : Color.clear)
                 )
+                .scaleEffect(isHovering ? 1.08 : 1.0)
                 .contentShape(Rectangle())
         }
         .buttonStyle(ScaleButtonStyle())
@@ -61,7 +86,7 @@ struct HomeButton: View {
         .help("Home")
         .accessibilityLabel("Home")
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.65)) {
                 isHovering = hovering
             }
         }
@@ -116,6 +141,7 @@ struct ActivityBarButton: View {
             Image(systemName: tab.iconName)
                 .font(.system(.title3))
                 .frame(width: 38, height: 38)
+                .scaleEffect(isHovering ? 1.08 : 1.0)
                 .contentShape(Rectangle())
         }
         .buttonStyle(ScaleButtonStyle())
@@ -141,10 +167,8 @@ struct ActivityBarButton: View {
         }
         .overlay(alignment: .topTrailing) {
             if showBadge {
-                Circle()
-                    .fill(badgeColor)
-                    .frame(width: 8, height: 8)
-                    .offset(x: 2, y: -2)
+                PulsingBadgeView(color: badgeColor)
+                    .offset(x: 4, y: -4)
                     .transition(.scale.combined(with: .opacity))
             }
         }
@@ -153,7 +177,7 @@ struct ActivityBarButton: View {
         .help(tab.title)
         .accessibilityLabel(tab.title)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.65)) {
                 isHovering = hovering
             }
         }

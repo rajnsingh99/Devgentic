@@ -638,6 +638,13 @@ struct EnvironmentFacts: Sendable {
     let osVersion: String
     let shellType: String
     let userName: String
+    /// Absolute home directory (e.g. "/Users/alice"). Small local models copy paths
+    /// verbatim from context — without a real absolute path to anchor on they emit
+    /// training-data placeholders like "/path/to/X". Populate with `NSHomeDirectory()`;
+    /// the app is NOT sandboxed (empty Devgentic.entitlements), so it returns the true
+    /// home. Under App Sandbox it would silently return the container path — switch to
+    /// `getpwuid(getuid())` if sandboxing is ever enabled.
+    let homeDirectory: String
     let currentDate: String
 }
 
@@ -754,6 +761,24 @@ enum AgentFailureReason: Sendable, Codable, Equatable {
         case .cancelled:
             return nil
         }
+    }
+
+    /// Best-effort classification of an inner agent's terminal failure TEXT into a typed reason.
+    /// The inner stream's `executionFinished(.failed)` only carries a string, so wrap sites would
+    /// otherwise blanket-classify everything as `.modelError` — mislabelling e.g. the cognitive
+    /// circuit breaker's stale-loop abort and surfacing the wrong remediation ("check credentials"
+    /// for a loop the agent was stuck in). Marker strings match `CognitiveCircuitBreaker`'s abort
+    /// reasons. Falls back to `.modelError` for anything unrecognized.
+    static func classify(agentReasonText text: String, provider: String = "agent") -> AgentFailureReason {
+        if text.contains("Breaking stale loop") {
+            // "Tool 'X' has been called N times with the same parameters…"
+            let action = text.split(separator: "'").dropFirst().first.map(String.init) ?? "the same action"
+            let words = text.split(separator: " ").map(String.init)
+            let count = words.firstIndex(of: "times")
+                .flatMap { $0 > 0 ? Int(words[$0 - 1]) : nil } ?? 2
+            return .repetitiveActionLoop(action: action, count: count)
+        }
+        return .modelError(provider: provider, error: text)
     }
 }
 

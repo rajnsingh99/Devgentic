@@ -180,34 +180,46 @@ struct ResilienceOverrides: Codable, Hashable, Sendable {
     var maxParseFailures: Int?
     /// Consecutive failed tool calls tolerated before the circuit breaker aborts. nil = Auto.
     var maxConsecutiveToolFailures: Int?
-    /// Identical-iteration repetitions tolerated before aborting a degenerate loop. nil = Auto.
+    /// Identical-iteration repetitions tolerated before aborting a degenerate loop
+    /// (also governs the per-tool global repetition cap). nil = Auto.
     var maxRepetitiveActions: Int?
+    /// Consecutive user-denied tool calls before the run stops. nil = Auto.
+    /// (Clarification loops are handled by RunInteractionMemory replay + the repetition
+    /// cap, not a dedicated counter — see CognitiveCircuitBreaker.)
+    var maxConsecutiveDenials: Int?
 
     init(maxParseFailures: Int? = nil,
          maxConsecutiveToolFailures: Int? = nil,
-         maxRepetitiveActions: Int? = nil) {
+         maxRepetitiveActions: Int? = nil,
+         maxConsecutiveDenials: Int? = nil) {
         self.maxParseFailures = maxParseFailures
         self.maxConsecutiveToolFailures = maxConsecutiveToolFailures
         self.maxRepetitiveActions = maxRepetitiveActions
+        self.maxConsecutiveDenials = maxConsecutiveDenials
     }
 
     // Tolerant per-field decoder (same idiom as RetryPolicy/ErrorRecovery) so a
     // future field or a renamed key can never collapse the enclosing profile decode.
+    // (Profiles that briefly persisted maxConsecutiveAskUser/maxConsecutiveIdle simply
+    // have those keys ignored here.)
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.maxParseFailures = (try? container.decodeIfPresent(Int.self, forKey: .maxParseFailures)) ?? nil
         self.maxConsecutiveToolFailures = (try? container.decodeIfPresent(Int.self, forKey: .maxConsecutiveToolFailures)) ?? nil
         self.maxRepetitiveActions = (try? container.decodeIfPresent(Int.self, forKey: .maxRepetitiveActions)) ?? nil
+        self.maxConsecutiveDenials = (try? container.decodeIfPresent(Int.self, forKey: .maxConsecutiveDenials)) ?? nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case maxParseFailures, maxConsecutiveToolFailures, maxRepetitiveActions
+        case maxConsecutiveDenials
     }
 
     /// True when no field is set — used to omit the whole object on encode so an
     /// all-Auto profile stays byte-identical to a pre-Phase-B one.
     var isEmpty: Bool {
         maxParseFailures == nil && maxConsecutiveToolFailures == nil && maxRepetitiveActions == nil
+            && maxConsecutiveDenials == nil
     }
 }
 
@@ -940,24 +952,31 @@ enum ApiProvider: String, Codable, CaseIterable, Identifiable, Sendable {
    case openAI = "OpenAI"
    case anthropic = "Anthropic"
    case google = "Google"
+   case openRouter = "OpenRouter"
+   case openAICompatible = "Custom (OpenAI-Compatible)"
 
    var id: String { self.rawValue }
 
     var providerString: String {
         switch self {
-        case .google:    return "google"
-        case .openAI:    return "openai"
-        case .ollama:    return "ollama"
-        case .anthropic: return "anthropic"
-        case .mlx:       return "mlx"
+        case .google:            return "google"
+        case .openAI:            return "openai"
+        case .ollama:            return "ollama"
+        case .anthropic:         return "anthropic"
+        case .mlx:               return "mlx"
+        case .openRouter:        return "openrouter"
+        case .openAICompatible:  return "openai_compatible"
         }
     }
 
     /// Whether this provider runs locally on the user's machine.
+    /// `.openAICompatible` is HTTP-based (it may point at a localhost server like
+    /// LM Studio, but architecturally it's a remote endpoint that flows through
+    /// CloudRequestPipeline, not the in-process/Ollama-managed local class).
     var isLocal: Bool {
         switch self {
         case .mlx, .ollama: return true
-        case .openAI, .anthropic, .google: return false
+        case .openAI, .anthropic, .google, .openRouter, .openAICompatible: return false
         }
     }
 }
@@ -1004,6 +1023,31 @@ struct ProviderConfig: Codable, Hashable, Sendable {
     /// Convenience: combined profile used for generator + parser routing in AgentConnect.
     var cognitiveProfile: CognitiveProfile {
         CognitiveProfile(capability: cognitiveCapability, dialect: modelDialect, metadata: modelMetadata, modalities: supportedModalities, chatTemplateSource: chatTemplateSource, stopSequences: stopSequences)
+    }
+
+    /// Re-baselines the config for a different provider. Everything scoped to the old
+    /// provider — endpoint, model, analyzer artifacts, advanced generation params — is
+    /// reset to its fresh-config default so a stale value can never leak into requests
+    /// against the new provider (e.g. an Ollama `localhost:11434` baseURL sent to OpenAI,
+    /// or a tuned local `temperature` silently applied to a cloud model).
+    ///
+    /// `apiKey` deliberately survives: switching away and back must not destroy a pasted
+    /// secret, local providers ignore it, and a key mismatched to the new cloud provider
+    /// fails visibly in the model-list fetch. `cognitiveCapability` is reset to `.none`;
+    /// profile-type-aware defaults are layered on by the `onProviderChanged` callbacks
+    /// via `ProfileCapabilityFilter`.
+    mutating func switchProvider(to newProvider: ApiProvider) {
+        apiProvider = newProvider
+        modelName = ""
+        baseURL = nil
+        advancedConfiguration = nil
+        cognitiveCapability = .none
+        modelDialect = .nativeJSON
+        modelMetadata = nil
+        chatTemplateSource = .embedded
+        stopSequences = []
+        thinkingEnabled = false
+        supportedModalities = .textOnly
     }
 
     // Explicit memberwise initializer to support default values

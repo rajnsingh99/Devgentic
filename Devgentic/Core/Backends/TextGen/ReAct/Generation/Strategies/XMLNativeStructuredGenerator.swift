@@ -96,7 +96,9 @@ struct XMLNativeStructuredGenerator: CognitiveGenerator {
         let pipeline = CognitiveParsePipeline(
             expectedDialect: .mistralXML,
             modelId: model.modelName,
-            iteration: iteration
+            iteration: iteration,
+            knownToolNames: Set(context.availableTools.map(\.name)),
+            registeredTools: context.availableTools
         )
         return pipeline.parse(raw: responseText)
     }

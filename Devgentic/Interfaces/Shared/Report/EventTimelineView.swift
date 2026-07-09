@@ -54,6 +54,8 @@ private struct EventRow: View {
 
     @State private var isExpanded: Bool = false
 
+    @State private var isHovering: Bool = false
+
     private var isError: Bool {
         event.severity == .error || event.eventType == .parseError || event.eventType == .error
     }
@@ -64,16 +66,22 @@ private struct EventRow: View {
             HStack(alignment: .top, spacing: 8) {
                 // Error indicator — left edge stripe
                 if isError {
-                    RoundedRectangle(cornerRadius: 1)
+                    RoundedRectangle(cornerRadius: 1.5)
                         .fill(theme.errorColor)
+                        .frame(width: 3)
+                        .padding(.vertical, 2)
+                        .shadow(color: theme.errorColor.opacity(0.5), radius: 3, x: 0, y: 0)
+                } else if isHovering {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(theme.accentColor.opacity(0.5))
                         .frame(width: 3)
                         .padding(.vertical, 2)
                 }
 
                 // Timestamp
                 Text(timeString)
-                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced design
-                    .foregroundStyle(theme.tertiaryText)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
+                    .foregroundStyle(isHovering ? theme.primaryText : theme.tertiaryText)
                     .frame(width: 72, alignment: .leading)
                     .padding(.top, 1)
 
@@ -83,22 +91,22 @@ private struct EventRow: View {
                 // Content
                 VStack(alignment: .leading, spacing: 3) {
                     Text(event.content ?? "—")
-                        .font(.system(.caption))
+                        .font(.system(.caption, weight: isHovering ? .medium : .regular))
                         .foregroundStyle(isError ? theme.errorColor : theme.primaryText)
                         .lineLimit(isExpanded ? nil : 2)
 
                     // Expandable detail
                     if event.detailJSON != nil {
                         Button {
-                            withAnimation(.easeOut(duration: 0.15)) { isExpanded.toggle() }
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { isExpanded.toggle() }
                         } label: {
                             HStack(spacing: 3) {
                                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                                     .font(.system(size: 8, weight: .bold)) // Fixed size: badge chip ≤9pt
                                 Text("details")
-                                    .font(.system(.caption2))
+                                    .font(.system(.caption2, weight: .medium))
                             }
-                            .foregroundStyle(theme.tertiaryText)
+                            .foregroundStyle(isHovering ? theme.accentColor : theme.tertiaryText)
                         }
                         .buttonStyle(.plain)
                     }
@@ -109,12 +117,22 @@ private struct EventRow: View {
                 // Severity dot
                 Circle()
                     .fill(severityColor)
-                    .frame(width: 5, height: 5)
+                    .frame(width: 6, height: 6)
                     .padding(.top, 5)
+                    .shadow(color: severityColor.opacity(isHovering ? 0.6 : 0.2), radius: 3, x: 0, y: 0)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(isError ? theme.errorColor.opacity(0.04) : Color.clear)
+            .padding(.vertical, 8)
+            .background(
+                ZStack {
+                    if isError {
+                        theme.errorColor.opacity(0.05)
+                    }
+                    if isHovering {
+                        theme.surfaceOverlayStrong.opacity(0.5)
+                    }
+                }
+            )
 
             // Expanded detail JSON
             if isExpanded, let details = event.detailJSON {
@@ -122,18 +140,30 @@ private struct EventRow: View {
                     .font(.system(size: 11, design: .monospaced)) // Fixed size: monospaced design
                     .foregroundStyle(theme.secondaryText)
                     .textSelection(.enabled)
-                    .padding(10)
+                    .padding(12)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(theme.secondaryBackground.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(theme.surfaceOverlayStrong)
+                            .shadow(color: Color.black.opacity(0.1), radius: 2, x: 0, y: 1)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(theme.dividerColor, lineWidth: 1)
+                    )
                     .padding(.horizontal, 12)
-                    .padding(.bottom, 6)
+                    .padding(.bottom, 8)
             }
 
             // Subtle row divider
             Divider()
                 .background(theme.dividerColor.opacity(0.5))
-                .padding(.leading, isError ? 15 : 12)
+                .padding(.leading, isError || isHovering ? 15 : 12)
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
         }
     }
 

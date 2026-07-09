@@ -54,47 +54,6 @@ final class BackendProfileService {
 
     /// Saves a given profile to the persistence layer and updates the in-memory array in-place.
     /// Throws `ProfileStoreError` on validation or persistence failure so callers can show errors.
-    /// [HITL/A4] "Always allow": flip a tool to auto-approve (`requiresConfirmation = false`) in the
-    /// originating agent profile and persist, so it stops raising a HITL prompt. Best-effort by tool
-    /// name; no-op if the profile/tool isn't found or is already auto. Returns whether it changed.
-    @discardableResult
-    func setToolAutoApprove(profileID: UUID, toolName: String) -> Bool {
-        // Store-authoritative: a Code profile is written directly to the store by CodeSessionManager
-        // and may not yet be in the in-memory `profiles` snapshot, so fall back to the store.
-        guard var profile = profiles.first(where: { $0.id == profileID })
-            ?? (try? profileStore.fetchProfile(byId: profileID)) else { return false }
-
-        // Tools live in the AgentConfig carried by `.agent` and `.code` profile details.
-        func autoApproved(_ config: AgentConfig) -> AgentConfig? {
-            var updated = config
-            var changed = false
-            for idx in updated.tools.indices
-            where updated.tools[idx].name == toolName && updated.tools[idx].requiresConfirmation {
-                updated.tools[idx].requiresConfirmation = false
-                changed = true
-            }
-            return changed ? updated : nil
-        }
-
-        switch profile.details {
-        case .agent(let config):
-            guard let updated = autoApproved(config) else { return false }
-            profile.details = .agent(updated)
-        case .code(let config):
-            guard let updated = autoApproved(config) else { return false }
-            profile.details = .code(updated)
-        default:
-            return false
-        }
-        do {
-            try saveProfile(profile)
-            return true
-        } catch {
-            logger.error("[HITL/A4] Failed to persist auto-approve for '\(toolName)': \(error.localizedDescription)")
-            return false
-        }
-    }
-
     func saveProfile(_ profile: BackendProfileModel) throws {
         // Capture old knowledge sources before save for change detection
         let oldSources: [KnowledgeSource]?
@@ -203,6 +162,16 @@ final class BackendProfileService {
                 ?? AnthropicAdvancedConfig.default()
 
         case .openAI:
+            return decodeConfig(from: config.advancedConfiguration, as: OpenAIAdvancedConfig.self)
+                ?? OpenAIAdvancedConfig.default()
+
+        case .openRouter:
+            // OpenRouter normalizes to the OpenAI parameter surface.
+            return decodeConfig(from: config.advancedConfiguration, as: OpenAIAdvancedConfig.self)
+                ?? OpenAIAdvancedConfig.default()
+
+        case .openAICompatible:
+            // Custom OpenAI-compatible endpoints share the OpenAI parameter surface.
             return decodeConfig(from: config.advancedConfiguration, as: OpenAIAdvancedConfig.self)
                 ?? OpenAIAdvancedConfig.default()
 

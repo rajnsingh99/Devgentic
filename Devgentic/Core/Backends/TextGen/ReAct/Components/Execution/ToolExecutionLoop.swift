@@ -27,6 +27,7 @@ func executeToolCalls(
     currentIteration: Int,
     iterationSpan: TraceContext,
     toolMediator: ToolExecutionMediator,
+    interactionMemory: RunInteractionMemory,
     continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> [ToolObservation] {
@@ -111,6 +112,7 @@ func executeToolCalls(
                         currentIteration: currentIteration,
                         iterationSpan: iterationSpan,
                         toolMediator: toolMediator,
+                        interactionMemory: interactionMemory,
                         continuation: continuation,
                         onTraceUpdate: onTraceUpdate
                     )
@@ -136,6 +138,7 @@ func executeToolCalls(
             currentIteration: currentIteration,
             iterationSpan: iterationSpan,
             toolMediator: toolMediator,
+            interactionMemory: interactionMemory,
             continuation: continuation,
             onTraceUpdate: onTraceUpdate
         )
@@ -159,6 +162,7 @@ private func executeSingleTool(
     currentIteration: Int,
     iterationSpan: TraceContext,
     toolMediator: ToolExecutionMediator,
+    interactionMemory: RunInteractionMemory,
     continuation: AsyncThrowingStream<AgentStreamEvent, Error>.Continuation,
     onTraceUpdate: @escaping @Sendable (AgentTraceLog) -> Void
 ) async throws -> ToolObservation {
@@ -184,6 +188,40 @@ private func executeSingleTool(
 
     // Intercept ask_user
     if let question = AskUserInterceptor.extractQuestion(toolName: toolName, arguments: arguments) {
+        // [Loop Safety] Identical re-ask → replay the earlier response instead of re-raising
+        // the banner. A human's answer (or skip) stands for the run. The replayed observation
+        // is byte-identical to the original, so a stuck ask-loop becomes deterministic and the
+        // repetition fingerprint's normal warn → stop ladder governs it.
+        if let stored = await interactionMemory.storedResponse(forQuestion: question) {
+            logger.info("[LoopSafety] 'ask_user' repeated an identical question — replaying the earlier response, no banner.")
+            continuation.yield(.thought("↩️ Repeated question — replaying your earlier response."))
+            let didAnswer = stored != nil
+            let answerText = stored ?? "System: The user skipped or did not respond."
+            let askOutput = ToolOutput(
+                toolName: toolName,
+                params: paramsString,
+                output: didAnswer ? "User answered: \(answerText)" : "Skipped by user.",
+                isSuccess: didAnswer
+            )
+            if didAnswer {
+                continuation.yield(.toolSucceeded(askOutput))
+            } else {
+                continuation.yield(.toolFailed(askOutput, category: .cancelled))
+            }
+            return ToolObservation(
+                stepId: currentIteration,
+                toolCallId: toolCallId,
+                toolName: toolName,
+                result: "User Response: \(answerText)",
+                summary: "User Response: \(answerText)",
+                isSuccess: didAnswer,
+                params: question,
+                output: "User Response: \(answerText)",
+                artifacts: [],
+                failureCategory: didAnswer ? nil : .cancelled
+            )
+        }
+
         let operationID = UUID()
         continuation.yield(.requestClarification(
             question: question,
@@ -193,6 +231,8 @@ private func executeSingleTool(
         ))
 
         let userResponse = await ExecutionSuspensionService.shared.suspendForClarification(for: operationID, conversationID: conversationID)
+        // [Loop Safety] Remember the response (or skip) so an identical re-ask replays it.
+        await interactionMemory.recordAnswer(question: question, response: userResponse)
         let didAnswer = userResponse != nil
         let answerText = userResponse ?? "System: The user skipped or did not respond."
 
@@ -236,11 +276,33 @@ private func executeSingleTool(
 
     switch dispatchOutcome {
     case .requiresConfirmation(let ps):
-        // [HITL/Bug2] If the user already chose "Always allow" for this tool earlier in THIS run, skip
-        // the banner. The live tool set (with requiresConfirmation) was resolved at stream start, so the
-        // persisted profile flip only kicks in next run — the session allowlist covers the current one.
+        // [HITL] If the user chose "Allow for this chat" for this tool, skip the banner. The
+        // allowlist is per-conversation and durable (survives runs + app restarts); it never
+        // touches the shared profile, so the grant can't leak to other conversations.
         if await SessionToolApprovals.shared.isAllowed(toolName: toolName, conversationID: conversationID) {
-            logger.info("[HITL] '\(toolName)' auto-approved via session allowlist (Always allow earlier this run) — skipping banner.")
+            logger.info("[HITL] '\(toolName)' auto-approved via per-conversation allowlist (\"Allow for this chat\") — skipping banner.")
+        } else if await interactionMemory.isDenied(toolName: toolName, params: paramsString) {
+            // [Loop Safety] Identical previously-denied request → auto-deny without a banner.
+            // The observation matches a manual denial byte-for-byte, so the consecutive-denial
+            // cap (and the repetition fingerprint) govern persistent hammering; a request with
+            // DIFFERENT arguments still reaches the user.
+            logger.info("[LoopSafety] '\(toolName)' repeated an identical declined request — auto-denied, no banner.")
+            continuation.yield(.thought("🚫 Repeated a declined request — auto-denied."))
+            let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
+            let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)
+            continuation.yield(.toolFailed(denialOutput, category: .userDenied))
+            return ToolObservation(
+                stepId: currentIteration,
+                toolCallId: toolCallId,
+                toolName: toolName,
+                result: denialResult.llmObservation,
+                summary: denialResult.llmObservation,
+                isSuccess: false,
+                params: paramsString,
+                output: denialResult.llmObservation,
+                artifacts: [],
+                failureCategory: .userDenied
+            )
         } else {
             let operationID = UUID()
             continuation.yield(.requestConfirmation(toolName: toolName, params: ps, operationID: operationID))
@@ -252,6 +314,8 @@ private func executeSingleTool(
                 effectiveParams = serializeToolParams(edited)
             }
             if !approved {
+                // [Loop Safety] Remember the denial so an identical re-ask is auto-denied.
+                await interactionMemory.recordDenial(toolName: toolName, params: paramsString)
                 let denialResult = ToolExecutionResult.userDenied(toolName: toolName)
                 let denialOutput = ToolOutput(toolName: toolName, params: paramsString, output: denialResult.llmObservation, isSuccess: false)
                 continuation.yield(.toolFailed(denialOutput, category: .userDenied))
@@ -403,7 +467,12 @@ func deduplicateToolCalls(_ toolCalls: [PendingToolCall]) -> [PendingToolCall] {
 
 func serializeToolParams(_ params: [String: JSONValue]) -> String {
     let normalized = normalizePathArguments(params)
-    if let data = try? JSONEncoder().encode(normalized), let str = String(data: data, encoding: .utf8) { return str }
+    // Sorted keys make the serialization DETERMINISTIC: identical logical arguments always
+    // produce identical strings. Both the repetition fingerprint (argsHash) and the
+    // RunInteractionMemory denial key depend on this.
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    if let data = try? encoder.encode(normalized), let str = String(data: data, encoding: .utf8) { return str }
     return "{}"
 }
 

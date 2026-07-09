@@ -364,16 +364,31 @@ final class MessagingCoordinator {
               resp.variants.indices.contains(resp.selectedVariantIndex),
               let profileID = resp.variants[resp.selectedVariantIndex].backendEntityId,
               let profile = try? BackendProfileStore.shared.fetchProfile(byId: profileID) else {
-            logger.error("[resumeRun] Could not recover the run's profile — cannot resume.")
+            finalizeUnresumable(agentMessage,
+                reason: "This run's profile could no longer be found — it may have been deleted. Send the request again.")
             return
         }
 
-        // Scope: plain-ReAct agent profiles only (exclude capability-wrapped Planning/Reflexion — their
-        // wrapper owns iter-1 seeding + episode lifecycle, which the resume preamble would corrupt).
-        guard case .agent(let agentConfig) = profile.details,
-              agentConfig.capabilities.planning == nil,
-              agentConfig.capabilities.selfReflection == nil else {
-            logger.warning("[resumeRun] Resume supported only for plain-ReAct agent profiles; aborting.")
+        // Scope: plain-ReAct executors only — .agent AND .code without capability wrappers
+        // (Code sessions are always plain ReAct; the check is defensive). Capability-wrapped
+        // Planning/Reflexion agents stay excluded: their wrapper owns iter-1 seeding + episode
+        // lifecycle, which the resume preamble would corrupt. Workflow-resume is not
+        // implemented (deferred). EVERY unresumable path FINALIZES the message with a visible
+        // reason — a silent return leaves a permanently dead Resume chip.
+        let resumeRefusalReason: String? = {
+            switch profile.details {
+            case .agent(let config), .code(let config):
+                return (config.capabilities.planning == nil && config.capabilities.selfReflection == nil)
+                    ? nil
+                    : "Resume isn't supported for Planning/Reflexion-wrapped agents — send the request again."
+            case .workflow:
+                return "Workflow runs can't be resumed after an interruption yet — start the run again."
+            case .bot, .imageGen:
+                return "Resume isn't supported for this profile type — send the request again."
+            }
+        }()
+        if let resumeRefusalReason {
+            finalizeUnresumable(agentMessage, reason: resumeRefusalReason)
             return
         }
 
@@ -381,15 +396,18 @@ final class MessagingCoordinator {
         // family. If the profile's model was swapped since the park, refuse rather than feed mismatched
         // turns to the wrong adapter.
         guard let llm = profile.resolvedLLMConfig else {
-            logger.error("[resumeRun] Profile has no resolvable LLM config; aborting resume.")
+            finalizeUnresumable(agentMessage,
+                reason: "The profile no longer has a usable model configuration — send the request again.")
             return
         }
         if let stampedProvider = agentMessage.apiProvider, stampedProvider != llm.apiProvider.rawValue {
-            logger.warning("[resumeRun] Provider drift since park (\(stampedProvider) → \(llm.apiProvider.rawValue)); aborting resume.")
+            finalizeUnresumable(agentMessage,
+                reason: "The profile's provider changed since this run was interrupted (\(stampedProvider) → \(llm.apiProvider.rawValue)) — send the request again.")
             return
         }
         if let stampedDialect = agentMessage.modelDialect, stampedDialect != llm.modelDialect.rawValue {
-            logger.warning("[resumeRun] Dialect drift since park (\(stampedDialect) → \(llm.modelDialect.rawValue)); aborting resume.")
+            finalizeUnresumable(agentMessage,
+                reason: "The profile's model changed since this run was interrupted — send the request again.")
             return
         }
 
@@ -405,11 +423,15 @@ final class MessagingCoordinator {
         // has no such precondition.
         if !isStreamingResume {
             guard reconstruction.parkedTool != nil else {
-                logger.warning("[resumeRun] No parked tool found in timeline — cannot resume.")
+                finalizeUnresumable(agentMessage,
+                    reason: "The interrupted state is incomplete and can't be resumed — send the request again.")
                 return
             }
         }
 
+        // Deliberately NOT finalized: this is a transient UI-state guard (the chip
+        // renders from the message's own bubble, so this shouldn't fire) — the run
+        // may be perfectly resumable from the right conversation view.
         guard let idx = chatHistoryViewModel.currentChatMessages.firstIndex(of: agentMessage) else {
             logger.error("[resumeRun] Message not in the current conversation; aborting resume.")
             return
@@ -455,6 +477,20 @@ final class MessagingCoordinator {
 
         vm.streamingMessageID = streaming.id
         vm.streamingMessage = streaming
+    }
+
+    /// Marks an interrupted message as definitively non-resumable: visible reason on
+    /// the bubble, `.final` lifecycle (removes the Resume chip), persisted. Every
+    /// unresumable path in `resumeRun` must route here — a bare `return` leaves a
+    /// permanently dead Resume chip that does nothing when clicked.
+    private func finalizeUnresumable(_ agentMessage: ChatMessage, reason: String) {
+        logger.warning("[resumeRun] \(reason) Finalizing interrupted message \(agentMessage.id.uuidString).")
+        agentMessage.isStreaming = false
+        agentMessage.lifecycleState = .final
+        agentMessage.terminalOutcome = .cancelled
+        agentMessage.terminalReason = reason
+        let conversationID = agentMessage.conversationId
+        Task { await persistenceService.addMessage(agentMessage, toConversation: conversationID) }
     }
 
     func cancelStreamingResponse() {

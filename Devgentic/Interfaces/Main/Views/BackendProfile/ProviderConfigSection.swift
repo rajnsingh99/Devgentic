@@ -84,10 +84,9 @@ struct ProviderConfigSection: View {
                 get: { providerConfig.apiProvider },
                 set: { newValue in
                     let oldValue = providerConfig.apiProvider
-                    providerConfig.apiProvider = newValue
-                    if newValue != oldValue {
-                        onProviderChanged?(oldValue, newValue)
-                    }
+                    guard newValue != oldValue else { return }
+                    providerConfig.switchProvider(to: newValue)
+                    onProviderChanged?(oldValue, newValue)
                 }
             )) {
                 ForEach(providers, id: \.self) { provider in
@@ -108,6 +107,8 @@ struct ProviderConfigSection: View {
             ollamaFields
         case .mlx:
             mlxFields
+        case .openAICompatible:
+            openAICompatibleFields
         default:
             remoteFields
         }
@@ -213,39 +214,7 @@ struct ProviderConfigSection: View {
     @ViewBuilder
     private var remoteFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // API Key
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("API Key").fontWeight(.medium)
-                }
-
-                Spacer(minLength: 16)
-
-                ZStack(alignment: .trailing) {
-                    Group {
-                        if isApiKeyVisible {
-                            TextField("Enter API Key", text: $providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                                .textFieldStyle(.roundedBorder)
-                                .accessibilityLabel("API key")
-                        } else {
-                            SecureField("Enter API Key", text: $providerConfig.apiKey.toNonOptional(defaultValue: ""))
-                                .textFieldStyle(.roundedBorder)
-                                .accessibilityLabel("API key")
-                        }
-                    }
-
-                    Button(action: { isApiKeyVisible.toggle() }) {
-                        Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
-                            .foregroundColor(theme.secondaryText)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 8)
-                    .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
-                    .accessibilityLabel(isApiKeyVisible ? "Hide API key" : "Show API key")
-                }
-                .frame(maxWidth: 350)
-            }
+            apiKeyField()
 
             Divider()
 
@@ -271,6 +240,90 @@ struct ProviderConfigSection: View {
                     modelPicker(apiKey: currentApiKey)
                 }
             }
+        }
+    }
+
+    // MARK: - OpenAI-Compatible Fields (custom endpoint)
+
+    /// Layout for a user-supplied OpenAI-compatible endpoint: the base URL is
+    /// REQUIRED and leads; the API key is OPTIONAL; model discovery is gated on
+    /// the base URL (not the key), since local servers usually need no key.
+    @ViewBuilder
+    private var openAICompatibleFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            endpointField
+
+            Divider()
+
+            apiKeyField(labelSuffix: " (Optional)")
+
+            Divider()
+
+            let currentBaseURL = providerConfig.baseURL ?? ""
+
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model Selection").fontWeight(.medium)
+                    Text("Load the endpoint's models, or type the id.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                }
+
+                Spacer(minLength: 16)
+
+                if currentBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Enter the API Endpoint above first.")
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                } else {
+                    OpenAICompatibleModelPickerView(
+                        selectedModel: $providerConfig.modelName,
+                        baseURL: currentBaseURL,
+                        apiKey: providerConfig.apiKey ?? ""
+                    )
+                    .frame(maxWidth: 350, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    // MARK: - API Key Field (shared)
+
+    /// The API-key row shared by cloud providers and the OpenAI-compatible
+    /// endpoint. `labelSuffix` lets the compatible case mark the field optional.
+    @ViewBuilder
+    private func apiKeyField(labelSuffix: String = "") -> some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Key\(labelSuffix)").fontWeight(.medium)
+            }
+
+            Spacer(minLength: 16)
+
+            ZStack(alignment: .trailing) {
+                Group {
+                    if isApiKeyVisible {
+                        TextField("Enter API Key", text: $providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("API key")
+                    } else {
+                        SecureField("Enter API Key", text: $providerConfig.apiKey.toNonOptional(defaultValue: ""))
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("API key")
+                    }
+                }
+
+                Button(action: { isApiKeyVisible.toggle() }) {
+                    Image(systemName: isApiKeyVisible ? "eye.slash" : "eye")
+                        .foregroundColor(theme.secondaryText)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 8)
+                .help(isApiKeyVisible ? "Hide API Key" : "Show API Key")
+                .accessibilityLabel(isApiKeyVisible ? "Hide API key" : "Show API key")
+            }
+            .frame(maxWidth: 350)
         }
     }
 
@@ -301,6 +354,26 @@ struct ProviderConfigSection: View {
                 apiKey: apiKey
             )
             .labelsHidden()
+            .frame(maxWidth: 350, alignment: .trailing)
+
+        case .openRouter:
+            OpenRouterModelPickerView(
+                selectedModel: $providerConfig.modelName,
+                cognitiveCapability: Binding(
+                    get: { providerConfig.cognitiveCapability },
+                    set: { providerConfig.cognitiveCapability = $0 }
+                ),
+                modelMetadata: Binding(
+                    get: { providerConfig.modelMetadata },
+                    set: { providerConfig.modelMetadata = $0 }
+                ),
+                supportedModalities: Binding(
+                    get: { providerConfig.supportedModalities },
+                    set: { providerConfig.supportedModalities = $0 }
+                ),
+                apiKey: apiKey,
+                filterForTools: ProfileCapabilityFilter.filterForTools(for: profileType)
+            )
             .frame(maxWidth: 350, alignment: .trailing)
 
         default:

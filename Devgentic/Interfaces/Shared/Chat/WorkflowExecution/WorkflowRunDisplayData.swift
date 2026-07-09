@@ -45,6 +45,9 @@ struct WorkflowRunDisplayData {
         let inputSourceLabel: String?
         let nodeTimeline: [TimelineEvent]
         let isStreaming: Bool
+        /// Degraded success: completed on a best-effort answer after an early stop
+        /// (circuit breaker / iteration budget). Badged amber instead of green.
+        var hasWarnings: Bool = false
         /// Whether this node kind produces a meaningful step-by-step timeline
         /// (agent reasoning + tool calls, or an Action node's tool invocation).
         /// Bots, image generators, and structural transform nodes are single-shot;
@@ -65,13 +68,13 @@ struct WorkflowRunDisplayData {
                 }
             }
 
-            var color: Color {
+            /// Theme-aware status color — single source of truth for node / connector / outcome cards.
+            func color(_ theme: any Theme) -> Color {
                 switch self {
-                case .pending:   return .gray
-                case .running:   return .blue
-                case .completed: return .green
-                case .failed:    return .red
-                case .skipped:   return .gray
+                case .completed:          return theme.successColor
+                case .failed:             return theme.errorColor
+                case .running:            return theme.accentColor
+                case .pending, .skipped:  return theme.secondaryText
                 }
             }
 
@@ -111,6 +114,7 @@ struct WorkflowRunDisplayData {
                     inputSourceLabel: nil,
                     nodeTimeline: state.nodeTimelines[result.nodeID] ?? [],
                     isStreaming: result.status == .running,
+                    hasWarnings: result.hasWarnings,
                     // No layout available to resolve the node kind — preserve the
                     // prior behavior of showing the toggle whenever a timeline exists.
                     supportsTimeline: true
@@ -189,6 +193,7 @@ struct WorkflowRunDisplayData {
                     inputSourceLabel: sourceLabel,
                     nodeTimeline: state.nodeTimelines[nodeID] ?? [],
                     isStreaming: result.status == .running,
+                    hasWarnings: result.hasWarnings,
                     supportsTimeline: kindSupportsTimeline(layoutNode.kind)
                 )
             }
@@ -215,10 +220,12 @@ struct WorkflowRunDisplayData {
     /// Builds display data from a persisted record. When `liveTimelines` is
     /// provided (typically by `WorkflowDedicatedView` when the in-memory
     /// `WorkflowExecutionState` still corresponds to this record), per-node
-    /// timelines are pulled in from memory so the "Timeline" tab in
-    /// `WorkflowOutputView` can render the agent's reasoning/tool-call trace
-    /// even after the run has finalized. Timelines are NOT persisted to disk,
-    /// so an app restart drops them and only the static `Output` view remains.
+    /// timelines are pulled from memory; otherwise they fall back to the
+    /// timeline persisted in the snapshot (`WorkflowNodeResultSnapshot.nodeTimeline`),
+    /// so historical runs — especially FAILED ones, where the trace is the
+    /// debugging evidence — still render the agent's reasoning/tool-call trace
+    /// after a restart. Records predating timeline persistence fall back to
+    /// the static `Output` view only.
     ///
     /// `layout` (the workflow's current layout) is used only to resolve each
     /// node's kind so the Timeline tab can be hidden for single-shot nodes
@@ -228,7 +235,8 @@ struct WorkflowRunDisplayData {
                      liveTimelines: [UUID: [TimelineEvent]]? = nil,
                      layout: WorkflowLayout? = nil) -> WorkflowRunDisplayData {
         let nodes = record.nodeResults.map { snapshot in
-            let timeline = liveTimelines?[snapshot.nodeID] ?? []
+            // Prefer the in-memory timeline (freshest); fall back to the persisted one.
+            let timeline = liveTimelines?[snapshot.nodeID] ?? snapshot.nodeTimeline ?? []
             let supportsTimeline: Bool = {
                 guard let layout else { return true }   // unknown layout → preserve prior behavior
                 guard let node = layout.nodes.first(where: { $0.id == snapshot.nodeID }) else {
@@ -247,6 +255,7 @@ struct WorkflowRunDisplayData {
                 inputSourceLabel: snapshot.inputSourceLabel,
                 nodeTimeline: timeline,
                 isStreaming: false,
+                hasWarnings: snapshot.hasWarnings ?? false,
                 supportsTimeline: supportsTimeline
             )
         }

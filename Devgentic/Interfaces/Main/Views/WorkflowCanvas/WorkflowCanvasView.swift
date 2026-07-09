@@ -160,10 +160,30 @@ struct WorkflowCanvasView: View {
         } message: {
             Text("This will remove all nodes and connections from the canvas. This cannot be undone.")
         }
-        .sheet(item: Binding<WorkflowNode?>(
-            get: { canvasState.targetConfigNode },
-            set: { canvasState.targetConfigNode = $0 }
-        )) { node in
+        .onChange(of: canvasState.targetConfigNode) { _, node in
+            if let node = node {
+                showInspectorPanel(for: node)
+            } else {
+                NodeInspectorPanelManager.shared.close()
+            }
+        }
+        .onChange(of: showingWorkflowConfig) { _, isShowing in
+            if isShowing {
+                showWorkflowConfigPanel()
+            } else {
+                NodeInspectorPanelManager.shared.close()
+            }
+        }
+    }
+
+    // MARK: - Custom Inspector Panels
+
+    private func showInspectorPanel(for node: WorkflowNode) {
+        NodeInspectorPanelManager.shared.show(
+            minSize: NSSize(width: 800, height: 520),
+            theme: theme,
+            onClose: { canvasState.targetConfigNode = nil }
+        ) {
             switch node.kind {
             case .condition:
                 ConditionNodeInspectorView(node: bindingForNode(node.id))
@@ -192,7 +212,14 @@ struct WorkflowCanvasView: View {
                 EmptyView()
             }
         }
-        .sheet(isPresented: $showingWorkflowConfig) {
+    }
+
+    private func showWorkflowConfigPanel() {
+        NodeInspectorPanelManager.shared.show(
+            minSize: NSSize(width: 800, height: 560),
+            theme: theme,
+            onClose: { showingWorkflowConfig = false }
+        ) {
             WorkflowConfigSheet(profile: $profile) {
                 canvasState.markDirty()
             }
@@ -229,7 +256,8 @@ struct WorkflowCanvasView: View {
                         targetPoint: targetPos,
                         isSelected: canvasState.selectedEdgeID == edge.id,
                         onTap: { canvasState.select(edgeID: edge.id) },
-                        onDelete: { canvasState.removeEdge(edge.id) }
+                        onDelete: { canvasState.removeEdge(edge.id) },
+                        canvasState: canvasState
                     )
                 }
             }
@@ -266,33 +294,51 @@ struct WorkflowCanvasView: View {
     // MARK: - Background Grid
 
     private func canvasBackground(in size: CGSize) -> some View {
-        Canvas { context, canvasSize in
-            let gridSpacing: CGFloat = 20
-            let dotSize: CGFloat = 1.5
-            let dotColor = theme.surfaceOverlay
+        ZStack {
+            RadialGradient(
+                colors: [theme.secondaryBackground.opacity(0.4), theme.primaryBackground],
+                center: .center,
+                startRadius: 0,
+                endRadius: max(size.width, size.height) * 0.8
+            )
+            .ignoresSafeArea()
 
-            // Account for current pan offset and scale
-            let offsetX = canvasState.canvasOffset.width.truncatingRemainder(dividingBy: gridSpacing * canvasState.canvasScale)
-            let offsetY = canvasState.canvasOffset.height.truncatingRemainder(dividingBy: gridSpacing * canvasState.canvasScale)
-            let scaledSpacing = gridSpacing * canvasState.canvasScale
+            Canvas { context, canvasSize in
+                let gridSpacing: CGFloat = 20
+                let dotSize: CGFloat = 1.5
+                let dotColor = theme.surfaceOverlay
+                let majorDotColor = theme.secondaryText.opacity(0.2)
 
-            var x = offsetX
-            while x < canvasSize.width {
-                var y = offsetY
-                while y < canvasSize.height {
-                    let rect = CGRect(
-                        x: x - dotSize / 2,
-                        y: y - dotSize / 2,
-                        width: dotSize,
-                        height: dotSize
-                    )
-                    context.fill(
-                        Path(ellipseIn: rect),
-                        with: .color(dotColor)
-                    )
-                    y += scaledSpacing
+                // Account for current pan offset and scale
+                let offsetX = canvasState.canvasOffset.width.truncatingRemainder(dividingBy: gridSpacing * canvasState.canvasScale)
+                let offsetY = canvasState.canvasOffset.height.truncatingRemainder(dividingBy: gridSpacing * canvasState.canvasScale)
+                let scaledSpacing = gridSpacing * canvasState.canvasScale
+
+                var x = offsetX
+                while x < canvasSize.width {
+                    var y = offsetY
+                    while y < canvasSize.height {
+                        let absoluteX = x - canvasState.canvasOffset.width
+                        let absoluteY = y - canvasState.canvasOffset.height
+                        let indexX = Int(round(absoluteX / scaledSpacing))
+                        let indexY = Int(round(absoluteY / scaledSpacing))
+                        let isMajor = indexX % 5 == 0 && indexY % 5 == 0
+
+                        let size = isMajor ? dotSize * 2.0 : dotSize
+                        let rect = CGRect(
+                            x: x - size / 2,
+                            y: y - size / 2,
+                            width: size,
+                            height: size
+                        )
+                        context.fill(
+                            Path(ellipseIn: rect),
+                            with: .color(isMajor ? majorDotColor : dotColor)
+                        )
+                        y += scaledSpacing
+                    }
+                    x += scaledSpacing
                 }
-                x += scaledSpacing
             }
         }
     }

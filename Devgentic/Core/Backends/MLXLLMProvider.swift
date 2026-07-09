@@ -153,9 +153,16 @@ struct MLXLLMProvider: LLMProvider {
 
     func generateCognitiveStep(messages: [[String: String]], tools: [[String: Any]]?) async throws -> ModernCognitiveStep {
         let fullText = try await generate(messages: messages, tools: tools, responseSchema: nil)
+        // Empty registry is correct here: the only caller of this method is
+        // NativeStructuredGenerator, which re-validates the result through
+        // NativeParsePipeline (ToolNameResolver with the real [AgentTool]
+        // registry). MLX never routes to the native generator today, so this
+        // path is effectively dormant — but if it ever runs, validation is
+        // layered above, same as OllamaLLMProvider's content fallback.
         let pipeline = CognitiveParsePipeline(
             expectedDialect: dialect,
-            modelId: modelName
+            modelId: modelName,
+            registeredTools: []
         )
         var step = pipeline.parse(raw: fullText)
 

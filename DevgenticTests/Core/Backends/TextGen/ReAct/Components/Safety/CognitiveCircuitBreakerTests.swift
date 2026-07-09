@@ -8,7 +8,9 @@
 //  - Global per-tool frequency: 3× same tool+args+output across ANY iterations
 //    aborts — catches alternating-combo evasion; checked BEFORE the warning tier
 //    so aborts outrank warnings.
-//  - evaluateAskUser: intervene past the ask_user limit, abort at the idle limit.
+//  - primeReplayedIteration: G1-resume priming counts toward caps without emitting actions.
+//    (evaluateAskUser/idle counters were REMOVED — clarification loops are governed by
+//    RunInteractionMemory replay + the repetition fingerprint, not a dedicated counter.)
 //  - Hooks without production callers (evaluateToolAttempt, evaluateMemoryHydration,
 //    recordClarificationResponse) were removed in the audit-#3 cleanup.
 //
@@ -174,50 +176,6 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         }
     }
 
-    // MARK: - Ask User Evaluation
-
-    func testEvaluateAskUser_ProceedsBelowLimit() {
-        var breaker = CognitiveCircuitBreaker(maxConsecutiveAskUser: 3, maxConsecutiveIdle: 5)
-        let action = breaker.evaluateAskUser()
-        if case .proceed = action {} else {
-            XCTFail("Expected .proceed on first ask_user call, got \(action)")
-        }
-    }
-
-    func testEvaluateAskUser_IntervenesAtAskUserLimit() {
-        var breaker = CognitiveCircuitBreaker(maxConsecutiveAskUser: 2, maxConsecutiveIdle: 10)
-
-        // 2 calls within limit
-        _ = breaker.evaluateAskUser()
-        _ = breaker.evaluateAskUser()
-
-        // 3rd exceeds maxConsecutiveAskUser (2)
-        let action = breaker.evaluateAskUser()
-        if case .intervene(let msg) = action {
-            XCTAssertTrue(msg.contains("ask_user") || msg.contains("asked the user"),
-                          "Intervene message should mention ask_user")
-            XCTAssertTrue(msg.contains("final_answer"),
-                          "Intervene message should offer the final_answer escape hatch (not the legacy tool_name: null contract)")
-        } else {
-            XCTFail("Expected .intervene on exceeding ask_user limit, got \(action)")
-        }
-    }
-
-    func testEvaluateAskUser_AbortsAtIdleLimit() {
-        // maxConsecutiveIdle < maxConsecutiveAskUser, so idle abort fires first
-        var breaker = CognitiveCircuitBreaker(maxConsecutiveAskUser: 10, maxConsecutiveIdle: 3)
-
-        _ = breaker.evaluateAskUser() // idle = 1
-        _ = breaker.evaluateAskUser() // idle = 2
-        let action = breaker.evaluateAskUser() // idle = 3 → abort
-
-        if case .abort(let reason) = action {
-            XCTAssertTrue(reason.contains("idle"), "Abort reason should mention idle steps")
-        } else {
-            XCTFail("Expected .abort at idle limit, got \(action)")
-        }
-    }
-
     // MARK: - Hallucination Tracking
 
     func testRecordHallucination_TracksToolName() {
@@ -227,18 +185,38 @@ final class CognitiveCircuitBreakerTests: XCTestCase {
         XCTAssertFalse(breaker.hallucinatedTools.contains("real_tool"))
     }
 
-    // MARK: - Reset
+    // MARK: - Replay Priming (G1 resume)
 
-    func testResetCountersOnSuccess_ResetsAskUserAndIdle() {
-        var breaker = CognitiveCircuitBreaker(maxConsecutiveAskUser: 10, maxConsecutiveIdle: 10)
-        _ = breaker.evaluateAskUser()  // askUser = 1, idle = 1
-        _ = breaker.evaluateAskUser()  // askUser = 2, idle = 2
-        XCTAssertGreaterThan(breaker.consecutiveAskUserCalls, 0)
-        XCTAssertGreaterThan(breaker.consecutiveIdleSteps, 0)
+    /// Priming replayed iterations must count toward the global per-tool cap exactly like live
+    /// evaluation: two replayed identical iterations + one live one hit the cap (3) and abort.
+    func testPrimeReplayedIteration_CountsTowardGlobalCap() {
+        var breaker = CognitiveCircuitBreaker(maxRepetitiveActions: 3)
+        let obs = [makeObservation(toolName: "read_file", params: "{\"path\":\"/a\"}", output: "same")]
 
-        breaker.resetCountersOnSuccess()
-        XCTAssertEqual(breaker.consecutiveAskUserCalls, 0)
-        XCTAssertEqual(breaker.consecutiveIdleSteps, 0)
+        breaker.primeReplayedIteration(obs)   // count 1 (silent)
+        breaker.primeReplayedIteration(obs)   // count 2 (silent)
+
+        let action = breaker.evaluateRepetitiveActions(obs)   // count 3 → abort
+        if case .abort(let reason) = action {
+            XCTAssertTrue(reason.contains("read_file"), "Abort should mention the capped tool, got: \(reason)")
+        } else {
+            XCTFail("Expected .abort after 2 primed + 1 live identical call, got \(action)")
+        }
+    }
+
+    /// Priming never returns an action — it only restores counters (the original run already
+    /// reacted to those iterations), so a resumed run with sub-cap history proceeds normally.
+    func testPrimeReplayedIteration_SubCapHistoryProceeds() {
+        var breaker = CognitiveCircuitBreaker(maxRepetitiveActions: 3)
+        let obs = [makeObservation(toolName: "read_file", params: "{\"path\":\"/a\"}", output: "same")]
+
+        breaker.primeReplayedIteration(obs)   // count 1
+
+        let fresh = [makeObservation(toolName: "list_directory", params: "{\"path\":\"/b\"}", output: "listing")]
+        let action = breaker.evaluateRepetitiveActions(fresh)
+        if case .proceed = action {} else {
+            XCTFail("Expected .proceed for a non-repeated live call after sub-cap priming, got \(action)")
+        }
     }
 
     // MARK: - Tool Result Recording

@@ -40,6 +40,11 @@ struct SynthesizedToolResult: Sendable {
     let params: String     // Serialized JSON parameters string
     let output: String     // Raw tool output string
     let isSuccess: Bool
+    /// Why the call failed (nil on success). Lets status math and the terminal
+    /// block distinguish EVIDENCE failures from user decisions — `.userDenied`
+    /// (tool confirmation rejected) and `.cancelled` (ask_user skipped) are
+    /// choices, not tool failures, and must not demote the run.
+    var failureCategory: ToolFailureCategory? = nil
 }
 
 // MARK: - Execution Summary
@@ -70,14 +75,23 @@ struct ExecutionSummary: Sendable {
 
     // MARK: - Mutation
 
+    /// Results that constitute tool EVIDENCE. User decisions (denied confirmation,
+    /// skipped ask_user, mid-flight cancel) are excluded — a run where the user
+    /// declined one write but the agent completed the task is a success, not a
+    /// partial failure, and must not store a FAILED episode.
+    var evidenceResults: [SynthesizedToolResult] {
+        toolResults.filter { $0.failureCategory != .userDenied && $0.failureCategory != .cancelled }
+    }
+
     /// Records a tool invocation result and updates the aggregate completion status unconditionally.
-    mutating func record(toolCallId: String, toolName: String, params: String, output: String, isSuccess: Bool) {
+    mutating func record(toolCallId: String, toolName: String, params: String, output: String, isSuccess: Bool, failureCategory: ToolFailureCategory? = nil) {
         toolResults.append(SynthesizedToolResult(
             toolCallId: toolCallId,
             toolName: toolName,
             params: params,
             output: output,
-            isSuccess: isSuccess
+            isSuccess: isSuccess,
+            failureCategory: failureCategory
         ))
         recomputeStatus()
     }
@@ -86,25 +100,33 @@ struct ExecutionSummary: Sendable {
     /// Optionally records a system failure reason if the loop was aborted abruptly.
     mutating func markComplete(failureReason: String? = nil) {
         self.failureReason = failureReason
-        if toolResults.isEmpty {
-            // No tools were executed — the agent terminated without acting.
-            // This is a partial result at best (e.g., parser dropped tool calls,
-            // or the model decided it couldn't help without tool use).
+        if evidenceResults.isEmpty {
+            // No tool EVIDENCE was produced — either no tools ran, or everything
+            // that ran was a user decision (denials / skips). A partial result at
+            // best (e.g., parser dropped tool calls, or the model decided it
+            // couldn't help without tool use).
             completionStatus = .partialSuccess
         } else {
-            completionStatus = toolResults.allSatisfy(\.isSuccess) ? .success : .partialSuccess
+            // Same math as recomputeStatus(): an all-failed run must read `.failed`.
+            // The previous `allSatisfy ? .success : .partialSuccess` ceiling silently
+            // upgraded all-failed runs to partialSuccess at loop end, overwriting the
+            // honest per-record verdict.
+            recomputeStatus()
         }
     }
 
     // MARK: - Private
 
+    /// Status is computed over EVIDENCE results only — user decisions don't
+    /// demote a run (a denied write followed by task completion is `.success`).
     private mutating func recomputeStatus() {
-        guard !toolResults.isEmpty else {
+        let evidence = evidenceResults
+        guard !evidence.isEmpty else {
             completionStatus = .stalled
             return
         }
-        let allSucceeded  = toolResults.allSatisfy(\.isSuccess)
-        let anySucceeded  = toolResults.contains(where: \.isSuccess)
+        let allSucceeded  = evidence.allSatisfy(\.isSuccess)
+        let anySucceeded  = evidence.contains(where: \.isSuccess)
         completionStatus  = allSucceeded ? .success : (anySucceeded ? .partialSuccess : .failed)
     }
 }

@@ -142,6 +142,18 @@ struct ThemeDecorator: Theme {
     var cornerRadiusSmall: CGFloat { base.cornerRadiusSmall }
     var cornerRadiusMedium: CGFloat { base.cornerRadiusMedium }
     var cornerRadiusLarge: CGFloat { base.cornerRadiusLarge }
+    var cornerRadiusChip: CGFloat { base.cornerRadiusChip }
+    var cornerRadiusRow: CGFloat { base.cornerRadiusRow }
+    var cornerRadiusPanel: CGFloat { base.cornerRadiusPanel }
+
+    // Tier 3 — Spacing (extra steps)
+    var spacing6: CGFloat { base.spacing6 }
+    var spacing12: CGFloat { base.spacing12 }
+    var spacing16: CGFloat { base.spacing16 }
+    var spacing24: CGFloat { base.spacing24 }
+
+    // Backend Origin Color (forwarded so a base theme may override the hues)
+    func backendColor(for backend: BackendType) -> Color { base.backendColor(for: backend) }
 
     // Syntax Highlighting
     var syntaxTheme: SyntaxTheme {
@@ -238,6 +250,10 @@ protocol Theme {
     /// `nil` defers to the system appearance.
     var colorScheme: ColorScheme? { get }
 
+    /// Accent color for a conversation/message's backend origin (local agent / Ollama / remote).
+    /// Single source of truth for the per-backend hues (sidebar rail, input picker dot, etc.).
+    func backendColor(for backend: BackendType) -> Color
+
     // ── Tier 2: Extended Color Tokens (defaults provided) ────────────
 
     /// Background for standard controls (input fields, popovers, chips).
@@ -319,11 +335,22 @@ protocol Theme {
     var spacingXLarge: CGFloat { get }
     var spacingXXLarge: CGFloat { get }
 
+    /// Extra spacing steps for the values used most that the size ladder skips (audit: 6/12/16/24).
+    var spacing6: CGFloat { get }
+    var spacing12: CGFloat { get }
+    var spacing16: CGFloat { get }
+    var spacing24: CGFloat { get }
+
     // ── Tier 3: Corner Radius ────────────────────────────────────────
 
     var cornerRadiusSmall: CGFloat { get }
     var cornerRadiusMedium: CGFloat { get }
     var cornerRadiusLarge: CGFloat { get }
+
+    /// Role-based radii for the values the app uses most (audit: 6/10/12 had no token).
+    var cornerRadiusChip: CGFloat { get }   // pills, badges, tags
+    var cornerRadiusRow: CGFloat { get }    // canonical rows / buttons / standard cards
+    var cornerRadiusPanel: CGFloat { get }  // larger cards, panels, sheets
 
     // ── Syntax Highlighting ──────────────────────────────────────────
 
@@ -395,6 +422,29 @@ extension Theme {
     var cornerRadiusSmall: CGFloat { 4 }
     var cornerRadiusMedium: CGFloat { 8 }
     var cornerRadiusLarge: CGFloat { 16 }
+
+    var cornerRadiusChip: CGFloat { 6 }
+    var cornerRadiusRow: CGFloat { 10 }
+    var cornerRadiusPanel: CGFloat { 12 }
+
+    // ── Tier 3 Spacing — Extra Steps (fill the ladder) ───────────────
+
+    var spacing6: CGFloat { 6 }
+    var spacing12: CGFloat { 12 }
+    var spacing16: CGFloat { 16 }
+    var spacing24: CGFloat { 24 }
+
+    // ── Backend Origin Color ─────────────────────────────────────────
+
+    /// Curated cross-theme hues; the neutral case follows the theme's text color.
+    func backendColor(for backend: BackendType) -> Color {
+        switch backend {
+        case .agent:  return Color(red: 0.60, green: 0.49, blue: 0.93)  // violet — local native agent
+        case .ollama: return Color(red: 0.96, green: 0.60, blue: 0.24)  // orange — local Ollama
+        case .remote: return Color(red: 0.30, green: 0.66, blue: 0.96)  // sky blue — remote
+        case .none:   return tertiaryText
+        }
+    }
 
     // ── Syntax Theme Default ─────────────────────────────────────────
 

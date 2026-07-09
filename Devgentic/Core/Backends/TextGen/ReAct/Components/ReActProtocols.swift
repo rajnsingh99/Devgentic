@@ -42,13 +42,12 @@ protocol CognitiveSafetyGuarding: Sendable {
     /// than general tool failures (3 consecutive). Models (especially Q4-quantized)
     /// reliably ignore the "do not retry this exact action" directive in scratchpad,
     /// so the circuit breaker is the actual enforcement.
+    /// (Clarification loops are no longer counter-governed: identical re-asks are
+    /// replayed from RunInteractionMemory — deterministic outputs — so the repetition
+    /// fingerprint catches them; distinct questions are bounded by the human in the loop.)
     mutating func recordDenial() -> CircuitBreakerAction
 
-    /// Evaluates the loop state when the agent asks for user clarification (prevents endless questioning).
-    mutating func evaluateAskUser() -> CircuitBreakerAction
-
     mutating func recordHallucination(_ toolName: String)
-    mutating func resetCountersOnSuccess()
 }
 
 /// The resulting action the executor must take when encountering an LLM error.

@@ -118,6 +118,24 @@ final class WorkflowCanvasState {
         }
     }
 
+    func nodeColor(for nodeID: UUID) -> Color {
+        guard let node = nodes.first(where: { $0.id == nodeID }) else { return .gray }
+        return Self.nodeColor(for: node.kind)
+    }
+
+    static func nodeColor(for kind: WorkflowNodeKind) -> Color {
+        switch kind {
+        case .profile(_, let pType):
+            return pType.displayColor
+        case .condition:  return .yellow
+        case .loop:       return .orange
+        case .code:       return .cyan
+        case .gate:       return .red
+        case .trigger:    return .gray
+        case .action:     return .teal
+        }
+    }
+
     // MARK: - Init
 
     init(profileID: UUID) {

@@ -282,6 +282,8 @@ struct ExplorerItemContentRow: View {
     @Environment(\.appTheme) private var theme
     @FocusState private var isTextFieldFocused: Bool
 
+    @State private var isHovered = false
+
     var body: some View {
         @Bindable var viewModel = viewModel
         HStack(spacing: 6) {
@@ -310,7 +312,7 @@ struct ExplorerItemContentRow: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             } else {
                 Text(item.name)
-                    .font(theme.fontSubheadline)
+                    .font(theme.fontFootnote.weight(.medium))
                     .foregroundColor(.primary.opacity(0.9))
                     .lineLimit(1)
             }
@@ -318,12 +320,77 @@ struct ExplorerItemContentRow: View {
         }
         .frame(height: 24)
         .padding(.leading, 4)
+        .padding(.trailing, isHovered ? 56 : 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovered ? theme.accentColor.opacity(0.04) : Color.clear)
+        )
+        .overlay(alignment: .trailing) {
+            if isHovered && viewModel.itemBeingRenamedID != item.id {
+                HStack(spacing: 2) {
+                    HoverActionButton(icon: "pencil", action: {
+                        viewModel.startRename(item)
+                    })
+                    .help("Rename")
+                    
+                    HoverActionButton(icon: "doc.on.doc", action: {
+                        viewModel.copyPath(item)
+                    })
+                    .help("Copy Path")
+                }
+                .padding(.trailing, 4)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
         .onDrag {
             guard !item.isDirectory else { return NSItemProvider() }
             return NSItemProvider(object: item.url as NSURL)
         }
         .contextMenu {
-            // Context menu logic remains the same
+            Button {
+                viewModel.openFile(item)
+            } label: {
+                Label("Open", systemImage: "doc.text")
+            }
+            
+            Button {
+                viewModel.revealInFinder(item)
+            } label: {
+                Label("Reveal in Finder", systemImage: "arrow.right.doc.on.clipboard")
+            }
+
+            Divider()
+
+            Button {
+                viewModel.copyPath(item)
+            } label: {
+                Label("Copy Path", systemImage: "doc.on.doc")
+            }
+
+            Button {
+                viewModel.copyRelativePath(item)
+            } label: {
+                Label("Copy Relative Path", systemImage: "doc.on.clipboard")
+            }
+
+            Divider()
+
+            Button {
+                viewModel.startRename(item)
+            } label: {
+                Label("Rename…", systemImage: "pencil")
+            }
+
+            Button(role: .destructive) {
+                viewModel.deleteItem(item)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 }

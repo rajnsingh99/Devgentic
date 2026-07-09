@@ -36,6 +36,9 @@ struct CloudRequestPipeline: Sendable {
         // 1. Pre-request: respect rate limits (profile-scoped when key provided)
         let key = rateLimitKey ?? provider.rawValue
         await GlobalRateLimiter.shared.wait(forKey: key, category: provider)
+        // The limiter swallows sleep interruption internally; surface a Stop
+        // pressed during a long debt wait before firing the request.
+        try Task.checkCancellation()
 
         // 2. Execute the request
         let (data, response) = try await session.data(for: request)
@@ -107,6 +110,9 @@ struct CloudRequestPipeline: Sendable {
         // 1. Pre-request: respect rate limits (profile-scoped when key provided)
         let key = rateLimitKey ?? provider.rawValue
         await GlobalRateLimiter.shared.wait(forKey: key, category: provider)
+        // The limiter swallows sleep interruption internally; surface a Stop
+        // pressed during a long debt wait before firing the request.
+        try Task.checkCancellation()
 
         // 2. Execute the streaming request
         let (bytes, response) = try await session.bytes(for: request)

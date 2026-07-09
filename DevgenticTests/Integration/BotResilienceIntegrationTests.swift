@@ -107,7 +107,7 @@ final class BotResilienceIntegrationTests: XCTestCase {
                 backoffStrategy: .fixed
             ),
             cognitive: CognitiveResiliencePolicy(maxParseFailures: 3),
-            loop: LoopResiliencePolicy(maxConsecutiveToolFailures: 3, maxRepetitiveActions: 3)
+            loop: LoopResiliencePolicy(maxConsecutiveToolFailures: 3, maxRepetitiveActions: 3, maxConsecutiveDenials: 2)
         )
     }
 

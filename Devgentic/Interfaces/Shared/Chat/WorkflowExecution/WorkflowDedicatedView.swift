@@ -30,12 +30,25 @@ struct WorkflowDedicatedView: View {
     @State private var viewMode: ViewMode = .execution
     @State private var selectedHistoricalRunID: UUID?
     @State private var selectedNodeID: UUID?
+    /// While true, the selection auto-follows the currently running node. A tap on any non-running
+    /// node pins the selection (sets this false); each new run (or conversation switch) re-enables it.
+    @State private var followRunningNode = true
     @State private var validationIssues: [WorkflowValidationIssue] = []
+    @State private var isHoveringFix = false
 
     enum ViewMode {
         case canvas
         case execution
     }
+
+    /// [UI-REDESIGN PROTOTYPE] Which execution layout to render. Flip to `.original` to restore
+    /// the classic horizontal card strip + output panel (both paths stay compiled); `.timelineA`
+    /// renders the vertical execution-timeline prototype (WorkflowExecutionTimelineView).
+    private enum ExecutionLayout {
+        case original
+        case timelineA
+    }
+    private let executionLayout: ExecutionLayout = .timelineA
 
     /// The live execution state for this conversation's workflow run.
     private var executionState: WorkflowExecutionState? {
@@ -144,6 +157,18 @@ struct WorkflowDedicatedView: View {
         executionState?.nodeResults.first(where: { $0.status == .running })?.nodeID
     }
 
+    /// Selection binding shared by both execution layouts: a tap on any non-running node
+    /// (incl. Final Outcome) pins the selection; tapping the running node keeps auto-follow on.
+    private var pinningSelectionBinding: Binding<UUID?> {
+        Binding(
+            get: { selectedNodeID },
+            set: { newValue in
+                selectedNodeID = newValue
+                if newValue != currentRunningNodeID { followRunningNode = false }
+            }
+        )
+    }
+
     /// Resolved profile binding for canvas view.
     private var profileBinding: Binding<BackendProfileModel>? {
         guard let idx = profileService.profiles.firstIndex(where: { $0.id == workflowProfileID }) else {
@@ -170,9 +195,9 @@ struct WorkflowDedicatedView: View {
                             .foregroundColor(theme.secondaryText)
                     }
 
-                    // Floating "Execution" button in canvas mode
+                    // Floating View Mode Selector Switch in canvas mode
                     VStack {
-                        canvasFloatingButton
+                        viewModeSegmentedControl
                             .padding(.top, 12)
                         Spacer()
                     }
@@ -195,6 +220,7 @@ struct WorkflowDedicatedView: View {
             // re-auto-select if the new conversation has a live run.
             selectedHistoricalRunID = nil
             selectedNodeID = nil
+            followRunningNode = true
             autoSelectLiveRunIfNeeded()
         }
         .onChange(of: executionState?.isRunning) { _, isRunning in
@@ -203,7 +229,10 @@ struct WorkflowDedicatedView: View {
                 // live view is shown without the user having to click into it.
                 // The .running row already lives in `runHistory` by this point
                 // (inserted by MessagingCoordinator before the stream starts).
-                selectedNodeID = nil
+                // Focus the running node (the `currentRunningNodeID` observer
+                // moves focus as execution progresses); re-enable auto-follow.
+                followRunningNode = true
+                selectedNodeID = currentRunningNodeID
                 if let recordID = executionState?.runRecordID {
                     selectedHistoricalRunID = recordID
                 }
@@ -227,11 +256,30 @@ struct WorkflowDedicatedView: View {
         }
         .onChange(of: currentRunningNodeID) { _, newRunning in
             // Follow the active node: when execution moves to a new node, the
-            // Final Output area auto-routes to its live timeline. Only applies
-            // to live runs (historical runs have no "current" node).
-            guard selectedHistoricalRunID == nil, let newRunning else { return }
+            // selection + Final Output area auto-route to it. Only while viewing
+            // the LIVE run (not a past historical one) and the user hasn't pinned
+            // a different node this run.
+            guard followRunningNode,
+                  selectedHistoricalRunID == executionState?.runRecordID,
+                  let newRunning else { return }
             withAnimation(.easeInOut(duration: 0.15)) {
                 selectedNodeID = newRunning
+            }
+        }
+        .onChange(of: selectedHistoricalRunID) { _, newID in
+            // Opening a FAILED historical run auto-focuses the first genuinely-failed
+            // node — the debugging evidence — instead of the Final Outcome. Skips the
+            // "Upstream dependency failed" cascade to land on the node that actually
+            // crashed. Live-run starts insert a `.running` stub record, so those pass
+            // through untouched.
+            guard let newID,
+                  let record = runHistory.first(where: { $0.id == newID }),
+                  record.status == .failed else { return }
+            let firstFailed = record.nodeResults.first {
+                $0.status == .failed && !$0.detail.hasPrefix("Upstream dependency")
+            } ?? record.nodeResults.first { $0.status == .failed }
+            if let firstFailed {
+                selectedNodeID = firstFailed.nodeID
             }
         }
     }
@@ -246,26 +294,49 @@ struct WorkflowDedicatedView: View {
 
                 Divider()
 
-                // Status strip: ✓ Completed | Total time 13.3s
-                executionStatusStrip(data: data)
+                switch executionLayout {
+                case .timelineA:
+                    // [UI-REDESIGN PROTOTYPE A] One vertical execution timeline — absorbs the
+                    // status strip (its run-state + total time live in the timeline header),
+                    // the card strip, and the output panel. Selection semantics unchanged.
+                    WorkflowExecutionTimelineView(
+                        displayData: data,
+                        selectedNodeID: pinningSelectionBinding,
+                        awaitingNodeIDs: awaitingNodeIDs(for: data),
+                        onAwaitingTap: { viewModel.interactionCenter.pulseBanner() },
+                        // Re-run: resend this run's original input through the normal send path
+                        // (same as retyping it). Terminal runs only.
+                        onRerun: (!data.isRunning && !data.userInput.isEmpty) ? {
+                            guard let config = viewModel.backendConfiguration.getRequestConfig() else { return }
+                            viewModel.sendMessage(
+                                attributedString: NSAttributedString(string: data.userInput),
+                                withConfig: config
+                            )
+                        } : nil
+                    )
 
-                Divider().opacity(0.4)
+                case .original:
+                    // Status strip: ✓ Completed | Total time 13.3s
+                    executionStatusStrip(data: data)
 
-                // Agent cards strip with status-aware connectors. Awaiting-input badges (D2)
-                // are driven by the unified InteractionCenter; the HITL request itself now
-                // renders in the shared above-input banner (P4 removed the in-canvas panel).
-                WorkflowOutcomeStripView(
-                    displayData: data,
-                    selectedNodeID: $selectedNodeID,
-                    awaitingNodeIDs: awaitingNodeIDs(for: data),
-                    onAwaitingTap: { viewModel.interactionCenter.pulseBanner() }
-                )
+                    Divider().opacity(0.4)
 
-                Divider().opacity(0.4)
+                    // Agent cards strip with status-aware connectors. Awaiting-input badges (D2)
+                    // are driven by the unified InteractionCenter; the HITL request itself now
+                    // renders in the shared above-input banner (P4 removed the in-canvas panel).
+                    WorkflowOutcomeStripView(
+                        displayData: data,
+                        selectedNodeID: pinningSelectionBinding,
+                        awaitingNodeIDs: awaitingNodeIDs(for: data),
+                        onAwaitingTap: { viewModel.interactionCenter.pulseBanner() }
+                    )
 
-                // Output area: selected node detail or final output
-                WorkflowOutputView(displayData: data, selectedNodeID: selectedNodeID)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    Divider().opacity(0.4)
+
+                    // Output area: selected node detail or final output
+                    WorkflowOutputView(displayData: data, selectedNodeID: selectedNodeID)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
                 emptyExecutionState
             }
@@ -330,19 +401,7 @@ struct WorkflowDedicatedView: View {
                 runPickerMenu
             }
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    viewMode = .canvas
-                }
-            } label: {
-                Label("Canvas", systemImage: "rectangle.3.group")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(theme.primaryText)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.plain)
-            .background(Capsule().fill(theme.surfaceOverlay))
+            viewModeSegmentedControl
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -481,31 +540,36 @@ struct WorkflowDedicatedView: View {
     // MARK: - Validation Summary Card
 
     private var validationSummaryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 14))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundColor(.red)
                 Text("\(validationErrors.count) configuration issue\(validationErrors.count == 1 ? "" : "s")")
-                    .font(theme.fontSubheadline.weight(.semibold))
+                    .font(theme.fontSubheadline.weight(.bold))
                     .foregroundColor(theme.primaryText)
                 Spacer()
                 Button {
                     withAnimation { viewMode = .canvas }
                 } label: {
                     Text("Fix in Canvas")
-                        .font(theme.fontCaption.weight(.medium))
-                        .foregroundColor(theme.accentColor)
+                        .font(theme.fontCaption.weight(.bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(theme.accentColor))
                 }
                 .buttonStyle(.plain)
+                .scaleEffect(isHoveringFix ? 1.04 : 1.0)
+                .onHover { isHoveringFix = $0 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 ForEach(validationErrors.prefix(5)) { issue in
                     HStack(spacing: 6) {
                         Circle()
                             .fill(Color.red)
-                            .frame(width: 5, height: 5)
+                            .frame(width: 4, height: 4)
                         Text("**\(issue.nodeName)**: \(issue.message)")
                             .font(.system(size: 11))
                             .foregroundColor(theme.secondaryText)
@@ -516,7 +580,7 @@ struct WorkflowDedicatedView: View {
                     Text("+ \(validationErrors.count - 5) more...")
                         .font(.system(size: 10))
                         .foregroundColor(theme.tertiaryText)
-                        .padding(.leading, 11)
+                        .padding(.leading, 10)
                 }
             }
 
@@ -528,11 +592,17 @@ struct WorkflowDedicatedView: View {
         .padding(14)
         .frame(maxWidth: 400)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.red.opacity(0.06))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.red.opacity(0.12), Color.red.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.red.opacity(0.2), lineWidth: 0.5)
         )
     }
@@ -543,16 +613,18 @@ struct WorkflowDedicatedView: View {
         VStack(spacing: 0) {
             if runHistory.isEmpty {
                 // Full centered hero — no history to show
-                VStack(spacing: 16) {
+                VStack(spacing: 18) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 48))
-                        .foregroundColor(.purple.opacity(0.4))
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundColor(theme.accentColor.opacity(0.45))
+                        .padding(20)
+                        .background(Circle().fill(theme.accentColor.opacity(0.08)))
 
                     Text("Workflow Ready")
                         .font(.title2.weight(.bold))
                         .foregroundColor(theme.primaryText)
 
-                    Text("Type your input below and run the workflow.\nSwitch to canvas mode to edit the pipeline.")
+                    Text("Type your input below and run the workflow.\nSwitch mode to Canvas to edit the pipeline.")
                         .font(.subheadline)
                         .foregroundColor(theme.secondaryText)
                         .multilineTextAlignment(.center)
@@ -561,29 +633,23 @@ struct WorkflowDedicatedView: View {
                     // Validation issues summary
                     if !validationErrors.isEmpty {
                         validationSummaryCard
+                            .padding(.top, 8)
                     }
 
-                    Button {
-                        withAnimation { viewMode = .canvas }
-                    } label: {
-                        Label("Open Canvas", systemImage: "rectangle.3.group")
-                            .font(theme.fontBody.weight(.medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                    .tint(.purple)
+                    viewModeSegmentedControl
+                        .padding(.top, 10)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 // Compact top banner + run history below
                 HStack(spacing: 12) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 24))
-                        .foregroundColor(.purple.opacity(0.5))
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(theme.accentColor.opacity(0.85))
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Workflow Ready")
-                            .font(theme.fontSubheadline.weight(.semibold))
+                            .font(theme.fontSubheadline.weight(.bold))
                             .foregroundColor(theme.primaryText)
                         Text("Type your input below to start a new run.")
                             .font(theme.fontCaption)
@@ -592,19 +658,11 @@ struct WorkflowDedicatedView: View {
 
                     Spacer()
 
-                    Button {
-                        withAnimation { viewMode = .canvas }
-                    } label: {
-                        Label("Canvas", systemImage: "rectangle.3.group")
-                            .font(theme.fontCaption.weight(.medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.purple)
+                    viewModeSegmentedControl
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-                .background(theme.secondaryBackground.opacity(0.5))
+                .padding(.vertical, 12)
+                .background(theme.secondaryBackground.opacity(0.65))
 
                 // Validation issues (compact, between banner and history)
                 if !validationErrors.isEmpty {
@@ -627,29 +685,52 @@ struct WorkflowDedicatedView: View {
 
     // MARK: - Canvas Floating Button
 
-    private var canvasFloatingButton: some View {
-        Button {
-            // Guarded: prompt Save/Discard/Cancel if the canvas has unsaved edits before
-            // showing the execution view (the executor runs the on-DISK layout, so a run
-            // with unsaved edits would silently use the stale workflow).
-            let binding = $viewMode
-            viewModel.workflowEditGuard.attempt {
+    // MARK: - View Mode Segmented Control
+
+    private var viewModeSegmentedControl: some View {
+        HStack(spacing: 0) {
+            Button(action: {
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    binding.wrappedValue = .execution
+                    viewMode = .canvas
                 }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.3.group")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("Canvas")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(viewMode == .canvas ? .white : theme.secondaryText)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(viewMode == .canvas ? theme.accentColor : Color.clear))
             }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "list.bullet.rectangle")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("Execution")
-                    .font(.system(size: 12, weight: .semibold))
+            .buttonStyle(.plain)
+
+            Button(action: {
+                let binding = $viewMode
+                viewModel.workflowEditGuard.attempt {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        binding.wrappedValue = .execution
+                    }
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "list.bullet.rectangle")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("Execution")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(viewMode == .execution ? .white : theme.secondaryText)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(viewMode == .execution ? theme.accentColor : Color.clear))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: .capsule)
+        .padding(3)
+        .background(Capsule().fill(theme.surfaceOverlay))
+        .shadow(color: Color.black.opacity(0.15), radius: 4, y: 2)
     }
 
     // MARK: - Helpers

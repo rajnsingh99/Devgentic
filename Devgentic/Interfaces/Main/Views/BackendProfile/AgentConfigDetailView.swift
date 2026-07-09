@@ -363,6 +363,8 @@ struct AgentConfigDetailView: View {
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(capabilityColor(for: providerConfig.wrappedValue.cognitiveCapability).opacity(0.2), lineWidth: 1))
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 3. Agent Capabilities (composable toggles + tools)
@@ -427,10 +429,11 @@ struct AgentConfigDetailView: View {
                                     .font(theme.fontCaption)
                                     .italic()
                                     .foregroundColor(theme.secondaryText)
-                                    .padding(.leading, 34)
                             }
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 3. System Instructions & Identity
@@ -521,6 +524,8 @@ struct AgentConfigDetailView: View {
                         }
 
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 4. Skills
@@ -640,6 +645,8 @@ struct AgentConfigDetailView: View {
                             .padding(.leading, 12)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 7. Execution
@@ -670,6 +677,22 @@ struct AgentConfigDetailView: View {
                             ErrorRecoverySection(
                                 resilienceOverrides: resilienceOverridesBinding,
                                 errorRecovery: errorRecoveryBinding
+                            )
+                            .padding(.leading, 12)
+                        }
+
+                        Divider()
+
+                        // Loop Safety — circuit-breaker caps (repetition / clarification /
+                        // idle / denial). Sibling group to Error Recovery; applies in chat
+                        // and when a workflow node executes this agent.
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Loop Safety")
+                                .font(theme.fontBody.weight(.semibold))
+                                .foregroundColor(theme.primaryText)
+
+                            LoopSafetySection(
+                                resilienceOverrides: resilienceOverridesBinding
                             )
                             .padding(.leading, 12)
                         }
@@ -732,13 +755,16 @@ struct AgentConfigDetailView: View {
                             .padding(.leading, 12)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
-                // 9. Advanced Configuration
                 SettingsCard(title: "Advanced Configuration", icon: "gearshape.2.fill", theme: theme) {
                     VStack(alignment: .leading, spacing: 16) {
                         advancedSettingsView
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // Profile applicability note

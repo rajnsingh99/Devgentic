@@ -39,6 +39,7 @@ struct ChatInputAreaView: View {
     @Environment(CodeSessionManager.self) private var codeSessionManager
     @Environment(MainViewRouter.self) private var router
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // MARK: - UI State
     @State private var showingBackendSelectorPopup: Bool = false
@@ -73,14 +74,7 @@ struct ChatInputAreaView: View {
 
     // MARK: - Dynamic UI Properties
     private var profileThemeColor: Color {
-        guard let profile = selectedProfile else { return .secondary }
-        switch profile.profileType {
-        case .bot: return .blue
-        case .agent: return .green
-        case .workflow: return .purple
-        case .imageGen: return .orange
-        case .code: return .cyan
-        }
+        selectedProfile?.profileType.displayColor ?? .secondary
     }
 
     private var profileButtonText: String {
@@ -192,6 +186,11 @@ struct ChatInputAreaView: View {
         }
         .animation(.spring(), value: inputViewModel.attachedFiles.count)
         .animation(.easeInOut(duration: 0.2), value: inputViewModel.voiceInputState)
+        // The suggestion panels declare move+opacity transitions, but insertion/removal
+        // only animates when the isShowing flip itself is animated at this container —
+        // without these the panels snap in. Reduce Motion keeps the instant swap.
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: inputViewModel.promptSuggestionState.isShowing)
+        .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.85), value: inputViewModel.fileSuggestionState.isShowing)
         .fixedSize(horizontal: false, vertical: true)
     }
     
@@ -209,11 +208,10 @@ struct ChatInputAreaView: View {
             editorAndPlaceholderArea
             toolbarArea
         }
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.controlBackground)
-                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
-        )
+        // Liquid Glass material (matches the banners/pickers around it, no longer the one opaque
+        // bottom surface) with a quiet hairline for edge definition. The accent focus ring was
+        // removed by design choice — with vivid accent colors it read as a loud colored border.
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
                 .stroke(theme.surfaceOverlay, lineWidth: 1)
@@ -454,8 +452,6 @@ struct ChatInputAreaView: View {
     
     // MARK: - File Drop Handler (P1)
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
-        var fileItems: [FileSystemItem] = []
-
         for provider in providers {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url = url else { return }
@@ -630,33 +626,4 @@ struct ChatInputAreaView: View {
         }
     }
 
-    // MARK: - Tool Management Helpers
-
-    private var toolsBinding: Binding<[Tool]> {
-        Binding(
-            get: {
-                if case .agent(let config) = selectedProfile?.details {
-                    return config.tools
-                }
-                return []
-            },
-            set: { newTools in
-                guard var profile = selectedProfile else { return }
-                if case .agent(var config) = profile.details {
-                    config.tools = newTools
-                    profile.details = .agent(config)
-                    selectedProfile = profile
-                    // Persist change via shared store
-                    try? BackendProfileStore.shared.saveProfile(profile)
-                }
-            }
-        )
-    }
-
-    private var profileInstructions: String {
-        if case .agent(let config) = selectedProfile?.details {
-            return config.instructions ?? ""
-        }
-        return ""
-    }
 }

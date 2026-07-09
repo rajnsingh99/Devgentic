@@ -546,7 +546,7 @@ final class ActiveStreamManager {
                         logger.info("[WF_EVENT] NodeStarted: '\(profileName)' [\(nodeID)] (\(idx)/\(total))")
                         workflowExecutionState?.handleNodeStarted(nodeID: nodeID, profileName: profileName, index: idx, total: total)
 
-                    case .workflowNodeCompleted(let nodeID, let profileName, let summary):
+                    case .workflowNodeCompleted(let nodeID, let profileName, let summary, let nodeHasWarnings):
                         agentMessage.thinkingHeadline = "\(profileName) completed"
                         let completedId = UUID()
                         // `summary` now carries the node's FULL output (for the per-node
@@ -556,7 +556,7 @@ final class ActiveStreamManager {
                         let summaryPreview = summary.count > 200 ? String(summary.prefix(200)) + "…" : summary
                         agentMessage.appendTimelineEvent(.thought(id: completedId, text: "✅ \(profileName): \(summaryPreview)"))
                         logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(String(summary.prefix(200)))")
-                        workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary)
+                        workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary, hasWarnings: nodeHasWarnings)
 
                     case .workflowNodeFailed(let nodeID, let profileName, let error, let suggestion):
                         agentMessage.thinkingHeadline = "\(profileName) failed"
@@ -979,11 +979,10 @@ final class ActiveStreamManager {
         // A coarse resolveAll(conversationID:) here would wrongly clear a *concurrent* stream's
         // still-parked HITL in the same conversation, so it is intentionally omitted.
 
-        // [HITL/Bug2] Scope "Always allow" session grants to the run that created them. A fresh run
-        // re-resolves tools from the (possibly changed) profile, so a stale grant must not survive to
-        // override a later re-enable. (Coarse per-conversation clear; a concurrent same-conversation
-        // run would at worst re-prompt once — benign, unlike wrongly resolving its parked HITL above.)
-        await SessionToolApprovals.shared.clear(conversationID: conversationID)
+        // NOTE: per-conversation "Allow for this chat" grants are deliberately NOT cleared here. They
+        // persist for the conversation's lifetime (and across restarts via SessionToolApprovals' durable
+        // store), so a later message in the same chat isn't re-prompted; they're dropped only when the
+        // conversation is deleted (ConversationManagementCoordinator.drainLiveExecution).
 
         // Terminal-outcome safety net: if no executor emitted `.executionFinished`
         // (legacy code path, early `continuation.finish()` in a catch block, or a

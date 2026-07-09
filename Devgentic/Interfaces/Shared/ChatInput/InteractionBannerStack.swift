@@ -33,20 +33,11 @@ struct InteractionBannerStack: View {
     var body: some View {
         let selected = vm.selectedConversationID
         let current = selected.flatMap { vm.interactionCenter.current(for: $0) }
-        let otherCount = otherConversationCount(excluding: selected)
 
+        // NOTE: the cross-conversation "N others awaiting input" affordance lives in
+        // `CrossConversationInputChip`, floated at the TOP of the chat area (MainApplicationView).
+        // This bottom stack is only the HITL banner for the CURRENTLY focused conversation.
         return VStack(spacing: 6) {
-            // Background-conversation affordance: a HITL raised in a conversation the user
-            // is NOT viewing (e.g. a scheduled / remote run) would otherwise be invisible
-            // now that the legacy per-message banner is gone. This chip surfaces it and
-            // navigates there on tap.
-            if otherCount > 0 {
-                OtherConversationsChip(count: otherCount) {
-                    navigateToOtherConversation(excluding: selected)
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
             if let pending = current {
                 banner(for: pending)
                     // Reset per-item @State (typed answer, edited plan) when the FIFO advances.
@@ -64,7 +55,6 @@ struct InteractionBannerStack: View {
         .padding(.horizontal)
         .padding(.bottom, 6)
         .animation(.spring(response: 0.38, dampingFraction: 0.82), value: current?.id)
-        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: otherCount)
         // [HITL/E2] Flash the banner when the user taps an "awaiting input" node.
         .onChange(of: vm.interactionCenter.attentionPulse) { _, _ in
             guard current != nil else { return }
@@ -73,6 +63,66 @@ struct InteractionBannerStack: View {
                 withAnimation(.spring(response: 0.34, dampingFraction: 0.7)) { pulse = false }
             }
         }
+    }
+
+    @ViewBuilder
+    private func banner(for pending: PendingHITL) -> some View {
+        switch pending.kind {
+        case .toolConfirmation(let confirmation):
+            PermissionInteractionBanner(pending: pending, confirmation: confirmation)
+        case .clarification(let clarification):
+            ClarificationInteractionBanner(pending: pending, clarification: clarification)
+        case .planReview(let planReview):
+            PlanReviewInteractionBanner(pending: pending, planReview: planReview)
+        case .gate(let gate):
+            GateInteractionBanner(pending: pending, gate: gate)
+        }
+    }
+}
+
+// MARK: - Cross-conversation affordance
+
+/// Compact chip shown above the input when one or more OTHER conversations have a pending HITL.
+/// Tapping it navigates to that conversation so its banner becomes visible (D1/background case).
+/// [F2] Floating, top-centered affordance for HITL requests raised in OTHER (unfocused / background /
+/// remote / scheduled) conversations — otherwise invisible now that the legacy per-message banner is
+/// gone. A content-hugging capsule (distinct from the bottom HITL banner, which acts on the CURRENT
+/// conversation); tapping navigates to the oldest waiting conversation.
+struct CrossConversationInputChip: View {
+    @Environment(MainApplicationViewModel.self) private var vm
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        let selected = vm.selectedConversationID
+        let count = otherConversationCount(excluding: selected)
+        return Group {
+            if count > 0 {
+                Button {
+                    navigateToOtherConversation(excluding: selected)
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "bell.badge.fill")
+                            .font(.system(.caption2, weight: .semibold))
+                        Text("\(count) other conversation\(count == 1 ? "" : "s") awaiting your input")
+                            .font(.system(.caption, weight: .medium))
+                            .lineLimit(1)
+                        Image(systemName: "arrow.right")
+                            .font(.system(.caption2, weight: .semibold))
+                    }
+                    .foregroundColor(theme.warningColor)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .glassEffect(.regular, in: Capsule())
+                    .overlay(Capsule().stroke(theme.warningColor.opacity(0.22), lineWidth: 0.5))
+                    .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 5)
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .accessibilityLabel("\(count) other conversations awaiting your input. Activate to switch.")
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: count)
     }
 
     /// Number of distinct OTHER conversations (not the focused one) with a pending HITL.
@@ -96,53 +146,6 @@ struct InteractionBannerStack: View {
             conversationID: target.origin.conversationID,
             interface: target.origin.interface
         )
-    }
-
-    @ViewBuilder
-    private func banner(for pending: PendingHITL) -> some View {
-        switch pending.kind {
-        case .toolConfirmation(let confirmation):
-            PermissionInteractionBanner(pending: pending, confirmation: confirmation)
-        case .clarification(let clarification):
-            ClarificationInteractionBanner(pending: pending, clarification: clarification)
-        case .planReview(let planReview):
-            PlanReviewInteractionBanner(pending: pending, planReview: planReview)
-        case .gate(let gate):
-            GateInteractionBanner(pending: pending, gate: gate)
-        }
-    }
-}
-
-// MARK: - Cross-conversation affordance
-
-/// Compact chip shown above the input when one or more OTHER conversations have a pending HITL.
-/// Tapping it navigates to that conversation so its banner becomes visible (D1/background case).
-private struct OtherConversationsChip: View {
-    let count: Int
-    let action: () -> Void
-    @Environment(\.appTheme) private var theme
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "bell.badge.fill")
-                    .font(.system(.caption2, weight: .semibold))
-                Text("\(count) other conversation\(count == 1 ? "" : "s") awaiting your input")
-                    .font(.system(.caption, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 4)
-                Image(systemName: "arrow.right")
-                    .font(.system(.caption2, weight: .semibold))
-            }
-            .foregroundColor(theme.warningColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(count) other conversations awaiting your input. Activate to switch.")
     }
 }
 
@@ -178,7 +181,29 @@ private struct InteractionHeader: View {
                 .truncationMode(.tail)
 
             Spacer()
+
+            InteractionAgeLabel(since: pending.timestamp)
         }
+    }
+}
+
+/// [HITL ergonomics] Auto-updating "how long has this been waiting" label —
+/// parks are deadline-free by design, so surface the age instead. `.relative`
+/// keeps itself current without a timer.
+private struct InteractionAgeLabel: View {
+    let since: Date
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "clock")
+                .font(.system(size: 9, weight: .medium))
+            Text(since, style: .relative)
+                .font(.system(.caption2, weight: .medium))
+                .monospacedDigit()
+        }
+        .foregroundColor(theme.tertiaryText)
+        .accessibilityLabel("Waiting for \(Text(since, style: .relative))")
     }
 }
 
@@ -188,7 +213,6 @@ private struct PermissionInteractionBanner: View {
     let pending: PendingHITL
     let confirmation: PendingToolConfirmation
     @Environment(MainApplicationViewModel.self) private var vm
-    @Environment(BackendProfileService.self) private var profileService
     @Environment(\.appTheme) private var theme
 
     @State private var isProcessing: Bool = false
@@ -279,7 +303,7 @@ private struct PermissionInteractionBanner: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Header: source title + risk pill (A1)
+            // Header: source title + waiting age + risk pill (A1)
             HStack(spacing: 7) {
                 Image(systemName: hitlInterfaceIcon(pending.origin.interface))
                     .font(.system(.caption2, weight: .semibold))
@@ -291,6 +315,7 @@ private struct PermissionInteractionBanner: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 6)
+                InteractionAgeLabel(since: pending.timestamp)
                 riskPill
             }
 
@@ -396,11 +421,12 @@ private struct PermissionInteractionBanner: View {
                         decide(approved: false)
                     }
 
-                    // A4: "Always allow" → flip this tool to auto-approve in its profile. Hidden for
-                    // destructive tools (those always prompt) and when the profile is unknown.
-                    if confirmation.risk != .destructive, pending.origin.profileID != nil {
-                        HITLActionButton(label: "Always allow", icon: "checkmark.circle", style: .ghost, isDisabled: !editsValid) {
-                            allowAlways()
+                    // A4: "Allow for this chat" → trust this tool for the rest of THIS conversation
+                    // (persisted, survives restart) without touching the shared profile, so the choice
+                    // never leaks to other conversations. Hidden for destructive tools (always prompt).
+                    if confirmation.risk != .destructive {
+                        HITLActionButton(label: "Allow for this chat", icon: "checkmark.circle", style: .ghost, isDisabled: !editsValid) {
+                            allowForThisConversation()
                         }
                     }
 
@@ -423,18 +449,18 @@ private struct PermissionInteractionBanner: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
     }
 
-    /// A4: auto-approve this tool in its originating profile, then approve the current request.
-    private func allowAlways() {
-        guard !isProcessing, let profileID = pending.origin.profileID else { return }
+    /// A4: trust this tool for the rest of THIS conversation — persisted per-conversation (survives
+    /// restart) and scoped strictly to this chat, so it never leaks to other conversations or the
+    /// shared profile. Then approve the current request.
+    private func allowForThisConversation() {
+        guard !isProcessing else { return }
         let tool = confirmation.toolName
         let conversationID = pending.origin.conversationID
         let edited = buildEditedArguments()   // capture @State on MainActor before hopping off it
-        profileService.setToolAutoApprove(profileID: profileID, toolName: tool)
-        bannerLogger.info("[HITL/UI] '\(tool)' ALWAYS-ALLOW by user — persisted to profile + session allowlist [conv \(conversationID)]")
+        bannerLogger.info("[HITL/UI] '\(tool)' ALLOW-FOR-CHAT by user — persisted to this conversation's allowlist [conv \(conversationID)]")
         withAnimation { isProcessing = true }
-        // [HITL/Bug2] The persisted flip only affects the NEXT run (the live tool set was resolved at
-        // stream start). Register a session grant for THIS run, chained BEFORE the approval resume so the
-        // tool's next call in the same run observes it — ordered by construction, not by Task timing.
+        // Register the per-conversation grant BEFORE the approval resume so the tool's next call in this
+        // run already observes it — ordered by construction, not by Task timing.
         Task { @MainActor in
             await SessionToolApprovals.shared.allow(toolName: tool, conversationID: conversationID)
             vm.submitToolApproval(operationID: pending.id, approved: true, editedArguments: edited)

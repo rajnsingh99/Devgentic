@@ -18,6 +18,8 @@ struct ConversationRowView: View {
 
     // Local state for hover effect
     @State private var isHovering = false
+    // Drives the amber "needs input" pulse on the accent rail.
+    @State private var needsInputPulse = false
     @Environment(\.appTheme) private var theme
 
     // Batch selection properties
@@ -42,7 +44,7 @@ struct ConversationRowView: View {
                 // Modern renaming field that blends in
                 TextField("", text: $editableName, prompt: Text("Name this chat").foregroundColor(.secondary.opacity(0.7)))
                     .textFieldStyle(.plain)
-                    .font(theme.fontSubheadline.weight(.medium))
+                    .font(theme.fontFootnote.weight(.medium))
                     .focused(isRenameFieldFocused)
                     .onSubmit(onCommitRename)
                     .padding(.vertical, 8)
@@ -84,49 +86,45 @@ struct ConversationRowView: View {
     @ViewBuilder
     private var standardContentView: some View {
         HStack(alignment: .top, spacing: 0) {
-            // Accent gradient line on left for selected state
-            if isSelected {
+            // Left rail = STATE (origin now lives on the dot below). Amber-pulsing when the run needs
+            // input — shown on ANY row so an unfocused waiting conversation still surfaces; accent when
+            // selected or hovered; absent otherwise for a clean, quiet list.
+            if needsInput || isSelected || isHovering {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(
-                        LinearGradient(
-                            colors: [theme.accentColor, theme.accentColor.opacity(0.4)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
+                        LinearGradient(colors: railGradientColors, startPoint: .top, endPoint: .bottom)
                     )
                     .frame(width: 3)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, (isSelected || needsInput) ? 2 : 5)
                     .padding(.trailing, 4)
-                    .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
+                    .shadow(
+                        color: needsInput
+                            ? theme.warningColor.opacity(needsInputPulse ? 0.85 : 0.2)
+                            : (isSelected ? theme.accentColor.opacity(0.4) : .clear),
+                        radius: needsInput ? (needsInputPulse ? 7 : 2) : (isSelected ? 4 : 0)
+                    )
+                    .help(needsInput ? "Needs your input" : "")
+                    .accessibilityLabel(needsInput ? "Needs your input" : "")
+                    .accessibilityHidden(!needsInput)
             } else {
-                Spacer()
-                    .frame(width: 7)
+                Spacer().frame(width: 7)
             }
 
             // Content Container
             VStack(alignment: .leading, spacing: 4) {
                 // Title row with timestamp
                 HStack(spacing: 5) {
-                    // Backend colored dot
-                    if let backendType = conversation.backendType, backendType != .none {
+                    // Backend origin dot (theme-aware palette) — decoupled from the state rail.
+                    if hasBackendDot {
                         Circle()
-                            .fill(badgeColor(for: backendType))
+                            .fill(theme.backendColor(for: conversation.backendType ?? .none))
                             .frame(width: 6, height: 6)
                     }
 
                     Text(conversation.displayTitle)
-                        .font(theme.fontSubheadline.weight(.medium))
+                        .font(theme.fontFootnote.weight(.medium))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
-
-                    // [F2] Pending HITL indicator — this conversation is waiting on the user.
-                    if needsInput {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(theme.warningColor)
-                            .help("Needs your input")
-                            .accessibilityLabel("Needs your input")
-                    }
 
                     Spacer()
 
@@ -145,7 +143,17 @@ struct ConversationRowView: View {
                     .font(.system(.caption))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
-                    .padding(.leading, (conversation.backendType != nil && conversation.backendType != .none) ? 11 : 0)
+                    .padding(.leading, hasBackendDot ? 11 : 0)
+            }
+        }
+        // Drive the amber "needs input" pulse from a stable parent so it tracks the state reliably.
+        .onChange(of: needsInput, initial: true) { _, active in
+            if active {
+                withAnimation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true)) {
+                    needsInputPulse = true
+                }
+            } else {
+                withAnimation(.easeInOut(duration: 0.2)) { needsInputPulse = false }
             }
         }
     }
@@ -175,7 +183,7 @@ struct ConversationRowView: View {
     @ViewBuilder
     private var backgroundView: some View {
         if isSelected {
-            // Accent-tinted selected state
+            // Selected state — neutral accent tint (origin is carried by the dot, not the selection).
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.accentColor.opacity(0.08))
                 .overlay(
@@ -193,13 +201,23 @@ struct ConversationRowView: View {
     }
 
     // MARK: - Helpers
-    private func badgeColor(for backendType: BackendType) -> Color {
-        switch backendType {
-        case .agent: return .purple
-        case .ollama: return .orange
-        case .remote: return .blue
-        case .none: return .secondary
+
+    /// Whether to show the backend origin dot (hidden for conversations with no backend).
+    private var hasBackendDot: Bool {
+        if let backendType = conversation.backendType { return backendType != .none }
+        return false
+    }
+
+    /// Left-rail gradient = STATE: amber when the run needs input (highest priority), else the
+    /// selection accent — bright when selected, dim on hover.
+    private var railGradientColors: [Color] {
+        if needsInput {
+            return [theme.warningColor, theme.warningColor.opacity(0.55)]
         }
+        if isSelected {
+            return [theme.accentColor, theme.accentColor.opacity(0.45)]
+        }
+        return [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.15)]   // hover
     }
 }
 

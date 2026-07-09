@@ -257,6 +257,10 @@ extension TraceStatus {
         if thrownError { return .error }
         switch terminalOutcome {
         case .completed: return .completed
+        // Degraded success: the stream finished cleanly with a best-effort answer. The
+        // early-stop itself is already on the span as a classified agent-error event
+        // (circuit-breaker / exhaustion), so the trace-level status stays `completed`.
+        case .completedWithWarnings: return .completed
         case .failed:    return .failed
         case .cancelled: return .cancelled
         case .none:      return .completed

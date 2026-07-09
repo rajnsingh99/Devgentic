@@ -69,7 +69,7 @@ struct GeneralSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 32) {
+            VStack(spacing: 24) {
                 
                 // 1. Developer Mode Section
                 SettingsCard(title: "Developer", icon: "hammer.fill", theme: theme) {
@@ -84,7 +84,7 @@ struct GeneralSettingsView: View {
                             .tint(theme.accentColor)
                     }
 
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     SettingsRow(
                         title: "Store Diagnostic Traces",
@@ -97,7 +97,7 @@ struct GeneralSettingsView: View {
                             .tint(theme.accentColor)
                     }
 
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     SettingsRow(
                         title: "Diagnostics Storage",
@@ -105,18 +105,36 @@ struct GeneralSettingsView: View {
                         theme: theme
                     ) {
                         Text(diagnosticsStorageText)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .foregroundColor(theme.accentColor)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(theme.accentColor.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(theme.accentColor.opacity(0.2), lineWidth: 0.5)
+                            )
                     }
 
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     SettingsRow(
                         title: "Open Diagnostic Bundle…",
                         description: "Inspect a diagnostic bundle (.zip) exported from another Devgentic install — view its trace, spans, and events. Read-only.",
                         theme: theme
                     ) {
-                        Button("Open…") { showBundleViewer = true }
+                        Button {
+                            showBundleViewer = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder.badge.plus")
+                                Text("Open…")
+                            }
+                            .font(.system(size: 11, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
                 }
                 .task {
@@ -144,7 +162,7 @@ struct GeneralSettingsView: View {
                             .tint(theme.accentColor)
                     }
 
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     SettingsRow(
                         title: "Agent Execution View",
@@ -156,12 +174,14 @@ struct GeneralSettingsView: View {
                                 Text(variant.rawValue).tag(variant)
                             }
                         }
+                        .pickerStyle(.menu)
                         .labelsHidden()
+                        .tint(theme.primaryText)
                         .fixedSize()
                     }
                 }
 
-                // 2. Speech Recognition Section
+                // 3. Speech Recognition Section
                 SettingsCard(title: "Speech Recognition", icon: "waveform", theme: theme) {
 
                     // Model Picker
@@ -184,7 +204,9 @@ struct GeneralSettingsView: View {
                                     .tag(model.id)
                                 }
                             }
+                            .pickerStyle(.menu)
                             .labelsHidden()
+                            .tint(theme.primaryText)
                             .fixedSize()
                             .onAppear { if previousModelId == nil { previousModelId = selectedModel } }
                             .onChange(of: selectedModel) { _, newModel in
@@ -223,7 +245,7 @@ struct GeneralSettingsView: View {
                         }
                     }
 
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     // Language Picker
                     SettingsRow(
@@ -237,8 +259,10 @@ struct GeneralSettingsView: View {
                                 Text(lang.display).tag(lang.code)
                             }
                         }
+                        .pickerStyle(.menu)
                         .labelsHidden()
                         .disabled(isEnglishOnlyModel)
+                        .tint(theme.primaryText)
                         .fixedSize()
                         .onChange(of: selectedLanguage) { _, newLanguage in
                             NotificationCenter.default.post(
@@ -248,7 +272,7 @@ struct GeneralSettingsView: View {
                         }
                     }
 
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     // VAD Auto-Stop Toggle
                     SettingsRow(
@@ -372,24 +396,33 @@ struct SettingsCard<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(.caption, weight: .medium))
-                    .foregroundStyle(theme.secondaryText)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(theme.accentColor)
                 Text(title)
-                    .font(.system(.caption, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundColor(theme.secondaryText)
-                    .tracking(0.5)
+                    .tracking(0.8)
                     .textCase(.uppercase)
             }
+            .padding(.leading, 4)
 
             VStack(spacing: 0) {
                 content
-                    .padding(16)
             }
-            .background(theme.surfaceOverlay)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(theme.secondaryBackground.opacity(0.65))
+                    .background(theme.surfaceOverlay.opacity(0.35))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(theme.dividerColor.opacity(0.35), lineWidth: 1)
+            )
+            .shadow(color: theme.shadowColor.opacity(0.05), radius: 6, x: 0, y: 3)
         }
     }
 }
@@ -399,20 +432,21 @@ struct SettingsRow<Control: View>: View {
     let description: LocalizedStringKey
     var isWarning: Bool = false
     let theme: any Theme
-    @ScaledMetric private var rowPadding: CGFloat = 16
     @ViewBuilder let control: Control
 
+    @State private var isHovered = false
+
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
-                    .font(theme.fontBody.weight(.medium))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(theme.primaryText)
 
                 Text(description)
-                    .font(.system(.caption))
+                    .font(.system(size: 11))
                     .foregroundColor(isWarning ? theme.warningColor : theme.secondaryText)
-                    .lineSpacing(2)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -424,6 +458,14 @@ struct SettingsRow<Control: View>: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(rowPadding)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(isHovered ? theme.accentColor.opacity(0.04) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
     }
 }

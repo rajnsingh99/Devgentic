@@ -60,6 +60,19 @@ actor ExecutionSuspensionService {
 
     private init() {}
 
+    // MARK: - Queries
+
+    /// Whether ANY operation (approval / clarification / plan review / gate) is
+    /// currently parked. Used by MLXService's idle timer to distinguish
+    /// "parked mid-run" from "genuinely idle" in its unload log — behavior is
+    /// identical either way (unload + lazy reload on resume).
+    func hasPendingSuspensions() -> Bool {
+        !activeContinuations.isEmpty
+            || !clarificationContinuations.isEmpty
+            || !planReviewContinuations.isEmpty
+            || !gateContinuations.isEmpty
+    }
+
     // MARK: - Permission Suspension (Tool Confirmation)
 
     /// Pauses execution for the specific operation until `resume` is called or timeout occurs.

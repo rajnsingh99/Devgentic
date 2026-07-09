@@ -42,7 +42,7 @@ struct CodeBlockCardView: View {
                         .font(theme.fontBody.weight(.semibold))
                         .foregroundColor(theme.primaryText)
 
-                    Text("\(lineCount) lines • Tap to expand")
+                    Text("\(lineCount) lines • Click to open")
                         .font(.caption)
                         .foregroundColor(theme.secondaryText)
                 }
@@ -59,7 +59,7 @@ struct CodeBlockCardView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.surfaceOverlayStrong, lineWidth: 1))
 
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                Image(systemName: "arrow.up.forward.app")
                     .font(.caption)
                     .foregroundColor(theme.secondaryText.opacity(0.5))
             }

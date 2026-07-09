@@ -51,7 +51,7 @@ struct ProfileCapabilityFilter {
         guard profileType == .agent else { return .none }
 
         switch provider {
-        case .openAI, .google, .anthropic:
+        case .openAI, .google, .anthropic, .openRouter, .openAICompatible:
             return .parallelActions
         case .ollama, .mlx:
             return .singleAction

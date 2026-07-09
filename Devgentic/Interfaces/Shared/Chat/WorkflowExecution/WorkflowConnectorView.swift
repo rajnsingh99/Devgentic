@@ -18,10 +18,10 @@ struct WorkflowConnectorView: View {
     let upstreamStatus: WorkflowRunDisplayData.NodeDisplayData.NodeStatus
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dashPhase: CGFloat = 0
 
-    private var lineColor: Color {
-        upstreamStatus.color
-    }
+    private var lineColor: Color { upstreamStatus.color(theme) }
 
     private var isDashed: Bool {
         switch upstreamStatus {
@@ -58,7 +58,8 @@ struct WorkflowConnectorView: View {
                         style: StrokeStyle(
                             lineWidth: 1.5,
                             lineCap: .round,
-                            dash: isDashed ? [3, 4] : []
+                            dash: isDashed ? [3, 4] : [],
+                            dashPhase: dashPhase
                         )
                     )
                 )
@@ -69,6 +70,15 @@ struct WorkflowConnectorView: View {
         .frame(width: connectorWidth, height: 22)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Connection: \(upstreamStatus.label)")
+        // Marching-ants flow toward the target while the upstream node runs (one dash period
+        // = 3+4 = 7, so animating to -7 loops seamlessly). Honours Reduce Motion.
+        .onChange(of: upstreamStatus == .running, initial: true) { _, running in
+            dashPhase = 0
+            guard running, !reduceMotion else { return }
+            withAnimation(.linear(duration: 0.5).repeatForever(autoreverses: false)) {
+                dashPhase = -7
+            }
+        }
     }
 
     private var connectorWidth: CGFloat { 36 }

@@ -27,7 +27,7 @@ enum WorkflowStreamCollector {
 
     static func nodeCompletedEvents(from events: [AgentStreamEvent]) -> [(nodeID: UUID, profileName: String, summary: String)] {
         events.compactMap { event in
-            if case .workflowNodeCompleted(let nodeID, let name, let summary) = event {
+            if case .workflowNodeCompleted(let nodeID, let name, let summary, _) = event {
                 return (nodeID, name, summary)
             }
             return nil

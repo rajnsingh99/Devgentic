@@ -91,7 +91,9 @@ struct MarkdownStructuredGenerator: CognitiveGenerator {
         let pipeline = CognitiveParsePipeline(
             expectedDialect: .reactMarkdown,
             modelId: model.modelName,
-            iteration: iteration
+            iteration: iteration,
+            knownToolNames: Set(context.availableTools.map(\.name)),
+            registeredTools: context.availableTools
         )
         return pipeline.parse(raw: responseText)
     }

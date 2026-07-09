@@ -182,6 +182,8 @@ struct AgentSkillsSection: View {
                     .background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
         .fileImporter(isPresented: $showingSkillsFolderImporter, allowedContentTypes: [.folder], allowsMultipleSelection: true) { result in
             handleSkillFolderSelection(result)

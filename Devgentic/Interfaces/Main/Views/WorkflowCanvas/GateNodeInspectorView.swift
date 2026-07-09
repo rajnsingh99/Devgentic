@@ -14,7 +14,7 @@ import SwiftUI
 
 struct GateNodeInspectorView: View {
     @Binding var node: WorkflowNode
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     @State private var prompt: String = "Approve this workflow step?"
@@ -39,7 +39,14 @@ struct GateNodeInspectorView: View {
                 .padding(24)
             }
         }
-        .frame(width: 540, height: 560)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 560,
+            idealHeight: 700,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear { loadFromNode() }
     }
@@ -72,7 +79,7 @@ struct GateNodeInspectorView: View {
             }
             .buttonStyle(.plain)
             .help("How gate nodes work")
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { closeInspector() }
                 .font(theme.fontCaption)
                 .buttonStyle(.plain)
                 .foregroundColor(theme.secondaryText)
@@ -205,6 +212,8 @@ struct GateNodeInspectorView: View {
                     .font(.caption)
                     .foregroundColor(theme.secondaryText)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -263,6 +272,8 @@ struct GateNodeInspectorView: View {
                     .font(.caption)
                     .foregroundColor(theme.secondaryText)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -300,6 +311,8 @@ struct GateNodeInspectorView: View {
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -328,6 +341,6 @@ struct GateNodeInspectorView: View {
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
         node.nodeConfig?.joinMode = joinMode
 
-        dismiss()
+        closeInspector()
     }
 }

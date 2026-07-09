@@ -167,7 +167,12 @@ struct LLMProviderConfig: Sendable {
     /// Currently used by Ollama (maps to `think: true` on /api/chat).
     let thinkingEnabled: Bool
 
-    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0, options: [String: JSONValue]? = nil, rateLimitKey: String = "default", thinkingEnabled: Bool = false) {
+    /// Additional HTTP headers applied to every request (e.g. OpenRouter's
+    /// optional `X-Title` attribution). Never carries auth — the API key stays
+    /// in `apiKey` so redaction and key-rotation paths see one field.
+    let extraHeaders: [String: String]
+
+    init(apiKey: String? = nil, baseURL: URL, modelName: String, timeout: TimeInterval = 300.0, options: [String: JSONValue]? = nil, rateLimitKey: String = "default", thinkingEnabled: Bool = false, extraHeaders: [String: String] = [:]) {
         self.apiKey = apiKey
         self.baseURL = baseURL
         self.modelName = modelName
@@ -175,6 +180,7 @@ struct LLMProviderConfig: Sendable {
         self.options = options
         self.rateLimitKey = rateLimitKey
         self.thinkingEnabled = thinkingEnabled
+        self.extraHeaders = extraHeaders
     }
 }
 
@@ -232,6 +238,11 @@ enum LLMProviderError: LocalizedError {
         // 2. Specific Interception: OpenAI 429 Quota Error
         if status == 429 && lowerBody.contains("openai") {
             return "⚠️ OpenAI API Quota Exceeded. Please check your billing details and account balance at https://platform.openai.com."
+        }
+
+        // 2b. Payment required — OpenRouter signals an out-of-credits account with 402.
+        if status == 402 {
+            return "⚠️ Provider account is out of credits (HTTP 402). Add credits to your account (OpenRouter: https://openrouter.ai/credits) and try again."
         }
         
         // 3. General JSON Error Extraction (prevents dumping huge raw JSON strings into the UI)

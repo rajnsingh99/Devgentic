@@ -175,7 +175,6 @@ struct AgentBubbleContentView: View {
         case .error(let title, let details, let category, let suggestion):
             VStack(alignment: .leading, spacing: 8) {
                 ErrorMessageView(title: title, details: details, category: category, suggestion: suggestion)
-                    .cardStyle()
 
                 // P1: Retry button for failed agent responses
                 RetryMessageButton {
@@ -193,7 +192,6 @@ struct AgentBubbleContentView: View {
                     .accessibilityLabel("Generated image")
             } else {
                 ErrorMessageView(title: "Image Not Available", details: "The image data could not be loaded.")
-                    .cardStyle()
             }
 
         case .mediaArtifact(let artifact):
@@ -354,13 +352,19 @@ struct InterruptedRunChip: View {
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(theme.warningColor.opacity(0.08))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [theme.warningColor.opacity(0.12), theme.warningColor.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(theme.warningColor.opacity(0.22), lineWidth: 0.5)
         )
         .accessibilityElement(children: .combine)
@@ -403,13 +407,19 @@ struct TerminalOutcomeChip: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(tint.opacity(0.08))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [tint.opacity(0.12), tint.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(tint.opacity(0.22), lineWidth: 0.5)
         )
         .accessibilityElement(children: .combine)
@@ -418,7 +428,7 @@ struct TerminalOutcomeChip: View {
 
     private var icon: String {
         switch outcome {
-        case .failed:    return "exclamationmark.triangle.fill"
+        case .failed, .completedWithWarnings: return "exclamationmark.triangle.fill"
         case .cancelled: return "stop.circle"
         case .completed: return "checkmark.circle.fill"
         }
@@ -426,7 +436,7 @@ struct TerminalOutcomeChip: View {
 
     private var tint: Color {
         switch outcome {
-        case .failed:    return .orange
+        case .failed, .completedWithWarnings: return .orange
         case .cancelled: return .gray
         case .completed: return .green
         }
@@ -434,8 +444,15 @@ struct TerminalOutcomeChip: View {
 
     private var headline: String {
         switch outcome {
-        case .failed:    return "Response may be incomplete — the agent didn't finish cleanly."
-        case .cancelled: return "Run stopped by user."
+        // Degraded success reads the same as the old failed-with-content UX — the answer
+        // shipped, but the run stopped early (circuit breaker / iteration budget).
+        case .failed, .completedWithWarnings:
+            return "Response may be incomplete — the agent didn't finish cleanly."
+        // Neutral wording: `.cancelled` covers both an explicit Stop and a system
+        // refusal to resume an interrupted run (unresumable profile / provider drift
+        // / etc.). The reason line below states which — the headline must not assert
+        // "by user" over a reason that says otherwise.
+        case .cancelled: return "Run stopped."
         case .completed: return "Completed."
         }
     }

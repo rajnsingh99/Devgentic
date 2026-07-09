@@ -13,7 +13,7 @@ import SwiftUI
 
 struct ConditionNodeInspectorView: View {
     @Binding var node: WorkflowNode
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     // MARK: - State
@@ -48,7 +48,14 @@ struct ConditionNodeInspectorView: View {
                 .padding(24)
             }
         }
-        .frame(width: 580, height: 680)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 680,
+            idealHeight: 800,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear {
             loadFromNode()
@@ -84,7 +91,7 @@ struct ConditionNodeInspectorView: View {
             }
             .buttonStyle(.plain)
             .help("How condition routing works")
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { closeInspector() }
                 .font(theme.fontCaption)
                 .buttonStyle(.plain)
                 .foregroundColor(theme.secondaryText)
@@ -217,6 +224,8 @@ struct ConditionNodeInspectorView: View {
                     .toggleStyle(.switch)
                     .controlSize(.small)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -263,6 +272,8 @@ struct ConditionNodeInspectorView: View {
                     .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -430,6 +441,8 @@ struct ConditionNodeInspectorView: View {
                 .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .frame(maxWidth: 120)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -528,6 +541,8 @@ struct ConditionNodeInspectorView: View {
                     guideTip("The classifier uses opaque tokens internally to prevent confusion with upstream content. It routes to the same labels defined in your pattern rules above.")
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -616,6 +631,6 @@ struct ConditionNodeInspectorView: View {
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
         node.nodeConfig?.joinMode = joinMode
 
-        dismiss()
+        closeInspector()
     }
 }

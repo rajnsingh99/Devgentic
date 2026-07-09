@@ -210,7 +210,7 @@ struct InputToolbarView: View {
             .padding(7)
             .background(
                 Circle()
-                    .fill(isHovering ? theme.secondaryText.opacity(0.25) : theme.secondaryText.opacity(0.18))
+                    .fill(isHovering ? theme.surfaceOverlay : Color.clear)
             )
     }
 }

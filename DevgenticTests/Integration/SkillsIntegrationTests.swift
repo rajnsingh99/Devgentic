@@ -136,6 +136,7 @@ final class SkillPromptInjectionTests: XCTestCase {
                 osVersion: "macOS 15.4",
                 shellType: "zsh",
                 userName: "testuser",
+                homeDirectory: "/Users/testuser",
                 currentDate: "2026-04-10"
             ),
             longTermMemory: StaticGroundingMemory(ragContext: ""),
@@ -178,6 +179,7 @@ final class SkillPromptInjectionTests: XCTestCase {
                 osVersion: "macOS 15.4",
                 shellType: "zsh",
                 userName: "testuser",
+                homeDirectory: "/Users/testuser",
                 currentDate: "2026-04-10"
             ),
             longTermMemory: StaticGroundingMemory(ragContext: ""),

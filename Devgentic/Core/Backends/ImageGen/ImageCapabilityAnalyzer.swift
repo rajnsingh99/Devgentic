@@ -67,8 +67,10 @@ enum ImageCapabilityAnalyzer {
             return analyzeMLX(modelName: modelName)
         case .ollama:
             return analyzeOllama(modelName: modelName)
-        case .anthropic:
-            // Anthropic does not currently support image generation
+        case .anthropic, .openRouter, .openAICompatible:
+            // Anthropic has no image generation API; OpenRouter and custom
+            // OpenAI-compatible endpoints are wired for text generation only in
+            // Devgentic, so all report no image modality support.
             return ImageModalitySupport(
                 supportsTextToImage: false,
                 supportsImageToImage: false,

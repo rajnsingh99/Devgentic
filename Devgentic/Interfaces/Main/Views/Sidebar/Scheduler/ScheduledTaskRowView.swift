@@ -29,7 +29,7 @@ struct ScheduledTaskRowView: View {
                     .frame(width: 8, height: 8)
 
                 Text(task.displayName)
-                    .font(theme.fontSubheadline.weight(.medium))
+                    .font(theme.fontFootnote.weight(.medium))
                     .foregroundColor(task.isEnabled ? theme.primaryText : theme.secondaryText)
                     .lineLimit(1)
 
@@ -91,7 +91,7 @@ struct ScheduledTaskRowView: View {
             // Last run summary
             if let summary = task.lastRunSummary, !summary.isEmpty {
                 Text(summary)
-                    .font(.system(.caption2))
+                    .font(.system(.caption))
                     .foregroundColor(theme.secondaryText.opacity(0.5))
                     .lineLimit(1)
             }

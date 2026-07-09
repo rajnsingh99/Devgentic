@@ -263,6 +263,8 @@ struct ThemePreviewCard: View {
     let currentTheme: any Theme
     let action: () -> Void
 
+    @State private var isHovered = false
+
     var body: some View {
         Button(action: action) {
             VStack(spacing: 12) {
@@ -292,11 +294,11 @@ struct ThemePreviewCard: View {
 
                                 RoundedRectangle(cornerRadius: 3)
                                     .fill(previewTheme.primaryText.opacity(0.2))
-                                    .frame(maxWidth: .infinity, maxHeight: 5)
+                                    .frame(width: 50, height: 5)
 
                                 RoundedRectangle(cornerRadius: 3)
                                     .fill(previewTheme.primaryText.opacity(0.1))
-                                    .frame(maxWidth: .infinity, maxHeight: 5)
+                                    .frame(width: 60, height: 5)
                             }
                         }
                     }
@@ -306,9 +308,15 @@ struct ThemePreviewCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(isSelected ? currentTheme.accentColor : currentTheme.surfaceOverlayStrong, lineWidth: isSelected ? 3 : 1)
+                        .stroke(isSelected ? currentTheme.accentColor : (isHovered ? currentTheme.accentColor.opacity(0.4) : currentTheme.surfaceOverlayStrong), lineWidth: isSelected ? 3 : 1)
                 )
-                .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
+                .shadow(color: isHovered ? currentTheme.accentColor.opacity(0.15) : Color.black.opacity(0.1), radius: isHovered ? 8 : 4, y: isHovered ? 4 : 2)
+                .scaleEffect(isHovered ? 1.02 : 1.0)
+                .onHover { hovering in
+                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.7)) {
+                        isHovered = hovering
+                    }
+                }
 
                 // Title
                 HStack {
@@ -339,6 +347,8 @@ struct CodeViewerPreviewCard: View {
     let isSelected: Bool
     let appTheme: any Theme
     let action: () -> Void
+
+    @State private var isHovered = false
 
     var previewTheme: any Theme {
         switch override {
@@ -386,9 +396,15 @@ struct CodeViewerPreviewCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(isSelected ? appTheme.accentColor : appTheme.surfaceOverlayStrong, lineWidth: isSelected ? 3 : 1)
+                        .stroke(isSelected ? appTheme.accentColor : (isHovered ? appTheme.accentColor.opacity(0.4) : appTheme.surfaceOverlayStrong), lineWidth: isSelected ? 3 : 1)
                 )
-                .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
+                .shadow(color: isHovered ? appTheme.accentColor.opacity(0.15) : Color.black.opacity(0.1), radius: isHovered ? 8 : 4, y: isHovered ? 4 : 2)
+                .scaleEffect(isHovered ? 1.02 : 1.0)
+                .onHover { hovering in
+                    withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.7)) {
+                        isHovered = hovering
+                    }
+                }
 
                 // Title
                 HStack {
@@ -420,6 +436,8 @@ struct AccentColorCircle: View {
     let appTheme: any Theme
     let action: () -> Void
 
+    @State private var isHovered = false
+
     var body: some View {
         Button(action: action) {
             VStack(spacing: 10) {
@@ -444,11 +462,17 @@ struct AccentColorCircle: View {
                             .frame(width: 40, height: 40)
                     } else {
                         Circle()
-                            .strokeBorder(appTheme.surfaceOverlayStrong, lineWidth: 1)
+                            .strokeBorder(isHovered ? appTheme.accentColor.opacity(0.5) : appTheme.surfaceOverlayStrong, lineWidth: isHovered ? 2 : 1)
                             .frame(width: 40, height: 40)
                     }
                 }
                 .contentShape(Circle())
+                .scaleEffect(isHovered ? 1.12 : 1.0)
+                .onHover { hovering in
+                    withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.6)) {
+                        isHovered = hovering
+                    }
+                }
                 
                 Text(accent.displayName)
                     .font(.system(.caption, weight: isSelected ? .semibold : .regular))

@@ -23,7 +23,10 @@ actor ReActAgentExecutor: Executor {
     // MARK: - Properties
     
     nonisolated let executorLabel: String = "ReAct"
-    nonisolated private let maxIterations: Int
+    // Internal (not private) so ExecutorFactoryTests can assert the configured
+    // limit is actually threaded — the .code fallthrough bug was invisible
+    // precisely because this value couldn't be observed from outside.
+    nonisolated let maxIterations: Int
     
     // MARK: - Initialization
     
@@ -99,8 +102,13 @@ actor ReActAgentExecutor: Executor {
                     // caps) now lives only inside the resolver's compatibility shim.
                     var circuitBreaker = CognitiveCircuitBreaker(
                         maxConsecutiveToolFailures: input.resiliencePolicy.loop.maxConsecutiveToolFailures,
-                        maxRepetitiveActions: input.resiliencePolicy.loop.maxRepetitiveActions
+                        maxRepetitiveActions: input.resiliencePolicy.loop.maxRepetitiveActions,
+                        maxConsecutiveDenials: input.resiliencePolicy.loop.maxConsecutiveDenials
                     )
+                    // [Loop Safety] Per-run memory of human interactions: replays identical
+                    // clarification answers and auto-denies identical declined requests, so
+                    // the user is never asked the same thing twice in one run.
+                    let interactionMemory = RunInteractionMemory()
                     var retryStrategy = LLMRetryStrategy(
                         maxConsecutiveParseFailures: input.resiliencePolicy.cognitive.maxParseFailures,
                         backoffStrategy: input.resiliencePolicy.transport.backoffStrategy,
@@ -203,7 +211,11 @@ actor ReActAgentExecutor: Executor {
                         }
                         
                         await GlobalRateLimiter.shared.wait(forKey: input.rateLimitKey, category: input.rateLimitCategory)
-                        
+                        // The limiter swallows sleep interruption internally (its wait is
+                        // non-throwing); surface a Stop pressed during a long cloud debt
+                        // wait here instead of firing another generation.
+                        try Task.checkCancellation()
+
                         let iterationSpan = executionTrace.newSpan()
                         let iterationMetadata: [String: String] = ["iteration": "\(currentIteration)"]
                         
@@ -218,6 +230,7 @@ actor ReActAgentExecutor: Executor {
                             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                             shellType: "Zsh (Non-Interactive Mode)",
                             userName: NSUserName(),
+                            homeDirectory: NSHomeDirectory(),
                             currentDate: Date().formatted(date: .numeric, time: .shortened)
                         )
 
@@ -319,8 +332,27 @@ actor ReActAgentExecutor: Executor {
                                     memoryStrategy.recordReasoning(stepId: step.stepId, text: reasoning)
                                 }
                                 for obs in step.observations {
-                                    executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
+                                    executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess, failureCategory: obs.failureCategory)
                                     memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
+                                }
+
+                                // [Loop Safety] Re-prime the repetition bookkeeping + interaction
+                                // memory from the replayed iteration so prevention and the
+                                // fingerprint streak survive the park → resume cycle (the breaker
+                                // and memory are per-run locals that would otherwise start at zero).
+                                circuitBreaker.primeReplayedIteration(step.observations)
+                                for obs in step.observations {
+                                    if obs.toolName == "ask_user" {
+                                        // Ask observations carry the question in `params` and the
+                                        // response in `output` ("User Response: …").
+                                        let prefix = "User Response: "
+                                        let response: String? = obs.isSuccess
+                                            ? (obs.output.hasPrefix(prefix) ? String(obs.output.dropFirst(prefix.count)) : obs.output)
+                                            : nil
+                                        await interactionMemory.recordAnswer(question: obs.params, response: response)
+                                    } else if obs.failureCategory == .userDenied {
+                                        await interactionMemory.recordDenial(toolName: obs.toolName, params: obs.params)
+                                    }
                                 }
                             }
 
@@ -338,6 +370,7 @@ actor ReActAgentExecutor: Executor {
                                     currentIteration: recon.resumeIteration,
                                     iterationSpan: iterationSpan,
                                     toolMediator: toolMediator,
+                                    interactionMemory: interactionMemory,
                                     continuation: continuation,
                                     onTraceUpdate: onTraceUpdate
                                 )
@@ -353,7 +386,7 @@ actor ReActAgentExecutor: Executor {
                                 }
                                 for obs in parkedObs {
                                     if obs.isSuccess && readingToolNames.contains(obs.toolName) { readingToolSuccessCount += 1 }
-                                    executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess)
+                                    executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: obs.isSuccess, failureCategory: obs.failureCategory)
                                     memoryStrategy.recordObservation(stepId: obs.stepId, toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, result: obs.result, artifacts: obs.artifacts)
                                 }
                             }
@@ -482,8 +515,12 @@ actor ReActAgentExecutor: Executor {
                                 // `seconds` is sanitized upstream (finite, ≥0, ≤1h) —
                                 // the guard is cheap insurance against the trapping
                                 // UInt64(negative/NaN) conversion.
+                                // `try` (not `try?`): Retry-After can be up to an hour, and a
+                                // swallowed CancellationError here made Stop fire a fresh
+                                // provider request instead of aborting — the throw propagates
+                                // to the CancellationError catch (clean .cancelled exit).
                                 if seconds > 0, seconds.isFinite {
-                                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                                 }
                                 currentIteration -= 1
                                 continue cognitiveLoop
@@ -642,6 +679,20 @@ actor ReActAgentExecutor: Executor {
                             break
                         case .completed(let finalThought):
                             executionSummary.finalAgentThought = finalThought
+                            // Terminal prose exit (genuineCompletion): there are no tool
+                            // calls, so `executeToolCalls` — which emits the per-iteration
+                            // reasoning row — never runs. Without this the final iteration's
+                            // span is empty in the Report Inspector and the event-derived
+                            // iteration count misses it.
+                            onTraceUpdate(AgentTraceLog(
+                                traceID: iterationSpan.traceID,
+                                spanID: iterationSpan.spanID,
+                                parentSpanID: iterationSpan.parentSpanID,
+                                stepNumber: currentIteration,
+                                state: .thinking(.reasoning),
+                                content: "Model answered directly (no tool calls).",
+                                metadata: ["iteration": "\(currentIteration)"]
+                            ))
                             break cognitiveLoop
                         case .suspectedFormatFailure(let originalReason, _):
                             // Identical-output detection. If the model emits byte-identical
@@ -750,6 +801,7 @@ actor ReActAgentExecutor: Executor {
                             currentIteration: currentIteration,
                             iterationSpan: iterationSpan,
                             toolMediator: toolMediator,
+                            interactionMemory: interactionMemory,
                             continuation: continuation,
                             onTraceUpdate: onTraceUpdate
                         )
@@ -783,13 +835,12 @@ actor ReActAgentExecutor: Executor {
                         // flows the synthesizer treats it as the agent's conclusion and
                         // formats accordingly. Either way: the answer survives.
                         if let terminal = observations.first(where: { $0.isTerminalSignal && $0.terminalKind == .finalAnswer }) {
-                            executionSummary.record(
-                                toolCallId: terminal.toolCallId,
-                                toolName: terminal.toolName,
-                                params: terminal.params,
-                                output: terminal.output,
-                                isSuccess: true
-                            )
+                            // final_answer is a control signal, NOT evidence — deliberately not
+                            // recorded into executionSummary.toolResults. Recording it as a
+                            // hardcoded-success tool result let hallucinated answers masquerade
+                            // as corroborating evidence in synthesis ("it was confirmed that…")
+                            // and inflated completionStatus (all-evidence-failed runs read
+                            // partialSuccess). Its text reaches the user via finalAgentThought.
                             executionSummary.finalAgentThought = terminal.output
                             memoryStrategy.recordObservation(
                                 stepId: terminal.stepId,
@@ -922,7 +973,7 @@ actor ReActAgentExecutor: Executor {
 
                         for obs in observations {
                             let isSuccess = obs.isSuccess
-                            executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: isSuccess)
+                            executionSummary.record(toolCallId: obs.toolCallId, toolName: obs.toolName, params: obs.params, output: obs.output, isSuccess: isSuccess, failureCategory: obs.failureCategory)
 
                             // Route user denials to the dedicated 2-strike denial counter.
                             // Any other failure goes through the general 3-strike tool-failure
@@ -948,32 +999,11 @@ actor ReActAgentExecutor: Executor {
                             }
                         }
 
-                        // --- Ask-User Friction Gate ---
-                        // Bounds consecutive interrogation: nudge the model past the ask_user
-                        // limit, abort at the idle limit. Counters reset only on real tool
-                        // progress (see the resetCountersOnSuccess gate below), so a run that
-                        // does nothing but question the user can't ride to maxIterations.
-                        for obs in observations where obs.toolName == "ask_user" {
-                            switch circuitBreaker.evaluateAskUser() {
-                            case .intervene(let systemMessage):
-                                continuation.yield(.warning(
-                                    category: .circuitBreaker,
-                                    message: "Repeated clarification requests — nudging the model to proceed without asking again."
-                                ))
-                                memoryStrategy.recordSystemAlert(msg: systemMessage)
-                                if let adapter = nativeGenerator?.toolTurnAdapter {
-                                    liveConversationTurns.append(adapter.systemAlertTurn(message: systemMessage))
-                                }
-                            case .abort(let reason):
-                                shouldAbort = true
-                                abortReason = reason
-                                abortCategory = .cbIdleLimit
-                                abortBypassesRecoveryPolicy = true
-                            case .proceed, .proceedWithWarning:
-                                break
-                            }
-                        }
-                        
+                        // (Clarification loops are no longer counter-governed: identical re-asks
+                        // are replayed from RunInteractionMemory — deterministic outputs — so the
+                        // repetition detection below catches them; distinct questions are
+                        // legitimate and bounded by the human in the loop + the iteration budget.)
+
                         // --- Repetitive Action Loop Detection ---
                         // Check if this iteration's observations are identical to previous ones.
                         // Catches "successful but useless" loops (e.g., same tool with empty args returning same result).
@@ -1023,7 +1053,6 @@ actor ReActAgentExecutor: Executor {
                                 if let adapter = nativeGenerator?.toolTurnAdapter {
                                     liveConversationTurns.append(adapter.systemAlertTurn(message: skipAlert))
                                 }
-                                circuitBreaker.resetCountersOnSuccess()
                                 // Don't abort — fall through to next iteration
 
                             case .fallbackPrompt:
@@ -1035,7 +1064,6 @@ actor ReActAgentExecutor: Executor {
                                 if let adapter = nativeGenerator?.toolTurnAdapter {
                                     liveConversationTurns.append(adapter.systemAlertTurn(message: fallbackAlert))
                                 }
-                                circuitBreaker.resetCountersOnSuccess()
                                 // Don't abort — fall through to next iteration
 
                             case .abort:
@@ -1073,19 +1101,20 @@ actor ReActAgentExecutor: Executor {
                                 }
                                 continuation.yield(.content(response))
                                 flushTokenUsage()
-                                continuation.yield(.executionFinished(outcome: .failed, reason: abortReason))
+                                // Degraded success: the breaker stopped the run, but a usable
+                                // best-effort answer was synthesized — surface it as "completed
+                                // with warnings" so consumers (esp. workflow nodes) don't discard
+                                // the output. Empty synthesis = a true failure. The episode above
+                                // deliberately stays `.failed` — the run did NOT achieve its goal
+                                // cleanly, and that's the signal episodic memory should keep.
+                                let degraded = !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                continuation.yield(.executionFinished(
+                                    outcome: degraded ? .completedWithWarnings : .failed,
+                                    reason: abortReason
+                                ))
                                 continuation.finish()
                                 return
                             }
-                        }
-
-                        // Reset ask-user/idle friction only when the iteration made real tool
-                        // progress — an iteration that only asked another question is not
-                        // progress, and an unconditional reset would zero the friction the
-                        // ask-user gate above just accumulated.
-                        let madeToolProgress = observations.contains { $0.isSuccess && $0.toolName != "ask_user" }
-                        if madeToolProgress {
-                            circuitBreaker.resetCountersOnSuccess()
                         }
 
                         onTraceUpdate(AgentTraceLog(
@@ -1162,38 +1191,103 @@ actor ReActAgentExecutor: Executor {
                     // --- UI Progress: Synthesis ---
                     continuation.yield(.thought("Composing final response…"))
 
-                    // Single typed source of truth: the executor's terminal outcome.
-                    // Everything below — episode close, trace text, stream event — derives
-                    // from `terminalOutcome`. The previous `exitStatus` string variable
-                    // re-encoded this fact in three places and was the root of vocabulary
-                    // drift between SessionGraph episode status and ExecutionOutcome.
-                    let terminalOutcome: ExecutionOutcome = iterationExhausted ? .failed : .completed
-                    let terminalReason: String? = iterationExhausted
-                        ? "Reached maximum iterations (\(maxIterations)) without explicit completion"
-                        : nil
+                    // Only UNRECOVERED EVIDENCE failures drive outcome honesty and
+                    // synthesis routing:
+                    //  • user decisions (denied confirmation, skipped ask_user) are
+                    //    choices, not tool failures — a denied write followed by task
+                    //    completion must not amber the run or store a FAILED episode;
+                    //  • a failure the agent retried to success (same tool + args) is
+                    //    a recovered blip, not a caveat on the final answer.
+                    let allResults = executionSummary.toolResults
+                    let effectiveFailures = allResults.enumerated().filter { index, result in
+                        guard !result.isSuccess else { return false }
+                        if result.failureCategory == .userDenied || result.failureCategory == .cancelled {
+                            return false
+                        }
+                        // Recovered = a LATER success repeated the same call (retry-to-
+                        // success). Order matters: an EARLIER success with identical args
+                        // is a different sub-goal, not a recovery — masking a trailing
+                        // failure behind it would flip a would-be-amber run to green and
+                        // store a poisoned "clean" episode.
+                        let recovered = allResults[(index + 1)...].contains {
+                            $0.isSuccess && $0.toolName == result.toolName && $0.params == result.params
+                        }
+                        return !recovered
+                    }.map { $0.element }
 
                     let response = await ResponseSynthesizer.synthesize(
                         summary: executionSummary,
                         personaInstructions: input.instructions,
                         originalQuery: input.userInput,
                         isNativeFlow: input.generatorStrategy is NativeStructuredGenerator,
-                        forceSynthesis: input.responseSynthesisEnabled,
+                        forceSynthesis: input.responseSynthesisEnabled || !effectiveFailures.isEmpty,
                         onUsage: { accumulatedTokenUsage.accumulate($0) }
                     )
 
+                    // Single typed source of truth: the executor's terminal outcome,
+                    // derived from the run's factual record — not just from which door
+                    // the loop exited. Unrecovered evidence failures →
+                    // `.completedWithWarnings` (answer shown + amber chip; workflow
+                    // nodes still complete). A tool-less prose answer stays
+                    // `.completed`: no tool evidence either way, and flagging it would
+                    // false-positive on every conversational ask. Exhaustion keeps its
+                    // best-effort upgrade.
+                    let terminalOutcome: ExecutionOutcome = {
+                        if iterationExhausted {
+                            let hasBestEffort = !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            return hasBestEffort ? .completedWithWarnings : .failed
+                        }
+                        return effectiveFailures.isEmpty ? .completed : .completedWithWarnings
+                    }()
+
+                    let terminalReason: String? = {
+                        if iterationExhausted {
+                            return "Reached maximum iterations (\(maxIterations)) without explicit completion"
+                        }
+                        guard !effectiveFailures.isEmpty else { return nil }
+                        let names = Set(effectiveFailures.map(\.toolName)).sorted().joined(separator: ", ")
+                        let evidenceCount = executionSummary.evidenceResults.count
+                        return "\(effectiveFailures.count) of \(evidenceCount) tool call(s) failed (\(names))"
+                    }()
+
+                    // Episode outcome follows the stream outcome. SessionGraph's own
+                    // EpisodeOutcome mapping (`completedWithWarnings → .failed`) keeps
+                    // episodic memory conservative, so degraded runs are never stored
+                    // as clean recipes for future retrieval.
+                    let episodeOutcome: ExecutionOutcome = terminalOutcome
+
                     if !input.suppressEpisodeManagement {
-                        sessionState.closeActiveEpisode(outcome: terminalOutcome, message: response)
+                        sessionState.closeActiveEpisode(outcome: episodeOutcome, message: response)
                         await SessionGraphStore.shared.updateActiveState(conversationID: input.conversationID, state: sessionState)
-                        logState.info("💾 Auto-Patched Active Episode to: \(terminalOutcome.rawValue.uppercased())")
+                        logState.info("💾 Auto-Patched Active Episode to: \(episodeOutcome.rawValue.uppercased())")
                     }
 
+                    // `iterations` metadata carries the authoritative loop counter and
+                    // `outcome` the honest terminal verdict to EvaluationLogger — the
+                    // event-derived count drifts (prose exits emit no .reasoning row;
+                    // throttle notices emit an extra one), and a bare finalizing event
+                    // must not imply success.
+                    let finalizingContent: String = {
+                        switch terminalOutcome {
+                        case .completed:
+                            return "Task completed successfully."
+                        case .completedWithWarnings:
+                            return "Task completed with warnings" + (terminalReason.map { ": \($0)" } ?? ".")
+                        case .failed, .cancelled:
+                            return "Task failed or reached max iterations."
+                        }
+                    }()
                     onTraceUpdate(AgentTraceLog(
                         traceID: input.traceContext.traceID,
                         spanID: input.traceContext.spanID,
                         parentSpanID: input.traceContext.parentSpanID,
                         stepNumber: currentIteration,
                         state: .thinking(.finalizing),
-                        content: terminalOutcome == .completed ? "Task completed successfully." : "Task failed or reached max iterations."
+                        content: finalizingContent,
+                        metadata: [
+                            "iterations": "\(currentIteration)",
+                            "outcome": terminalOutcome.rawValue
+                        ]
                     ))
 
                     logger.info("--- 🏁 REACT EXECUTION COMPLETE 🏁 ---")

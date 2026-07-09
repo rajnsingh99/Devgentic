@@ -107,8 +107,12 @@ struct ToastOverlay: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            // MARK: Liquid Glass — toast with glass treatment
+            // MARK: Liquid Glass — toast with glass treatment + semantic tint (success/warning/error)
             .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(toastManager.style.tint.opacity(0.35), lineWidth: 1)
+            )
             // --- To revert to pre-Liquid-Glass, comment out the line above and uncomment below ---
             // .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial).shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4))
             // .overlay(RoundedRectangle(cornerRadius: 12).stroke(toastManager.style.tint.opacity(0.3), lineWidth: 1))

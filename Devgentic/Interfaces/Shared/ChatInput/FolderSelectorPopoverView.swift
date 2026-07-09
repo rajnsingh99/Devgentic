@@ -82,11 +82,12 @@ struct FolderSelectorPopoverView: View {
                     .foregroundColor(theme.primaryText)
                 Spacer()
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .popoverRowHighlight()
     }
 
     private func recentRow(_ url: URL) -> some View {
@@ -121,11 +122,12 @@ struct FolderSelectorPopoverView: View {
                         .foregroundColor(.cyan)
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .popoverRowHighlight()
         .help(url.path)
     }
 

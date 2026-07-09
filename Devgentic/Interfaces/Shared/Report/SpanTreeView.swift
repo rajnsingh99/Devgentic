@@ -30,23 +30,28 @@ private struct SpanRow: View {
     let span: Span
     let theme: any Theme
 
+    @State private var isHovering = false
+
     var body: some View {
         HStack(spacing: 8) {
             // Status dot
             Circle()
                 .fill(statusColor)
                 .frame(width: 6, height: 6)
+                .shadow(color: statusColor.opacity(isHovering ? 0.6 : 0.2), radius: 3, x: 0, y: 0)
 
             // Kind icon
             Image(systemName: iconName)
                 .font(.system(.caption))
-                .foregroundStyle(kindColor)
+                .foregroundStyle(isHovering ? .white : kindColor)
                 .frame(width: 16)
+                .scaleEffect(isHovering ? 1.1 : 1.0)
+                .shadow(color: isHovering ? kindColor.opacity(0.8) : .clear, radius: 4, x: 0, y: 0)
 
             // Name — cleaned up, no "Trace:" prefix clutter
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName)
-                    .font(.system(.caption, weight: isTopLevel ? .semibold : .regular))
+                    .font(.system(.caption, weight: isTopLevel ? .bold : .medium))
                     .foregroundStyle(theme.primaryText)
                     .lineLimit(1)
 
@@ -61,27 +66,44 @@ private struct SpanRow: View {
 
             // Error count badge
             if errorCount > 0 {
-                HStack(spacing: 2) {
+                HStack(spacing: 3) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 8)) // Fixed size: badge chip ≤9pt
                     Text("\(errorCount)")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
+                        .font(.system(size: 10, weight: .bold, design: .monospaced)) // Fixed size: monospaced design
                 }
                 .foregroundStyle(theme.errorColor)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(theme.errorColor.opacity(0.1))
-                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(theme.errorColor.opacity(0.15))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(theme.errorColor.opacity(0.4), lineWidth: 1)
+                        )
+                )
+                .shadow(color: theme.errorColor.opacity(0.3), radius: 2, x: 0, y: 1)
             }
 
             // Duration
             if let duration = span.durationMs {
                 Text(DurationFormat.format(ms: duration))
-                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced design
-                    .foregroundStyle(theme.tertiaryText)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced)) // Fixed size: monospaced design
+                    .foregroundStyle(isHovering ? theme.primaryText : theme.tertiaryText)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isHovering ? theme.surfaceOverlayStrong : Color.clear)
+        )
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                isHovering = hovering
+            }
+        }
     }
 
     // MARK: - Computed

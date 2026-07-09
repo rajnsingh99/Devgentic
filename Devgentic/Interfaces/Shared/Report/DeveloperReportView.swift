@@ -85,8 +85,9 @@ struct DeveloperReportView: View {
                         Text(scope.rawValue).tag(scope)
                     }
                 }
-                .pickerStyle(.menu)
-                .frame(width: 160)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 380)
 
                 Toggle("Debug", isOn: $viewModel.showDebugEvents)
                     .toggleStyle(.switch)
@@ -96,67 +97,54 @@ struct DeveloperReportView: View {
 
                 Button(action: onExport) {
                     Label("Export", systemImage: "square.and.arrow.up")
-                        .font(.system(.caption, weight: .medium))
+                        .font(.system(.caption, weight: .semibold))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .tint(theme.accentColor)
                 .controlSize(.small)
             }
 
             // Filter chips row
             HStack(spacing: 6) {
                 ForEach(EventTypeFilter.allCases) { filter in
-                    filterChip(filter)
+                    FilterChipView(filter: filter, viewModel: viewModel, theme: theme)
                 }
                 Spacer()
 
                 // Event count
-                Text("\(viewModel.visibleEvents.count) events")
-                    .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced design
-                    .foregroundStyle(theme.tertiaryText)
+                HStack(spacing: 4) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 9))
+                    Text("\(viewModel.visibleEvents.count) events")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                }
+                .foregroundStyle(theme.tertiaryText)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(theme.surfaceOverlay)
+                .clipShape(Capsule())
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(theme.secondaryBackground.opacity(0.5))
-    }
-
-    private func filterChip(_ filter: EventTypeFilter) -> some View {
-        let isActive = viewModel.activeEventFilter == filter
-        let chipColor: Color = {
-            if !isActive { return theme.secondaryText }
-            switch filter {
-            case .all: return theme.accentColor
-            case .thoughts: return .blue
-            case .tools: return .orange
-            case .llm: return .purple
-            case .errors: return theme.errorColor
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            ZStack {
+                theme.secondaryBackground.opacity(0.7)
+                if let nsVisualEffectView = NSClassFromString("NSVisualEffectView") {
+                    LinearGradient(
+                        colors: [theme.primaryBackground.opacity(0.05), theme.secondaryBackground.opacity(0.2)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
             }
-        }()
-
-        return Button {
-            withAnimation(.easeOut(duration: 0.15)) {
-                viewModel.activeEventFilter = filter
-            }
-        } label: {
-            HStack(spacing: 3) {
-                Image(systemName: filter.icon)
-                    .font(.system(size: 9)) // Fixed size: badge chip ≤9pt
-                Text(filter.rawValue)
-                    .font(.system(.caption2, weight: isActive ? .semibold : .regular))
-            }
-            .foregroundStyle(chipColor)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isActive ? chipColor.opacity(0.12) : theme.surfaceOverlay)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(isActive ? chipColor.opacity(0.3) : Color.clear, lineWidth: 0.5)
-            )
-        }
-        .buttonStyle(.plain)
+        )
+        .overlay(
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.5))
+                .frame(height: 1),
+            alignment: .bottom
+        )
     }
 
     // MARK: - Error Banner
@@ -232,15 +220,30 @@ struct DeveloperReportView: View {
             if viewModel.summary.hallucinatedTools > 0 {
                 verticalDivider
                 summaryCell(
-                    icon: "questionmark.diamond",
+                    icon: "questionmark.diamond.fill",
                     value: "\(viewModel.summary.hallucinatedTools)",
                     label: "Hallucinated",
                     color: .orange
                 )
             }
         }
-        .padding(.vertical, 8)
-        .background(theme.secondaryBackground.opacity(0.5))
+        .padding(.vertical, 12)
+        .background(
+            ZStack {
+                theme.secondaryBackground.opacity(0.7)
+                LinearGradient(
+                    colors: [theme.secondaryBackground.opacity(0.2), theme.primaryBackground.opacity(0.05)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        )
+        .overlay(
+            Rectangle()
+                .fill(theme.dividerColor.opacity(0.5))
+                .frame(height: 1),
+            alignment: .top
+        )
     }
 
     private func summaryCell(icon: String, value: String, label: String, color: Color? = nil) -> some View {
@@ -263,6 +266,73 @@ struct DeveloperReportView: View {
     private var verticalDivider: some View {
         Rectangle()
             .fill(theme.dividerColor)
-            .frame(width: 1, height: 24)
+            .frame(width: 1, height: 28)
+    }
+}
+
+// MARK: - Premium Filter Chip View
+private struct FilterChipView: View {
+    let filter: EventTypeFilter
+    @Bindable var viewModel: ReportViewModel
+    let theme: any Theme
+    
+    @State private var isHovering = false
+    
+    private var isActive: Bool {
+        viewModel.activeEventFilter == filter
+    }
+    
+    private var chipColor: Color {
+        if !isActive && !isHovering { return theme.secondaryText }
+        switch filter {
+        case .all: return theme.accentColor
+        case .thoughts: return .blue
+        case .tools: return .orange
+        case .llm: return .purple
+        case .errors: return theme.errorColor
+        }
+    }
+    
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                viewModel.activeEventFilter = filter
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: filter.icon)
+                    .font(.system(size: 10))
+                Text(filter.rawValue)
+                    .font(.system(.caption, weight: isActive ? .semibold : .medium))
+            }
+            .foregroundStyle(isActive ? .white : chipColor)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                ZStack {
+                    if isActive {
+                        chipColor
+                    } else {
+                        theme.surfaceOverlay
+                        if isHovering {
+                            chipColor.opacity(0.1)
+                        }
+                    }
+                }
+            )
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(isActive ? chipColor.opacity(0.5) : (isHovering ? chipColor.opacity(0.3) : theme.dividerColor.opacity(0.5)), lineWidth: 1)
+            )
+            .scaleEffect(isHovering && !isActive ? 1.02 : 1.0)
+            .shadow(color: isActive ? chipColor.opacity(0.3) : .clear, radius: 4, x: 0, y: 2)
+        }
+        .buttonStyle(.plain)
+        .onHover { hover in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isHovering = hover
+            }
+        }
     }
 }

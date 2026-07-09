@@ -29,6 +29,10 @@ enum EpisodeLifecycle: String, Codable, Sendable {
     init(_ outcome: ExecutionOutcome) {
         switch outcome {
         case .completed: self = .completed
+        // Degraded success: the run shipped a best-effort answer but did NOT achieve its
+        // goal cleanly — episodic memory keeps the failure signal (the executor also
+        // passes `.failed` for episodes explicitly; this mapping is the safety net).
+        case .completedWithWarnings: self = .failed
         case .failed:    self = .failed
         case .cancelled: self = .cancelled
         }

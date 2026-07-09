@@ -19,8 +19,18 @@ struct WorkflowEdgeView: View {
     let isSelected: Bool
     let onTap: () -> Void
     let onDelete: () -> Void
+    var canvasState: WorkflowCanvasState
 
     @Environment(\.appTheme) private var theme
+    @State private var dashOffset: CGFloat = 0
+
+    private var sourceColor: Color {
+        canvasState.nodeColor(for: edge.sourceNodeID)
+    }
+
+    private var targetColor: Color {
+        canvasState.nodeColor(for: edge.targetNodeID)
+    }
 
     private var midPoint: CGPoint {
         // Evaluate the midpoint for a symmetric cubic Bezier S-curve
@@ -40,13 +50,34 @@ struct WorkflowEdgeView: View {
             // Visible edge line
             bezierPath
                 .stroke(
-                    isSelected ? theme.accentColor : theme.secondaryText.opacity(0.5),
+                    LinearGradient(
+                        colors: [sourceColor.opacity(isSelected ? 0.95 : 0.55), targetColor.opacity(isSelected ? 0.95 : 0.55)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
                     style: StrokeStyle(
                         lineWidth: isSelected ? 2.5 : 1.5,
                         lineCap: .round,
-                        dash: isSelected ? [6, 4] : []
+                        dash: isSelected ? [6, 4] : [],
+                        dashPhase: dashOffset
                     )
                 )
+                .onAppear {
+                    if isSelected {
+                        withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                            dashOffset = -20
+                        }
+                    }
+                }
+                .onChange(of: isSelected) { _, selected in
+                    if selected {
+                        withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                            dashOffset = -20
+                        }
+                    } else {
+                        dashOffset = 0
+                    }
+                }
 
             // Arrowhead at target
             arrowHead
@@ -73,7 +104,7 @@ struct WorkflowEdgeView: View {
 
     private var arrowHead: some View {
         Self.makeArrowPath(at: targetPoint)
-            .fill(isSelected ? theme.accentColor : theme.secondaryText.opacity(0.5))
+            .fill(isSelected ? targetColor : targetColor.opacity(0.55))
     }
 
     static func makeArrowPath(at target: CGPoint) -> Path {

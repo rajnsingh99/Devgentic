@@ -52,111 +52,90 @@ struct NotificationSettingsView: View {
                 }
 
                 // Master Toggle
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Notifications")
-                        .font(.system(.caption, weight: .bold))
-                        .foregroundColor(theme.secondaryText)
-                        .tracking(0.5)
-                        .textCase(.uppercase)
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Enable Notifications")
-                                .font(theme.fontBody.weight(.medium))
-                                .foregroundColor(theme.primaryText)
-                            Text("Receive alerts when queries complete while the app is in the background.")
-                                .font(.system(.caption))
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        Spacer()
+                SettingsCard(title: "Notifications", icon: "bell.fill", theme: theme) {
+                    SettingsRow(
+                        title: "Enable Notifications",
+                        description: "Receive alerts when queries complete while the app is in the background.",
+                        theme: theme
+                    ) {
                         Toggle("", isOn: $config.isGloballyEnabled)
                             .toggleStyle(.switch)
                             .labelsHidden()
+                            .tint(theme.accentColor)
                     }
-                    .padding(12)
-                    .background(theme.surfaceOverlay)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
                 }
 
                 // Channels
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Channels")
-                        .font(.system(.caption, weight: .bold))
-                        .foregroundColor(theme.secondaryText)
-                        .tracking(0.5)
-                        .textCase(.uppercase)
+                SettingsCard(title: "Channels", icon: "square.grid.2x2.fill", theme: theme) {
+                    ChannelRow(
+                        name: "Local Notification",
+                        description: permissionStatus == .denied
+                            ? "Permission denied — tap Open Settings above"
+                            : "macOS system notifications",
+                        icon: "bell.badge",
+                        isEnabled: permissionStatus != .denied,
+                        isComingSoon: false,
+                        theme: theme
+                    )
 
-                    VStack(spacing: 0) {
-                        channelRow(
-                            name: "Local Notification",
-                            description: permissionStatus == .denied
-                                ? "Permission denied — tap Open Settings above"
-                                : "macOS system notifications",
-                            icon: "bell.badge",
-                            isEnabled: permissionStatus != .denied
-                        )
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
-                        Divider().padding(.leading, 40)
+                    ChannelRow(
+                        name: "Slack Webhook",
+                        description: "Coming soon",
+                        icon: "number",
+                        isEnabled: false,
+                        isComingSoon: true,
+                        theme: theme
+                    )
 
-                        channelRow(
-                            name: "Slack Webhook",
-                            description: "Coming soon",
-                            icon: "number",
-                            isEnabled: false,
-                            isComingSoon: true
-                        )
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
-                        Divider().padding(.leading, 40)
+                    ChannelRow(
+                        name: "Discord Webhook",
+                        description: "Coming soon",
+                        icon: "gamecontroller",
+                        isEnabled: false,
+                        isComingSoon: true,
+                        theme: theme
+                    )
 
-                        channelRow(
-                            name: "Discord Webhook",
-                            description: "Coming soon",
-                            icon: "gamecontroller",
-                            isEnabled: false,
-                            isComingSoon: true
-                        )
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
-                        Divider().padding(.leading, 40)
-
-                        channelRow(
-                            name: "Telegram Bot",
-                            description: "Coming soon",
-                            icon: "paperplane",
-                            isEnabled: false,
-                            isComingSoon: true
-                        )
-                    }
-                    .background(theme.surfaceOverlay)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    ChannelRow(
+                        name: "Telegram Bot",
+                        description: "Coming soon",
+                        icon: "paperplane",
+                        isEnabled: false,
+                        isComingSoon: true,
+                        theme: theme
+                    )
                 }
 
                 // Test Notification
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Test")
-                        .font(.system(.caption, weight: .bold))
-                        .foregroundColor(theme.secondaryText)
-                        .tracking(0.5)
-                        .textCase(.uppercase)
-
-                    Button {
-                        sendTestNotification()
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: testSent ? "checkmark.circle.fill" : "bell.and.waves.left.and.right")
-                                .foregroundColor(testSent ? .green : theme.accentColor)
-                            Text(testSent ? "Test Sent!" : "Send Test Notification")
-                                .font(theme.fontSubheadline.weight(.medium))
+                SettingsCard(title: "Test Alert", icon: "hammer.fill", theme: theme) {
+                    SettingsRow(
+                        title: "Send Test Notification",
+                        description: "Send a mock local alert to verify Devgentic has correctly configured system permissions.",
+                        theme: theme
+                    ) {
+                        Button {
+                            sendTestNotification()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: testSent ? "checkmark.circle.fill" : "bell.and.waves.left.and.right")
+                                    .foregroundColor(testSent ? .green : theme.accentColor)
+                                Text(testSent ? "Test Sent!" : "Test")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(theme.surfaceOverlay)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!config.isGloballyEnabled || permissionStatus == .denied)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!config.isGloballyEnabled || permissionStatus == .denied)
-                    .opacity((config.isGloballyEnabled && permissionStatus != .denied) ? 1.0 : 0.5)
 
                     if let errorMsg = testErrorMessage {
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
                         HStack(spacing: 6) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.red)
@@ -166,6 +145,8 @@ struct NotificationSettingsView: View {
                                 .font(.system(.caption))
                                 .foregroundColor(.red)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
                     }
                 }
             }
@@ -178,45 +159,6 @@ struct NotificationSettingsView: View {
             // Re-check when user returns from System Settings.
             Task { await refreshPermissionStatus() }
         }
-    }
-
-    @ViewBuilder
-    private func channelRow(name: LocalizedStringKey, description: LocalizedStringKey, icon: String, isEnabled: Bool, isComingSoon: Bool = false) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(.body)) // scales with Dynamic Type; ~16pt
-                .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.4) : (isEnabled ? theme.accentColor : .orange))
-                .frame(width: 28)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name)
-                    .font(theme.fontSubheadline.weight(.medium))
-                    .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.5) : theme.primaryText)
-                Text(description)
-                    .font(.system(.caption))
-                    .foregroundColor(theme.secondaryText.opacity(0.6))
-            }
-
-            Spacer()
-
-            if isComingSoon {
-                Text("Soon")
-                    .font(.system(size: 10, weight: .medium)) // Fixed size: intentional (badge/chip text)
-                    .foregroundColor(theme.secondaryText.opacity(0.4))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(theme.secondaryText.opacity(0.08))
-                    .clipShape(Capsule())
-            } else if !isEnabled && !isComingSoon {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundColor(.orange.opacity(0.7))
-                    .font(.system(.body)) // scales with Dynamic Type; ~14pt
-                    .accessibilityHidden(true)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
     }
 
     private func sendTestNotification() {
@@ -246,6 +188,68 @@ struct NotificationSettingsView: View {
     private func openSystemNotificationSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
             NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+// MARK: - Reusable Custom Channel Row with Hover States
+
+private struct ChannelRow: View {
+    let name: LocalizedStringKey
+    let description: LocalizedStringKey
+    let icon: String
+    let isEnabled: Bool
+    let isComingSoon: Bool
+    let theme: any Theme
+
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.4) : (isEnabled ? theme.accentColor : .orange))
+                .frame(width: 24, alignment: .center)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(isComingSoon ? theme.secondaryText.opacity(0.5) : theme.primaryText)
+                Text(description)
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText.opacity(0.8))
+            }
+
+            Spacer()
+
+            if isComingSoon {
+                Text("Soon")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(theme.secondaryText.opacity(0.5))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(theme.secondaryText.opacity(0.08))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(theme.secondaryText.opacity(0.15), lineWidth: 0.5)
+                    )
+            } else if !isEnabled {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundColor(.orange.opacity(0.8))
+                    .font(.system(size: 14))
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(isHovered ? theme.accentColor.opacity(0.04) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
         }
     }
 }

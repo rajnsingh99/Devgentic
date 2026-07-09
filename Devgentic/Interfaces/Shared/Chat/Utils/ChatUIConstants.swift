@@ -19,5 +19,5 @@ enum ChatUIConstants {
 
     /// Minimum height applied to an actively-streaming agent bubble so
     /// incremental tokens don't cause layout thrash as the bubble grows.
-    static let streamingBubbleMinHeight: CGFloat = 550
+    static let streamingBubbleMinHeight: CGFloat = 200
 }

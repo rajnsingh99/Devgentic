@@ -213,9 +213,23 @@ struct ChatActionButton<LabelContent: View>: View {
 
     var body: some View {
         Button(action: action) {
-            label.padding(.horizontal, 8).padding(.vertical, 4).background(RoundedRectangle(cornerRadius: 8).fill(isHovering && !disabled ? theme.secondaryText.opacity(0.3) : Color.clear))
+            label
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule()
+                        .fill(isHovering && !disabled ? theme.surfaceOverlay.opacity(0.8) : Color.clear)
+                )
+                .contentShape(Capsule())
+                .scaleEffect(isHovering && !disabled ? 1.03 : 1.0)
         }
-        .buttonStyle(.plain).disabled(disabled).onHover { hovering in withAnimation(.easeInOut(duration: 0.2)) { isHovering = hovering } }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .onHover { hovering in 
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { 
+                isHovering = hovering 
+            } 
+        }
     }
 }
 
@@ -227,7 +241,6 @@ struct AgentMessageActionsView: View {
     @Environment(\.appTheme) private var theme
     @State private var didCopy: Bool = false
     @State private var showVariantsPopover: Bool = false
-    @State private var showReportInspector: Bool = false
     @AppStorage(AppSettings.developerModeKey) private var isDeveloperMode: Bool = false
 
     /// Whether this specific message is currently being read aloud.
@@ -287,7 +300,15 @@ struct AgentMessageActionsView: View {
                 }
 
                 if message.traceID != nil || message.agentResponse != nil {
-                    ChatActionButton(action: { showReportInspector = true }) {
+                    ChatActionButton(action: {
+                        ReportInspectorPanelManager.shared.show(
+                            messageID: message.id,
+                            conversationID: message.conversationId,
+                            traceID: message.traceID,
+                            theme: theme,
+                            isDeveloperMode: isDeveloperMode
+                        )
+                    }) {
                         Label(
                             isDeveloperMode ? "Trace" : "Feedback",
                             systemImage: isDeveloperMode ? "chart.bar.doc.horizontal" : "bubble.left.and.exclamationmark.bubble.right"
@@ -308,13 +329,7 @@ struct AgentMessageActionsView: View {
             .font(.system(.caption))
             .padding(.top, theme.spacingSmall)
         }
-        .sheet(isPresented: $showReportInspector) {
-            ReportInspectorView(
-                messageID: message.id,
-                conversationID: message.conversationId,
-                traceID: message.traceID
-            )
-        }
+
         .onReceive(NotificationCenter.default.publisher(for: .speechOpenCodeViewer)) { notification in
             guard let messageID = notification.object as? UUID, messageID == message.id,
                   let userInfo = notification.userInfo,

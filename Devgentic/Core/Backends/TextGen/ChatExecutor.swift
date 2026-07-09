@@ -105,7 +105,10 @@ actor ChatExecutor: Executor {
                     // started we can't cleanly re-attempt without double-rendering.
                     var retrier = TransportRetrier(transport: input.resiliencePolicy.transport)
 
-                    let applyRetryStep: @Sendable (TransportRetrier.RetryStep) async -> Void = { step in
+                    // Throws on cancellation: a swallowed CancellationError during a long
+                    // Retry-After backoff made Stop fire another provider request instead
+                    // of aborting — propagating reaches the CancellationError catch below.
+                    let applyRetryStep: @Sendable (TransportRetrier.RetryStep) async throws -> Void = { step in
                         if let penalty = step.drainPenalty {
                             await GlobalRateLimiter.shared.drainAndPenalize(
                                 key: input.rateLimitKey, category: input.rateLimitCategory, penaltySeconds: penalty
@@ -113,7 +116,7 @@ actor ChatExecutor: Executor {
                         }
                         continuation.yield(.warning(category: step.category, message: step.message))
                         if step.delay > 0 {
-                            try? await Task.sleep(nanoseconds: UInt64(step.delay * 1_000_000_000))
+                            try await Task.sleep(nanoseconds: UInt64(step.delay * 1_000_000_000))
                         }
                     }
 
@@ -153,7 +156,7 @@ actor ChatExecutor: Executor {
                                 // budget is spent or the failure is deterministic;
                                 // rethrows non-transport errors unchanged.
                                 let step = try retrier.nextStep(for: error)
-                                await applyRetryStep(step)
+                                try await applyRetryStep(step)
                             }
                         }
                         fullResponse = result
@@ -202,7 +205,7 @@ actor ChatExecutor: Executor {
                                 // prior one), retrying would re-render — surface it.
                                 if emittedThisAttempt || !fullResponse.isEmpty { throw error }
                                 let step = try retrier.nextStep(for: error)
-                                await applyRetryStep(step)
+                                try await applyRetryStep(step)
                             }
                         }
                     }
@@ -356,6 +359,7 @@ actor ChatExecutor: Executor {
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             shellType: "Zsh (Non-Interactive Mode)",
             userName: NSUserName(),
+            homeDirectory: NSHomeDirectory(),
             currentDate: Date().formatted(date: .numeric, time: .shortened)
         )
 

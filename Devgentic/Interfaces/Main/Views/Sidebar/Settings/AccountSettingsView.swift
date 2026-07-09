@@ -27,24 +27,34 @@ struct AccountSettingsView: View {
                     if isSignedIn {
                         // Signed In State
                         VStack(spacing: 0) {
-                            HStack(spacing: 16) {
+                            HStack(spacing: 20) {
                                 // Profile Picture Placeholder
                                 Circle()
-                                    .fill(theme.accentColor.opacity(0.2))
-                                    .frame(width: 60, height: 60)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [theme.accentColor.opacity(0.25), theme.accentColor.opacity(0.08)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 56, height: 56)
                                     .overlay(
                                         Text(String(userName.prefix(1)).uppercased())
-                                            .font(.system(size: 24, weight: .bold)) // Fixed size: intentional (avatar)
+                                            .font(.system(size: 22, weight: .bold))
                                             .foregroundColor(theme.accentColor)
+                                    )
+                                    .overlay(
+                                        Circle()
+                                            .stroke(theme.accentColor.opacity(0.3), lineWidth: 1)
                                     )
 
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(userName)
-                                        .font(.system(.title3, weight: .semibold))
+                                        .font(.system(size: 15, weight: .semibold))
                                         .foregroundColor(theme.primaryText)
 
                                     Text(userEmail)
-                                        .font(theme.fontSubheadline)
+                                        .font(.system(size: 12))
                                         .foregroundColor(theme.secondaryText)
                                 }
                                 
@@ -56,18 +66,15 @@ struct AccountSettingsView: View {
                                     }
                                 }) {
                                     Text("Sign Out")
-                                        .font(theme.fontSubheadline.weight(.medium))
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                        .background(theme.surfaceOverlayStrong)
-                                        .foregroundColor(theme.primaryText)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        .font(.system(size: 11, weight: .semibold))
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .padding(20)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 18)
                             
-                            Divider().background(theme.dividerColor)
+                            Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
                             
                             SettingsRow(
                                 title: "Sync Data",
@@ -85,15 +92,16 @@ struct AccountSettingsView: View {
                         VStack(alignment: .center, spacing: 20) {
                             
                             Image(systemName: "person.crop.circle.badge.exclamationmark")
-                                .font(.system(size: 48)) // Fixed size: intentional (icon)
-                                .foregroundColor(theme.secondaryText)
-                                .padding(.top, 20)
+                                .font(.system(size: 40))
+                                .foregroundColor(theme.secondaryText.opacity(0.5))
+                                .padding(.top, 24)
                                 .accessibilityHidden(true)
                             
                             Text("Sign in with your Google account to sync your workflow, manage backend profiles across devices, and unlock full Devgentic capabilities.")
-                                .font(theme.fontBody)
+                                .font(.system(size: 12))
                                 .foregroundColor(theme.secondaryText)
                                 .multilineTextAlignment(.center)
+                                .lineSpacing(4)
                                 .padding(.horizontal, 24)
                             
                             Button(action: {
@@ -101,20 +109,19 @@ struct AccountSettingsView: View {
                                     isSignedIn = true
                                 }
                             }) {
-                                HStack(spacing: 12) {
+                                HStack(spacing: 8) {
                                     Image(systemName: "g.circle.fill")
-                                        .font(.system(.title3)) // scales with Dynamic Type; ~18pt
+                                        .font(.system(size: 14))
                                         .accessibilityHidden(true)
                                     Text("Sign in with Google")
-                                        .font(theme.fontBody.weight(.semibold))
+                                        .font(.system(size: 12, weight: .semibold))
                                 }
-                                .padding(.horizontal, 24)
-                                .padding(.vertical, 12)
-                                .background(theme.accentColor)
-                                .foregroundColor(.white)
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.borderedProminent)
+                            .tint(theme.accentColor)
+                            .controlSize(.regular)
                             .padding(.bottom, 24)
                         }
                     }

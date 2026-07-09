@@ -162,7 +162,7 @@ enum CapabilityMilestoneKind: String, Codable, Equatable, Sendable {
 /// user) when the row was last written. After an unexpected restart, a persisted non-`.final`
 /// state is the durable "this run was interrupted" marker — and `.parkedHITL` additionally
 /// carries the operationID needed to later resume it (G1 Piece 2). Defaults to `.final` so
-/// every legacy row and user message reads as complete.
+/// every legacy row and user message reads as completre.
 enum MessageLifecycleState: Codable, Equatable, Sendable {
     case final
     case streaming

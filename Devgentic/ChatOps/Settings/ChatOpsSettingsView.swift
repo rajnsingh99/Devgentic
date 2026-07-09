@@ -185,7 +185,7 @@ struct ChatOpsSettingsView: View {
                     }
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 // Token input row (custom layout since it's a multi-element input)
                 HStack(spacing: 8) {
@@ -389,7 +389,7 @@ struct ChatOpsSettingsView: View {
                     .disabled(!config.connectionState.isConnected)
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 SettingsRow(
                     title: "Status",
@@ -407,7 +407,7 @@ struct ChatOpsSettingsView: View {
                 }
 
                 if config.connectionState.isConnected {
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     HStack {
                         Spacer()
@@ -487,7 +487,7 @@ struct ChatOpsSettingsView: View {
                     }
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 HStack(spacing: 8) {
                     SecureField("Bot Token", text: $discordTokenInput)
@@ -533,7 +533,7 @@ struct ChatOpsSettingsView: View {
                     .padding(.bottom, 12)
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 // Intent reminder
                 HStack(spacing: 6) {
@@ -679,7 +679,7 @@ struct ChatOpsSettingsView: View {
                     .disabled(!config.discordConnectionState.isConnected)
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 SettingsRow(
                     title: "Status",
@@ -697,7 +697,7 @@ struct ChatOpsSettingsView: View {
                 }
 
                 if config.discordConnectionState.isConnected {
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     HStack {
                         Spacer()
@@ -776,7 +776,7 @@ struct ChatOpsSettingsView: View {
                     }
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 HStack(spacing: 8) {
                     SecureField("xoxb-...", text: $slackBotTokenInput)
@@ -810,7 +810,7 @@ struct ChatOpsSettingsView: View {
                     EmptyView()
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 HStack(spacing: 8) {
                     SecureField("xapp-...", text: $slackAppTokenInput)
@@ -991,7 +991,7 @@ struct ChatOpsSettingsView: View {
                     .disabled(!config.slackConnectionState.isConnected)
                 }
 
-                Divider().background(theme.dividerColor)
+                Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                 SettingsRow(
                     title: "Status",
@@ -1009,7 +1009,7 @@ struct ChatOpsSettingsView: View {
                 }
 
                 if config.slackConnectionState.isConnected {
-                    Divider().background(theme.dividerColor)
+                    Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                     HStack {
                         Spacer()

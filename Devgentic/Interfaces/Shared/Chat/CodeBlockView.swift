@@ -46,7 +46,7 @@ struct CodeBlockView: View {
                     .foregroundColor(isCopied ? theme.successColor : theme.secondaryText)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(isHovering ? Color.white.opacity(0.1) : Color.clear)
+                    .background(isHovering ? theme.surfaceOverlay : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
@@ -97,14 +97,16 @@ struct AsyncHighlightedCodeView: View {
     let code: String
 
     @State private var highlightedCode: NSAttributedString?
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
         // The representable just displays the result of the async operation.
+        // Task id includes the light/dark flag so switching themes re-highlights the block.
         HighlightedCodeViewRepresentable(attributedString: highlightedCode, code: code)
-            .task(id: code) {
+            .task(id: "\(theme.colorScheme == .light)\u{0}\(code)") {
                 // When the code changes, start highlighting in the background.
                 // The result is automatically posted to the @State property on the main thread.
-                highlightedCode = await highlightCodeAsync(language: language, code: code)
+                highlightedCode = await highlightCodeAsync(language: language, code: code, isLightTheme: theme.colorScheme == .light)
             }
     }
 
@@ -119,14 +121,14 @@ struct AsyncHighlightedCodeView: View {
     }()
 
     /// Performs syntax highlighting on a background thread.
-    private func highlightCodeAsync(language: String, code: String) async -> NSAttributedString {
+    private func highlightCodeAsync(language: String, code: String, isLightTheme: Bool) async -> NSAttributedString {
         let baseFont = Self.monoFont
         // Use Task.detached to ensure this doesn't run on a main-actor-bound context.
         return await Task.detached {
             // Highlightr() can return nil if resources are missing — fall back to plain text.
             let attributedCode: NSAttributedString
             if let highlightr = Highlightr() {
-                highlightr.setTheme(to: "atom-one-dark") // Enforce dark theme for IDE look
+                highlightr.setTheme(to: isLightTheme ? "atom-one-light" : "atom-one-dark") // Match app theme
                 attributedCode = highlightr.highlight(code, as: language, fastRender: true) ?? NSAttributedString(string: code)
             } else {
                 attributedCode = NSAttributedString(string: code)

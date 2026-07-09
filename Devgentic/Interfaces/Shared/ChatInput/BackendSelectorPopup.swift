@@ -19,8 +19,7 @@ struct BackendSelectorPopup: View {
     /// Populated from `MainApplicationViewModel.interfaceMode.allowedProfileTypes`.
     var allowedProfileTypes: Set<ProfileType>? = nil
 
-    // MARK: - Environment
-    @Environment(\.openWindow) var openWindow
+    @Environment(\.appTheme) private var theme
 
     // MARK: - Data Source
     @State private var profiles: [BackendProfileModel] = []
@@ -44,24 +43,50 @@ struct BackendSelectorPopup: View {
     }
 
     var body: some View {
+        Group {
+            if filteredProfiles.isEmpty {
+                emptyState
+            } else {
+                columns
+            }
+        }
+        .padding(.vertical, 8)
+        .frame(maxHeight: 450)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            self.profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "square.stack.3d.up.slash")
+                .font(.title3)
+                .foregroundColor(theme.tertiaryText)
+            Text("No profiles available")
+                .font(theme.fontSubheadline)
+                .foregroundColor(theme.secondaryText)
+            Text("Create one in the Backend Profiles panel.")
+                .font(.caption)
+                .foregroundColor(theme.tertiaryText)
+        }
+        .padding(24)
+        .frame(minWidth: 220)
+    }
+
+    private var columns: some View {
         HStack(alignment: .top, spacing: 0) {
             let showBots = !botProfiles.isEmpty
             let showAgents = !agentProfiles.isEmpty
             let showWorkflows = !workflowProfiles.isEmpty
             let showImageGen = !imageGenProfiles.isEmpty
 
-            // Column 1: Bots
             if showBots {
                 ProfileColumnView(
                     title: "Bots",
                     profiles: botProfiles,
                     configuration: configuration,
-                    onSelect: { self.isPresented = false },
-                    onEdit: { profileID in
-                        // Placeholder for future edit action
-                        // openWindow(id: "profile-editor", value: profileID)
-                        self.isPresented = false
-                    }
+                    onSelect: { self.isPresented = false }
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
@@ -70,17 +95,12 @@ struct BackendSelectorPopup: View {
                 Divider()
             }
 
-            // Column 2: Agents
             if showAgents {
                 ProfileColumnView(
                     title: "Agents",
                     profiles: agentProfiles,
                     configuration: configuration,
-                    onSelect: { self.isPresented = false },
-                    onEdit: { profileID in
-                        // openWindow(id: "profile-editor", value: profileID)
-                        self.isPresented = false
-                    }
+                    onSelect: { self.isPresented = false }
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
@@ -89,17 +109,12 @@ struct BackendSelectorPopup: View {
                 Divider()
             }
 
-            // Column 3: Workflows
             if showWorkflows {
                 ProfileColumnView(
                     title: "Workflows",
                     profiles: workflowProfiles,
                     configuration: configuration,
-                    onSelect: { self.isPresented = false },
-                    onEdit: { profileID in
-                        // openWindow(id: "profile-editor", value: profileID)
-                        self.isPresented = false
-                    }
+                    onSelect: { self.isPresented = false }
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
@@ -108,23 +123,15 @@ struct BackendSelectorPopup: View {
                 Divider()
             }
 
-            // Column 4: Image Gen
             if showImageGen {
                 ProfileColumnView(
                     title: "Image Gen",
                     profiles: imageGenProfiles,
                     configuration: configuration,
-                    onSelect: { self.isPresented = false },
-                    onEdit: { _ in self.isPresented = false }
+                    onSelect: { self.isPresented = false }
                 )
                 .frame(minWidth: 180, idealWidth: 200)
             }
-        }
-        .padding(.vertical, 8)
-        .frame(maxHeight: 450)
-        .fixedSize(horizontal: false, vertical: true)
-        .onAppear {
-            self.profiles = (try? BackendProfileStore.shared.fetchProfiles()) ?? []
         }
     }
 }
@@ -136,28 +143,27 @@ private struct ProfileColumnView: View {
     let profiles: [BackendProfileModel]
     var configuration: BackendConfiguration
     let onSelect: () -> Void
-    let onEdit: (UUID) -> Void
+    @Environment(\.appTheme) private var theme
 
     var body: some View {
-        VStack(alignment: .center, spacing: 5) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(.headline)
+                .font(.system(.caption, weight: .bold))
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 18)   // aligns with cell text (8 outer + 10 inner)
                 .padding(.bottom, 4)
 
             ScrollView {
-                VStack(alignment: .center, spacing: 0) {
+                VStack(spacing: 1) {
                     ForEach(profiles) { profile in
-                        let isSelected = configuration.selectedProfileID == profile.id
-                        
                         ItemCell(
                             profile: profile,
-                            isSelected: isSelected
+                            isSelected: configuration.selectedProfileID == profile.id,
+                            onSelect: {
+                                configuration.selectedProfileID = profile.id
+                                onSelect()
+                            }
                         )
-                        .onTapGesture(count: 2) { onEdit(profile.id) }
-                        .onTapGesture(count: 1) {
-                            configuration.selectedProfileID = profile.id
-                            self.onSelect()
-                        }
                     }
                 }
             }
@@ -171,15 +177,20 @@ private struct ProfileColumnView: View {
 private struct ItemCell: View {
     let profile: BackendProfileModel
     let isSelected: Bool
+    let onSelect: () -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isHovering = false
 
     private var detailText: String? {
         switch profile.details {
         case .bot(let config):
             return config.llmConfig.modelName
-        case .agent:
-            return "Agent" // Placeholder
-        case .workflow:
-            return "Workflow" // Placeholder
+        case .agent(let config):
+            return config.llmConfig.modelName
+        case .workflow(let config):
+            let count = config.agentProfileIDs.count
+            return count == 1 ? "1 node" : "\(count) nodes"
         case .imageGen(let config):
             return config.llmConfig.modelName
         case .code(let config):
@@ -188,38 +199,51 @@ private struct ItemCell: View {
     }
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 0) {
-                Spacer()
-                VStack(alignment: .center, spacing: 2) {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(profile.profileType.displayColor)
+                    .frame(width: 7, height: 7)
+
+                VStack(alignment: .leading, spacing: 2) {
                     Text(profile.displayName)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.primary)
+                        .font(theme.fontSubheadline.weight(.medium))
+                        .foregroundColor(theme.primaryText)
                         .lineLimit(1)
+                        .truncationMode(.tail)
 
                     if let detail = detailText, !detail.isEmpty {
                         Text(detail)
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
-                Spacer()
-            }
 
-            if isSelected {
-                HStack {
-                    Spacer()
+                Spacer(minLength: 4)
+
+                if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.accentColor)
+                        .font(.system(.caption))
+                        .foregroundColor(theme.accentColor)
                 }
             }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected
+                          ? theme.accentColor.opacity(0.15)
+                          : (isHovering ? theme.surfaceOverlay : Color.clear))
+            )
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal)
-        .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-        .contentShape(Rectangle())
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .buttonStyle(.plain)
+        .onHover { hover in
+            withAnimation(.easeInOut(duration: 0.1)) { isHovering = hover }
+        }
         .padding(.horizontal, 8)
+        .accessibilityLabel("\(profile.displayName)\(isSelected ? ", selected" : "")")
     }
 }

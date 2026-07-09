@@ -226,8 +226,8 @@ final class ConversationManagementCoordinator {
         vm.activeStreamManager.cancelStreams(forConversation: conversationID)
         vm.interactionCenter.resolveAll(conversationID: conversationID)
         Task { await ExecutionSuspensionService.shared.cancel(for: conversationID) }
-        // Drop any "Always allow" session grants for this conversation (the persisted profile flip
-        // is the durable record; this is just the in-flight-run allowlist).
+        // Drop this conversation's "Allow for this chat" tool grants — the conversation is being
+        // deleted, so its durable per-conversation allowlist should go with it.
         Task { await SessionToolApprovals.shared.clear(conversationID: conversationID) }
     }
 

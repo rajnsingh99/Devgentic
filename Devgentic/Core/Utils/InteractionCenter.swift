@@ -14,12 +14,15 @@
 //   - D2: `items(for:)` exposes every pending request so the workflow canvas can badge
 //         each waiting node while the banner shows only the current one.
 //
-//  P1 status: the type exists and is owned by MainApplicationViewModel + injected into
-//  ActiveStreamManager, but has NO writers yet (dead, zero behavior change). P2 wires the
-//  ASM bridge to `enqueue`; the `.hitl*Resolved` notifications drive `resolve`.
+//  Wiring (P2 shipped): ActiveStreamManager's HITL bridge calls `enqueue` for every
+//  park kind; the `.hitl*Resolved` notification handlers drive `resolve`, and
+//  conversation teardown drives `resolveAll`. This class also owns the stale-park
+//  watchdog: a local notification fires if a request sits unanswered past the
+//  threshold (parks are deadline-free by design — the watchdog is the signal).
 //
 
 import Foundation
+import AppKit
 import Observation
 
 @Observable @MainActor
@@ -27,6 +30,15 @@ final class InteractionCenter {
 
     /// Insertion-ordered pending requests across every conversation / interface.
     private(set) var pending: [PendingHITL] = []
+
+    /// [HITL ergonomics] One stale-park watchdog per pending operation: fires a
+    /// local notification if the request is still unanswered after the threshold,
+    /// so a forgotten banner doesn't wait silently forever (parks have no deadline
+    /// by design — this is the signal, not a timeout).
+    @ObservationIgnored private var staleWatchdogs: [UUID: Task<Void, Never>] = [:]
+
+    /// How long a request may sit unanswered before the stale notification fires.
+    private static let staleNotificationDelay: TimeInterval = 180
 
     /// [HITL/E2] Bumped to draw attention to the always-visible banner — e.g. when the user taps an
     /// "awaiting input" workflow node. The banner observes this and pulses; the value itself is opaque.
@@ -45,16 +57,62 @@ final class InteractionCenter {
         } else {
             pending.append(item)
         }
+        startStaleWatchdog(for: item)
     }
 
     /// Removes the request for a resolved / cancelled / timed-out operation. No-op if absent.
     func resolve(operationID: UUID) {
         pending.removeAll { $0.id == operationID }
+        cancelStaleWatchdog(for: operationID)
     }
 
     /// Removes every pending request for a conversation (Stop button / conversation teardown).
     func resolveAll(conversationID: UUID) {
+        let removedIDs = pending.filter { $0.origin.conversationID == conversationID }.map(\.id)
         pending.removeAll { $0.origin.conversationID == conversationID }
+        for id in removedIDs { cancelStaleWatchdog(for: id) }
+    }
+
+    // MARK: - Stale-Park Watchdog
+
+    private func startStaleWatchdog(for item: PendingHITL) {
+        cancelStaleWatchdog(for: item.id)
+        staleWatchdogs[item.id] = Task { [weak self] in
+            // Cancellation here means the request was answered in time — the
+            // nil-return IS the intended silence, unlike the executor sleeps.
+            guard (try? await Task.sleep(
+                nanoseconds: UInt64(Self.staleNotificationDelay * 1_000_000_000)
+            )) != nil else { return }
+            guard let self, self.item(withID: item.id) != nil else { return }
+            self.staleWatchdogs[item.id] = nil
+            Self.dispatchStaleNotification(for: item)
+        }
+    }
+
+    private func cancelStaleWatchdog(for operationID: UUID) {
+        staleWatchdogs[operationID]?.cancel()
+        staleWatchdogs[operationID] = nil
+    }
+
+    /// Mirrors ActiveStreamManager's completion-notification contract: skip when
+    /// the app is frontmost (the banner + cross-conversation chip are already
+    /// visible), honor the per-conversation notification toggle.
+    nonisolated private static func dispatchStaleNotification(for item: PendingHITL) {
+        Task.detached(priority: .utility) {
+            let isAppActive = await MainActor.run { NSApp.isActive }
+            guard !isAppActive else { return }
+
+            let config = await NotificationConfiguration.shared
+            guard await config.isNotificationEnabled(for: item.origin.conversationID) else { return }
+
+            let minutes = max(1, Int(Date().timeIntervalSince(item.timestamp) / 60))
+            let payload = AppNotificationPayload(
+                title: "Still waiting for you",
+                body: "\(item.origin.title) has been waiting \(minutes) min for \(item.kind.staleNoun).",
+                conversationID: item.origin.conversationID
+            )
+            await NotificationDispatcher.shared.dispatch(payload)
+        }
     }
 
     // MARK: - Queries
@@ -80,5 +138,19 @@ final class InteractionCenter {
     /// Whether any request is pending for a conversation.
     func hasPending(for conversationID: UUID) -> Bool {
         pending.contains { $0.origin.conversationID == conversationID }
+    }
+}
+
+// MARK: - Stale-Notification Copy
+
+private extension PendingInteraction {
+    /// Human phrase for what the stale notification says the run is waiting on.
+    var staleNoun: String {
+        switch self {
+        case .toolConfirmation: return "your approval"
+        case .clarification:    return "your answer"
+        case .planReview:       return "your plan review"
+        case .gate:             return "your go-ahead at a gate"
+        }
     }
 }

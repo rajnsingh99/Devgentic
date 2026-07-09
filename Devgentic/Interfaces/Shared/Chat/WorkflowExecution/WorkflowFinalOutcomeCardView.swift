@@ -29,7 +29,14 @@ struct WorkflowFinalOutcomeCardView: View {
     /// so it can render through the same status-driven theming as agent cards.
     private var aggregateStatus: WorkflowRunDisplayData.NodeDisplayData.NodeStatus {
         if displayData.isRunning {
-            return .running
+            // Only "synthesising" once every upstream node has settled; while nodes are still
+            // executing, this card is just waiting for inputs — so it renders neutral (like other
+            // waiting nodes) instead of grabbing the accent/running treatment the whole run.
+            let allNodesSettled = !displayData.nodeResults.isEmpty
+                && displayData.nodeResults.allSatisfy {
+                    $0.status == .completed || $0.status == .failed || $0.status == .skipped
+                }
+            return allNodesSettled ? .running : .pending
         }
         if displayData.workflowError != nil {
             return .failed
@@ -40,7 +47,7 @@ struct WorkflowFinalOutcomeCardView: View {
         return .completed
     }
 
-    private var statusColor: Color { aggregateStatus.color }
+    private var statusColor: Color { aggregateStatus.color(theme) }
 
     private var bodyText: String {
         let trimmed = displayData.finalOutput.trimmingCharacters(in: .whitespacesAndNewlines)

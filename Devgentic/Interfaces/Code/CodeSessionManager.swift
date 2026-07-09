@@ -58,11 +58,13 @@ final class CodeSessionManager {
         if modelName.isEmpty { return "Select Model" }
         let providerPrefix: String
         switch provider {
-        case .ollama:    providerPrefix = "Ollama"
-        case .mlx:       providerPrefix = "MLX"
-        case .anthropic: providerPrefix = "Anthropic"
-        case .openAI:    providerPrefix = "OpenAI"
-        case .google:    providerPrefix = "Google"
+        case .ollama:           providerPrefix = "Ollama"
+        case .mlx:              providerPrefix = "MLX"
+        case .anthropic:        providerPrefix = "Anthropic"
+        case .openAI:           providerPrefix = "OpenAI"
+        case .google:           providerPrefix = "Google"
+        case .openRouter:       providerPrefix = "OpenRouter"
+        case .openAICompatible: providerPrefix = "Custom"
         }
         return "\(providerPrefix) \u{00B7} \(modelName)"
     }

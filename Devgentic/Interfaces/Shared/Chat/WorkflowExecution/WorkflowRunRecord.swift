@@ -52,12 +52,19 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
         let duration: TimeInterval
         let input: String?
         let inputSourceLabel: String?
+        /// The node's reasoning/tool-call trace, persisted so historical runs (esp. FAILED ones,
+        /// where the trace is the debugging evidence) can still render the agent timeline after
+        /// the in-memory `WorkflowExecutionState` is gone. Optional → old records decode as nil.
+        let nodeTimeline: [TimelineEvent]?
+        /// Degraded success (completed on a best-effort answer after an early stop).
+        /// Optional → old records decode as nil (= no warnings).
+        let hasWarnings: Bool?
 
         enum NodeStatus: String, Codable, Sendable, Equatable {
             case running, completed, failed, skipped
         }
 
-        // Backward-compatible decoding (old records lack input fields)
+        // Backward-compatible decoding (old records lack input fields / nodeTimeline)
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             id = try c.decode(UUID.self, forKey: .id)
@@ -68,9 +75,11 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             duration = try c.decode(TimeInterval.self, forKey: .duration)
             input = try c.decodeIfPresent(String.self, forKey: .input)
             inputSourceLabel = try c.decodeIfPresent(String.self, forKey: .inputSourceLabel)
+            nodeTimeline = try c.decodeIfPresent([TimelineEvent].self, forKey: .nodeTimeline)
+            hasWarnings = try c.decodeIfPresent(Bool.self, forKey: .hasWarnings)
         }
 
-        init(id: UUID, nodeID: UUID, profileName: String, status: NodeStatus, detail: String, duration: TimeInterval, input: String? = nil, inputSourceLabel: String? = nil) {
+        init(id: UUID, nodeID: UUID, profileName: String, status: NodeStatus, detail: String, duration: TimeInterval, input: String? = nil, inputSourceLabel: String? = nil, nodeTimeline: [TimelineEvent]? = nil, hasWarnings: Bool? = nil) {
             self.id = id
             self.nodeID = nodeID
             self.profileName = profileName
@@ -79,6 +88,8 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
             self.duration = duration
             self.input = input
             self.inputSourceLabel = inputSourceLabel
+            self.nodeTimeline = nodeTimeline
+            self.hasWarnings = hasWarnings
         }
     }
 
@@ -123,7 +134,13 @@ struct WorkflowRunRecord: Identifiable, Codable, Sendable, Equatable {
                 detail: result.detail,
                 duration: result.duration,
                 input: inputText,
-                inputSourceLabel: sourceLabel
+                inputSourceLabel: sourceLabel,
+                // Persist the trace (capped from the end — on failure the most recent
+                // events are the diagnostic ones). Empty → nil keeps old-record parity.
+                nodeTimeline: state.nodeTimelines[result.nodeID].flatMap { events in
+                    events.isEmpty ? nil : Array(events.suffix(400))
+                },
+                hasWarnings: result.hasWarnings ? true : nil
             )
         }
 

@@ -29,47 +29,58 @@ struct ErrorMessageView: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: iconName)
                 .font(.title3)
                 .foregroundColor(theme.errorColor)
                 .padding(.top, 2) // Align icon nicely with text
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 if let title = title, !title.isEmpty {
                     Text(title)
                         .font(.headline)
                         .bold()
-                        // Use .primary to adapt to light/dark, maybe slightly red?
-                        .foregroundColor(theme.primaryText.opacity(0.9))
+                        .foregroundColor(theme.errorColor.opacity(0.95))
                 }
                 Text(details)
-                    .font(.system(.title3)) // Increased font size for readability
-                    // Use .secondary for less emphasis, but ensure readability
-                    .foregroundColor(theme.secondaryText)
-                    .textSelection(.enabled) // Allow copying error details
+                    .font(theme.fontBody) 
+                    .foregroundColor(theme.primaryText.opacity(0.85))
+                    .textSelection(.enabled) 
 
                 if let suggestion = suggestion, !suggestion.isEmpty {
                     HStack(alignment: .top, spacing: 5) {
-                        Image(systemName: "lightbulb")
+                        Image(systemName: "lightbulb.fill")
                             .font(.callout)
-                            .foregroundColor(theme.accentColor)
+                            .foregroundColor(theme.accentColor.opacity(0.9))
                         Text(suggestion)
                             .font(.callout)
-                            .foregroundColor(theme.secondaryText.opacity(0.85))
+                            .foregroundColor(theme.secondaryText.opacity(0.9))
                             .textSelection(.enabled)
                     }
-                    .padding(.top, 3)
+                    .padding(.top, 4)
                 }
             }
-            // Allow VStack to expand
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [theme.errorColor.opacity(0.12), theme.errorColor.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(theme.errorColor.opacity(0.25), lineWidth: 0.5)
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Error: \(title ?? "Unknown"). \(details)" + (suggestion.map { ". Suggestion: \($0)" } ?? ""))
         .accessibilityAddTraits(.isStaticText)
-        // Add some internal padding within the bubble (handled by container)
-        // No background needed here, container view will add it
     }
 }
 

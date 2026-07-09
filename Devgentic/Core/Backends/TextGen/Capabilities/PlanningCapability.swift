@@ -99,6 +99,7 @@ actor PlanningExecutorWrapper: Executor {
                         osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
                         shellType: "Zsh (Non-Interactive Mode)",
                         userName: NSUserName(),
+                        homeDirectory: NSHomeDirectory(),
                         currentDate: Date().formatted(date: .numeric, time: .shortened)
                     )
 
@@ -288,8 +289,14 @@ actor PlanningExecutorWrapper: Executor {
 
                     let combinedResults = subtasks.compactMap { subtaskResults[$0.id] }.joined(separator: "\n")
 
+                    // Partial-failure detection: subtask catch sites prefix failures with
+                    // "Error: ". Computed BEFORE building the summary so an all-failed run
+                    // doesn't present raw internal error descriptions as the conclusion.
+                    let totalSubtasks = subtasks.count
+                    let failedSubtasks = subtaskResults.values.filter { $0.hasPrefix("Error:") }.count
+                    let allFailed = totalSubtasks > 0 && failedSubtasks == totalSubtasks
+
                     var synthesisSummary = ExecutionSummary(originalGoal: input.userInput)
-                    synthesisSummary.finalAgentThought = combinedResults.isEmpty ? nil : combinedResults
                     // [G4] Aggregate subtask tool results so ResponseSynthesizer has full context.
                     for tool in allToolResults {
                         synthesisSummary.record(
@@ -300,7 +307,16 @@ actor PlanningExecutorWrapper: Executor {
                             isSuccess: tool.isSuccess
                         )
                     }
-                    synthesisSummary.markComplete()
+                    if allFailed {
+                        // Raw "Error: <localizedDescription>" strings are internal — routing
+                        // them through failureReason (not finalAgentThought) keeps the
+                        // conclusion-only fast path from echoing them verbatim and lets
+                        // synthesis produce a clean user-facing failure message.
+                        synthesisSummary.markComplete(failureReason: combinedResults)
+                    } else {
+                        synthesisSummary.finalAgentThought = combinedResults.isEmpty ? nil : combinedResults
+                        synthesisSummary.markComplete()
+                    }
 
                     let response = await ResponseSynthesizer.synthesize(
                         summary: synthesisSummary,
@@ -315,12 +331,6 @@ actor PlanningExecutorWrapper: Executor {
                         onUsage: { continuation.yield(.tokenUsage($0)) }
                     )
 
-                    // Partial-failure detection: if all subtasks errored, treat as .failed
-                    // even though we still produced a synthesized response (honesty over polish).
-                    // Errors are marked by the "Error: " prefix written at subtask catch sites above.
-                    let totalSubtasks = subtasks.count
-                    let failedSubtasks = subtaskResults.values.filter { $0.hasPrefix("Error:") }.count
-                    let allFailed = totalSubtasks > 0 && failedSubtasks == totalSubtasks
                     let terminalOutcome: ExecutionOutcome = allFailed ? .failed : .completed
                     let terminalReason: String? = failedSubtasks > 0
                         ? "\(failedSubtasks) of \(totalSubtasks) subtasks failed"

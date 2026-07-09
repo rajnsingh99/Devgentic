@@ -183,6 +183,8 @@ struct BotConfigDetailView: View {
                             }
                         )
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 3. Persona & Behavior
@@ -263,6 +265,8 @@ struct BotConfigDetailView: View {
                             .foregroundColor(theme.errorColor)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 4. File Handling Strategy & Knowledge
@@ -273,6 +277,8 @@ struct BotConfigDetailView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         advancedSettingsView
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
             }
             .padding(ViewLayout.containerPadding)
@@ -495,6 +501,8 @@ struct BotConfigDetailView: View {
                     .padding(.leading, 12)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 

@@ -26,24 +26,45 @@ struct WorkflowPortView: View {
 
     private let radius: CGFloat = WorkflowCanvasState.portRadius
 
+    @State private var pulseIndicator = false
+
     var body: some View {
-        Circle()
-            .fill(fillColor)
-            .frame(width: radius * 2, height: radius * 2)
-            .overlay(
+        ZStack {
+            if isCompatibleTarget || isHovering {
                 Circle()
-                    .stroke(strokeColor, lineWidth: 1.5)
-            )
-            .scaleEffect(isHovering || isCompatibleTarget ? 1.4 : 1.0)
-            .shadow(color: glowColor, radius: isCompatibleTarget ? 4 : 0)
-            .opacity(isNodeHovered || isHovering || isCompatibleTarget ? 1.0 : 0.0)
-            .contentShape(Circle().inset(by: -8)) // Larger hit area
-            .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    isHovering = hovering
-                }
+                    .stroke(portProfileColor.opacity(0.35), lineWidth: 1.5)
+                    .scaleEffect(pulseIndicator ? 1.6 : 1.1)
+                    .opacity(pulseIndicator ? 0.0 : 1.0)
+                    .frame(width: radius * 2, height: radius * 2)
             }
-            .gesture(portType == .output ? outputDragGesture : nil)
+
+            Circle()
+                .fill(fillColor)
+                .frame(width: radius * 2, height: radius * 2)
+                .overlay(
+                    Circle()
+                        .stroke(strokeColor, lineWidth: 1.5)
+                )
+                .shadow(color: glowColor, radius: isCompatibleTarget || isHovering ? 5 : 0)
+        }
+        .scaleEffect(isHovering || isCompatibleTarget ? 1.35 : 1.0)
+        .opacity(isNodeHovered || isHovering || isCompatibleTarget ? 1.0 : 0.0)
+        .contentShape(Circle().inset(by: -8)) // Larger hit area
+        .onHover { hovering in
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.7)) {
+                isHovering = hovering
+            }
+        }
+        .gesture(portType == .output ? outputDragGesture : nil)
+        .onChange(of: isCompatibleTarget, initial: true) { _, compatible in
+            if compatible {
+                withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false)) {
+                    pulseIndicator = true
+                }
+            } else {
+                pulseIndicator = false
+            }
+        }
     }
 
     @State private var isDragging = false

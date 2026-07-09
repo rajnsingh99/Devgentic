@@ -68,10 +68,10 @@ private struct WorkflowRunCardView: View {
 
     private var statusColor: Color {
         switch record.status {
-        case .completed: return .green
-        case .failed:    return .red
-        case .cancelled: return .orange
-        case .running:   return .blue
+        case .completed: return theme.successColor
+        case .failed:    return theme.errorColor
+        case .cancelled: return theme.warningColor
+        case .running:   return theme.accentColor
         }
     }
 
@@ -113,31 +113,21 @@ private struct WorkflowRunCardView: View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 8) {
                 // Row 1: Status + run duration
-                // The prominent timer here is the run *duration* — how long the job
-                // actually took. The previous design used `Text(record.timestamp,
-                // style: .relative)` which kept ticking up indefinitely ("10 days,
-                // 19 hrs") since `.relative` formats time-elapsed-since, not job
-                // duration.
                 HStack(spacing: 8) {
                     Image(systemName: statusIcon)
                         .font(.system(size: 13))
                         .foregroundColor(statusColor)
+                        .shadow(color: statusColor.opacity(0.35), radius: 2)
 
-                    // For .running rows, tick `Date() - record.timestamp` once
-                    // per second via `TimelineView(.periodic)`. The view stops
-                    // re-rendering the moment the row's status flips out of
-                    // .running (the surrounding `if` evaluates again and we
-                    // swap to the static `durationText`). The frozen value
-                    // already lives in `record.duration` by then.
                     if record.status == .running {
                         TimelineView(.periodic(from: record.timestamp, by: 1.0)) { context in
                             Text(Self.formatDuration(context.date.timeIntervalSince(record.timestamp)))
-                                .font(theme.fontCaption.weight(.medium).monospacedDigit())
+                                .font(theme.fontCaption.weight(.bold).monospacedDigit())
                                 .foregroundColor(theme.primaryText)
                         }
                     } else {
                         Text(durationText)
-                            .font(theme.fontCaption.weight(.medium).monospacedDigit())
+                            .font(theme.fontCaption.weight(.bold).monospacedDigit())
                             .foregroundColor(theme.primaryText)
                     }
 
@@ -162,10 +152,10 @@ private struct WorkflowRunCardView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 9))
-                            .foregroundColor(.red.opacity(0.7))
+                            .foregroundColor(theme.errorColor.opacity(0.7))
                         Text(error)
                             .font(.system(size: 11))
-                            .foregroundColor(.red.opacity(0.8))
+                            .foregroundColor(theme.errorColor.opacity(0.8))
                             .lineLimit(2)
                     }
                 } else if !record.finalOutput.isEmpty {
@@ -185,46 +175,48 @@ private struct WorkflowRunCardView: View {
                 HStack(spacing: 8) {
                     let stats = nodeStats
                     Label("\(stats.total) node\(stats.total == 1 ? "" : "s")", systemImage: "square.on.square")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(theme.tertiaryText)
 
                     if stats.failed > 0 {
                         Text("\(stats.failed) failed")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.red)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(theme.errorColor)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 1)
                             .background(
-                                Capsule().fill(Color.red.opacity(0.1))
+                                Capsule().fill(theme.errorColor.opacity(0.12))
                             )
                     }
 
                     Spacer()
 
                     Text(statusLabel)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(statusColor)
                         .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
+                        .padding(.vertical, 1.5)
                         .background(
-                            Capsule().fill(statusColor.opacity(0.1))
+                            Capsule().fill(statusColor.opacity(0.12))
                         )
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(cardBackground)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(cardBorder, lineWidth: isSelected ? 1.5 : 0.5)
             )
+            .shadow(color: isSelected ? statusColor.opacity(0.08) : Color.black.opacity(0.04), radius: isSelected ? 6 : 1, y: 1)
         }
         .buttonStyle(.plain)
+        .scaleEffect(isHovering ? 1.012 : 1.0)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.75)) {
                 isHovering = hovering
             }
         }

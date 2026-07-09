@@ -18,7 +18,7 @@ struct ActionNodeInspectorView: View {
     @Binding var node: WorkflowNode
     /// Workflow variable names (Code-node outputs) surfaced in the binding menu.
     var availableVariables: [String] = []
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     /// Boolean argument input mode.
@@ -55,7 +55,14 @@ struct ActionNodeInspectorView: View {
                 .padding(24)
             }
         }
-        .frame(width: 580, height: 620)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 620,
+            idealHeight: 750,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear { loadFromNode() }
         .sheet(isPresented: $showToolPicker) { toolPickerSheet }
@@ -87,7 +94,7 @@ struct ActionNodeInspectorView: View {
             }
             .buttonStyle(.plain)
             .help("How action nodes work")
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { closeInspector() }
                 .font(theme.fontCaption)
                 .buttonStyle(.plain)
                 .foregroundColor(theme.secondaryText)
@@ -180,6 +187,8 @@ struct ActionNodeInspectorView: View {
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -188,17 +197,22 @@ struct ActionNodeInspectorView: View {
     private func argumentsCard(for tool: Tool) -> some View {
         let argNames = sortedArgNames(for: tool)
         return SettingsCard(title: "Arguments", icon: "list.bullet.rectangle", theme: theme) {
-            if argNames.isEmpty {
-                Text("This tool takes no arguments.")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
-            } else {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(argNames, id: \.self) { argName in
-                        argumentRow(tool: tool, argName: argName)
+            VStack {
+                if argNames.isEmpty {
+                    Text("This tool takes no arguments.")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(argNames, id: \.self) { argName in
+                            argumentRow(tool: tool, argName: argName)
+                        }
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -414,6 +428,8 @@ struct ActionNodeInspectorView: View {
                     .controlSize(.small)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -573,6 +589,6 @@ struct ActionNodeInspectorView: View {
         node.nodeConfig?.hardTimeout = hardTimeout
         node.nodeConfig?.onFailure = failurePolicy
 
-        dismiss()
+        closeInspector()
     }
 }

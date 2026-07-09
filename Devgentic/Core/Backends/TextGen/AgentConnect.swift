@@ -258,7 +258,7 @@ class AgentConnect: @unchecked Sendable {
                     // Determine if this is a native provider (supports turn-by-turn history)
                     let isNativeProvider: Bool = {
                         switch llmConfig.apiProvider {
-                        case .anthropic, .openAI, .google: return true
+                        case .anthropic, .openAI, .google, .openRouter, .openAICompatible: return true
                         case .ollama: return llmConfig.cognitiveCapability != .none
                         case .mlx: return false
                         }
@@ -757,6 +757,16 @@ class AgentConnect: @unchecked Sendable {
     ) throws -> any CognitiveGenerator {
         
         switch llmConfig.apiProvider {
+        // NOTE (register #1): the cloud arms intentionally have NO pre-flight
+        // chat-only guard. `cognitiveCapability` is populated only by the LOCAL
+        // analyzers (Ollama /api/show, MLXTokenizerAnalyzer) — cloud model
+        // selection leaves it at the default `.none`, so guarding on it here
+        // would 405 every existing cloud profile. The runtime guard lives in
+        // ProviderErrorClassifier.classify(statusCode:rawBody:): a 400/422 whose
+        // body rejects tool definitions classifies fatal with an actionable
+        // "doesn't support tool calling" message. The silent-ignore shape
+        // (endpoint accepts `tools` but the model never calls one) is the
+        // register-#3 zero-tool-call detector, tracked separately.
         case .anthropic:
             return NativeStructuredGenerator(
                 toolAdapter: ClaudeToolSchemaAdapter(),
@@ -769,12 +779,15 @@ class AgentConnect: @unchecked Sendable {
                 toolTurnAdapter: GeminiToolTurnAdapter()
             )
 
-        case .openAI:
+        case .openAI, .openRouter, .openAICompatible:
+            // OpenRouter and custom OpenAI-compatible endpoints speak the OpenAI
+            // chat schema, so they share the OpenAI tool encoding and native turn
+            // adapter.
             return NativeStructuredGenerator(
                 toolAdapter: NativeJSONSchemaAdapter(),
                 toolTurnAdapter: OpenAIToolTurnAdapter()
             )
-            
+
         case .mlx, .ollama:
             let cognitiveProfile = llmConfig.cognitiveProfile
             
@@ -955,7 +968,61 @@ class AgentConnect: @unchecked Sendable {
             }
             let config = LLMProviderConfig(apiKey: apiKey, baseURL: baseURL, modelName: llmConfig.modelName, timeout: 300.0, options: options, rateLimitKey: rlKey)
             return OpenAILLMProvider(config: config)
-            
+
+        case .openRouter:
+            guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
+                throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "OpenRouter API Key is required."])
+            }
+            let baseURL: URL
+            if let baseURLString = llmConfig.baseURL {
+                guard let parsed = URL(string: baseURLString) else {
+                    throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid OpenRouter Base URL: \(baseURLString)"])
+                }
+                baseURL = parsed
+            } else {
+                baseURL = ProviderDefaults.openRouterBaseURL
+            }
+            var options: [String: JSONValue]? = nil
+            if let advConfig = llmConfig.advancedConfiguration {
+                options = advConfig
+            }
+            let config = LLMProviderConfig(
+                apiKey: apiKey,
+                baseURL: baseURL,
+                modelName: llmConfig.modelName,
+                timeout: 300.0,
+                options: options,
+                rateLimitKey: rlKey,
+                // Optional OpenRouter attribution. HTTP-Referer is omitted until the
+                // app has a public homepage to point at.
+                extraHeaders: ["X-Title": "Devgentic"]
+            )
+            return OpenAILLMProvider(config: config, providerCategory: .openRouter)
+
+        case .openAICompatible:
+            // Any OpenAI-compatible endpoint (LM Studio, vLLM, llama.cpp server,
+            // Groq, DeepSeek, …). Base URL is REQUIRED (no canonical default);
+            // the API key is OPTIONAL (local servers usually need none — a nil
+            // key simply omits the Authorization header in OpenAILLMProvider).
+            guard let baseURLString = llmConfig.baseURL,
+                  !baseURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let baseURL = URL(string: baseURLString) else {
+                throw NSError(domain: "AgentConnect", code: 400, userInfo: [NSLocalizedDescriptionKey: "A valid Base URL is required for an OpenAI-Compatible provider (e.g. http://localhost:1234/v1)."])
+            }
+            var options: [String: JSONValue]? = nil
+            if let advConfig = llmConfig.advancedConfiguration {
+                options = advConfig
+            }
+            let config = LLMProviderConfig(
+                apiKey: llmConfig.apiKey,
+                baseURL: baseURL,
+                modelName: llmConfig.modelName,
+                timeout: 300.0,
+                options: options,
+                rateLimitKey: rlKey
+            )
+            return OpenAILLMProvider(config: config, providerCategory: .openAICompatible)
+
         case .google:
             guard let apiKey = llmConfig.apiKey, !apiKey.isEmpty else {
                 throw NSError(domain: "AgentConnect", code: 401, userInfo: [NSLocalizedDescriptionKey: "Gemini API Key is required."])
@@ -1316,7 +1383,7 @@ class AgentConnect: @unchecked Sendable {
     /// dialect in play — it runs through the heuristic JSON fallback.
     private func effectiveDialect(_ config: ProviderConfig) -> String {
         switch config.apiProvider {
-        case .anthropic, .google, .openAI:
+        case .anthropic, .google, .openAI, .openRouter, .openAICompatible:
             return "Native JSON (Cloud)"
         case .mlx, .ollama:
             switch config.cognitiveCapability {

@@ -22,7 +22,7 @@ import SwiftUI
 struct ProfileNodeInspectorView: View {
     @Binding var node: WorkflowNode
     let profile: BackendProfileModel?
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     // MARK: - Constants
@@ -122,7 +122,14 @@ struct ProfileNodeInspectorView: View {
                 .padding(24)
             }
         }
-        .frame(width: 560, height: 540)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 540,
+            idealHeight: 680,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear { loadFromNode() }
     }
@@ -210,12 +217,13 @@ struct ProfileNodeInspectorView: View {
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(theme.warningColor)
                     }
-                    Spacer()
                     Text("\(taskDescription.count)/\(Self.maxTaskDescriptionLength)")
                         .font(.system(size: 10))
                         .foregroundColor(isNearLimit ? theme.warningColor : theme.tertiaryText)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -292,6 +300,8 @@ struct ProfileNodeInspectorView: View {
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -405,6 +415,8 @@ struct ProfileNodeInspectorView: View {
                         .foregroundColor(theme.errorColor)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
         .sheet(isPresented: $showProfileEditor) {
             if let profile = profile {
@@ -439,6 +451,6 @@ struct ProfileNodeInspectorView: View {
         }
         // Trim whitespace to prevent spaces-only from passing validation downstream
         node.nodeConfig?.taskDescription = trimmedTaskDescription
-        dismiss()
+        closeInspector()
     }
 }

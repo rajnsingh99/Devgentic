@@ -17,24 +17,30 @@ enum RateLimitCategory: String, Codable, Sendable {
     case openAI
     case geminiFlash
     case anthropic
+    case openRouter
+    case openAICompatible
 
     /// Conservative default RPM for each provider tier.
     var defaultTokensPerSecond: Double {
         switch self {
-        case .local:       return 1.0          // 60 RPM — hardware bound
-        case .geminiFlash: return 15.0 / 60.0  // 15 RPM — free tier
-        case .anthropic:   return 50.0 / 60.0  // 50 RPM — Tier 1
-        case .openAI:      return 500.0 / 60.0 // 500 RPM — Tier 1
+        case .local:            return 1.0          // unused — .local bypasses the limiter (see GlobalRateLimiter.wait)
+        case .geminiFlash:      return 15.0 / 60.0  // 15 RPM — free tier
+        case .anthropic:        return 50.0 / 60.0  // 50 RPM — Tier 1
+        case .openAI:           return 500.0 / 60.0 // 500 RPM — Tier 1
+        case .openRouter:       return 200.0 / 60.0 // limits scale with credits upstream; reactive 429 handling covers the rest
+        case .openAICompatible: return 600.0 / 60.0 // endpoint unknown (often local LM Studio/vLLM) — permissive; reactive 429 covers remote gateways
         }
     }
 
     /// Maximum burst tokens (allows rapid-fire up to this count).
     var defaultMaxBurst: Double {
         switch self {
-        case .local:       return 1.0
-        case .geminiFlash: return 5.0
-        case .anthropic:   return 5.0
-        case .openAI:      return 10.0
+        case .local:            return 1.0
+        case .geminiFlash:      return 5.0
+        case .anthropic:        return 5.0
+        case .openAI:           return 10.0
+        case .openRouter:       return 10.0
+        case .openAICompatible: return 20.0
         }
     }
 }
@@ -52,10 +58,16 @@ extension RateLimitCategory {
     /// - MLX: `"local:mlx"` — single GPU, always shared
     static func deriveBucketKey(provider: ApiProvider, apiKey: String?, baseURL: String?) -> String {
         switch provider {
-        case .anthropic, .openAI, .google:
+        case .anthropic, .openAI, .google, .openRouter:
             let category = Self.from(provider: provider)
             let keyHash = apiKey.map { String($0.hashValue) } ?? "no-key"
             return "\(category.rawValue):\(keyHash)"
+        case .openAICompatible:
+            // The endpoint IS the server/quota boundary (the key is often absent
+            // for local servers), so key the bucket by baseURL — two different
+            // compatible endpoints must not share one token bucket.
+            let urlHash = baseURL.map { String($0.hashValue) } ?? "no-url"
+            return "openAICompatible:\(urlHash)"
         case .ollama:
             let urlHash = baseURL.map { String($0.hashValue) } ?? "localhost"
             return "local:\(urlHash)"
@@ -67,10 +79,12 @@ extension RateLimitCategory {
     /// Maps ApiProvider to the corresponding rate limit category.
     static func from(provider: ApiProvider) -> RateLimitCategory {
         switch provider {
-        case .anthropic: return .anthropic
-        case .google:    return .geminiFlash
-        case .openAI:    return .openAI
-        case .ollama, .mlx: return .local
+        case .anthropic:        return .anthropic
+        case .google:           return .geminiFlash
+        case .openAI:           return .openAI
+        case .openRouter:       return .openRouter
+        case .openAICompatible: return .openAICompatible
+        case .ollama, .mlx:     return .local
         }
     }
 }
@@ -79,6 +93,11 @@ extension RateLimitCategory {
 /// Buckets are keyed on (provider + apiKey/baseURL) so profiles sharing
 /// the same API key share the same server-side quota boundary.
 /// Prevents "Death Spirals" where multiple agent loops exhaust limits simultaneously.
+///
+/// `.local` providers bypass the limiter entirely: MLX runs in-process (requests
+/// already serialize on the GPU) and Ollama queues at the server, so there is no
+/// upstream quota to protect — a proactive bucket only added ~1s latency per
+/// agent iteration.
 actor GlobalRateLimiter {
 
     // MARK: - Singleton
@@ -134,6 +153,11 @@ actor GlobalRateLimiter {
     /// - Returns: The time waited (in seconds).
     @discardableResult
     func wait(forKey key: String, category: RateLimitCategory) async -> TimeInterval {
+        // Local inference is unmetered — no bucket is ever created. This also
+        // covers a remote Ollama baseURL (still classified `.local`): self-hosted
+        // servers have no quota tiers and apply their own request queueing.
+        guard category != .local else { return 0 }
+
         var bucket = getOrCreateBucket(key: key, category: category)
 
         let now = Date()
@@ -183,6 +207,10 @@ actor GlobalRateLimiter {
     /// Drains the bucket to force a hard reset.
     /// Used when the server responds with 429 despite our local counting (Drift).
     func drainAndPenalize(key: String, category: RateLimitCategory, penaltySeconds: TimeInterval = 0) {
+        // Local is unmetered — nothing to drain. A 429 from a local endpoint is
+        // still backed off by LLMRetryStrategy's Retry-After sleep independently.
+        guard category != .local else { return }
+
         var bucket = getOrCreateBucket(key: key, category: category)
 
         bucket.currentTokens = min(0, bucket.currentTokens)
@@ -201,6 +229,8 @@ actor GlobalRateLimiter {
 
     /// Checks the current estimated wait time without consuming a token.
     func timeUntilNextToken(forKey key: String, category: RateLimitCategory) -> TimeInterval {
+        guard category != .local else { return 0 } // local is unmetered
+
         guard let bucket = buckets[key] else { return 0 }
 
         let now = Date()

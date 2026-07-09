@@ -761,6 +761,11 @@ actor WorkflowExecutor: Executor {
         var nodeArtifacts: [ToolOutput] = []
         var nodeMediaArtifacts: [MediaArtifact] = []
         var nodeStatus: NodeExecutionStatus = .completed
+        // Degraded success: the inner agent stopped early (circuit breaker / iteration budget)
+        // but synthesized a usable best-effort answer. The node still COMPLETES (output flows
+        // downstream, joins satisfied, error port untouched); this flag rides the completion
+        // event so the UI can badge the node amber instead of green.
+        var nodeHasWarnings = false
 
         do {
             // Race: stream consumption vs timeout (same pattern as AgentConnect).
@@ -916,9 +921,20 @@ actor WorkflowExecutor: Executor {
                 switch outcome {
                 case .completed:
                     break
+                case .completedWithWarnings:
+                    // Degraded success — keep `.completed` so the workflow continues (the
+                    // best-effort output is real and flows downstream); surface the warning
+                    // on the node instead of killing the run. The evidence (LOOP GUARD card
+                    // etc.) is already in the node's timeline.
+                    nodeHasWarnings = true
+                    logger.notice("Node '\(displayName)' completed with warnings (\(streamResult.4 ?? "degraded run")). Continuing.")
                 case .failed:
                     let reasonText = streamResult.4 ?? "Inner agent execution failed"
-                    nodeStatus = .failed(.modelError(provider: "agent", error: reasonText))
+                    // Classify instead of blanket `.modelError`: a circuit-breaker stale-loop abort
+                    // becomes `.repetitiveActionLoop` (correct remediation; NOT retryable — retrying
+                    // a deterministic loop-abort would just loop again). Unrecognized text keeps the
+                    // retryable `.modelError` behaviour described above.
+                    nodeStatus = .failed(AgentFailureReason.classify(agentReasonText: reasonText))
                     logger.warning("Node '\(displayName)' inner outcome=.failed (\(reasonText)). Demoting nodeStatus to .failed.")
                 case .cancelled:
                     nodeStatus = .canceled
@@ -990,7 +1006,7 @@ actor WorkflowExecutor: Executor {
             // visually via line limits, and the orchestrator's aggregate thought
             // log truncates its own preview (see ActiveStreamManager).
             await TraceRecorder.shared.endSpan(spanID: nodeSpan.spanID, status: .completed)
-            continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: nodeOutput))
+            continuation.yield(.workflowNodeCompleted(nodeID: nodeID, profileName: displayName, summary: nodeOutput, hasWarnings: nodeHasWarnings))
             logger.info("Node '\(displayName)' completed. Output: \(nodeOutput.count) chars, Duration: \(String(format: "%.1f", result.metadata.duration))s")
 
         case .failed(let reason):

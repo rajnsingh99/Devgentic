@@ -34,16 +34,26 @@ enum ProviderDefaults {
     /// Ollama local server default.
     static let ollamaBaseURL = URL(string: "http://localhost:11434")!
 
+    /// OpenRouter API root (OpenAI-compatible aggregator).
+    static let openRouterBaseURL = URL(string: "https://openrouter.ai/api/v1/")!
+
+    /// Placeholder/hint for a custom OpenAI-compatible endpoint. There is no
+    /// canonical default (the user must supply one) — this is only the UI
+    /// placeholder, pre-filled to LM Studio's local server for discoverability.
+    static let openAICompatibleHintURL = URL(string: "http://localhost:1234/v1")!
+
     // MARK: - Provider Lookup
 
     /// Returns the canonical default base URL for a given provider.
     static func baseURL(for provider: ApiProvider) -> URL {
         switch provider {
-        case .anthropic: return anthropicBaseURL
-        case .openAI:    return openAIBaseURL
-        case .google:    return geminiBaseURL
-        case .ollama:    return ollamaBaseURL
-        case .mlx:       return URL(string: "local://mlx")!
+        case .anthropic:        return anthropicBaseURL
+        case .openAI:           return openAIBaseURL
+        case .google:           return geminiBaseURL
+        case .ollama:           return ollamaBaseURL
+        case .openRouter:       return openRouterBaseURL
+        case .openAICompatible: return openAICompatibleHintURL
+        case .mlx:              return URL(string: "local://mlx")!
         }
     }
 

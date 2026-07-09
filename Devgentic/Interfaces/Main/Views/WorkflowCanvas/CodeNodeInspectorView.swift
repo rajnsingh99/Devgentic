@@ -14,7 +14,7 @@ import SwiftUI
 
 struct CodeNodeInspectorView: View {
     @Binding var node: WorkflowNode
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     // MARK: - State
@@ -40,7 +40,14 @@ struct CodeNodeInspectorView: View {
                 .padding(24)
             }
         }
-        .frame(width: 540, height: 520)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 520,
+            idealHeight: 650,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear { loadFromNode() }
     }
@@ -73,7 +80,7 @@ struct CodeNodeInspectorView: View {
             }
             .buttonStyle(.plain)
             .help("How code nodes work")
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { closeInspector() }
                 .font(theme.fontCaption)
                 .buttonStyle(.plain)
                 .foregroundColor(theme.secondaryText)
@@ -214,6 +221,8 @@ struct CodeNodeInspectorView: View {
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -240,6 +249,8 @@ struct CodeNodeInspectorView: View {
                     .foregroundColor(theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -282,6 +293,6 @@ struct CodeNodeInspectorView: View {
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
         node.nodeConfig?.joinMode = joinMode
 
-        dismiss()
+        closeInspector()
     }
 }

@@ -431,9 +431,12 @@ class BackendOrchestrationService {
                         }
 
                     case .code:
-                        // Code mode routes through the agent pipeline using an ephemeral profile.
-                        // The ephemeral profile is built with .agent profileType internally,
-                        // so this case handles the rare scenario where profileType is explicitly .code.
+                        // Code mode routes through the agent pipeline (AgentConnect) but the
+                        // profile IS .code end-to-end — CodeSessionManager builds it with
+                        // `details: .code(agentConfig)` and ExecutorFactory has a dedicated
+                        // .code arm. (An earlier comment here claimed the profile was built
+                        // as .agent internally; that was never true and masked a factory
+                        // fallthrough that capped Code runs at 15 iterations.)
                         let codeProjectPath: String
                         if case .code(let codeConfig) = currentConfig.profile.details {
                             codeProjectPath = codeConfig.projectPath ?? "unknown"
@@ -442,6 +445,10 @@ class BackendOrchestrationService {
                         }
                         logger.info("[CODE] Routing to AgentConnect (agent pipeline) — traceID: \(context.traceID), project: \(codeProjectPath), RAG: \(ragContextString != nil), history: \(conversationHistory.count) msgs")
 
+                        // [G1 Piece 2] resumeState threads into Code runs the same as agents —
+                        // Code IS the plain ReAct loop, so the executor's resume preamble
+                        // (replay completed steps, re-raise the parked tool) applies as-is.
+                        // Without this, a resumed parked Code run silently re-ran from scratch.
                         let stream = agentConnect.streamAgentResponse(
                             for: currentConfig.profile,
                             userInput: queryForRequest,
@@ -449,6 +456,7 @@ class BackendOrchestrationService {
                             conversationID: conversationID,
                             ragContext: ragContextString,
                             userPayload: attachedImagePayload,
+                            resumeState: resumeState,
                             traceContext: context,
                             onTraceUpdate: aggregatedTraceUpdate
                         )
@@ -473,7 +481,15 @@ class BackendOrchestrationService {
                         currentConfig = BackendRequestConfig(profile: updatedProfile)
                     }
 
-                    continuation.yield(.error("Extended thinking disabled — '\(modelName)' reported it isn't supported. Retrying without it…"))
+                    // .warning, not .error: this is a benign one-shot self-heal (the
+                    // retry below almost always succeeds and the profile is already
+                    // patched). An .error here rendered a red failure card for a run
+                    // that recovered. A SECOND thinkingUnsupported is not caught
+                    // (thinkingRetryDone guard) and still surfaces as a real error.
+                    continuation.yield(.warning(
+                        category: .retry,
+                        message: "Extended thinking disabled — '\(modelName)' reported it isn't supported. Retrying without it…"
+                    ))
                     // Loop back to retry dispatch with the updated config.
                     continue dispatchLoop
                 } catch {

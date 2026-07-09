@@ -19,10 +19,15 @@ private let logger = DGLogger(category: "OpenAILLMProvider")
 struct OpenAILLMProvider: LLMProvider {
 
     let config: LLMProviderConfig
+    /// Rate-limit category the pipeline meters and attributes errors under.
+    /// `.openAI` for OpenAI proper; `.openRouter` when this provider serves an
+    /// OpenAI-compatible OpenRouter profile.
+    let providerCategory: RateLimitCategory
     var modelName: String { config.modelName }
 
-    init(config: LLMProviderConfig) {
+    init(config: LLMProviderConfig, providerCategory: RateLimitCategory = .openAI) {
         self.config = config
+        self.providerCategory = providerCategory
     }
 
     // MARK: - Config-Driven Computed Properties
@@ -76,6 +81,9 @@ struct OpenAILLMProvider: LLMProvider {
         if let apiKey = config.apiKey {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        for (header, value) in config.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: header)
+        }
         return request
     }
 
@@ -113,7 +121,7 @@ struct OpenAILLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
@@ -177,7 +185,7 @@ struct OpenAILLMProvider: LLMProvider {
 
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
@@ -209,7 +217,7 @@ struct OpenAILLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
@@ -279,7 +287,7 @@ struct OpenAILLMProvider: LLMProvider {
         var request = makeRequest()
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: .openAI, rateLimitKey: config.rateLimitKey)
+        let (data, _) = try await CloudRequestPipeline.execute(request: request, provider: providerCategory, rateLimitKey: config.rateLimitKey)
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let choices = json?["choices"] as? [[String: Any]],
@@ -345,7 +353,7 @@ struct OpenAILLMProvider: LLMProvider {
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
                 let (bytes, _) = try await CloudRequestPipeline.executeStream(
-                    request: request, provider: .openAI, rateLimitKey: self.config.rateLimitKey
+                    request: request, provider: self.providerCategory, rateLimitKey: self.config.rateLimitKey
                 )
                 return bytes
             },

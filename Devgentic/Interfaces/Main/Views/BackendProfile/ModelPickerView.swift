@@ -141,6 +141,258 @@ struct OpenAIModelPickerView: View {
 }
 
 
+// MARK: - OpenRouter Model Picker View
+
+/// Rich picker for OpenRouter's multi-vendor catalog (~340 models). Unlike the
+/// other cloud pickers this binds capability metadata, because OpenRouter's
+/// /models response declares tool support, vision input, and context length
+/// up front — the one cloud provider where the agent tool-capability gate can
+/// run BEFORE the first request instead of via the runtime 400-classifier.
+struct OpenRouterModelPickerView: View {
+    @Binding var selectedModel: String
+    @Binding var cognitiveCapability: ModelCognitiveCapability
+    @Binding var modelMetadata: ModelMetadata?
+    @Binding var supportedModalities: SupportedModalities
+
+    let apiKey: String
+
+    /// If true (Agents), models without tool support are hidden entirely.
+    var filterForTools: Bool = false
+
+    @Environment(\.appTheme) private var theme
+    @State private var allModels: [OpenRouterModel] = []
+    @State private var searchText: String = ""
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String? = nil
+    @State private var fetchTask: Task<Void, Never>?
+
+    private var visibleModels: [OpenRouterModel] {
+        var models = filterForTools ? allModels.filter(\.toolCapable) : allModels
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !query.isEmpty {
+            models = models.filter { $0.id.lowercased().contains(query) || $0.name.lowercased().contains(query) }
+        }
+        return models
+    }
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            HStack {
+                if isLoading {
+                    ProgressView().controlSize(.small)
+                    Text("Verifying key...").foregroundColor(theme.secondaryText)
+                } else if let errorMessage = errorMessage {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(theme.errorColor).accessibilityHidden(true)
+                    Text(errorMessage).foregroundColor(theme.secondaryText).font(theme.fontCaption)
+                } else if allModels.isEmpty {
+                    Text("Enter a valid API key to see models.").foregroundColor(theme.secondaryText).font(theme.fontCaption)
+                } else if visibleModels.isEmpty {
+                    Text(filterForTools && searchText.isEmpty
+                         ? "No tool-capable models found."
+                         : "No models match \"\(searchText)\".")
+                        .foregroundColor(theme.warningColor)
+                        .font(theme.fontCaption)
+                } else {
+                    Picker("Available Models", selection: $selectedModel) {
+                        // Keep an out-of-filter selection visible so the Picker
+                        // never renders an empty selection while searching.
+                        if !visibleModels.contains(where: { $0.id == selectedModel }), !selectedModel.isEmpty {
+                            Text(selectedModel).tag(selectedModel)
+                        }
+                        ForEach(visibleModels) { model in
+                            Text(model.id + (model.visionInput ? "  👁 Vision" : ""))
+                                .tag(model.id)
+                        }
+                    }
+                    .labelsHidden()
+                }
+            }
+
+            if !allModels.isEmpty {
+                TextField("Filter models (e.g. deepseek, claude)", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+                    .font(theme.fontCaption)
+            }
+        }
+        .task {
+            if !apiKey.isEmpty, allModels.isEmpty {
+                await fetchModels()
+            }
+        }
+        .onChange(of: apiKey) { _, _ in
+            fetchTask?.cancel()
+            fetchTask = Task {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                await fetchModels()
+            }
+        }
+        .onChange(of: selectedModel) { _, newValue in
+            seedBindings(for: newValue)
+        }
+        .onDisappear { fetchTask?.cancel() }
+    }
+
+    private func fetchModels() async {
+        guard !apiKey.isEmpty else {
+            allModels = []
+            errorMessage = nil
+            return
+        }
+
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let fetched = try await withThrowingTaskGroup(of: [OpenRouterModel].self) { group in
+                group.addTask { try await OpenRouterService().verifyAndFetchModels(apiKey: apiKey) }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(15))
+                    throw URLError(.timedOut)
+                }
+                guard let result = try await group.next() else { throw URLError(.timedOut) }
+                group.cancelAll()
+                return result
+            }
+            await MainActor.run {
+                self.allModels = fetched
+                let selectable = filterForTools ? fetched.filter(\.toolCapable) : fetched
+                if !selectable.contains(where: { $0.id == selectedModel }) {
+                    self.selectedModel = selectable.first?.id ?? ""
+                }
+                self.seedBindings(for: self.selectedModel)
+                self.isLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                self.allModels = []
+                self.errorMessage = error is URLError && (error as? URLError)?.code == .timedOut
+                    ? "Request timed out. Check your network connection."
+                    : error.localizedDescription
+                self.isLoading = false
+            }
+        }
+    }
+
+    /// Seeds capability fields from the catalog entry so downstream routing
+    /// (memory budgeting via contextWindow, the vision-input gate, agent
+    /// capability checks) sees real values instead of cloud-blind defaults.
+    /// Tier stays `.medium` — the same effective default AgentConnect applies
+    /// when cloud metadata is absent — so seeding never shifts memory-strategy
+    /// behavior relative to the other cloud providers.
+    private func seedBindings(for modelID: String) {
+        guard let model = allModels.first(where: { $0.id == modelID }) else { return }
+        cognitiveCapability = model.toolCapable ? .parallelActions : .none
+        modelMetadata = ModelMetadata(tier: .medium, contextWindow: model.contextLength)
+        supportedModalities = model.visionInput ? .visionCapable : .textOnly
+    }
+}
+
+
+// MARK: - OpenAI-Compatible Model Picker View
+
+/// Picker for a user-supplied OpenAI-compatible endpoint (LM Studio, vLLM,
+/// llama.cpp, Groq, DeepSeek, …). The manual TextField is the source of truth —
+/// many servers implement `/models`, but some don't, so "Load Models" is a
+/// convenience that populates a Menu rather than the only way to pick.
+/// The API key is optional; discovery is gated on a non-empty base URL.
+struct OpenAICompatibleModelPickerView: View {
+    @Binding var selectedModel: String
+    let baseURL: String
+    let apiKey: String
+
+    @Environment(\.appTheme) private var theme
+    @State private var models: [String] = []
+    @State private var isLoading: Bool = false
+    @State private var statusMessage: String? = nil
+    @State private var fetchTask: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            TextField("Model id (e.g. qwen2.5-coder)", text: $selectedModel)
+                .textFieldStyle(.roundedBorder)
+                .disableAutocorrection(true)
+                .frame(maxWidth: 300)
+
+            HStack(spacing: 8) {
+                if isLoading {
+                    ProgressView().controlSize(.small)
+                    Text("Loading…").font(theme.fontCaption).foregroundColor(theme.secondaryText)
+                } else if !models.isEmpty {
+                    Menu {
+                        ForEach(models, id: \.self) { model in
+                            Button(model) { selectedModel = model }
+                        }
+                    } label: {
+                        Label("\(models.count) models", systemImage: "list.bullet")
+                    }
+                    .fixedSize()
+                } else if let statusMessage {
+                    Text(statusMessage)
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.secondaryText)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 0)
+
+                Button("Load Models") {
+                    fetchTask?.cancel()
+                    fetchTask = Task { await fetchModels() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .frame(maxWidth: 300)
+        }
+        .onDisappear { fetchTask?.cancel() }
+    }
+
+    private func fetchModels() async {
+        let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else { return }
+
+        isLoading = true
+        statusMessage = nil
+
+        do {
+            let fetched = try await withThrowingTaskGroup(of: [String].self) { group in
+                group.addTask {
+                    try await OpenAICompatibleService().fetchModels(
+                        baseURL: trimmedURL,
+                        apiKey: apiKey.isEmpty ? nil : apiKey
+                    )
+                }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(15))
+                    throw URLError(.timedOut)
+                }
+                guard let result = try await group.next() else { throw URLError(.timedOut) }
+                group.cancelAll()
+                return result
+            }
+            await MainActor.run {
+                self.models = fetched
+                if self.selectedModel.isEmpty, let first = fetched.first {
+                    self.selectedModel = first
+                }
+                self.statusMessage = fetched.isEmpty
+                    ? "No models listed — enter the model id manually."
+                    : nil
+                self.isLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                self.models = []
+                self.statusMessage = "Couldn't reach \(trimmedURL)/models — enter the model id manually."
+                self.isLoading = false
+            }
+        }
+    }
+}
+
+
 // MARK: - Ollama Model Picker View
 struct OllamaModelPickerView: View {
     @Binding var selectedModel: String

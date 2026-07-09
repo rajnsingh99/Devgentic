@@ -166,6 +166,12 @@ struct AgentSessionMetrics {
     var didFinishSuccessfully: Bool = false
     var didHitMaxIterations: Bool = false
     var hallucinatedTools: Int = 0
+
+    /// ExecutionOutcome.rawValue reported by the executor on its terminal
+    /// finalizing event. When present it decides the summary's Outcome label
+    /// honestly; when absent (non-reporting executors) the legacy
+    /// finalizing-implies-success heuristic applies.
+    var reportedOutcome: String? = nil
     
     // Track tools for summary
     var executedTools: [(name: String, success: Bool)] = []

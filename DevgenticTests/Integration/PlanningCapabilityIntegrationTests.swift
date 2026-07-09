@@ -69,7 +69,7 @@ final class PlanningCapabilityIntegrationTests: XCTestCase {
     private func makePlanContext(instructions: String?, recentHistory: String?, query: String) -> SemanticContext {
         SemanticContext(
             instructions: instructions,
-            environmentFacts: EnvironmentFacts(osVersion: "macOS", shellType: "zsh", userName: "t", currentDate: "2026-06-20"),
+            environmentFacts: EnvironmentFacts(osVersion: "macOS", shellType: "zsh", userName: "t", homeDirectory: "/Users/t", currentDate: "2026-06-20"),
             longTermMemory: StaticGroundingMemory(ragContext: ""),
             recentHistory: recentHistory,
             nativeHistoryTurns: nil,

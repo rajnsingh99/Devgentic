@@ -42,6 +42,8 @@ struct JoinModeCard: View {
                     .foregroundColor(theme.tertiaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 

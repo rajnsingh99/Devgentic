@@ -162,9 +162,9 @@ struct WorkflowNodeView: View {
             if isOrJoin { orJoinBadge }
         }
         .shadow(
-            color: isSelected ? theme.accentColor.opacity(0.25) : Color.black.opacity(isHovering ? 0.12 : 0.06),
-            radius: isSelected ? 8 : (isHovering ? 6 : 3),
-            x: 0, y: 2
+            color: isSelected ? profileColor.opacity(0.35) : Color.black.opacity(isHovering ? 0.12 : 0.06),
+            radius: isSelected ? 12 : (isHovering ? 6 : 3),
+            x: 0, y: isSelected ? 4 : 2
         )
         .scaleEffect(isHovering ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isHovering)
@@ -226,13 +226,7 @@ struct WorkflowNodeView: View {
     private var profileColor: Color {
         switch node.kind {
         case .profile(_, let pType):
-            switch pType {
-            case .bot:      return .blue
-            case .agent:    return .green
-            case .workflow: return .purple
-            case .imageGen: return .orange
-            case .code:     return .cyan
-            }
+            return pType.displayColor
         case .condition:  return .yellow
         case .loop:       return .orange
         case .code:       return .cyan
@@ -309,9 +303,11 @@ struct ProfileNodeCard: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: iconName)
-                .font(.system(.title3))
+                .font(.system(.subheadline, weight: .bold))
                 .foregroundColor(color)
                 .frame(width: 28, height: 28)
+                .background(Circle().fill(color.opacity(0.15)))
+                .overlay(Circle().stroke(color.opacity(0.35), lineWidth: 0.5))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -328,12 +324,22 @@ struct ProfileNodeCard: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(theme.controlBackground)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [theme.controlBackground, theme.controlBackground.opacity(0.85)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(color.opacity(0.06))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isSelected ? theme.accentColor : theme.surfaceOverlayStrong, lineWidth: isSelected ? 2 : 1)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 2 : 1)
         )
     }
 }
@@ -369,12 +375,17 @@ struct ConditionNodeCard: View {
         )
         .overlay(
             WorkflowHexagon()
-                .stroke(isSelected ? theme.accentColor : color.opacity(0.6), lineWidth: isSelected ? 2 : 1.5)
+                .stroke(isSelected ? color : color.opacity(0.5), lineWidth: isSelected ? 2.5 : 1.5)
         )
-        // Add a subtle colored tint to the background since it's a structural node
         .background(
             WorkflowHexagon()
-                .fill(color.opacity(0.05))
+                .fill(
+                    LinearGradient(
+                        colors: [color.opacity(0.12), color.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
     }
 }
@@ -391,17 +402,17 @@ struct CodeNodeCard: View {
         VStack(spacing: 0) {
             // Header
             HStack(spacing: 6) {
-                Image(systemName: "circle.fill").foregroundColor(.red).font(.system(size: 8))
-                Image(systemName: "circle.fill").foregroundColor(.yellow).font(.system(size: 8))
-                Image(systemName: "circle.fill").foregroundColor(.green).font(.system(size: 8))
+                Image(systemName: "circle.fill").foregroundColor(.red).font(.system(size: 6))
+                Image(systemName: "circle.fill").foregroundColor(.yellow).font(.system(size: 6))
+                Image(systemName: "circle.fill").foregroundColor(.green).font(.system(size: 6))
                 Spacer()
                 Text(subtitle)
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(color.opacity(0.8))
+                    .foregroundColor(color.opacity(0.95))
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(theme.surfaceOverlay)
+            .background(theme.surfaceOverlay.opacity(0.9))
 
             Divider()
 
@@ -412,21 +423,22 @@ struct CodeNodeCard: View {
                     .foregroundColor(color)
                 
                 Text(title)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .foregroundColor(theme.primaryText)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 10)
             .frame(maxHeight: .infinity)
             .background(theme.controlBackground)
+            .background(color.opacity(0.04))
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isSelected ? theme.accentColor : theme.surfaceOverlayStrong, lineWidth: isSelected ? 2 : 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isSelected ? color : theme.surfaceOverlayStrong, lineWidth: isSelected ? 2 : 1)
         )
     }
 }
@@ -446,6 +458,7 @@ struct GateNodeCard: View {
                 .foregroundColor(.white)
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(color))
+                .shadow(color: color.opacity(0.4), radius: 4)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -467,12 +480,17 @@ struct GateNodeCard: View {
         )
         .overlay(
             Capsule()
-                // Make the border a bit thicker/distinct for gate
-                .stroke(isSelected ? theme.accentColor : color.opacity(0.8), lineWidth: isSelected ? 3 : 2)
+                .stroke(isSelected ? color : color.opacity(0.8), lineWidth: isSelected ? 3 : 2)
         )
         .background(
             Capsule()
-                .fill(color.opacity(0.1))
+                .fill(
+                    LinearGradient(
+                        colors: [color.opacity(0.15), color.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
     }
 }
@@ -484,6 +502,7 @@ struct LoopNodeCard: View {
     let color: Color
     let isSelected: Bool
     @Environment(\.appTheme) private var theme
+    @State private var rotationPhase: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 2) {
@@ -510,12 +529,23 @@ struct LoopNodeCard: View {
         )
         .overlay(
             Circle()
-                .strokeBorder(isSelected ? theme.accentColor : color.opacity(0.5), style: StrokeStyle(lineWidth: isSelected ? 3 : 2, dash: [6, 4]))
+                .strokeBorder(isSelected ? color : color.opacity(0.5), style: StrokeStyle(lineWidth: isSelected ? 3 : 2, dash: [6, 4], dashPhase: rotationPhase))
         )
         .background(
             Circle()
-                .fill(color.opacity(0.05))
+                .fill(
+                    LinearGradient(
+                        colors: [color.opacity(0.12), color.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
+        .onAppear {
+            withAnimation(.linear(duration: 3.0).repeatForever(autoreverses: false)) {
+                rotationPhase = 20
+            }
+        }
     }
 }
 
@@ -566,6 +596,7 @@ struct ActionNodeCard: View {
                 .foregroundColor(.white)
                 .frame(width: 30, height: 30)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(color))
+                .shadow(color: color.opacity(0.35), radius: 3)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -590,16 +621,16 @@ struct ActionNodeCard: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(theme.controlBackground)
         )
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(color.opacity(0.06))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isSelected ? theme.accentColor : color.opacity(0.5), lineWidth: isSelected ? 2 : 1.5)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isSelected ? color : color.opacity(0.5), lineWidth: isSelected ? 2 : 1.5)
         )
     }
 }

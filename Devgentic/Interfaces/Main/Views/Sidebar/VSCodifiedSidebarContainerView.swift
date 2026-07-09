@@ -32,6 +32,7 @@ struct VSCodifiedSidebarContainerView: View {
 
     // Drag-resize state
     @State private var isResizing: Bool = false
+    @State private var isHoveringHandle: Bool = false
     @State private var resizeStartWidth: CGFloat = 320
 
     @Environment(MainApplicationViewModel.self) var viewModel
@@ -113,38 +114,48 @@ struct VSCodifiedSidebarContainerView: View {
 
     // MARK: - Resize Handle
 
-    /// A 4pt-wide invisible hit-target on the pane's trailing edge. The user
-    /// drags it to resize; width is clamped to `[minSidebarWidth, maxSidebarWidth]`.
-    /// The handle lights up subtly while hovered/dragging so there's a visible
-    /// affordance without adding permanent chrome.
+    /// A custom resizer handle on the pane's trailing edge. Displays a fine
+    /// vertical hairline that fades in on hover/drag and snaps to theme colors.
     private var resizeHandle: some View {
-        Rectangle()
-            .fill(isResizing ? theme.accentColor.opacity(0.4) : Color.clear)
-            .contentShape(Rectangle())
-            .frame(width: 6)
-            .frame(maxHeight: .infinity)
-            .onHover { hovering in
-                if hovering {
-                    NSCursor.resizeLeftRight.push()
-                } else {
-                    NSCursor.pop()
-                }
+        ZStack {
+            Rectangle()
+                .fill(Color.clear)
+            
+            // Central hairline indicator
+            Rectangle()
+                .fill(isResizing ? theme.accentColor : theme.dividerColor.opacity(0.8))
+                .frame(width: 1)
+                .padding(.vertical, 8)
+                .opacity(isHoveringHandle || isResizing ? 1.0 : 0.0)
+        }
+        .contentShape(Rectangle())
+        .frame(width: 8)
+        .frame(maxHeight: .infinity)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHoveringHandle = hovering
             }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        if !isResizing {
-                            isResizing = true
-                            resizeStartWidth = sidebarWidth
-                        }
-                        let proposed = resizeStartWidth + value.translation.width
-                        sidebarWidth = min(max(proposed, minSidebarWidth), maxSidebarWidth)
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    if !isResizing {
+                        isResizing = true
+                        resizeStartWidth = sidebarWidth
                     }
-                    .onEnded { _ in
-                        isResizing = false
-                    }
-            )
-            .accessibilityLabel("Sidebar resize handle")
-            .accessibilityHint("Drag to resize the sidebar")
+                    let proposed = resizeStartWidth + value.translation.width
+                    sidebarWidth = min(max(proposed, minSidebarWidth), maxSidebarWidth)
+                }
+                .onEnded { _ in
+                    isResizing = false
+                }
+        )
+        .accessibilityLabel("Sidebar resize handle")
+        .accessibilityHint("Drag to resize the sidebar")
     }
 }

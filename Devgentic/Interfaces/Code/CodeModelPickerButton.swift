@@ -142,11 +142,13 @@ private struct CodeModelSelectorPopover: View {
         let isSelected = codeSessionManager.provider == provider
         let label: String = {
             switch provider {
-            case .ollama:    return "Ollama"
-            case .mlx:       return "MLX"
-            case .anthropic: return "Anthropic"
-            case .openAI:    return "OpenAI"
-            case .google:    return "Google"
+            case .ollama:           return "Ollama"
+            case .mlx:              return "MLX"
+            case .anthropic:        return "Anthropic"
+            case .openAI:           return "OpenAI"
+            case .google:           return "Google"
+            case .openRouter:       return "OpenRouter"
+            case .openAICompatible: return "Custom"
             }
         }()
 

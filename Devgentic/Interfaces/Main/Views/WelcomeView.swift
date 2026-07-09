@@ -13,9 +13,9 @@ struct WelcomeView: View {
     @Environment(\.appTheme) private var theme
     @Environment(MainApplicationViewModel.self) private var viewModel
     @Environment(MainViewRouter.self) private var router
-    private var briefService = MorningBriefService.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    @State private var briefChecked = false
+    @State private var didNotifyWidgets = false
     @State private var showContent = false
     @State private var showActions = false
     @State private var showShortcuts = false
@@ -29,7 +29,7 @@ struct WelcomeView: View {
                 Spacer()
                     .frame(height: 60)
 
-                // MARK: - Greeting
+                // MARK: - Greeting (hero — stays centered across all widths)
                 greetingSection
                     .opacity(showContent ? 1 : 0)
                     .offset(y: showContent ? 0 : 12)
@@ -37,38 +37,15 @@ struct WelcomeView: View {
                 Spacer()
                     .frame(height: 36)
 
-                // MARK: - Morning Brief
-                if briefService.isGenerating {
-                    MorningBriefLoadingView()
-                        .transition(.opacity)
-                        .padding(.bottom, 28)
-                } else if let brief = briefService.currentBrief, !brief.isEmpty {
-                    MorningBriefCardView(
-                        brief: brief,
-                        onNavigate: { handleNavigation($0) },
-                        onDismiss: {
-                            withAnimation(.easeOut(duration: 0.25)) {
-                                briefService.dismissBrief()
-                            }
-                        }
-                    )
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .scale(scale: 0.96)),
-                        removal: .opacity
-                    ))
+                // MARK: - Widget Grid (adaptive — reflows 1→N columns by width)
+                widgetGrid
+                    .opacity(showActions ? 1 : 0)
+                    .offset(y: showActions ? 0 : 10)
                     .padding(.bottom, 28)
-                }
-
-                // MARK: - User Personal Profile Card
-                if UserDefaults.standard.bool(forKey: AppSettings.ciFeatureUserPersonalKey) {
-                    UserPersonalWelcomeCard()
-                        .opacity(showActions ? 1 : 0)
-                        .offset(y: showActions ? 0 : 10)
-                        .padding(.bottom, 16)
-                }
 
                 // MARK: - Quick Actions
                 quickActionsGrid
+                    .frame(maxWidth: 640)
                     .opacity(showActions ? 1 : 0)
                     .offset(y: showActions ? 0 : 10)
 
@@ -90,27 +67,53 @@ struct WelcomeView: View {
                 Spacer()
                     .frame(height: 40)
             }
-            .frame(maxWidth: 520)
+            // Wider cap than the old 520 so widgets can flow into 2 columns on
+            // large windows; collapses to one centered column when narrow.
+            .frame(maxWidth: contentMaxWidth)
             .frame(maxWidth: .infinity)
         }
         .scrollContentBackground(.hidden)
-        .animation(.easeOut(duration: 0.4), value: showContent)
-        .animation(.easeOut(duration: 0.35).delay(0.08), value: showActions)
-        .animation(.easeOut(duration: 0.3).delay(0.16), value: showShortcuts)
-        .animation(.easeInOut(duration: 0.3), value: briefService.currentBrief != nil)
-        .animation(.easeInOut(duration: 0.2), value: briefService.isGenerating)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: showContent)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.35).delay(0.08), value: showActions)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3).delay(0.16), value: showShortcuts)
+        // Animate the grid when the set of visible widgets changes (any widget
+        // appearing or disappearing), not just the Morning Brief.
+        .animation(.easeInOut(duration: 0.3), value: WelcomeWidgetRegistry.active.map(\.id))
         .onAppear {
-            if !briefChecked {
-                briefChecked = true
-                checkAndGenerateBrief()
+            if !didNotifyWidgets {
+                didNotifyWidgets = true
+                WelcomeWidgetRegistry.all.forEach { $0.onWelcomeAppear() }
             }
-            // Staggered entrance
-            withAnimation { showContent = true }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                withAnimation { showActions = true }
+            // Staggered entrance — skipped under Reduce Motion (reveal everything at once).
+            if reduceMotion {
+                showContent = true
+                showActions = true
+                showShortcuts = true
+            } else {
+                withAnimation { showContent = true }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    withAnimation { showActions = true }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    withAnimation { showShortcuts = true }
+                }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                withAnimation { showShortcuts = true }
+        }
+    }
+
+    /// Max content width. Wide enough for two ~480pt widget cards + spacing.
+    private let contentMaxWidth: CGFloat = 1040
+
+    // MARK: - Widget Grid
+
+    /// Hosts the welcome "widgets" in a centered flow that reflows by available
+    /// width: one centered column when narrow, multiple columns when wide.
+    /// Content comes entirely from `WelcomeWidgetRegistry` — add a new widget by
+    /// registering it, not by editing this view.
+    @ViewBuilder private var widgetGrid: some View {
+        CenteredFlowLayout(itemWidth: 480, hSpacing: 16, vSpacing: 16) {
+            ForEach(WelcomeWidgetRegistry.active, id: \.id) { widget in
+                widget.makeBody()
             }
         }
     }
@@ -267,26 +270,6 @@ struct WelcomeView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    // MARK: - Brief Generation
-
-    private func checkAndGenerateBrief() {
-        guard briefService.shouldShowBrief() else { return }
-        Task {
-            let _ = await briefService.generateBrief()
-        }
-    }
-
-    // MARK: - Navigation
-
-    private func handleNavigation(_ destination: BriefItemDestination) {
-        switch destination {
-        case .conversation(let id):
-            viewModel.selectedConversationID = id
-            if !router.isShowingChat {
-                router.returnToChat()
-            }
-        }
-    }
 }
 
 // MARK: - Quick Action Card
@@ -409,10 +392,102 @@ private struct KeyHint: View {
     }
 }
 
-#Preview {
+// MARK: - Centered Flow Layout
+
+/// Lays children left→right, wrapping to new rows when they run out of
+/// horizontal space, and horizontally centers every row. Each child is sized
+/// up to `itemWidth`. One child → centered; many → fills width and reflows.
+/// This is what lets new welcome widgets be added without a single growing
+/// column (see `WelcomeView.widgetGrid`).
+private struct CenteredFlowLayout: Layout {
+    var itemWidth: CGFloat = 480
+    var hSpacing: CGFloat = 16
+    var vSpacing: CGFloat = 16
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let available = proposal.width ?? itemWidth
+        let rows = layoutRows(subviews: subviews, available: available)
+        let widest = rows.map { rowWidth($0) }.max() ?? min(available, itemWidth)
+        var height: CGFloat = 0
+        for (i, row) in rows.enumerated() {
+            height += row.map { $0.size.height }.max() ?? 0
+            if i < rows.count - 1 { height += vSpacing }
+        }
+        return CGSize(width: widest, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = layoutRows(subviews: subviews, available: bounds.width)
+        var y = bounds.minY
+        for row in rows {
+            let rowHeight = row.map { $0.size.height }.max() ?? 0
+            var x = bounds.minX + (bounds.width - rowWidth(row)) / 2
+            for placed in row {
+                subviews[placed.index].place(
+                    at: CGPoint(x: x, y: y),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(placed.size)
+                )
+                x += placed.size.width + hSpacing
+            }
+            y += rowHeight + vSpacing
+        }
+    }
+
+    private struct Placed { let index: Int; let size: CGSize }
+
+    private func rowWidth(_ row: [Placed]) -> CGFloat {
+        row.reduce(0) { $0 + $1.size.width } + hSpacing * CGFloat(max(0, row.count - 1))
+    }
+
+    private func layoutRows(subviews: Subviews, available: CGFloat) -> [[Placed]] {
+        let cellWidth = min(itemWidth, available)
+        var rows: [[Placed]] = []
+        var current: [Placed] = []
+        for (index, sub) in subviews.enumerated() {
+            let measured = sub.sizeThatFits(ProposedViewSize(width: cellWidth, height: nil))
+            let size = CGSize(width: min(cellWidth, measured.width), height: measured.height)
+            if !current.isEmpty, rowWidth(current) + hSpacing + size.width > available {
+                rows.append(current)
+                current = []
+            }
+            current.append(Placed(index: index, size: size))
+        }
+        if !current.isEmpty { rows.append(current) }
+        return rows
+    }
+}
+
+#Preview("Welcome") {
     ZStack {
         Color.gray.opacity(0.1).ignoresSafeArea()
         WelcomeView()
     }
     .frame(width: 800, height: 600)
+}
+
+#Preview("Widget reflow — wide") {
+    CenteredFlowLayout(itemWidth: 480) {
+        ForEach(0..<3, id: \.self) { i in
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.blue.opacity(0.15))
+                .frame(height: 150)
+                .overlay(Text("Widget \(i + 1)"))
+        }
+    }
+    .frame(width: 1100, height: 360)
+    .padding()
+}
+
+#Preview("Widget reflow — narrow") {
+    CenteredFlowLayout(itemWidth: 480) {
+        ForEach(0..<3, id: \.self) { i in
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.blue.opacity(0.15))
+                .frame(height: 150)
+                .overlay(Text("Widget \(i + 1)"))
+        }
+    }
+    .frame(width: 480, height: 520)
+    .padding()
 }

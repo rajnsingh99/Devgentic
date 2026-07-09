@@ -40,10 +40,28 @@ actor MLXService {
 
     /// Task handle for the auto-unload timer.
     private var idleCleanupTask: Task<Void, Never>?
-    
+
     /// The duration of inactivity before the model is automatically unloaded to save RAM.
-    /// Default: 300 seconds (5 minutes).
+    /// NOTE: this is 2 minutes — earlier comments/log strings claimed 5 minutes while
+    /// the constant said 2; the text now derives from the constant so it can't lie.
     private let idleTimeoutNanoseconds: UInt64 = 2 * 60 * 1_000_000_000
+
+    /// Human-readable form of the idle timeout for log messages.
+    private var idleTimeoutDescription: String {
+        "\(idleTimeoutNanoseconds / 60_000_000_000) minute(s)"
+    }
+
+    /// Count of in-flight generations (stream tasks between start and finish).
+    /// The idle timer can fire during actor-reentrancy windows mid-stream (the
+    /// lost-cancel race seen in run logs: "idle … Releasing memory" printed, then
+    /// "Idle timer cancelled" from the incoming request, unload proceeded anyway).
+    /// Both `handleIdleTimeout` and `unloadModel` refuse while this is non-zero.
+    private var activeGenerations = 0
+
+    /// In-flight model load, published so concurrent `loadModel` calls (actor
+    /// reentrancy across the container-load await) coalesce onto one load
+    /// instead of double-loading the full model.
+    private var loadInFlight: Task<Void, Error>?
     
     private init() {}
     
@@ -54,19 +72,36 @@ actor MLXService {
     func loadModel(from directory: URL) async throws {
         // Cancel any pending unload timer since we are about to use the model (or load a new one)
         cancelIdleTimer()
-        
+
+        // Coalesce concurrent loads: this actor is reentrant across the awaits
+        // below, so two streams lazy-reloading simultaneously would otherwise
+        // both observe `modelContainer == nil` and double-load the full model
+        // (transient 2× RAM + doubled latency). Await any in-flight load first,
+        // then re-check.
+        if let inflight = loadInFlight {
+            _ = try? await inflight.value
+        }
+
         // Optimization: Don't reload if it's already the active model
         if let current = currentModelDirectory, current == directory, modelContainer != nil {
             logger.info("Model already loaded: \(directory.lastPathComponent)")
             return
         }
-        
+
         logger.notice("Loading MLX model from: \(directory.path)")
+
+        // 1. Clean up previous model to free RAM. FORCED variant: the public
+        // unloadModel() refuses while a generation is in flight, but a container
+        // SWAP here is safe — an in-flight generation holds its own container
+        // reference (stays alive as active memory), and clearing the recycle
+        // cache doesn't touch buffers in use. Using the guarded version logged a
+        // spurious "Refusing model unload" on every lazy reload and skipped the
+        // cache clear on mid-generation model switches (multi-GB retention).
+        _ = performUnload()
         
-        // 1. Clean up previous model to free RAM
-        _ = unloadModel()
-        
-        do {
+        // Publish the in-flight load so concurrent callers await it instead of
+        // starting a duplicate load (see coalescing check above).
+        let load = Task { () throws -> Void in
             // mlx-swift-lm 3.x: `loadModelContainer(from:using:)` replaces the old
             // `loadModelContainer(configuration:)` API. The `using:` parameter is a
             // `TokenizerLoader` that knows how to build an `MLXLMCommon.Tokenizer`
@@ -81,23 +116,43 @@ actor MLXService {
             self.currentModelDirectory = directory
             self.lastModelDirectory = directory
 
-            logger.notice("Successfully loaded MLX model: \(directory.lastPathComponent)")
+            self.logger.notice("Successfully loaded MLX model: \(directory.lastPathComponent)")
             self.logMemoryStats(label: "Post-Load")
+        }
+        loadInFlight = load
+        defer { loadInFlight = nil }
 
+        do {
+            try await load.value
         } catch {
             logger.error("Failed to load MLX model: \(error.localizedDescription)")
             // Ensure state is clean on failure
-            _ = unloadModel()
+            _ = performUnload()
             throw error
         }
     }
     
     /// Unloads the current model from memory and forces a cache clear.
+    /// Refuses while a generation is in flight — external callers (idle timer,
+    /// conversation switch, settings) must not yank the container mid-stream.
+    /// Internal container swaps during `loadModel` use `performUnload()` directly.
     /// - Returns: A dictionary containing memory stats (freed bytes, remaining active, remaining cache).
     @discardableResult
     func unloadModel() -> [String: Int] {
+        guard activeGenerations == 0 else {
+            logger.warning("Refusing model unload — \(self.activeGenerations) generation(s) in flight.")
+            return [:]
+        }
+        return performUnload()
+    }
+
+    /// The actual unload, no in-flight guard. Safe during a container swap: an
+    /// in-flight generation holds its own container reference (kept alive as
+    /// active memory), and clearing the recycle cache never touches buffers in use.
+    @discardableResult
+    private func performUnload() -> [String: Int] {
         cancelIdleTimer()
-        
+
         // 1. VISUALIZATION STEP 1: Initial State
         let activeBefore = MLX.Memory.activeMemory
         let cacheBefore = MLX.Memory.cacheMemory
@@ -204,6 +259,15 @@ actor MLXService {
 
         return AsyncThrowingStream { continuation in
             Task {
+                activeGenerations += 1
+                defer { activeGenerations -= 1 }
+
+                // Lazy reload: an idle-timer unload between iterations (HITL park,
+                // long tool run) recovers inline instead of failing the request into
+                // the retry classifier — no wasted generation attempt, no error card.
+                if modelContainer == nil, lastModelDirectory != nil {
+                    _ = await reloadCurrentModel()
+                }
                 guard let container = modelContainer else {
                     continuation.finish(throwing: NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "No MLX model is currently loaded. Please load a model first."]))
                     return
@@ -422,6 +486,15 @@ actor MLXService {
 
         return AsyncThrowingStream { continuation in
             Task {
+                activeGenerations += 1
+                defer { activeGenerations -= 1 }
+
+                // Lazy reload: an idle-timer unload between iterations (HITL park,
+                // long tool run) recovers inline instead of failing the request into
+                // the retry classifier — no wasted generation attempt, no error card.
+                if modelContainer == nil, lastModelDirectory != nil {
+                    _ = await reloadCurrentModel()
+                }
                 guard let container = modelContainer else {
                     continuation.finish(throwing: NSError(domain: "MLXService", code: 404, userInfo: [NSLocalizedDescriptionKey: "No MLX model is currently loaded. Please load a model first."]))
                     return
@@ -672,7 +745,7 @@ actor MLXService {
     private func startIdleTimer() {
         cancelIdleTimer() // Ensure no duplicate timers
         
-        logger.debug("Starting idle timer. Model will unload in 5 minutes if inactive.")
+        logger.debug("Starting idle timer. Model will unload in \(self.idleTimeoutDescription) if inactive.")
         
         idleCleanupTask = Task { [weak self] in
             do {
@@ -701,8 +774,25 @@ actor MLXService {
     }
     
     /// The action to perform when the timer fires.
-    private func handleIdleTimeout() {
-        logger.notice("MLX Service has been idle for 5 minutes. Releasing memory.")
+    private func handleIdleTimeout() async {
+        // Never unload under an in-flight generation. The timer can fire during
+        // an actor-reentrancy window mid-stream — run-1 logs showed the unload
+        // proceeding even though the incoming request's cancel had arrived.
+        guard activeGenerations == 0 else {
+            logger.notice("Idle timeout while \(self.activeGenerations) generation(s) in flight — keeping model, re-arming timer.")
+            startIdleTimer()
+            return
+        }
+
+        // Parked-HITL runs: unloading is DESIRED (frees 4-6GB while the user
+        // decides at the banner); the lazy reload at generation entry recovers
+        // on resume without a failed attempt. The check only selects the log
+        // message so testers can tell the two cases apart — both paths unload.
+        if await ExecutionSuspensionService.shared.hasPendingSuspensions() {
+            logger.notice("MLX idle timeout during a parked HITL request — releasing memory; the model lazy-reloads when the run resumes.")
+        } else {
+            logger.notice("MLX Service has been idle for \(self.idleTimeoutDescription). Releasing memory.")
+        }
         _ = unloadModel()
     }
 }

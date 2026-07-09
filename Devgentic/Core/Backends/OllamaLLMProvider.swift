@@ -249,14 +249,17 @@ struct OllamaLLMProvider: LLMProvider {
         // to recover them. (G7 fix) Split prose-before-JSON from the JSON block so the
         // agent's reasoning is preserved instead of discarded by the parser.
         //
-        // Tool-name resolution happens one level up in the generator (which has access
-        // to the registered `[AgentTool]`), so we call the pipeline without a registry
-        // here — it parses and classifies, validation is layered on top.
+        // Tool-name resolution happens one level up: this step's result is
+        // re-validated by NativeParsePipeline (ToolNameResolver with the real
+        // registry) inside NativeStructuredGenerator. The explicit empty registry
+        // is therefore CORRECT — this pipeline only parses and classifies; the
+        // provider-format tool dicts in scope would be the wrong type anyway.
         if pendingTools.isEmpty && !content.isEmpty {
             let (prose, jsonBlock) = Self.splitProseAndJSON(content)
             let pipeline = CognitiveParsePipeline(
                 expectedDialect: .nativeJSON,
-                modelId: config.modelName
+                modelId: config.modelName,
+                registeredTools: []
             )
             let parsed = pipeline.parse(raw: jsonBlock.isEmpty ? content : jsonBlock)
 

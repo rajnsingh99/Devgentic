@@ -22,7 +22,9 @@ struct WorkflowOutcomeCardView: View {
     let onTap: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
+    @State private var runningPulse = false
 
     private var durationText: String {
         let d = nodeData.duration
@@ -31,7 +33,22 @@ struct WorkflowOutcomeCardView: View {
         return "\(Int(d / 60))m \(Int(d.truncatingRemainder(dividingBy: 60)))s"
     }
 
-    private var statusColor: Color { nodeData.status.color }
+    private var statusColor: Color { nodeData.status.color(theme) }
+
+    /// A running node (not awaiting input) breathes its accent border + a soft glow.
+    private var isRunning: Bool { nodeData.status == .running && !isAwaitingInput }
+
+    private var borderColor: Color {
+        if isAwaitingInput { return theme.warningColor }
+        // Running nodes breathe even when selected — they're the animated focus.
+        if isRunning { return statusColor.opacity(runningPulse ? 0.95 : 0.4) }
+        if isSelected { return statusColor }
+        return statusColor.opacity(isHovering ? 0.55 : 0.35)
+    }
+
+    private var borderWidth: CGFloat {
+        (isAwaitingInput || isSelected) ? 2 : (isRunning ? 1.8 : 1.5)
+    }
 
     /// Body text resolution. Terminal states (`.completed` / `.failed`) preview
     /// the node's *output* (`detail`) so each card mirrors the Final Outcome
@@ -138,20 +155,29 @@ struct WorkflowOutcomeCardView: View {
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(theme.controlBackground)
+                // Soft glow that breathes with the border while the node is running.
+                .shadow(
+                    color: isRunning ? statusColor.opacity(runningPulse ? 0.32 : 0.0) : .clear,
+                    radius: isRunning ? (runningPulse ? 9 : 2) : 0
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(
-                    isAwaitingInput ? theme.warningColor
-                        : (isSelected ? statusColor : statusColor.opacity(isHovering ? 0.55 : 0.35)),
-                    lineWidth: (isAwaitingInput || isSelected) ? 2 : 1.5
-                )
+                .stroke(borderColor, lineWidth: borderWidth)
         )
         .contentShape(RoundedRectangle(cornerRadius: 10))
         .onTapGesture(perform: onTap)
         .onHover { hovering in
             withAnimation(.easeInOut(duration: 0.15)) {
                 isHovering = hovering
+            }
+        }
+        // Drive the breathing pulse only while running (and honour Reduce Motion).
+        .onChange(of: isRunning, initial: true) { _, running in
+            runningPulse = false
+            guard running, !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                runningPulse = true
             }
         }
     }

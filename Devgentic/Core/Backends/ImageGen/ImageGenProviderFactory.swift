@@ -58,6 +58,12 @@ enum ImageGenProviderFactory {
 
         case .anthropic:
             throw ImageGenError.providerError(underlying: "Anthropic does not currently support image generation.")
+
+        case .openRouter:
+            throw ImageGenError.providerError(underlying: "OpenRouter profiles support text generation only. Use an OpenAI, Gemini, or MLX profile for image generation.")
+
+        case .openAICompatible:
+            throw ImageGenError.providerError(underlying: "Custom OpenAI-compatible profiles support text generation only. Use an OpenAI, Gemini, or MLX profile for image generation.")
         }
     }
 }

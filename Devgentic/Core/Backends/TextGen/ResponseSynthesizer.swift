@@ -75,13 +75,36 @@ struct ResponseSynthesizer {
         // =====================================================================
         // PATH B: LEGACY JSON-MODE FLOW (Ollama/MLX strict parsing)
         // =====================================================================
-        
+
+        // --- FAST PATH 0: CONCLUSION-ONLY (no evidence tools ran) ---
+        // A final_answer-only run leaves toolResults empty (final_answer is a
+        // control signal, not evidence). There is nothing to synthesize against —
+        // return the agent's answer directly instead of paying an IC call.
+        if summary.toolResults.isEmpty,
+           let thought = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !thought.isEmpty {
+            logger.info("🏎️ [Synthesizer] Conclusion-only fast path — no evidence tools; returning agent's answer directly.")
+            let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(thought)
+            return cleaned.isEmpty ? thought : cleaned
+        }
+
         // --- FAST PATH 1: DETERMINISTIC FORMATTING (Single Tool) ---
         // If the agent used JSON mode but only executed 1 tool successfully,
         // we format the raw output deterministically without calling the LLM.
         if case .success = summary.completionStatus,
            summary.toolResults.count == 1,
            let result = summary.toolResults.first {
+            // If the agent composed an explicit final answer (final_answer text →
+            // finalAgentThought), that IS the deliverable. Since final_answer is
+            // no longer recorded as a tool result, a [tool, final_answer] run
+            // reaches here with count == 1 — returning the raw tool output would
+            // silently discard the answer.
+            if let thought = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !thought.isEmpty {
+                logger.info("🏎️ [Synthesizer] Legacy Fast path — single success with final answer: returning agent's answer.")
+                let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(thought)
+                return cleaned.isEmpty ? thought : cleaned
+            }
             logger.info("🏎️ [Synthesizer] Legacy Fast path — single success: '\(result.toolName)'.")
             return buildDeterministicResponse(for: result, goal: originalQuery)
         }
@@ -157,6 +180,7 @@ struct ResponseSynthesizer {
     Rules:
     - Write in second person, natural language.
     - Do NOT mention internal steps, system messages, or reasoning.
+    - Only state facts supported by successful tool results. If the claimed conclusion is unsupported by them, present it explicitly as unverified.
     - If status is failed/stalled, explain what was attempted and what was missing.
     - Maximum 3 sentences for simple tasks.
     """
@@ -169,7 +193,11 @@ struct ResponseSynthesizer {
         lines.append("")
         
         if let thought = summary.finalAgentThought, !thought.isEmpty {
-            lines.append("AGENT'S FINAL CONCLUSION / REASONING:")
+            // Labeled unverified: the conclusion is the model's own claim, not
+            // evidence. Without this label (and with final_answer formerly listed
+            // as a "(Success)" tool result), hallucinated answers were framed as
+            // confirmed fact by the synthesizer.
+            lines.append("AGENT'S CLAIMED CONCLUSION (unverified — do not state claims as fact unless supported by a successful tool result below):")
             lines.append(thought)
             lines.append("")
         }
@@ -180,7 +208,18 @@ struct ResponseSynthesizer {
             lines.append("No tools were executed.")
         } else {
             for result in summary.toolResults {
-                let statusStr = result.isSuccess ? "Success" : "Failed"
+                // User decisions are labeled as such so the IC model doesn't
+                // narrate a denial as a malfunction.
+                let statusStr: String
+                if result.isSuccess {
+                    statusStr = "Success"
+                } else if result.failureCategory == .userDenied {
+                    statusStr = "Denied by user"
+                } else if result.failureCategory == .cancelled {
+                    statusStr = "Skipped by user"
+                } else {
+                    statusStr = "Failed"
+                }
                 let toolName = String(describing: result.toolName)
                 let rawOutput = String(describing: result.output)
                 // Cap output at 800 chars to stay well within context budget.
@@ -233,29 +272,69 @@ struct ResponseSynthesizer {
 
     // MARK: - Deterministic Fallback (when LLM is unavailable)
 
-    private static func buildDeterministicFallback(summary: ExecutionSummary) -> String {
+    // Internal (not private) so tests can pin the answer-preserving behavior —
+    // the LLM-failure path that reaches this in production needs a live IC model
+    // to exercise, which unit tests can't do.
+    static func buildDeterministicFallback(summary: ExecutionSummary) -> String {
         switch summary.completionStatus {
 
         case .success, .partialSuccess:
+            // The agent's own final answer (when present) is the primary
+            // deliverable; the tool bullets are corroborating context. This
+            // branch previously dropped the answer entirely whenever IC
+            // synthesis was unavailable.
+            var sections: [String] = []
+            if let thought = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !thought.isEmpty {
+                let cleaned = OutputSanitizer.stripThinkBlocksAndTokens(thought)
+                sections.append(cleaned.isEmpty ? thought : cleaned)
+            }
             let successes = summary.toolResults.filter(\.isSuccess)
-            let outputs = successes.map { r -> String in
-                let toolName = String(describing: r.toolName)
-                let output = String(describing: r.output)
-                let truncated = output.count > 200
-                    ? String(output.prefix(200)) + "…"
-                    : output
-                // Explicit String concatenation avoids any risk of GRDB's SQL
-                // StringInterpolation capturing values as SQL expressions when
-                // the GRDB module is linked in the same target.
-                return "• " + toolName + ": " + truncated
-            }.joined(separator: "\n")
-            return "Here's what I found:\n" + outputs
+            if !successes.isEmpty {
+                let outputs = successes.map { r -> String in
+                    let toolName = String(describing: r.toolName)
+                    let output = String(describing: r.output)
+                    let truncated = output.count > 200
+                        ? String(output.prefix(200)) + "…"
+                        : output
+                    // Explicit String concatenation avoids any risk of GRDB's SQL
+                    // StringInterpolation capturing values as SQL expressions when
+                    // the GRDB module is linked in the same target.
+                    return "• " + toolName + ": " + truncated
+                }.joined(separator: "\n")
+                sections.append("Here's what I found:\n" + outputs)
+            }
+            // Honest caveat on partial runs: name the evidence failures (user
+            // denials/skips are decisions, not failures — excluded).
+            let failures = summary.toolResults.filter {
+                !$0.isSuccess && $0.failureCategory != .userDenied && $0.failureCategory != .cancelled
+            }
+            if case .partialSuccess = summary.completionStatus, !failures.isEmpty {
+                let names = Set(failures.map(\.toolName)).sorted().joined(separator: ", ")
+                sections.append("Note: \(failures.count) tool call(s) did not succeed (\(names)).")
+            }
+            if sections.isEmpty {
+                // No answer and no successful output — surface the failure reason
+                // (e.g. Planning's all-subtasks-failed error digest) framed as a
+                // failure, rather than a bare "no output" or raw error text.
+                if let reason = summary.failureReason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
+                    return "I couldn't complete the task:\n\(reason)"
+                }
+                return "The task ended without producing any output. Please try again or rephrase your request."
+            }
+            return sections.joined(separator: "\n\n")
 
         case .failed:
             let tools = summary.toolResults.map { String(describing: $0.toolName) }.joined(separator: ", ")
-            return "I encountered errors while trying to complete your request. " +
+            var message = "I encountered errors while trying to complete your request. " +
                    "The following tools were attempted but did not succeed: " + tools + ". " +
                    "Please check that the required capabilities are enabled, or try rephrasing your request."
+            // The agent's claim is occasionally right even when evidence tools
+            // failed — surface it, but labeled so it can't read as a finding.
+            if let claim = summary.finalAgentThought?.trimmingCharacters(in: .whitespacesAndNewlines), !claim.isEmpty {
+                message += "\n\nUnverified conclusion from the agent: \"" + claim + "\""
+            }
+            return message
 
         case .stalled:
             return "I wasn't able to determine how to complete your request with the available tools. " +

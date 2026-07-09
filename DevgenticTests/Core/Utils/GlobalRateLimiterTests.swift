@@ -96,15 +96,31 @@ final class GlobalRateLimiterTests: XCTestCase {
         XCTAssertGreaterThan(waited, 0, "Request beyond burst should throttle")
     }
 
-    func testBurst_LocalBurstIsOne() async {
-        let key = "local:mlx"
-        // First request: immediate
-        let waited1 = await limiter.wait(forKey: key, category: .local)
-        XCTAssertEqual(waited1, 0, "First local request should be immediate")
+    // MARK: - Local Bypass Tests
 
-        // Second request: should throttle (burst = 1)
-        let waited2 = await limiter.wait(forKey: key, category: .local)
-        XCTAssertGreaterThan(waited2, 0, "Second local request should throttle (burst = 1)")
+    func testLocal_BypassesThrottling() async {
+        let key = "local:mlx"
+        // Local is unmetered: rapid-fire requests never wait.
+        for i in 1...10 {
+            let waited = await limiter.wait(forKey: key, category: .local)
+            XCTAssertEqual(waited, 0, "Local request \(i) should never throttle")
+        }
+    }
+
+    func testLocal_TimeUntilNextToken_AlwaysZero() async {
+        let key = "local:mlx"
+        for _ in 1...5 {
+            await limiter.wait(forKey: key, category: .local)
+        }
+        let wait = await limiter.timeUntilNextToken(forKey: key, category: .local)
+        XCTAssertEqual(wait, 0, "Local should never project a wait")
+    }
+
+    func testLocal_DrainAndPenalize_HasNoEffect() async {
+        let key = "local:mlx"
+        await limiter.drainAndPenalize(key: key, category: .local, penaltySeconds: 30.0)
+        let waited = await limiter.wait(forKey: key, category: .local)
+        XCTAssertEqual(waited, 0, "Drain on a local bucket must not introduce throttling")
     }
 
     func testBurst_OpenAIAllowsTenImmediateRequests() async {
@@ -254,16 +270,18 @@ final class GlobalRateLimiterTests: XCTestCase {
     // MARK: - Debt Accumulation Tests
 
     func testDebt_AccumulatesAcrossRequests() async {
-        let key = "local:debt-test"
-        // Local: burst = 1, rate = 1/sec
-        // Request 1: immediate (consumes the 1 burst token)
-        let w1 = await limiter.wait(forKey: key, category: .local)
-        XCTAssertEqual(w1, 0)
+        let key = "anthropic:debt-test"
+        // Anthropic: burst = 5, rate ≈ 0.83/sec
+        // Requests 1-5: immediate (consume the burst)
+        for _ in 1...5 {
+            let w = await limiter.wait(forKey: key, category: .anthropic)
+            XCTAssertEqual(w, 0)
+        }
 
-        // Request 2: goes into debt → ~1s wait
-        let w2 = await limiter.wait(forKey: key, category: .local)
-        XCTAssertGreaterThan(w2, 0.5, "Should wait approximately 1s")
-        XCTAssertLessThan(w2, 2.0, "Should not wait excessively")
+        // Request 6: goes into debt → ~1.2s wait
+        let w6 = await limiter.wait(forKey: key, category: .anthropic)
+        XCTAssertGreaterThan(w6, 0.5, "Should wait approximately 1.2s")
+        XCTAssertLessThan(w6, 2.5, "Should not wait excessively")
     }
 
     // MARK: - Workflow Scenario Tests

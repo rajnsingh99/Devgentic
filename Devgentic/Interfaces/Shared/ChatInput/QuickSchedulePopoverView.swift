@@ -51,11 +51,12 @@ struct QuickSchedulePopoverView: View {
                             .foregroundColor(theme.primaryText)
                         Spacer()
                     }
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 8)
                     .padding(.vertical, 6)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .popoverRowHighlight()
             }
 
             Divider()
@@ -79,11 +80,12 @@ struct QuickSchedulePopoverView: View {
                         .foregroundColor(theme.secondaryText)
                     Spacer()
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .popoverRowHighlight()
         }
         .padding(.vertical, 4)
         .frame(width: 200)

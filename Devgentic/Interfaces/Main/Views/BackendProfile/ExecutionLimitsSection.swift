@@ -150,7 +150,7 @@ struct ErrorRecoverySection: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Tool Failure Tolerance")
                         .font(theme.fontBody.weight(.medium))
-                    Text("Consecutive tool failures before the agent gives up")
+                    Text("Gives up after this many tool failures in a row")
                         .font(theme.fontCaption)
                         .foregroundColor(theme.secondaryText)
                 }
@@ -270,6 +270,91 @@ struct ErrorRecoverySection: View {
                     ForEach(ExhaustionPolicy.allCases) { policy in
                         Text(policy.displayName).tag(policy)
                     }
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
+        }
+    }
+}
+
+/// Loop Safety — circuit-breaker caps. These live on the AGENT profile, so they apply both in
+/// chat and when a workflow node executes this agent (same AgentConnect resolution seam). If the
+/// agent stops early but has a usable answer, the run completes with warnings instead of failing
+/// (degraded success). Rendered as its own titled group in AgentConfigDetailView, sibling to
+/// "Error Recovery".
+struct LoopSafetySection: View {
+    @Binding var resilienceOverrides: ResilienceOverrides?
+    @Environment(\.appTheme) private var theme
+
+    /// Matches `ResolvedResiliencePolicy.resolved`'s `RetryPolicy()` fallback for the
+    /// repetition cap (the denial cap has its own fixed default, shown inline).
+    private let autoDefault = 3
+
+    private var effectiveOverrides: ResilienceOverrides { resilienceOverrides ?? ResilienceOverrides() }
+
+    /// Mutates the overrides and collapses an all-Auto result back to `nil` so an
+    /// untouched profile never persists an empty overrides object.
+    private func updateOverrides(_ mutate: (inout ResilienceOverrides) -> Void) {
+        var updated = effectiveOverrides
+        mutate(&updated)
+        resilienceOverrides = updated.isEmpty ? nil : updated
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+
+            // Repetition Tolerance (loop tier) — ONE knob for both repetition checks:
+            // identical-iteration fingerprints AND per-tool global repeats. The model is
+            // warned one identical call before the cap fires.
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Repetition Tolerance")
+                        .font(theme.fontBody.weight(.medium))
+                    Text("Stops the run when a tool returns the same result this many times — the model is warned one call early")
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.secondaryText)
+                }
+
+                Spacer(minLength: 16)
+
+                Picker("", selection: Binding<Int?>(
+                    get: { effectiveOverrides.maxRepetitiveActions },
+                    set: { newValue in updateOverrides { $0.maxRepetitiveActions = newValue } }
+                )) {
+                    Text("Auto (\(autoDefault))").tag(Int?.none)
+                    Text("2").tag(Int?.some(2))
+                    Text("3").tag(Int?.some(3))
+                    Text("5").tag(Int?.some(5))
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+
+            // Denial Limit — consecutive user-denied tool calls before the run stops
+            // (tighter than general failures: the user already rejected the action).
+            // Identical declined requests are auto-denied without a banner (RunInteractionMemory);
+            // identical repeated questions replay the earlier answer — so no clarification knob.
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Denial Limit")
+                        .font(theme.fontBody.weight(.medium))
+                    Text("Stops the run after this many denials in a row — repeats of a declined request are auto-denied")
+                        .font(theme.fontCaption)
+                        .foregroundColor(theme.secondaryText)
+                }
+
+                Spacer(minLength: 16)
+
+                Picker("", selection: Binding<Int?>(
+                    get: { effectiveOverrides.maxConsecutiveDenials },
+                    set: { newValue in updateOverrides { $0.maxConsecutiveDenials = newValue } }
+                )) {
+                    Text("Auto (2)").tag(Int?.none)
+                    Text("1").tag(Int?.some(1))
+                    Text("2").tag(Int?.some(2))
+                    Text("3").tag(Int?.some(3))
                 }
                 .labelsHidden()
                 .fixedSize()

@@ -24,6 +24,9 @@ struct WorkflowNodeResult: Identifiable, Sendable {
     let detail: String
     let startTime: Date
     var endTime: Date?
+    /// Degraded success — the node completed on a best-effort answer after an early stop
+    /// (circuit breaker / iteration budget). Badged amber instead of green in the UI.
+    var hasWarnings: Bool = false
 
     var duration: TimeInterval {
         (endTime ?? Date()).timeIntervalSince(startTime)
@@ -120,18 +123,20 @@ final class WorkflowExecutionState {
         ))
     }
 
-    func handleNodeCompleted(nodeID: UUID, profileName: String, summary: String) {
+    func handleNodeCompleted(nodeID: UUID, profileName: String, summary: String, hasWarnings: Bool = false) {
         if let idx = nodeResults.firstIndex(where: { $0.nodeID == nodeID }) {
             nodeResults[idx] = WorkflowNodeResult(
                 id: nodeResults[idx].id, nodeID: nodeID, profileName: profileName,
                 status: .completed, detail: summary,
-                startTime: nodeResults[idx].startTime, endTime: Date()
+                startTime: nodeResults[idx].startTime, endTime: Date(),
+                hasWarnings: hasWarnings
             )
         } else {
             nodeResults.append(WorkflowNodeResult(
                 id: UUID(), nodeID: nodeID, profileName: profileName,
                 status: .completed, detail: summary,
-                startTime: Date(), endTime: Date()
+                startTime: Date(), endTime: Date(),
+                hasWarnings: hasWarnings
             ))
         }
     }

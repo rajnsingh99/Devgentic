@@ -66,6 +66,18 @@ enum ExecutorFactory {
 
             return executor
 
+        case .code:
+            // Code mode runs the plain ReAct loop with the profile's configured
+            // limits (CodeSessionManager builds the session profile with
+            // maxIterations: 20). No capability decorators — Code doesn't stack
+            // Planning/Reflexion. Before this case existed, .code fell through
+            // @unknown default to a bare ReActAgentExecutor(), silently capping
+            // every Code run at the default 15 iterations.
+            guard case .code(let config) = profile.details else {
+                return ReActAgentExecutor()
+            }
+            return ReActAgentExecutor(maxIterations: config.maxIterations ?? 15)
+
         case .workflow:
             return WorkflowExecutor()
 

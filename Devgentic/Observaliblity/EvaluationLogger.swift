@@ -75,11 +75,30 @@ class EvaluationLogger {
                     metrics.totalIterations += 1
                 }
                 if detail == .finalizing {
-                    metrics.didFinishSuccessfully = true
-                    // Ensure at least 1 iteration is counted when the loop ran
-                    // but no .reasoning trace was emitted (e.g., null-termination
-                    // on first iteration where the model returned no tool calls).
-                    if metrics.totalIterations == 0 {
+                    // The executor reports its honest terminal outcome as metadata.
+                    // A bare finalizing event no longer implies success — the old
+                    // unconditional `didFinishSuccessfully = true` printed SUCCESS ✅
+                    // even when the event's own content said "Task failed".
+                    if let outcome = log.metadata?["outcome"] {
+                        metrics.reportedOutcome = outcome
+                        metrics.didFinishSuccessfully =
+                            outcome == ExecutionOutcome.completed.rawValue ||
+                            outcome == ExecutionOutcome.completedWithWarnings.rawValue
+                    } else {
+                        // Legacy behavior for executors that don't report an outcome.
+                        metrics.didFinishSuccessfully = true
+                    }
+                    // Prefer the authoritative loop counter the executor reports on its
+                    // terminal finalizing event. The event-derived count drifts: prose
+                    // exits emit no .reasoning row (undercount) and throttle-preflight
+                    // notices emit an extra one (overcount). The incremental count
+                    // remains as fallback for executors that don't report.
+                    if let reported = log.metadata?["iterations"], let count = Int(reported), count > 0 {
+                        metrics.totalIterations = count
+                    } else if metrics.totalIterations == 0 {
+                        // Ensure at least 1 iteration is counted when the loop ran
+                        // but no .reasoning trace was emitted (e.g., null-termination
+                        // on first iteration where the model returned no tool calls).
                         metrics.totalIterations = 1
                     }
                 }
@@ -157,7 +176,20 @@ class EvaluationLogger {
             }
             
             let outcomeLabel: String
-            if metrics.didFinishSuccessfully && metrics.toolCalls == 0 {
+            if let reported = metrics.reportedOutcome {
+                switch reported {
+                case ExecutionOutcome.completedWithWarnings.rawValue:
+                    outcomeLabel = "PARTIAL ⚠️"  // Completed with tool failures / best-effort
+                case ExecutionOutcome.failed.rawValue:
+                    outcomeLabel = "FAIL ❌"
+                case ExecutionOutcome.cancelled.rawValue:
+                    outcomeLabel = "CANCELLED 🚫"
+                default:
+                    // .completed — keep the zero-tool nuance: a completion that never
+                    // executed a tool is worth a second look during testing.
+                    outcomeLabel = metrics.toolCalls == 0 ? "PARTIAL ⚠️" : "SUCCESS ✅"
+                }
+            } else if metrics.didFinishSuccessfully && metrics.toolCalls == 0 {
                 outcomeLabel = "PARTIAL ⚠️"  // Completed but no tools executed
             } else if metrics.didFinishSuccessfully {
                 outcomeLabel = "SUCCESS ✅"

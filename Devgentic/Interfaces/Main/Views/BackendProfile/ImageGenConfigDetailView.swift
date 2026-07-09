@@ -179,6 +179,8 @@ struct ImageGenConfigDetailView: View {
                         )
                     )
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 3. Generation Defaults
@@ -193,6 +195,8 @@ struct ImageGenConfigDetailView: View {
                         config: $localAdvancedConfig,
                         provider: providerConfig.wrappedValue.apiProvider
                     )
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
 
                 // 6. Capability Badge
@@ -215,6 +219,8 @@ struct ImageGenConfigDetailView: View {
                                 .foregroundColor(theme.secondaryText)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
             }
             .padding(ViewLayout.containerPadding)
@@ -299,6 +305,8 @@ struct ImageGenConfigDetailView: View {
                 }
                 .padding(.top, 8)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -344,6 +352,8 @@ struct ImageGenConfigDetailView: View {
                         .foregroundColor(npCount > 5_000 ? theme.warningColor : theme.secondaryText)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 

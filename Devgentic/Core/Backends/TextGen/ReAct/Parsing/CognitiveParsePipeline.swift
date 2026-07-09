@@ -50,7 +50,16 @@ struct CognitiveParsePipeline: Sendable {
     let knownToolNames: Set<String>
 
     /// Registered tools for tool-name resolution at the end of the cascade.
-    /// When empty, name resolution is skipped (parser results pass through).
+    /// When empty, Stage-5 ToolNameResolver is SKIPPED — extracted tool names
+    /// pass through unvalidated as `.success` and a misspelled name only fails
+    /// later at dispatch (as a tool failure feeding the circuit breaker, instead
+    /// of a typed parse failure with a "did you mean" corrective retry).
+    ///
+    /// Deliberately NO default value: every call site must decide. Empty is
+    /// correct ONLY where validation is layered above (provider content-fallback
+    /// parses re-validated by `NativeParsePipeline` one level up) or where no
+    /// dispatch follows (pure-parse tests). Six call sites silently opted out
+    /// of validation for months because this parameter used to default to `[]`.
     let registeredTools: [AgentTool]
 
     init(
@@ -58,7 +67,7 @@ struct CognitiveParsePipeline: Sendable {
         modelId: String = "unknown",
         iteration: Int = 0,
         knownToolNames: Set<String> = [],
-        registeredTools: [AgentTool] = []
+        registeredTools: [AgentTool]
     ) {
         self.expectedDialect = expectedDialect
         self.modelId = modelId

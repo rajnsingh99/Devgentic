@@ -23,7 +23,11 @@ struct ReportInspectorView: View {
     /// nil for the developer path (which uses the full-includes preset).
     @State private var pendingExportFeedback: UserFeedback?
 
-    init(messageID: UUID, conversationID: UUID, traceID: String?) {
+    /// Callback to trigger when the view wants to close (for custom popovers)
+    let onClose: (() -> Void)?
+
+    init(messageID: UUID, conversationID: UUID, traceID: String?, onClose: (() -> Void)? = nil) {
+        self.onClose = onClose
         _viewModel = State(initialValue: ReportViewModel(
             messageID: messageID,
             conversationID: conversationID,
@@ -46,10 +50,26 @@ struct ReportInspectorView: View {
             }
         }
         .frame(
-            minWidth: isDeveloperMode ? 700 : 420,
-            minHeight: isDeveloperMode ? 400 : 340
+            minWidth: isDeveloperMode ? 850 : 500,
+            idealWidth: isDeveloperMode ? 1000 : 550,
+            maxWidth: .infinity,
+            minHeight: isDeveloperMode ? 500 : 450,
+            idealHeight: isDeveloperMode ? 700 : 550,
+            maxHeight: .infinity
         )
         .background(theme.primaryBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [theme.dividerColor, theme.dividerColor.opacity(0.3)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1.5
+                )
+        )
         .task {
             await viewModel.loadData()
         }
@@ -69,12 +89,12 @@ struct ReportInspectorView: View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text(isDeveloperMode ? "Execution Trace" : "Feedback")
-                    .font(.system(.title3, weight: .semibold))
+                    .font(.system(.title3, design: .rounded, weight: .bold))
                     .foregroundStyle(theme.primaryText)
 
                 if let profileName = viewModel.activeTraceRecord?.profileName {
                     Text(profileName)
-                        .font(.system(.caption))
+                        .font(.system(.caption, weight: .medium))
                         .foregroundStyle(theme.secondaryText)
                 }
             }
@@ -82,31 +102,53 @@ struct ReportInspectorView: View {
             Spacer()
 
             // Mode indicator pill
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Image(systemName: isDeveloperMode ? "hammer.fill" : "person.fill")
-                    .font(.system(size: 9)) // Fixed size: badge chip ≤9pt
+                    .font(.system(size: 10, weight: .semibold))
                 Text(isDeveloperMode ? "Developer" : "User")
-                    .font(.system(.caption2, weight: .medium))
+                    .font(.system(.caption, design: .rounded, weight: .semibold))
             }
-            .foregroundStyle(theme.secondaryText)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(theme.surfaceOverlay)
-            .clipShape(Capsule())
+            .foregroundStyle(isDeveloperMode ? theme.accentColor : theme.secondaryText)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(isDeveloperMode ? theme.accentColor.opacity(0.15) : theme.surfaceOverlayStrong)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(isDeveloperMode ? theme.accentColor.opacity(0.3) : theme.dividerColor, lineWidth: 1)
+            )
+            .padding(.trailing, 8)
 
-            Button(action: { dismiss() }) {
+            Button(action: { onClose?() ?? dismiss() }) {
                 Image(systemName: "xmark")
-                    .font(.system(.caption2, weight: .bold))
+                    .font(.system(.caption, weight: .bold))
                     .foregroundStyle(theme.secondaryText)
-                    .frame(width: 22, height: 22)
-                    .background(theme.secondaryBackground)
+                    .frame(width: 26, height: 26)
+                    .background(theme.surfaceOverlayStrong)
                     .clipShape(Circle())
+                    .overlay(Circle().stroke(theme.dividerColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help("Close")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .background(
+            ZStack {
+                theme.secondaryBackground.opacity(0.6)
+                if let nsVisualEffectView = NSClassFromString("NSVisualEffectView") {
+                    // For macOS a glass effect can be nice, but since we can't easily bridge here without AppKit,
+                    // we'll rely on our theme's translucent layer plus a linear gradient.
+                    LinearGradient(
+                        colors: [theme.primaryBackground.opacity(0.1), theme.secondaryBackground.opacity(0.4)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+            }
+        )
     }
 
     // MARK: - Export

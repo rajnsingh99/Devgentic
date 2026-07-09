@@ -33,7 +33,7 @@ enum ProviderClass: Sendable, Equatable {
 
     init(apiProvider: ApiProvider) {
         switch apiProvider {
-        case .anthropic, .openAI, .google: self = .cloud
+        case .anthropic, .openAI, .google, .openRouter, .openAICompatible: self = .cloud
         case .ollama: self = .ollama
         case .mlx: self = .mlx
         }
@@ -81,6 +81,9 @@ struct CognitiveResiliencePolicy: Sendable, Equatable {
 struct LoopResiliencePolicy: Sendable, Equatable {
     let maxConsecutiveToolFailures: Int
     let maxRepetitiveActions: Int
+    /// Consecutive user-denied tool calls before the run stops. (Clarification loops are
+    /// governed by RunInteractionMemory replay + the repetition cap, not a counter.)
+    let maxConsecutiveDenials: Int
 }
 
 // MARK: - Resolved Policy
@@ -152,7 +155,10 @@ struct ResolvedResiliencePolicy: Sendable, Equatable {
             ),
             loop: LoopResiliencePolicy(
                 maxConsecutiveToolFailures: overrides?.maxConsecutiveToolFailures ?? legacy.maxRetries,
-                maxRepetitiveActions: overrides?.maxRepetitiveActions ?? legacy.maxRetries
+                maxRepetitiveActions: overrides?.maxRepetitiveActions ?? legacy.maxRetries,
+                // Never coupled to the legacy single knob — fixed default (the breaker's
+                // historical hardcoded value).
+                maxConsecutiveDenials: overrides?.maxConsecutiveDenials ?? 2
             )
         )
     }
@@ -187,6 +193,38 @@ enum ProviderErrorClassifier {
         "input token count",
     ]
 
+    /// Rejection markers that, combined with a tools/function-calling mention,
+    /// indicate the model or endpoint does not support tool calling AT ALL —
+    /// distinct from tool-ARGUMENT validation 400s ("tools[0].function.name is
+    /// invalid"), which mean tools ARE supported and fall through to the generic
+    /// verdict. Real-world sources: OpenAI-compatible gateways ("Unrecognized
+    /// request argument supplied: tools"), Ollama's OpenAI shim ("does not
+    /// support tools"), llama.cpp ("tools param requires --jinja"), LM Studio /
+    /// vLLM ("not supported"), Gemini ("Function calling is not enabled"),
+    /// Anthropic pydantic-style ("tools: Extra inputs are not permitted").
+    static let toolsRejectionMarkers: [String] = [
+        "does not support",
+        "not supported",
+        "unsupported",
+        "not enabled",
+        "unrecognized request argument",
+        "unknown parameter",
+        "extra inputs are not permitted",
+        "requires --jinja",
+    ]
+
+    /// True when a 4xx body indicates the endpoint/model rejected tool calling
+    /// wholesale (chat-only model), not a malformed tool definition. Requires
+    /// BOTH a tools/function mention AND a rejection marker so tool-argument
+    /// validation errors keep their generic (accurate) verdict.
+    static func indicatesToolsUnsupported(_ loweredBody: String) -> Bool {
+        let mentionsTools = loweredBody.contains("tool")
+            || loweredBody.contains("function call")
+            || loweredBody.contains("function_call")
+        guard mentionsTools else { return false }
+        return toolsRejectionMarkers.contains(where: { loweredBody.contains($0) })
+    }
+
     static func classify(_ error: CloudProviderError) -> ProviderErrorVerdict {
         classify(
             statusCode: error.statusCode,
@@ -216,6 +254,14 @@ enum ProviderErrorClassifier {
             // 408 request-timeout is the one 4xx that is genuinely transient.
             return .transient(detail: "HTTP \(statusCode)")
 
+        case 402:
+            // OpenRouter (and some gateways) signal an out-of-credits account with
+            // 402 rather than 429 — deterministic until the user tops up, so fatal.
+            return .fatal(
+                reason: "The provider account is out of credits (HTTP 402). Add credits (OpenRouter: https://openrouter.ai/credits) and try again.\(requestRef)",
+                category: .providerQuotaExhausted
+            )
+
         case 401, 403:
             return .fatal(
                 reason: "Authentication failed (HTTP \(statusCode)) — the provider rejected the API key. Check the key in this profile's settings.\(requestRef)",
@@ -239,6 +285,19 @@ enum ProviderErrorClassifier {
                contextOverflowSignatures.contains(where: { lowered.contains($0) }) {
                 return .fatal(
                     reason: "The conversation no longer fits the model's context window. Start a new chat, or enable history compaction, then try again.\(requestRef)",
+                    category: .providerCapabilityMissing
+                )
+            }
+            // Tools-rejection (register #1 runtime guard): the endpoint refused
+            // the `tools` payload — a chat-only model/gateway driven through the
+            // Agent loop. Cloud has no pre-flight capability guard (capability
+            // is never populated for cloud configs), so this classification is
+            // where the user learns the real cause instead of an opaque
+            // bad-request.
+            if statusCode == 400 || statusCode == 422,
+               indicatesToolsUnsupported(lowered) {
+                return .fatal(
+                    reason: "This model or endpoint rejected tool definitions (HTTP \(statusCode)) — it doesn't support tool calling. Choose a tool-capable model for this Agent profile, or use a Bot profile for plain chat.\(requestRef)",
                     category: .providerCapabilityMissing
                 )
             }

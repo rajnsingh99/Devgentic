@@ -206,12 +206,15 @@ struct MainApplicationView: View {
                 ChatHistoryView()
                     .environment(chatHistoryViewModel)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(.bottom, 115)
+                    // Apply the overlay BEFORE the bottom inset so WelcomeView
+                    // is inset by the same 115pt and its footer (diagnostics
+                    // disclosure) no longer renders under the floating bar.
                     .overlay {
                         if viewModel.selectedConversationID == nil {
                             WelcomeView()
                         }
                     }
+                    .padding(.bottom, 115)
 
             case .code:
                 CodeDedicatedView()
@@ -254,6 +257,13 @@ struct MainApplicationView: View {
                     .allowsHitTesting(showModePicker)
                     .animation(.spring(response: 0.3, dampingFraction: 0.75), value: showModePicker)
             }
+        }
+        // [F2] Cross-conversation "needs input" affordance — floats at the top-center of the chat
+        // area, content-hugging, so a HITL waiting in another conversation stays discoverable.
+        .overlay(alignment: .top) {
+            CrossConversationInputChip()
+                .environment(viewModel)
+                .padding(.top, 12)
         }
         .onChange(of: viewModel.interfaceMode) { _, _ in
             showModePicker = true

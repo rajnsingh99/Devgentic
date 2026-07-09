@@ -155,6 +155,10 @@ struct EpisodicHistoryFormatter {
         guard let outcome = terminalOutcome else { return nil }
         switch outcome {
         case .failed:    return "failed"
+        // Degraded success — the run stopped early but shipped a best-effort answer.
+        // "partial" tells the model the prior turn's answer may be incomplete without
+        // overstating it as a failure.
+        case .completedWithWarnings: return "partial"
         case .cancelled: return "cancelled"
         case .completed: return nil
         }
@@ -182,7 +186,9 @@ struct EpisodicHistoryFormatter {
               let reason = terminalReason?.trimmingCharacters(in: .whitespacesAndNewlines),
               !reason.isEmpty else { return nil }
         switch outcome {
-        case .failed, .cancelled:
+        // Degraded runs carry their early-stop reason too — it's the context the model
+        // needs to understand why the prior answer may be incomplete.
+        case .failed, .cancelled, .completedWithWarnings:
             return "\(indent)<termination>\(xmlEscape(truncate(reason, maxLength: 200)))</termination>\n"
         case .completed:
             return nil

@@ -671,23 +671,39 @@ struct CategoryChip: View {
         Button(action: action) {
             Text(title)
                 .font(.system(.caption, weight: isSelected ? .semibold : .medium))
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 12)
                 .padding(.vertical, 5)
-                .background(isSelected ? theme.primaryText : theme.surfaceOverlay)
-                .foregroundColor(isSelected ? theme.primaryBackground : theme.secondaryText)
+                .background {
+                    if isSelected {
+                        LinearGradient(
+                            colors: [theme.accentColor, theme.accentColor.opacity(0.85)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    } else {
+                        theme.surfaceOverlay
+                    }
+                }
+                .foregroundColor(isSelected ? .white : theme.secondaryText)
                 .clipShape(Capsule())
+                .shadow(color: isSelected ? theme.accentColor.opacity(0.2) : Color.clear, radius: 4, y: 1)
                 .overlay(
                     Capsule()
                         .stroke(
-                            isSelected ? Color.clear : (isHovered ? theme.primaryText.opacity(0.6) : theme.surfaceOverlay),
-                            lineWidth: isHovered && !isSelected ? 1 : 0.5
+                            isSelected ? Color.clear : (isHovered ? theme.accentColor.opacity(0.4) : theme.surfaceOverlayStrong),
+                            lineWidth: 0.5
                         )
                 )
+                .scaleEffect(isHovered ? 1.05 : 1.0)
+                .scaleEffect(isSelected ? 0.98 : 1.0)
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
+        .onHover { hovering in
+            withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.65)) {
+                isHovered = hovering
+            }
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isSelected)
         .accessibilityLabel(title)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
     }

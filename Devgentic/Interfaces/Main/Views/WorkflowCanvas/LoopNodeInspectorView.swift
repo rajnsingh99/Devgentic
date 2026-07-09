@@ -18,7 +18,7 @@ struct LoopNodeInspectorView: View {
     let parentWorkflowID: UUID
     let availableWorkflows: [BackendProfileModel]
 
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     // Local editing state
@@ -50,7 +50,14 @@ struct LoopNodeInspectorView: View {
                 .padding(24)
             }
         }
-        .frame(width: 540, height: 560)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 560,
+            idealHeight: 700,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear { loadFromNode() }
     }
@@ -83,7 +90,7 @@ struct LoopNodeInspectorView: View {
             }
             .buttonStyle(.plain)
             .help("How loop nodes work")
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { closeInspector() }
                 .font(theme.fontCaption)
                 .buttonStyle(.plain)
                 .foregroundColor(theme.secondaryText)
@@ -199,39 +206,44 @@ struct LoopNodeInspectorView: View {
 
     private var bodyWorkflowCard: some View {
         SettingsCard(title: "Body Workflow", icon: "arrow.triangle.2.circlepath", theme: theme) {
-            if filteredWorkflows.isEmpty {
-                Label("No workflow profiles available.", systemImage: "exclamationmark.triangle")
-                    .foregroundColor(theme.secondaryText)
-                    .font(.caption)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(filteredWorkflows) { wf in
-                        Button {
-                            bodyWorkflowID = wf.id
-                            bodyWorkflowName = wf.displayName
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: ProfileType.workflow.iconName)
-                                    .foregroundColor(.purple)
-                                    .frame(width: 20)
+            VStack {
+                if filteredWorkflows.isEmpty {
+                    Label("No workflow profiles available.", systemImage: "exclamationmark.triangle")
+                        .foregroundColor(theme.secondaryText)
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(filteredWorkflows) { wf in
+                            Button {
+                                bodyWorkflowID = wf.id
+                                bodyWorkflowName = wf.displayName
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: ProfileType.workflow.iconName)
+                                        .foregroundColor(.purple)
+                                        .frame(width: 20)
 
-                                Text(wf.displayName)
-                                    .font(theme.fontSubheadline)
-                                    .foregroundColor(theme.primaryText)
+                                    Text(wf.displayName)
+                                        .font(theme.fontSubheadline)
+                                        .foregroundColor(theme.primaryText)
 
-                                Spacer()
+                                    Spacer()
 
-                                if bodyWorkflowID == wf.id {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(theme.accentColor)
+                                    if bodyWorkflowID == wf.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(theme.accentColor)
+                                    }
                                 }
+                                .padding(.vertical, 4)
                             }
-                            .padding(.vertical, 4)
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -254,6 +266,8 @@ struct LoopNodeInspectorView: View {
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .frame(maxWidth: 120)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -359,6 +373,8 @@ struct LoopNodeInspectorView: View {
                     }
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -406,6 +422,6 @@ struct LoopNodeInspectorView: View {
         if node.nodeConfig == nil { node.nodeConfig = WorkflowNodeConfig() }
         node.nodeConfig?.joinMode = joinMode
 
-        dismiss()
+        closeInspector()
     }
 }

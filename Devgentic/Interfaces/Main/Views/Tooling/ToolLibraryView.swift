@@ -93,148 +93,199 @@ struct ToolLibraryView: View {
         .sheet(item: $bugReportSource) { source in
             MCPBugReportSheet(source: source)
         }
-    }
-
-    // MARK: - Sidebar
+    }    // MARK: - Sidebar
 
     @ViewBuilder
     private var toolSidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $selectedSidebar) {
-                Section {
-                    sidebarRow(
-                        label: "All Tools",
-                        icon: "archivebox.fill",
-                        count: totalToolCount,
-                        tag: .all
-                    )
-                } header: {
-                    Text("Library")
-                        .font(.system(.caption, weight: .semibold))
-                        .foregroundColor(theme.secondaryText)
-                        .textCase(.uppercase)
-                        .tracking(0.5)
-                }
-
-                if favoriteCount > 0 {
-                    Section {
-                        sidebarRow(
-                            label: "Favorites",
-                            icon: "star.fill",
-                            count: favoriteCount,
-                            tag: .favorites
-                        )
-                    } header: {
-                        Text("Pinned")
-                            .font(.system(.caption, weight: .semibold))
-                            .foregroundColor(theme.secondaryText)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // LIBRARY Section
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Library")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.secondaryText.opacity(0.7))
                             .textCase(.uppercase)
-                            .tracking(0.5)
-                    }
-                }
-
-                Section {
-                    ForEach(builtInGroups, id: \.name) { group in
+                            .tracking(0.8)
+                            .padding(.leading, 8)
+                        
                         sidebarRow(
-                            label: group.name,
-                            icon: group.icon,
-                            count: group.count,
-                            tag: .localCategory(group.name)
+                            label: "All Tools",
+                            icon: "archivebox.fill",
+                            count: totalToolCount,
+                            tag: .all
                         )
                     }
-                } header: {
-                    Text("Built-in Tools")
-                        .font(.system(.caption, weight: .semibold))
-                        .foregroundColor(theme.secondaryText)
-                        .textCase(.uppercase)
-                        .tracking(0.5)
-                }
-
-                Section {
-                    let mcpSources = toolStore.sources.filter { $0.type == .mcp }
-
-                    if mcpSources.isEmpty {
-                        VStack(spacing: 4) {
-                            Text("No MCP servers")
-                                .font(.caption)
-                                .foregroundColor(theme.secondaryText)
-                            Button("Add Server") { router.navigate(to: .addMCPServer) }
-                                .font(.caption2)
-                                .buttonStyle(.borderless)
+                    
+                    // PINNED Section
+                    if favoriteCount > 0 {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Pinned")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(theme.secondaryText.opacity(0.7))
+                                .textCase(.uppercase)
+                                .tracking(0.8)
+                                .padding(.leading, 8)
+                            
+                            sidebarRow(
+                                label: "Favorites",
+                                icon: "star.fill",
+                                count: favoriteCount,
+                                tag: .favorites
+                            )
                         }
-                        .padding(.vertical, 4)
-                    } else {
-                        ForEach(mcpSources) { source in
-                            HStack(spacing: 6) {
-                                MCPIconView(
-                                    icons: source.tools.first?.icons,
-                                    fallbackSymbol: "network",
-                                    size: 16
-                                )
-                                .foregroundColor(theme.secondaryText)
-
-                                Text(source.serverName)
-                                    .font(theme.fontSubheadline)
-                                    .foregroundColor(theme.primaryText)
-
-                                Spacer()
-
-                                Text("\(source.tools.count)")
-                                    .font(.caption2)
+                    }
+                    
+                    // BUILT-IN TOOLS Section
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Built-in Tools")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.secondaryText.opacity(0.7))
+                            .textCase(.uppercase)
+                            .tracking(0.8)
+                            .padding(.leading, 8)
+                        
+                        ForEach(builtInGroups, id: \.name) { group in
+                            sidebarRow(
+                                label: group.name,
+                                icon: group.icon,
+                                count: group.count,
+                                tag: .localCategory(group.name)
+                            )
+                        }
+                    }
+                    
+                    // MCP SERVERS Section
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("MCP Servers")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.secondaryText.opacity(0.7))
+                            .textCase(.uppercase)
+                            .tracking(0.8)
+                            .padding(.leading, 8)
+                        
+                        let mcpSources = toolStore.sources.filter { $0.type == .mcp }
+                        
+                        if mcpSources.isEmpty {
+                            VStack(spacing: 6) {
+                                Text("No MCP servers")
+                                    .font(.system(size: 11))
                                     .foregroundColor(theme.secondaryText)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(theme.surfaceOverlay)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                                ConnectionStateIndicator(sourceId: source.id)
+                                Button("Add Server") { router.navigate(to: .addMCPServer) }
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .buttonStyle(.plain)
+                                    .foregroundColor(theme.accentColor)
                             }
-                            .tag(SidebarSelection.mcp(source.id))
-                            .contextMenu {
-                                Button("Edit Configuration...") {
-                                    router.navigate(to: .editMCPServer(sourceID: source.id))
-                                }
-                                Button("Report Issue...") {
-                                    bugReportSource = source
-                                }
-                                Divider()
-                                Button("Remove Server", role: .destructive) {
-                                    toolStore.deleteTool(toolSource: source)
-                                    if selectedSidebar == .mcp(source.id) {
-                                        selectedSidebar = .all
-                                    }
-                                }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 8)
+                        } else {
+                            ForEach(mcpSources) { source in
+                                mcpSidebarRow(source: source)
                             }
                         }
                     }
-                } header: {
-                    Text("MCP Servers")
-                        .font(.system(.caption, weight: .semibold))
-                        .foregroundColor(theme.secondaryText)
-                        .textCase(.uppercase)
-                        .tracking(0.5)
                 }
+                .padding(.vertical, 16)
+                .padding(.horizontal, 10)
             }
-            .listStyle(.sidebar)
         }
-        .background(theme.secondaryBackground.opacity(0.5))
+        .background(theme.secondaryBackground.opacity(0.4))
     }
 
     private func sidebarRow(label: String, icon: String, count: Int, tag: SidebarSelection) -> some View {
-        HStack {
-            Label(label, systemImage: icon)
-                .font(theme.fontSubheadline)
-                .foregroundColor(theme.primaryText)
+        let isSelected = selectedSidebar == tag
+        return HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+                .frame(width: 18, alignment: .center)
+            
+            Text(label)
+                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.85))
+            
             Spacer()
+            
             Text("\(count)")
-                .font(.caption2)
-                .foregroundColor(theme.secondaryText)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
-                .background(theme.surfaceOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .background(isSelected ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? theme.accentColor.opacity(0.08) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.8)) {
+                selectedSidebar = tag
+            }
         }
         .tag(tag)
+    }
+
+    private func mcpSidebarRow(source: ToolSource) -> some View {
+        let tag = SidebarSelection.mcp(source.id)
+        let isSelected = selectedSidebar == tag
+        
+        return HStack(spacing: 8) {
+            MCPIconView(
+                icons: source.tools.first?.icons,
+                fallbackSymbol: "network",
+                size: 14
+            )
+            .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+            .frame(width: 18, alignment: .center)
+            
+            Text(source.serverName)
+                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
+                .foregroundColor(isSelected ? theme.primaryText : theme.primaryText.opacity(0.85))
+                .lineLimit(1)
+            
+            Spacer()
+            
+            Text("\(source.tools.count)")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(isSelected ? theme.accentColor.opacity(0.12) : theme.surfaceOverlay)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            
+            ConnectionStateIndicator(sourceId: source.id)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected ? theme.accentColor.opacity(0.08) : Color.clear)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.8)) {
+                selectedSidebar = tag
+            }
+        }
+        .contextMenu {
+            Button("Edit Configuration...") {
+                router.navigate(to: .editMCPServer(sourceID: source.id))
+            }
+            Button("Report Issue...") {
+                bugReportSource = source
+            }
+            Divider()
+            Button("Remove Server", role: .destructive) {
+                toolStore.deleteTool(toolSource: source)
+                if selectedSidebar == .mcp(source.id) {
+                    selectedSidebar = .all
+                }
+            }
+        }
     }
 
     // MARK: - Detail (Tool List)
@@ -246,34 +297,31 @@ struct ToolLibraryView: View {
         } else {
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        // Column header
-                        HStack(spacing: 0) {
-                            Text("Tool")
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Text("Description")
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Text("State")
-                                .frame(width: 80, alignment: .center)
+                    LazyVStack(spacing: 12) {
+                        // Title / Count summary header
+                        HStack {
+                            Text(currentSelectionTitle)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(theme.secondaryText.opacity(0.8))
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+                            
+                            Spacer()
+                            
+                            Text("\(displayedRows.count) \(displayedRows.count == 1 ? "tool" : "tools")")
+                                .font(.system(size: 11))
+                                .foregroundColor(theme.secondaryText)
                         }
-                        .font(.system(.caption, weight: .semibold))
-                        .foregroundColor(theme.secondaryText)
-                        .textCase(.uppercase)
-                        .tracking(0.5)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(theme.surfaceOverlay.opacity(0.3))
-
+                        .padding(.horizontal, 4)
+                        .padding(.top, 14)
+                        .padding(.bottom, 2)
+                        
                         ForEach(displayedRows) { row in
                             toolRow(row)
-
-                            if row.id != displayedRows.last?.id {
-                                Divider()
-                                    .padding(.leading, 56)
-                            }
                         }
                     }
-                    .padding(.bottom, isSelectionMode && !selectedToolIDs.isEmpty ? 64 : 20)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, isSelectionMode && !selectedToolIDs.isEmpty ? 80 : 20)
                 }
 
                 // Bulk action bar
@@ -289,56 +337,63 @@ struct ToolLibraryView: View {
     // MARK: - Bulk Actions
 
     private var bulkActionBar: some View {
-        HStack(spacing: 12) {
-            Text("\(selectedToolIDs.count) selected")
-                .font(.system(.caption, weight: .semibold))
+        HStack(spacing: 14) {
+            Text("\(selectedToolIDs.count) Selected")
+                .font(.system(size: 11, weight: .bold))
                 .foregroundColor(theme.primaryText)
+                .textCase(.uppercase)
+                .tracking(0.5)
 
             Spacer()
 
             Button { bulkSetState(.ask) } label: {
-                Label("Ask", systemImage: "lock.shield.fill")
-                    .font(.system(.caption, weight: .semibold))
+                Label("Ask First", systemImage: "lock.shield.fill")
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.bordered)
-            .tint(.orange)
+            .buttonStyle(.borderedProminent)
+            .tint(theme.warningColor)
             .controlSize(.small)
 
             Button { bulkSetState(.auto) } label: {
-                Label("Auto", systemImage: "bolt.fill")
-                    .font(.system(.caption, weight: .semibold))
+                Label("Auto Run", systemImage: "bolt.fill")
+                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.bordered)
-            .tint(.green)
+            .buttonStyle(.borderedProminent)
+            .tint(theme.successColor)
             .controlSize(.small)
 
             Button { bulkSetState(.disabled) } label: {
-                Label("Disable", systemImage: "xmark")
-                    .font(.system(.caption, weight: .semibold))
+                Label("Disable", systemImage: "xmark.circle")
+                    .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.bordered)
+            .tint(.secondary)
             .controlSize(.small)
 
-            Divider().frame(height: 20)
+            Divider().frame(height: 16)
 
             Button { bulkToggleFavorite() } label: {
-                Image(systemName: "star.fill")
-                    .font(.system(.caption))
+                Label("Favorite", systemImage: "star.fill")
+                    .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .tint(.yellow)
             .controlSize(.small)
-            .accessibilityLabel("Toggle favorite")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(theme.secondaryBackground)
-                .shadow(color: .black.opacity(0.2), radius: 8, y: -2)
+            RoundedRectangle(cornerRadius: 14)
+                .fill(theme.secondaryBackground.opacity(0.85))
+                .background(.ultraThinMaterial)
         )
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(theme.accentColor.opacity(0.2), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 12)
     }
 
     private enum BulkToolState {
@@ -465,6 +520,24 @@ struct ToolLibraryView: View {
         return false
     }
 
+    private var currentSelectionTitle: String {
+        switch selectedSidebar {
+        case .all:
+            return "All Tools"
+        case .favorites:
+            return "Favorites"
+        case .localCategory(let category):
+            return category
+        case .mcp(let id):
+            if let source = toolStore.sources.first(where: { $0.id == id }) {
+                return source.serverName
+            }
+            return "MCP Server"
+        case .none:
+            return "Tools"
+        }
+    }
+
     var displayedRows: [ToolTableRow] {
         var rows: [ToolTableRow] = []
 
@@ -560,108 +633,170 @@ private struct ToolRowContent: View {
 
     @State private var isHovered = false
 
+    private var displayTitle: String {
+        if let title = row.definition.title {
+            return title
+        }
+        return row.definition.name.toTitleCase()
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            // Selection checkbox (bulk mode)
-            if isSelectionMode {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(theme.fontBody)
-                    .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
-                    .frame(width: 20)
-                    .onTapGesture { onToggleSelection() }
-            }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                // Left: Icon + Titles
+                HStack(alignment: .center, spacing: 12) {
+                    // Selection checkbox (bulk mode)
+                    if isSelectionMode {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 14))
+                            .foregroundColor(isSelected ? theme.accentColor : theme.secondaryText)
+                            .onTapGesture { onToggleSelection() }
+                    }
 
-            // Icon
-            MCPIconView(
-                icons: row.definition.icons,
-                fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
-                size: 24
-            )
-            .foregroundColor(theme.accentColor)
-            .frame(width: 28)
-
-            // Name + source + favorite star
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    if let title = row.definition.title {
-                        Text(title)
-                            .font(theme.fontSubheadline.weight(.medium))
-                            .foregroundColor(theme.primaryText)
-                    } else {
+                    // Icon
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(theme.accentColor.opacity(0.1))
+                            .frame(width: 36, height: 36)
+                        
+                        MCPIconView(
+                            icons: row.definition.icons,
+                            fallbackSymbol: row.source.type == .local ? "cpu" : "wrench.fill",
+                            size: 20
+                        )
+                        .foregroundColor(theme.accentColor)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .center, spacing: 6) {
+                            Text(displayTitle)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(theme.primaryText)
+                            
+                            if isFavorited {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.yellow)
+                            }
+                            
+                            if showSourceName {
+                                Text(row.source.serverName)
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(theme.secondaryText.opacity(0.6))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(theme.surfaceOverlay)
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                            }
+                        }
+                        
+                        // Technical name code badge
                         Text(row.definition.name)
-                            .font(.system(size: 13, weight: .medium, design: .monospaced)) // Fixed size: monospaced
-                            .foregroundColor(theme.primaryText)
-                    }
-
-                    if isFavorited {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9)) // Fixed size: intentional (badge/chip text)
-                            .foregroundColor(.yellow)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(theme.secondaryText.opacity(0.85))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.04))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(theme.dividerColor.opacity(0.3), lineWidth: 0.5)
+                            )
                     }
                 }
-
-                if row.definition.title != nil {
-                    Text(row.definition.name)
-                        .font(.system(size: 10, design: .monospaced)) // Fixed size: monospaced
-                        .foregroundColor(theme.secondaryText)
-                }
-
-                ToolAnnotationBadges(annotations: row.definition.annotations)
-
-                if showSourceName {
-                    Text(row.source.serverName)
-                        .font(.system(.caption2))
-                        .foregroundColor(theme.secondaryText.opacity(0.7))
+                
+                Spacer()
+                
+                // Right: Hover controls (gear, info) + State control button
+                HStack(alignment: .center, spacing: 10) {
+                    if isHovered {
+                        HStack(spacing: 8) {
+                            ToolDetailsButton(definition: row.definition)
+                                .font(.system(size: 14))
+                            
+                            if isEnabled {
+                                ToolSettingsPopover(
+                                    configuredTools: $configuredTools,
+                                    source: row.source,
+                                    definition: row.definition
+                                )
+                                .font(.system(size: 14))
+                            }
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
+                    }
+                    
+                    ToolStateControl(
+                        configuredTools: $configuredTools,
+                        source: row.source,
+                        definition: row.definition,
+                        instructions: instructions
+                    )
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Description + info (info button only on hover)
-            HStack(alignment: .center, spacing: 8) {
+            
+            // Description & Badges
+            VStack(alignment: .leading, spacing: 8) {
                 Text(row.definition.description)
-                    .font(.system(.caption))
+                    .font(.system(size: 12))
                     .foregroundColor(theme.secondaryText)
-                    .lineLimit(2)
-
-                Spacer(minLength: 4)
-
-                if isHovered {
-                    ToolDetailsButton(definition: row.definition)
-                        .transition(.opacity)
+                    .lineSpacing(2)
+                    .lineLimit(isHovered ? nil : 2) // Expand description on hover
+                    .fixedSize(horizontal: false, vertical: true)
+                
+                if row.definition.annotations != nil {
+                    ToolAnnotationBadges(annotations: row.definition.annotations)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            // State control
-            ToolStateControl(
-                configuredTools: $configuredTools,
-                source: row.source,
-                definition: row.definition,
-                instructions: instructions
-            )
-            .frame(width: 80, alignment: .center)
-
-            // Settings gear AFTER state button (only when enabled)
-            if isEnabled {
-                ToolSettingsPopover(
-                    configuredTools: $configuredTools,
-                    source: row.source,
-                    definition: row.definition
-                )
-            }
+            .padding(.leading, isSelectionMode ? 32 : 0)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 14)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isHovered ? theme.accentColor.opacity(0.06) : Color.clear)
+            RoundedRectangle(cornerRadius: 12)
+                .fill(theme.secondaryBackground.opacity(isHovered ? 0.95 : 0.6))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isHovered ? theme.accentColor.opacity(0.4) : theme.dividerColor.opacity(0.3), lineWidth: isHovered ? 1.5 : 1)
+        )
+        .shadow(color: theme.shadowColor.opacity(isHovered ? 0.12 : 0.04), radius: isHovered ? 8 : 2, x: 0, y: isHovered ? 4 : 1)
         .contentShape(Rectangle())
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
                 isHovered = hovering
             }
         }
+    }
+}
+
+private struct ParameterTypeBadge: View {
+    let typeName: String
+    
+    private var color: Color {
+        switch typeName.lowercased() {
+        case "string": return .blue
+        case "integer", "number": return .green
+        case "boolean": return .purple
+        case "array": return .orange
+        case "object": return .yellow
+        default: return .secondary
+        }
+    }
+    
+    var body: some View {
+        Text(typeName.uppercased())
+            .font(.system(size: 8, weight: .bold))
+            .tracking(0.5)
+            .foregroundColor(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(color.opacity(0.3), lineWidth: 0.5)
+            )
     }
 }
 
@@ -684,103 +819,130 @@ private struct ToolDetailsButton: View {
         .accessibilityLabel("View full tool details & parameters")
         .popover(isPresented: $isShowingPopover, arrowEdge: .trailing) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
                     // Header
-                    HStack {
-                        MCPIconView(icons: definition.icons, fallbackSymbol: "wrench.fill", size: 20)
-                            .foregroundColor(.accentColor)
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(theme.accentColor.opacity(0.12))
+                                .frame(width: 32, height: 32)
+                            
+                            MCPIconView(icons: definition.icons, fallbackSymbol: "wrench.fill", size: 16)
+                                .foregroundColor(theme.accentColor)
+                        }
+                        
                         VStack(alignment: .leading, spacing: 2) {
                             if let title = definition.title {
-                                Text(title).font(.headline)
+                                Text(title)
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(theme.primaryText)
+                                
                                 Text(definition.name)
-                                    .font(.caption)
-                                    .fontDesign(.monospaced)
-                                    .foregroundColor(.secondary)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText)
                             } else {
+                                Text(definition.name.toTitleCase())
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(theme.primaryText)
+                                
                                 Text(definition.name)
-                                    .font(.headline)
-                                    .fontDesign(.monospaced)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(theme.secondaryText)
                             }
                         }
                     }
+                    .padding(.bottom, 4)
 
                     // Full Description
                     Text(definition.description)
-                        .font(.body)
-                        .foregroundColor(.primary)
-                        .lineLimit(nil)
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.primaryText.opacity(0.9))
+                        .lineSpacing(3)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
 
                     // Behavior Hints
-                    if definition.annotations != nil {
-                        Divider()
-                        Text("Behavior Hints")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.secondary)
-                        ToolAnnotationBadges(annotations: definition.annotations)
+                    if let annotations = definition.annotations {
+                        Divider().background(theme.dividerColor.opacity(0.4))
+                        
+                        Text("Behavior")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.secondaryText)
+                            .textCase(.uppercase)
+                            .tracking(0.5)
+                        
+                        ToolAnnotationBadges(annotations: annotations)
                     }
 
-                    Divider()
+                    Divider().background(theme.dividerColor.opacity(0.4))
 
                     // Parameters Section
                     Text("Parameters Schema")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(theme.secondaryText)
+                        .textCase(.uppercase)
+                        .tracking(0.5)
 
                     if definition.parameters.properties.isEmpty {
                         Text("No parameters required.")
-                            .font(.caption)
+                            .font(.system(size: 11))
                             .italic()
-                            .foregroundColor(.secondary)
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.vertical, 4)
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(definition.parameters.properties.keys.sorted()), id: \.self) { key in
                                 let prop = definition.parameters.properties[key]!
                                 let isRequired = definition.parameters.required.contains(key)
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(alignment: .firstTextBaseline) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .center, spacing: 6) {
                                         Text(key)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .fontWeight(.bold)
-                                        Text(prop.type)
-                                            .font(.caption2)
-                                            .foregroundColor(.blue)
+                                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                            .foregroundColor(theme.primaryText)
+                                        
+                                        ParameterTypeBadge(typeName: prop.type)
 
                                         if isRequired {
-                                            Text("Required")
-                                                .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge/chip text)
-                                                .foregroundColor(.red)
-                                                .padding(.horizontal, 4)
+                                            Text("REQUIRED")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .tracking(0.5)
+                                                .foregroundColor(theme.errorColor)
+                                                .padding(.horizontal, 5)
                                                 .padding(.vertical, 2)
-                                                .background(Color.red.opacity(0.1))
+                                                .background(theme.errorColor.opacity(0.08))
                                                 .clipShape(RoundedRectangle(cornerRadius: 4))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 4)
+                                                        .stroke(theme.errorColor.opacity(0.3), lineWidth: 0.5)
+                                                )
                                         }
                                     }
 
                                     if let desc = prop.description {
                                         Text(desc)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 11))
+                                            .foregroundColor(theme.secondaryText)
+                                            .lineSpacing(2)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
                                 .padding(10)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+                                .background(theme.secondaryBackground.opacity(0.5))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(theme.dividerColor.opacity(0.35), lineWidth: 1)
+                                )
                             }
                         }
                     }
                 }
-                .padding()
+                .padding(16)
             }
-            .frame(width: 350)
-            .frame(maxHeight: 500)
+            .frame(width: 380)
+            .frame(maxHeight: 520)
         }
     }
 }
@@ -796,6 +958,7 @@ fileprivate struct ToolStateControl: View {
 
     @Environment(\.appTheme) private var theme
     @State private var showingDependencyAlert = false
+    @State private var isHovered = false
 
     private enum ToolControlState {
         case disabled
@@ -814,23 +977,31 @@ fileprivate struct ToolStateControl: View {
         Button {
             cycleState()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 stateIcon
-                    .font(.system(.caption, weight: .bold))
-                if currentState != .disabled {
-                    Text(stateLabel)
-                        .font(.system(.caption, weight: .semibold))
-                }
+                    .font(.system(size: 10, weight: .bold))
+                
+                Text(stateLabel)
+                    .font(.system(size: 10, weight: .semibold))
             }
-            .frame(width: currentState == .disabled ? 28 : 54, height: 16, alignment: .center)
+            .frame(width: 88, height: 24)
+            .background(stateBackground)
+            .foregroundColor(stateForeground)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(stateBorder, lineWidth: 1)
+            )
+            .shadow(color: stateShadowColor, radius: isHovered ? 4 : 2, x: 0, y: isHovered ? 2 : 1)
         }
         .buttonStyle(.plain)
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(stateBackground)
-        .foregroundColor(stateForeground)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
         .help(helpText)
+        .contentShape(Capsule())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
         .alert("Tool in Use", isPresented: $showingDependencyAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -852,22 +1023,60 @@ fileprivate struct ToolStateControl: View {
 
     private var stateLabel: String {
         switch currentState {
-        case .disabled: return ""
-        case .ask: return "Ask"
-        case .auto: return "Auto"
+        case .disabled: return "Disabled"
+        case .ask: return "Ask First"
+        case .auto: return "Auto Run"
         }
     }
 
-    private var stateBackground: Color {
+    private var stateBackground: AnyView {
         switch currentState {
-        case .disabled: return Color.secondary.opacity(0.15)
-        case .ask: return theme.warningColor
-        case .auto: return theme.successColor
+        case .disabled:
+            return AnyView(Color.clear)
+        case .ask:
+            return AnyView(
+                LinearGradient(
+                    colors: [theme.warningColor.opacity(0.85), theme.warningColor],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        case .auto:
+            return AnyView(
+                LinearGradient(
+                    colors: [theme.successColor.opacity(0.85), theme.successColor],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+        }
+    }
+
+    private var stateBorder: Color {
+        switch currentState {
+        case .disabled:
+            return theme.secondaryText.opacity(0.3)
+        case .ask, .auto:
+            return Color.clear
         }
     }
 
     private var stateForeground: Color {
-        currentState == .disabled ? .primary : .white
+        switch currentState {
+        case .disabled:
+            return theme.secondaryText
+        case .ask, .auto:
+            return .white
+        }
+    }
+
+    private var stateShadowColor: Color {
+        if !isHovered { return Color.black.opacity(0.05) }
+        switch currentState {
+        case .disabled: return Color.black.opacity(0.1)
+        case .ask: return theme.warningColor.opacity(0.3)
+        case .auto: return theme.successColor.opacity(0.3)
+        }
     }
 
     private var helpText: String {
@@ -1064,17 +1273,23 @@ private struct AnnotationBadge: View {
     let symbol: String
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 3) {
             Image(systemName: symbol)
-                .font(.system(size: 8)) // Fixed size: intentional (badge icon)
-            Text(text)
-                .font(.system(size: 9, weight: .medium)) // Fixed size: intentional (badge/chip text)
+                .font(.system(size: 7, weight: .semibold))
+            
+            Text(text.uppercased())
+                .font(.system(size: 8, weight: .bold))
+                .tracking(0.5)
         }
         .foregroundColor(color)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 2)
-        .background(color.opacity(0.1))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(color.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 4))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(color.opacity(0.35), lineWidth: 0.5)
+        )
     }
 }
 
@@ -1110,5 +1325,31 @@ private struct ConnectionStateIndicator: View {
         case .reconnecting(let attempt): return "Reconnecting (attempt \(attempt))..."
         case .error(let msg): return "Error: \(msg)"
         }
+    }
+}
+
+// MARK: - String Extension for Title Case
+
+extension String {
+    func toTitleCase() -> String {
+        let parts = self.split { $0 == "_" || $0 == "-" }
+        return parts.map { part in
+            let word = String(part)
+            let lower = word.lowercased()
+            switch lower {
+            case "ui": return "UI"
+            case "mcp": return "MCP"
+            case "pim": return "PIM"
+            case "llm": return "LLM"
+            case "macos": return "macOS"
+            case "db": return "Database"
+            case "cli": return "CLI"
+            default:
+                if lower.isEmpty { return "" }
+                let first = lower.prefix(1).uppercased()
+                let rest = lower.dropFirst()
+                return first + rest
+            }
+        }.joined(separator: " ")
     }
 }

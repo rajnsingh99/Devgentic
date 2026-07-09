@@ -149,6 +149,18 @@ final class ChatPersistenceStore: ChatPersistenceProtocol {
                 existing.terminalOutcomeRaw = message.terminalOutcome?.rawValue
                 existing.terminalReason = message.terminalReason
 
+                // [G1] Resume lifecycle + run-identity stamp. `ChatMessageSD.from` writes these on
+                // first INSERT, but the in-flight flush path upserts an already-inserted row: the
+                // `.toolCall` flush creates the row as `.streaming` BEFORE the HITL park can stamp
+                // `.parkedHITL`, so they must be re-applied on every UPDATE too — otherwise the
+                // parked marker + operationID never reach disk and a parked run wrongly reloads as
+                // `.streaming` and resumes via the drop-dangling path instead of re-raising the HITL.
+                existing.lifecycleStateRaw = message.lifecycleState.rawKind
+                existing.parkedOperationID = message.lifecycleState.parkedOperationID?.uuidString
+                existing.apiProvider = message.apiProvider
+                existing.modelName = message.modelName
+                existing.modelDialect = message.modelDialect
+
                 // Update attachments
                 for old in existing.attachedTextFiles { context.delete(old) }
                 existing.attachedTextFiles = message.attachedTextFiles?.map { AttachedTextFileSD.from($0) } ?? []

@@ -39,7 +39,7 @@ struct CoreIntelligenceSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 32) {
+            VStack(spacing: 24) {
 
                 // 1. Master Enable + Model Selection
                 SettingsCard(title: "Core Intelligence", icon: "cpu.fill", theme: theme) {
@@ -59,7 +59,7 @@ struct CoreIntelligenceSettingsView: View {
 
                         // No-model-selected hint
                         if selectedModel.isEmpty {
-                            Divider().background(theme.dividerColor)
+                            Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
                             HStack {
                                 Image(systemName: "info.circle.fill")
                                     .foregroundColor(theme.accentColor)
@@ -69,9 +69,11 @@ struct CoreIntelligenceSettingsView: View {
                                     .foregroundColor(theme.secondaryText)
                                 Spacer()
                             }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
                         }
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         // Model Selection
                         SettingsRow(
@@ -92,7 +94,7 @@ struct CoreIntelligenceSettingsView: View {
                             }
                         }
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         // Manage Models button
                         HStack {
@@ -105,6 +107,8 @@ struct CoreIntelligenceSettingsView: View {
                             .buttonStyle(.bordered)
                             .controlSize(.small)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 12)
                     }
                 }
 
@@ -120,7 +124,7 @@ struct CoreIntelligenceSettingsView: View {
                             theme: theme
                         )
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         FeatureToggleRow(
                             title: "Response Synthesis",
@@ -130,7 +134,7 @@ struct CoreIntelligenceSettingsView: View {
                             theme: theme
                         )
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         FeatureToggleRow(
                             title: "RAG — Contextual Query Rewriting",
@@ -140,7 +144,7 @@ struct CoreIntelligenceSettingsView: View {
                             theme: theme
                         )
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         FeatureToggleRow(
                             title: "Morning Brief",
@@ -150,7 +154,7 @@ struct CoreIntelligenceSettingsView: View {
                             theme: theme
                         )
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         FeatureToggleRow(
                             title: "User Personal",
@@ -160,7 +164,7 @@ struct CoreIntelligenceSettingsView: View {
                             theme: theme
                         )
 
-                        Divider().background(theme.dividerColor)
+                        Rectangle().fill(theme.dividerColor.opacity(0.3)).frame(height: 0.5)
 
                         FeatureToggleRow(
                             title: "Context-Aware Suggestions",
@@ -204,7 +208,7 @@ struct CoreIntelligenceSettingsView: View {
                     SettingsCard(title: "Debug — Test Intelligence Core", icon: "ant.fill", theme: theme) {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Simulate a Morning Brief generation to verify IC load/generate/unload lifecycle and memory tracking in Console logs.")
-                                .font(.system(.caption))
+                               .font(.system(.caption))
                                 .foregroundColor(theme.secondaryText)
                                 .lineSpacing(2)
 
@@ -296,6 +300,7 @@ struct CoreIntelligenceSettingsView: View {
                                 )
                             }
                         }
+                        .padding(16)
                     }
                     #endif
 
@@ -323,6 +328,7 @@ struct CoreIntelligenceSettingsView: View {
                                         .stroke(theme.dividerColor, lineWidth: 1)
                                 )
                         }
+                        .padding(16)
                     }
                 }
             }
@@ -360,7 +366,9 @@ struct CoreIntelligenceSettingsView: View {
                         .tag(model.displayName)
                 }
             }
+            .pickerStyle(.menu)
             .labelsHidden()
+            .tint(theme.primaryText)
             .fixedSize()
         }
     }
@@ -546,26 +554,27 @@ private struct FeatureToggleRow: View {
     @Binding var isOn: Bool
     let theme: any Theme
     var comingSoon: Bool = false
-    @ScaledMetric private var rowPadding: CGFloat = 16
+
+    @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
+        HStack(alignment: .top, spacing: 20) {
             Image(systemName: icon)
-                .font(.system(.body)) // scales with Dynamic Type; ~16pt
+                .font(.system(size: 14))
                 .foregroundColor(isOn && !comingSoon ? theme.accentColor : theme.secondaryText)
-                .frame(width: 24)
+                .frame(width: 24, alignment: .center)
                 .padding(.top, 2)
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(theme.fontBody.weight(.medium))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(theme.primaryText)
 
                     if comingSoon {
                         Text("Coming Soon")
-                            .font(.system(size: 9, weight: .bold)) // Fixed size: intentional (badge text)
+                            .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -575,9 +584,9 @@ private struct FeatureToggleRow: View {
                 }
 
                 Text(description)
-                    .font(.system(.caption))
+                    .font(.system(size: 11))
                     .foregroundColor(theme.secondaryText)
-                    .lineSpacing(2)
+                    .lineSpacing(2.5)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -589,7 +598,17 @@ private struct FeatureToggleRow: View {
                 .tint(theme.accentColor)
                 .disabled(comingSoon)
         }
-        .padding(rowPadding)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(isHovered ? theme.accentColor.opacity(0.04) : Color.clear)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if !comingSoon {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isHovered = hovering
+                }
+            }
+        }
         .opacity(comingSoon ? 0.6 : 1.0)
     }
 }

@@ -576,13 +576,21 @@ final class ChatInputViewModel {
     }
 
     func toggleVoiceInput() {
-        if voiceInputState == .recording {
+        if voiceInputState == .recording || voiceInputState == .finalizingSilence {
+            // .finalizingSilence must stop too — the button shows "stop" during the
+            // VAD hysteresis window, and a tap there was previously swallowed.
             stopStreamingAndFinalize()
         } else if voiceInputState == .available {
             Task { await startStreaming() }
         } else if voiceInputState == .idle || voiceInputState.isErrorState {
             // Model not loaded or failed — show selection popover
             showModelSelectorPopover = true
+        } else if voiceInputState == .permissionsDeniedMic {
+            // Denied mic permission is otherwise a silent dead end — route the user
+            // to the Microphone privacy pane, the only place it can be fixed.
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 

@@ -43,12 +43,9 @@ struct RecordingOverlayView: View {
             .padding(.bottom, 12)
         }
         .frame(minHeight: 58)
-        // Match mainInputArea chrome exactly
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.controlBackground)
-                .shadow(color: Color.black.opacity(0.1), radius: 6, x: 0, y: 3)
-        )
+        // Match mainInputArea chrome exactly (Liquid Glass + surfaceOverlay stroke)
+        // so toggling voice input doesn't visibly swap materials.
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
         .overlay(
             RoundedRectangle(cornerRadius: 16)
                 .stroke(theme.surfaceOverlay, lineWidth: 1)
@@ -158,6 +155,7 @@ private struct TimerTextView: View {
     @State private var recordingTime: TimeInterval = 0.0
     @State private var isPulsing = false
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 6) {
@@ -168,7 +166,9 @@ private struct TimerTextView: View {
                 .scaleEffect(isPulsing ? 1.3 : 1.0)
                 .opacity(isPulsing ? 0.6 : 1.0)
                 .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
-                .onAppear { isPulsing = true }
+                // Reduce Motion: keep the dot static — recording state is already
+                // conveyed by the overlay itself and the running timer.
+                .onAppear { if !reduceMotion { isPulsing = true } }
 
             Text(formatTime(recordingTime))
                 .font(.system(.body, design: .monospaced))

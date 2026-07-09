@@ -166,11 +166,16 @@ enum PromptBuilder {
         systemContent += "\n\n" + wrapping.section("system_instructions", content: context.instructions ?? "You are a helpful AI assistant.")
 
         // Layer 5: CONTEXT — Environment facts (always full)
+        // Home is rendered as an absolute path (never tilde): small models copy
+        // paths verbatim from context, and a literal "/Users/<name>" anchor is what
+        // stops them emitting training-data placeholders like "/path/to/X".
         let envContent = """
         - OS: \(context.environmentFacts.osVersion)
         - Shell: \(context.environmentFacts.shellType)
         - User: \(context.environmentFacts.userName)
+        - Home: \(context.environmentFacts.homeDirectory)
         - Date: \(context.environmentFacts.currentDate)
+        - Paths: use absolute paths; user folders are under \(context.environmentFacts.homeDirectory) (Desktop, Documents, Downloads)
         """
         systemContent += "\n\n" + wrapping.section("environment", content: envContent)
 

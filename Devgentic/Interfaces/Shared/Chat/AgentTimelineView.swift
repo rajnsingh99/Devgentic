@@ -281,6 +281,8 @@ struct TimelineNodeGroupView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded: Bool = true
 
+    @State private var isHoveringHeader = false
+
     var body: some View {
         switch node {
         case .thought(_, let text):
@@ -313,11 +315,8 @@ struct TimelineNodeGroupView: View {
                 .padding(.horizontal, 4)
 
         case .actionGroup(let actions):
-            // Tight inner spacing (2pt) so the rail connects visually to the
-            // chevron above. The outer timeline VStack still provides 10pt
-            // separation between this group and sibling nodes.
             VStack(alignment: .leading, spacing: 2) {
-                // Group header — click toggles the collapsible detail list.
+                // Group header
                 Button {
                     if reduceMotion {
                         isExpanded.toggle()
@@ -327,46 +326,65 @@ struct TimelineNodeGroupView: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(.caption2, weight: .bold))
-                            .foregroundColor(theme.tertiaryText)
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    HStack(spacing: 8) {
+                        // Glowing anchor dot
+                        Circle()
+                            .fill(theme.accentColor)
+                            .frame(width: 6, height: 6)
+                            .shadow(color: theme.accentColor.opacity(0.6), radius: 3)
+                            .overlay(
+                                Circle()
+                                    .stroke(theme.accentColor.opacity(0.4), lineWidth: 2)
+                                    .scaleEffect(isExpanded ? 1.4 : 1.0)
+                                    .opacity(isExpanded ? 0 : 1)
+                            )
+                            .padding(.leading, 8)
 
                         Text(generateGroupTitle(actions))
                             .font(theme.fontSubheadline.weight(.medium))
-                            .foregroundColor(theme.secondaryText)
+                            .foregroundColor(theme.primaryText.opacity(0.9))
 
                         Spacer()
+                        
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(theme.tertiaryText)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .padding(.trailing, 8)
                     }
-                    .padding(.horizontal, 4)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isHoveringHeader ? theme.surfaceOverlay.opacity(0.6) : Color.clear)
+                    )
+                    .scaleEffect(isHoveringHeader ? 1.01 : 1.0)
                 }
                 .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        isHoveringHeader = hovering
+                    }
+                }
 
                 if isExpanded {
-                    // Rail is rendered as an overlay on the children VStack so it
-                    // physically can't exceed the VStack's intrinsic height. An
-                    // earlier HStack-with-Rectangle approach let the rail stretch
-                    // into whatever vertical space the parent bubble offered —
-                    // showing a long hanging tail past the last child whenever
-                    // the bubble was taller than the timeline content.
-                    //
-                    // • `.padding(.leading, 22)` reserves rail space (8pt rail x
-                    //   + 1pt width + 13pt gutter).
-                    // • `.overlay(alignment: .leading)` pins the rail to the VStack's
-                    //   left edge and height — it starts at y=0 (top of first row)
-                    //   and ends at y=height (bottom of last row), no tail.
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(actions) { action in
                             ActionDetailView(event: action)
                         }
                     }
-                    .padding(.leading, 22)
+                    .padding(.leading, 28)
+                    .padding(.top, 4)
                     .overlay(alignment: .leading) {
                         Rectangle()
-                            .fill(theme.tertiaryText.opacity(0.35))
-                            .frame(width: 1)
-                            .padding(.leading, 8)
+                            .fill(
+                                LinearGradient(
+                                    colors: [theme.accentColor.opacity(0.4), theme.accentColor.opacity(0.05)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .frame(width: 2)
+                            .padding(.leading, 10) // Centered with the 6pt dot which sits at leading 8
                     }
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
@@ -431,6 +449,7 @@ struct ActionDetailView: View {
     let event: TimelineEvent
     @Environment(\.appTheme) private var theme
     @State private var isOutputExpanded: Bool = false
+    @State private var isHovering: Bool = false
 
     var body: some View {
         if case .toolExecution(let data) = event {
@@ -460,6 +479,9 @@ struct ActionDetailView: View {
                             Text(Self.formatDuration(dur))
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                                 .foregroundColor(theme.tertiaryText)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(theme.surfaceOverlay.opacity(0.5)))
                         }
 
                         Spacer(minLength: 4)
@@ -473,9 +495,21 @@ struct ActionDetailView: View {
                                 .rotationEffect(.degrees(isOutputExpanded ? 90 : 0))
                         }
                     }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isHovering ? theme.surfaceOverlay.opacity(0.7) : Color.clear)
+                    )
                     .contentShape(Rectangle())
+                    .scaleEffect(isHovering ? 1.01 : 1.0)
                 }
                 .buttonStyle(.plain)
+                .onHover { hovering in
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                        isHovering = hovering
+                    }
+                }
 
                 if isOutputExpanded, let out = data.output, !out.isEmpty {
                     Text(out)
@@ -483,10 +517,16 @@ struct ActionDetailView: View {
                         .foregroundColor(theme.primaryText.opacity(0.72))
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .background(theme.surfaceOverlay.opacity(0.4))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .padding(.leading, 4)
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(theme.surfaceOverlay.opacity(0.3))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+                                )
+                        )
+                        .padding(.leading, 6)
                         .transition(.opacity)
                 }
             }
@@ -502,10 +542,14 @@ struct ActionDetailView: View {
                 Image(systemName: success ? "bubble.left.fill" : "arrow.uturn.left")
                     .font(.system(size: 10))
                     .foregroundColor(success ? theme.streamingIndicator.opacity(0.85) : theme.secondaryText.opacity(0.5))
+                    .padding(4)
+                    .background(Circle().fill(success ? theme.streamingIndicator.opacity(0.12) : theme.surfaceOverlay))
             } else if success {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 10))
+                Image(systemName: "checkmark")
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundColor(theme.successColor.opacity(0.85))
+                    .padding(4)
+                    .background(Circle().fill(theme.successColor.opacity(0.12)))
             } else {
                 HStack(spacing: 3) {
                     Image(systemName: data.failureCategory?.icon ?? "exclamationmark.triangle.fill")
@@ -516,14 +560,14 @@ struct ActionDetailView: View {
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
                             .foregroundColor(theme.errorColor.opacity(0.85))
                             .tracking(0.3)
-                            .padding(.horizontal, 3)
-                            .padding(.vertical, 1)
-                            .background(
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(theme.errorColor.opacity(0.12))
-                            )
                     }
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(theme.errorColor.opacity(0.12))
+                )
             }
         }
     }
@@ -556,13 +600,19 @@ struct CapabilityMilestoneRow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(milestoneColor.opacity(0.08))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [milestoneColor.opacity(0.12), milestoneColor.opacity(0.04)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(milestoneColor.opacity(0.2), lineWidth: 0.5)
         )
     }
@@ -594,23 +644,33 @@ struct WarningRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(category.displayName.uppercased())
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.orange.opacity(0.9))
+                    .foregroundColor(.orange.opacity(0.95))
                     .tracking(0.5)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.orange.opacity(0.15)))
 
                 Text(text)
                     .font(.system(.caption, weight: .medium))
                     .foregroundColor(theme.primaryText.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.orange.opacity(0.08))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.orange.opacity(0.15), Color.orange.opacity(0.05)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(Color.orange.opacity(0.25), lineWidth: 0.5)
         )
     }
@@ -627,22 +687,24 @@ struct InterimReasoningRow: View {
 
     @Environment(\.appTheme) private var theme
     @State private var isExpanded = false
+    @State private var isAnimating = false
 
     private static let collapsedLineLimit = 3
     private static let expandThresholdChars = 220
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "sparkle")
-                .font(.system(size: 10))
-                .foregroundColor(theme.tertiaryText)
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(theme.accentColor.opacity(0.85))
                 .frame(width: 14, alignment: .center)
                 .padding(.top, 3)
+                .symbolEffect(.pulse, options: .repeating, isActive: isAnimating)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(flattenedText)
-                    .font(.system(size: 12))
-                    .foregroundColor(theme.secondaryText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(theme.secondaryText.opacity(0.9))
                     .lineLimit(isExpanded ? nil : Self.collapsedLineLimit)
                     .multilineTextAlignment(.leading)
                     .textSelection(.enabled)
@@ -656,14 +718,24 @@ struct InterimReasoningRow: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(theme.accentColor.opacity(0.75))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(theme.accentColor.opacity(0.85))
                 }
             }
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(theme.surfaceOverlay.opacity(0.4))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(theme.surfaceOverlayStrong, lineWidth: 0.5)
+        )
+        .onAppear { isAnimating = true }
     }
 
     /// Flattens markdown for compact display: drops heading markers, list

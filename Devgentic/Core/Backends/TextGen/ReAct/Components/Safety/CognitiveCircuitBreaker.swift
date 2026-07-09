@@ -15,10 +15,8 @@ private let logger = DGLogger(category: "CircuitBreaker")
 /// By returning `CircuitBreakerAction`, it dictates the orchestrator's next move.
 struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
 
-    // MARK: - Limits (configurable via AgentConfig.retryPolicy)
+    // MARK: - Limits (configurable via AgentConfig resilience overrides)
 
-    private let maxConsecutiveAskUser: Int
-    private let maxConsecutiveIdle: Int
     let maxConsecutiveToolFailures: Int
     let maxRepetitiveActions: Int
 
@@ -26,24 +24,24 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     /// routinely ignore even when the directive appears in scratchpad. A dedicated
     /// counter with a tighter cap catches denial-retry loops before they waste
     /// iterations on HITL round-trips the user already rejected.
-    private let maxConsecutiveDenials: Int = 2
+    /// NOTE: clarification (ask_user) loops are no longer counter-governed — identical
+    /// re-asks are answered from RunInteractionMemory (deterministic replay), which makes
+    /// them visible to the repetition fingerprint below; distinct questions are legitimate
+    /// and bounded by the human in the loop + the iteration budget.
+    private let maxConsecutiveDenials: Int
 
     init(maxConsecutiveToolFailures: Int = 3,
          maxRepetitiveActions: Int = 3,
-         maxConsecutiveAskUser: Int = 3,
-         maxConsecutiveIdle: Int = 5) {
+         maxConsecutiveDenials: Int = 2) {
         self.maxConsecutiveToolFailures = maxConsecutiveToolFailures
         self.maxRepetitiveActions = maxRepetitiveActions
-        self.maxConsecutiveAskUser = maxConsecutiveAskUser
-        self.maxConsecutiveIdle = maxConsecutiveIdle
+        self.maxConsecutiveDenials = maxConsecutiveDenials
     }
 
     // MARK: - State Tracking
 
     private(set) var consecutiveToolFailures = 0
     private(set) var consecutiveDenials = 0
-    private(set) var consecutiveAskUserCalls = 0
-    private(set) var consecutiveIdleSteps = 0
     private(set) var hallucinatedTools: Set<String> = []
 
     /// Tracks consecutive iterations where every tool call in the iteration
@@ -58,10 +56,11 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
     /// repeating the same core action (e.g., read_file alone then read_file + list_directory).
     /// Key: "toolName|argsHash|outputSignature", Value: total count across all iterations.
     private(set) var globalToolFrequency: [String: Int] = [:]
-    // G3: matches the iteration-level "three strikes" philosophy. A tool invoked
-    // 3× with identical args + output across a session is stuck — no reason to
-    // wait for 5 (which on a 25s/iter local model = ~50s of wasted work).
-    private let maxGlobalToolRepetitions: Int = 3
+    /// The global per-tool cap shares the repetition-tolerance knob (`maxRepetitiveActions`,
+    /// configurable via ResilienceOverrides) — both checks catch the same phenomenon at
+    /// different granularities, and a separate hardcoded cap made this the only abort
+    /// trigger the user couldn't govern.
+    private var maxGlobalToolRepetitions: Int { maxRepetitiveActions }
     
     // MARK: - Tool Loop Evaluation
 
@@ -139,14 +138,7 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
         // Normalization handles CRLF→LF and per-line trailing whitespace so that
         // meaningless editor/tool artifacts don't produce false "different" hashes.
         // Leading whitespace is preserved — code indentation still discriminates.
-        let components = observations
-            .sorted(by: { $0.toolName < $1.toolName })
-            .map { obs in
-                let argsHash = obs.params.hashValue
-                let normalized = Self.normalizeForHashing(obs.output)
-                let resultSignature = "\(normalized.count):\(normalized.hashValue)"
-                return "\(obs.toolName)|\(argsHash)|\(resultSignature)"
-            }
+        let components = Self.iterationComponents(observations)
         let fingerprint = components.joined(separator: ";;")
 
         // Increment the global per-tool frequency tally UNCONDITIONALLY before any
@@ -225,39 +217,79 @@ struct CognitiveCircuitBreaker: CognitiveSafetyGuarding {
             return .proceedWithWarning(uiMessage: uiMessage, modelAlert: modelAlert)
         }
 
+        // --- Check 2 warning (one strike before the global cap) ---
+        // The global per-tool check previously aborted COLD — unlike Check 1, a model that
+        // alternated tool combos never saw a warning before being killed. Give it the same
+        // dual-channel "switch / finalize / ask" alert one identical call early.
+        if maxGlobalToolRepetitions >= 2 {
+            for key in components where globalToolFrequency[key, default: 0] == maxGlobalToolRepetitions - 1 {
+                let toolName = key.components(separatedBy: "|").first ?? "unknown"
+                let count = globalToolFrequency[key, default: 0]
+                logger.info("⚠️ Global repetition warning: '\(toolName)' at \(count)/\(self.maxGlobalToolRepetitions) identical calls. One more will trigger abort.")
+
+                let uiMessage = "Tool '\(toolName)' keeps producing the same result. One more identical call will end this run."
+
+                let modelAlert = """
+                ⚠️ REPETITION DETECTED — SYSTEM INTERVENTION
+
+                Tool '\(toolName)' has now returned identical output for the same arguments \(count) times across this run. Calling it again with the same arguments will ABORT this session.
+
+                You MUST choose one of these three paths now:
+
+                1. SWITCH TOOLS. The previous output is already in your working memory above — re-reading it will not help. Use a DIFFERENT tool (or different arguments) to make progress.
+
+                2. FINALIZE. If you already have enough information to answer the user's request, call `final_answer(answer: "...")` with your response. Do not call any other tool in the same step.
+
+                3. ASK. If you are genuinely blocked on something only the user can clarify, call `ask_user(question: "...")`. Do not use `final_answer` to ask questions.
+
+                Do NOT call '\(toolName)' with the same arguments again.
+                """
+
+                return .proceedWithWarning(uiMessage: uiMessage, modelAlert: modelAlert)
+            }
+        }
+
         return .proceed
     }
 
-    // MARK: - Ask User & Idle Step Evaluation
+    // MARK: - Replay Priming (G1 resume)
 
-    /// Bounds consecutive interrogation loops. Counters only reset via
-    /// `resetCountersOnSuccess`, which the executor gates on real (non-ask_user)
-    /// tool progress — asking another question is not progress.
-    mutating func evaluateAskUser() -> CircuitBreakerAction {
-        consecutiveAskUserCalls += 1
-        consecutiveIdleSteps += 1
-
-        if consecutiveIdleSteps >= maxConsecutiveIdle {
-            return .abort(reason: "Reached \(consecutiveIdleSteps) consecutive idle steps — the run is stuck in a clarification loop without tool progress.")
+    /// Re-primes the repetition bookkeeping from a resumed run's replayed iterations so the
+    /// fingerprint streak and per-tool global counts survive a park → resume cycle (the breaker
+    /// itself is a per-run local and would otherwise start from zero). Silent: updates counters
+    /// only, never returns an action — the original run already reacted to these iterations.
+    mutating func primeReplayedIteration(_ observations: [ToolObservation]) {
+        guard !observations.isEmpty else { return }
+        let components = Self.iterationComponents(observations)
+        let fingerprint = components.joined(separator: ";;")
+        for key in components {
+            globalToolFrequency[key, default: 0] += 1
         }
-
-        if consecutiveAskUserCalls > maxConsecutiveAskUser {
-            let msg = "SYSTEM INTERVENTION: You have asked the user \(consecutiveAskUserCalls) questions without making progress. Stop asking. Either proceed using the available tools, or call `final_answer` with your best response based on what you already know. Do NOT call ask_user again."
-            return .intervene(systemMessage: msg)
+        if fingerprint == lastIterationFingerprint {
+            consecutiveIdenticalIterations += 1
+        } else {
+            lastIterationFingerprint = fingerprint
+            consecutiveIdenticalIterations = 1
         }
-
-        return .proceed
     }
 
-    // MARK: - Metrics & Reset
+    /// Deterministic per-iteration fingerprint components: (tool, argsHash, output signature)
+    /// per observation, tool-name-sorted. Shared by live evaluation and replay priming.
+    private static func iterationComponents(_ observations: [ToolObservation]) -> [String] {
+        observations
+            .sorted(by: { $0.toolName < $1.toolName })
+            .map { obs in
+                let argsHash = obs.params.hashValue
+                let normalized = normalizeForHashing(obs.output)
+                let resultSignature = "\(normalized.count):\(normalized.hashValue)"
+                return "\(obs.toolName)|\(argsHash)|\(resultSignature)"
+            }
+    }
+
+    // MARK: - Metrics
 
     mutating func recordHallucination(_ toolName: String) {
         hallucinatedTools.insert(toolName)
-    }
-
-    mutating func resetCountersOnSuccess() {
-        consecutiveAskUserCalls = 0
-        consecutiveIdleSteps = 0
     }
 
     // MARK: - Output Normalization (G3)

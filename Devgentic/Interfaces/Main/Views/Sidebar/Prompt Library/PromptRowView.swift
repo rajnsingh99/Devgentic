@@ -209,7 +209,7 @@ struct PromptRowView: View {
                     }
 
                     Text(prompt.title)
-                        .font(theme.fontSubheadline.weight(.medium))
+                        .font(theme.fontFootnote.weight(.medium))
                         .foregroundColor(theme.primaryText)
                         .lineLimit(1)
 

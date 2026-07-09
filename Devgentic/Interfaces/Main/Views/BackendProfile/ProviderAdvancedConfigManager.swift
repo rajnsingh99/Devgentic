@@ -18,6 +18,12 @@ final class ProviderAdvancedConfigManager {
     var localGeminiConfig: GeminiAdvancedConfig = .default()
     var localAnthropicConfig: AnthropicAdvancedConfig = .default()
     var localOpenAIConfig: OpenAIAdvancedConfig = .default()
+    /// OpenRouter reuses the OpenAI parameter surface but keeps its own instance
+    /// so edits on one provider never bleed into the other's saved config.
+    var localOpenRouterConfig: OpenAIAdvancedConfig = .default()
+    /// Custom OpenAI-compatible endpoints reuse the OpenAI parameter surface too,
+    /// with their own instance for the same isolation reason.
+    var localOpenAICompatibleConfig: OpenAIAdvancedConfig = .default()
     var localMlxConfig: MLXAdvancedConfig = .default()
 
     /// Guard flag: prevents onChange handlers from writing back during initial load.
@@ -47,6 +53,16 @@ final class ProviderAdvancedConfigManager {
                 from: providerConfig.advancedConfiguration,
                 as: OpenAIAdvancedConfig.self
             ) ?? .default()
+        case .openRouter:
+            localOpenRouterConfig = profileService.decodeConfig(
+                from: providerConfig.advancedConfiguration,
+                as: OpenAIAdvancedConfig.self
+            ) ?? .default()
+        case .openAICompatible:
+            localOpenAICompatibleConfig = profileService.decodeConfig(
+                from: providerConfig.advancedConfiguration,
+                as: OpenAIAdvancedConfig.self
+            ) ?? .default()
         case .mlx:
             localMlxConfig = profileService.decodeConfig(
                 from: providerConfig.advancedConfiguration,
@@ -70,6 +86,8 @@ final class ProviderAdvancedConfigManager {
         case .google:   return profileService.encodeConfig(from: localGeminiConfig)
         case .anthropic: return profileService.encodeConfig(from: localAnthropicConfig)
         case .openAI:   return profileService.encodeConfig(from: localOpenAIConfig)
+        case .openRouter: return profileService.encodeConfig(from: localOpenRouterConfig)
+        case .openAICompatible: return profileService.encodeConfig(from: localOpenAICompatibleConfig)
         case .mlx:      return profileService.encodeConfig(from: localMlxConfig)
         }
     }
@@ -103,6 +121,16 @@ struct AdvancedConfigSyncModifier: ViewModifier {
             .onChange(of: configManager.localOpenAIConfig) { _, _ in
                 guard let encoded = configManager.encode(for: .openAI, using: profileService),
                       providerConfig.wrappedValue.apiProvider == .openAI else { return }
+                providerConfig.wrappedValue.advancedConfiguration = encoded
+            }
+            .onChange(of: configManager.localOpenRouterConfig) { _, _ in
+                guard let encoded = configManager.encode(for: .openRouter, using: profileService),
+                      providerConfig.wrappedValue.apiProvider == .openRouter else { return }
+                providerConfig.wrappedValue.advancedConfiguration = encoded
+            }
+            .onChange(of: configManager.localOpenAICompatibleConfig) { _, _ in
+                guard let encoded = configManager.encode(for: .openAICompatible, using: profileService),
+                      providerConfig.wrappedValue.apiProvider == .openAICompatible else { return }
                 providerConfig.wrappedValue.advancedConfiguration = encoded
             }
             .onChange(of: configManager.localMlxConfig) { _, _ in
@@ -185,6 +213,10 @@ struct ProviderAdvancedSettingsView: View {
             AnthropicSettingsView(config: $configManager.localAnthropicConfig)
         case .openAI:
             OpenAISettingsView(config: $configManager.localOpenAIConfig)
+        case .openRouter:
+            OpenAISettingsView(config: $configManager.localOpenRouterConfig)
+        case .openAICompatible:
+            OpenAISettingsView(config: $configManager.localOpenAICompatibleConfig)
         case .mlx:
             MLXSettingsView(
                 config: $configManager.localMlxConfig,

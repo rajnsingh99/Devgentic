@@ -124,8 +124,11 @@ struct ProfileValidator {
             ))
         }
 
-        // Rule 4: Cloud providers require an API key
-        let cloudProviders: [ApiProvider] = [.openAI, .anthropic, .google]
+        // Rule 4: Cloud providers require an API key.
+        // NOTE: `.openAICompatible` is intentionally excluded — LM Studio, vLLM,
+        // and llama.cpp servers typically need no key. It instead requires a base
+        // URL (Rule 4b).
+        let cloudProviders: [ApiProvider] = [.openAI, .anthropic, .google, .openRouter]
         if cloudProviders.contains(config.apiProvider) {
             if let key = config.apiKey, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // Key present — OK
@@ -133,6 +136,18 @@ struct ProfileValidator {
                 errors.append(ProfileValidationError(
                     field: "apiKey",
                     message: "\(config.apiProvider.rawValue) requires an API key."
+                ))
+            }
+        }
+
+        // Rule 4b: A custom OpenAI-compatible provider has no canonical endpoint,
+        // so a base URL is mandatory (the key is optional).
+        if config.apiProvider == .openAICompatible {
+            let hasBaseURL = (config.baseURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            if !hasBaseURL {
+                errors.append(ProfileValidationError(
+                    field: "baseURL",
+                    message: "A base URL is required for an OpenAI-Compatible provider (e.g. http://localhost:1234/v1)."
                 ))
             }
         }

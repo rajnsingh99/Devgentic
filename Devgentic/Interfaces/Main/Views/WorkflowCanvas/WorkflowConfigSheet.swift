@@ -16,7 +16,7 @@ struct WorkflowConfigSheet: View {
     @Binding var profile: BackendProfileModel
     let onDirty: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeNodeInspector) private var closeInspector
     @Environment(\.appTheme) private var theme
 
     // MARK: - Execution Defaults
@@ -55,7 +55,14 @@ struct WorkflowConfigSheet: View {
                 .padding(24)
             }
         }
-        .frame(width: 540, height: 560)
+        .frame(
+            minWidth: 800,
+            idealWidth: 950,
+            maxWidth: .infinity,
+            minHeight: 560,
+            idealHeight: 700,
+            maxHeight: .infinity
+        )
         .background(theme.primaryBackground)
         .onAppear { loadFromProfile() }
     }
@@ -85,7 +92,7 @@ struct WorkflowConfigSheet: View {
             }
             .buttonStyle(.plain)
             .help("About workflow settings")
-            Button("Cancel") { dismiss() }
+            Button("Cancel") { closeInspector() }
                 .font(theme.fontCaption)
                 .buttonStyle(.plain)
                 .foregroundColor(theme.secondaryText)
@@ -284,6 +291,8 @@ struct WorkflowConfigSheet: View {
                         .foregroundColor(theme.tertiaryText)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -344,6 +353,8 @@ struct WorkflowConfigSheet: View {
                         .foregroundColor(theme.tertiaryText)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -365,6 +376,8 @@ struct WorkflowConfigSheet: View {
                     .font(.system(size: 10))
                     .foregroundColor(theme.tertiaryText)
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 16)
         }
     }
 
@@ -422,6 +435,6 @@ struct WorkflowConfigSheet: View {
 
         profile.details = .workflow(config)
         onDirty()
-        dismiss()
+        closeInspector()
     }
 }

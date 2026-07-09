@@ -102,7 +102,7 @@ enum AgentStreamEvent: Sendable {
     case workflowNodeStarted(nodeID: UUID, profileName: String, index: Int, total: Int)
 
     /// A workflow node has completed execution successfully.
-    case workflowNodeCompleted(nodeID: UUID, profileName: String, summary: String)
+    case workflowNodeCompleted(nodeID: UUID, profileName: String, summary: String, hasWarnings: Bool = false)
 
     /// A workflow node has failed. `suggestion` carries an optional actionable
     /// remediation hint (derived from the typed `AgentFailureReason`) that the UI
@@ -249,14 +249,19 @@ enum WarningCategory: String, Sendable, Codable, Equatable, CaseIterable {
 /// Emitted as the last event in the stream via `.executionFinished`.
 enum ExecutionOutcome: String, Sendable, Codable, Equatable, CaseIterable {
     case completed
+    /// Degraded success: the run stopped early (circuit-breaker abort, iteration budget) but
+    /// synthesized a usable best-effort answer. Chat shows the answer + an amber chip; a workflow
+    /// node COMPLETES (output flows downstream, joins satisfied) instead of hard-failing the run.
+    case completedWithWarnings
     case failed
     case cancelled
 
     var displayName: String {
         switch self {
-        case .completed: return "Completed"
-        case .failed:    return "Failed"
-        case .cancelled: return "Cancelled"
+        case .completed:             return "Completed"
+        case .completedWithWarnings: return "Completed with warnings"
+        case .failed:                return "Failed"
+        case .cancelled:             return "Cancelled"
         }
     }
 }

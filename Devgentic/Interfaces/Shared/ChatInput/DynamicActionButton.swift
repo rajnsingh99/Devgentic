@@ -45,13 +45,21 @@ struct DynamicActionButton: View {
     let onStopStreaming: () -> Void
 
     @Environment(\.appTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var isHovering = false
+    /// Set when a long-press opened the model picker so the release-click that
+    /// follows doesn't ALSO fire the tap action (e.g. start recording).
+    @State private var suppressNextTap = false
 
     private let buttonSize: CGFloat = 30
 
+    /// Source of determinate progress for the model-download ring. @Observable —
+    /// reading downloadProgress in body re-renders as the download advances.
+    private var downloadService: WhisperModelDownloadService { .shared }
+
     var body: some View {
-        Button(action: performAction) {
+        Button(action: handleTap) {
             if isSending && !isStreamingActive {
                 ProgressView().controlSize(.small)
                     .frame(width: buttonSize, height: buttonSize)
@@ -62,10 +70,21 @@ struct DynamicActionButton: View {
             }
         }
         .buttonStyle(PlainButtonStyle())
+        // Hold the mic to open the speech-model picker even when a model is
+        // already loaded (a plain tap starts recording in that state).
+        .simultaneousGesture(modelPickerLongPress)
         .onHover { hover in withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) { isHovering = hover } }
         .disabled(isDisabled)
         .help(helpText)
         .accessibilityLabel(helpText)
+        // Right-click: the discoverable macOS-native route to the same picker.
+        .contextMenu {
+            if mode == .mic {
+                Button("Change Speech Model…") {
+                    inputViewModel.showModelSelectorPopover = true
+                }
+            }
+        }
         .popover(isPresented: $inputViewModel.showModelSelectorPopover, arrowEdge: .top) {
             WhisperModelSelectorPopover(
                 isPresented: $inputViewModel.showModelSelectorPopover,
@@ -109,50 +128,75 @@ struct DynamicActionButton: View {
                 .fill(backgroundColor(canSend: canSend, isDisabledBySystem: isDisabledBySystem))
                 .shadow(color: backgroundColor(canSend: canSend, isDisabledBySystem: isDisabledBySystem).opacity(0.3), radius: 3, x: 0, y: 2)
 
-            ZStack {
-                if mode == .mic || mode == .stopVoice {
-                    Image(systemName: iconName)
-                        .resizable().scaledToFit()
-                        .fontWeight(.medium)
-                        .frame(width: buttonSize * iconScale, height: buttonSize * iconScale)
-                        .foregroundColor(iconForegroundColor)
-                        .transition(.scale(scale: 0.5).combined(with: .opacity))
-                }
-
-                if mode == .send {
-                    Image(systemName: "arrow.up")
-                        .resizable().scaledToFit()
-                        .fontWeight(.semibold)
-                        .frame(width: buttonSize * 0.5, height: buttonSize * 0.5)
-                        .foregroundColor(.white)
-                        .transition(.scale(scale: 0.5).combined(with: .opacity))
-                }
-
-                if mode == .stopStreaming {
-                    Image(systemName: "square.fill")
-                        .resizable().scaledToFit()
-                        .fontWeight(.regular)
-                        .frame(width: buttonSize * 0.45, height: buttonSize * 0.45)
-                        .foregroundColor(.white)
-                        .transition(.scale(scale: 0.5).combined(with: .opacity))
-                }
-            }
+            // One persistent Image so mode changes morph glyph-to-glyph via symbol
+            // replace instead of cross-fading separately stacked views.
+            Image(systemName: symbolName)
+                .font(symbolFont)
+                .foregroundColor(iconForegroundColor)
+                .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
+                .animation(.easeInOut(duration: 0.18), value: symbolName)
 
             if voiceInputState == .modelLoading || voiceInputState == .modelPreparing {
-                Circle()
-                    .fill(theme.controlBackground.opacity(0.85))
-                    .frame(width: buttonSize, height: buttonSize)
-                    .overlay {
-                        ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.8)
-                    }
-                    .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                modelProgressOverlay
             }
         }
     }
 
+    /// Model-fetch overlay: determinate ring while the Whisper download reports
+    /// progress, indeterminate spinner otherwise (preparing/specialization has
+    /// no progress metric).
+    private var modelProgressOverlay: some View {
+        Circle()
+            .fill(theme.controlBackground.opacity(0.85))
+            .frame(width: buttonSize, height: buttonSize)
+            .overlay {
+                if voiceInputState == .modelLoading, downloadService.downloadProgress > 0 {
+                    ZStack {
+                        Circle()
+                            .stroke(theme.accentColor.opacity(0.25), lineWidth: 2)
+                        Circle()
+                            .trim(from: 0, to: downloadService.downloadProgress)
+                            .stroke(theme.accentColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                            .animation(.linear(duration: 0.25), value: downloadService.downloadProgress)
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(theme.accentColor)
+                    }
+                    .padding(4)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.8)
+                }
+            }
+            .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+    }
+
     // MARK: - Action
+
+    private var modelPickerLongPress: some Gesture {
+        LongPressGesture(minimumDuration: 0.45)
+            .onEnded { _ in
+                guard mode == .mic else { return }
+                suppressNextTap = true
+                inputViewModel.showModelSelectorPopover = true
+                // If AppKit swallows the release-click during popover presentation,
+                // the Button action never fires — don't let the suppression leak
+                // into the next genuine tap.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    suppressNextTap = false
+                }
+            }
+    }
+
+    private func handleTap() {
+        if suppressNextTap {
+            suppressNextTap = false
+            return
+        }
+        performAction()
+    }
 
     private func performAction() {
         switch mode {
@@ -182,9 +226,10 @@ struct DynamicActionButton: View {
         userInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var iconName: String {
+    private var symbolName: String {
         switch mode {
-        case .send, .stopStreaming: return ""
+        case .send: return "arrow.up"
+        case .stopStreaming: return "square.fill"
         case .stopVoice: return "stop.circle.fill"
         case .mic:
             switch voiceInputState {
@@ -197,8 +242,15 @@ struct DynamicActionButton: View {
         }
     }
 
-    private var iconScale: CGFloat {
-        mode == .stopVoice ? 0.55 : 0.5
+    /// Font-based sizing (required for symbol content transitions); sizes chosen
+    /// to match the previous frame-based glyph sizes optically.
+    private var symbolFont: Font {
+        switch mode {
+        case .send:          return .system(size: 13, weight: .semibold)
+        case .stopStreaming: return .system(size: 12, weight: .regular)
+        case .stopVoice:     return .system(size: 14, weight: .medium)
+        case .mic:           return .system(size: 13, weight: .medium)
+        }
     }
 
     private func backgroundColor(canSend: Bool, isDisabledBySystem: Bool) -> Color {
@@ -231,10 +283,11 @@ struct DynamicActionButton: View {
     }
 
     private var isDisabled: Bool {
-        if !backendProfileSelected { return true }
         switch mode {
         case .send:
-            return trimmedInput.isEmpty || isSending || voiceInputState == .recording || voiceInputState == .processing || voiceInputState == .finalizingSilence
+            // Only SENDING needs a backend. Voice capture just fills the text field,
+            // so the mic (and stop) stay usable before a backend is picked.
+            return !backendProfileSelected || trimmedInput.isEmpty || isSending || voiceInputState == .recording || voiceInputState == .processing || voiceInputState == .finalizingSilence
         case .stopVoice: return isSending
         case .stopStreaming: return false
         case .mic:
@@ -245,9 +298,29 @@ struct DynamicActionButton: View {
     private var helpText: String {
         switch mode {
         case .send: return "Send message (Enter)"
-        case .stopVoice: return "Stop Voice Input"
+        case .stopVoice: return "Stop recording and transcribe"
         case .stopStreaming: return "Stop generating response"
-        case .mic: return "Voice Input"
+        case .mic:
+            switch voiceInputState {
+            case .available:
+                return "Start voice input (\(inputViewModel.currentSpeechModelName)) — hold or right-click to change model"
+            case .idle:
+                return "Choose a speech model to enable voice input"
+            case .modelLoading:
+                return "Downloading speech model…"
+            case .modelPreparing:
+                return "Preparing speech model…"
+            case .processing:
+                return "Transcribing…"
+            case .requestingPermissions:
+                return "Requesting microphone access…"
+            case .permissionsDeniedMic:
+                return "Microphone access denied — click to open System Settings"
+            case .error:
+                return "Voice input error — click to choose a speech model"
+            default:
+                return "Voice input"
+            }
         }
     }
 
