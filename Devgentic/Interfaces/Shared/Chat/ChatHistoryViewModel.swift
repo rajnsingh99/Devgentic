@@ -192,7 +192,10 @@ final class ChatHistoryViewModel {
     func copyMessageContentToClipboard(message: ChatMessage) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        if let content = message.content.textContent {
+        // [Q9] Prefer the selected agent variant so Copy matches what's on screen for a
+        // regenerated response; falls back to `content` (nil currentAgentContent) — no change
+        // for user/non-regenerated messages.
+        if let content = (message.currentAgentContent ?? message.content).textContent {
             pasteboard.setString(content, forType: .string)
             logger.info("Copied message \(message.id.uuidString) content to clipboard.")
         }

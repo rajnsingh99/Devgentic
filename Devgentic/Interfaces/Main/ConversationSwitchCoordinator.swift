@@ -122,9 +122,22 @@ final class ConversationSwitchCoordinator {
             guard !Task.isCancelled else { return }
             guard let self else { return }
 
-            // Only unload models if no agent is actively streaming AND the new
-            // conversation uses a different backend profile.
-            if !streamingActive {
+            // [QA revival P1e] Unload models only if NO stream is active anywhere AND the new
+            // conversation uses a different backend profile. `streamingActive` covers only the
+            // main window's slot; also consult the shared ActiveStreamManager so a QuickAccess /
+            // ChatOps / scheduler run (which never sets streamingMessageID) isn't rug-pulled
+            // mid-generation. Re-read after the debounce so a run that began during it counts.
+            // [C7] Count only ACTIVELY-STREAMING runs. A run parked on a HITL sits in
+            // activeStreams until answered (possibly hours) but is idle — excluding it lets the
+            // model unload while parked (reloading cheaply on resume) instead of pinning multiple
+            // large local models resident indefinitely.
+            let anyStreamActive = streamingActive
+                || (self.viewModel?.activeStreamManager.activeStreams.values.contains { message in
+                    if case .streaming = message.lifecycleState { return true }
+                    return false
+                } ?? false)
+
+            if !anyStreamActive {
                 let newProfileID: UUID? = conversationID.flatMap {
                     self.persistenceService.getConversation(withId: $0)?.backendEntityId
                 }
@@ -137,7 +150,7 @@ final class ConversationSwitchCoordinator {
                     self.logger.info("Skipping model unload — new conversation uses same backend profile (\(currentProfileID?.uuidString ?? "nil")).")
                 }
             } else {
-                self.logger.info("Skipping model unload — agent is actively streaming (messageID: \(activeStreamID?.uuidString ?? "nil")).")
+                self.logger.info("Skipping model unload — a stream is active (main slot: \(activeStreamID?.uuidString ?? "nil"), or shared ActiveStreamManager).")
             }
 
             await self.chatHistoryViewModel.loadConversation(id: conversationID)

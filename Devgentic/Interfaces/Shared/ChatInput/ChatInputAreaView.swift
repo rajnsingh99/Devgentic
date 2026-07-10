@@ -450,66 +450,16 @@ struct ChatInputAreaView: View {
     
     // MARK: - Handlers
     
-    // MARK: - File Drop Handler (P1)
+    // MARK: - File Drop Handler (P1) — [Q8] shared with the QuickAccess panel via FileAttachmentPicker.
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
-        for provider in providers {
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url = url else { return }
-                // Skip video files
-                if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
-                   type.conforms(to: .video) || type.conforms(to: .movie) {
-                    return
-                }
-                var isDirectory: ObjCBool = false
-                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-                    let newItem = FileSystemItem(
-                        id: url,
-                        name: url.lastPathComponent,
-                        url: url,
-                        isDirectory: isDirectory.boolValue
-                    )
-                    DispatchQueue.main.async { [self] in
-                        inputViewModel.addAttachedFile(fileItem: newItem)
-                    }
-                }
-            }
+        FileAttachmentPicker.handleDrop(providers) { item in
+            inputViewModel.addAttachedFile(fileItem: item)
         }
-
-        return true
     }
 
     private func openFilePicker() {
-        let openPanel = NSOpenPanel()
-        openPanel.canChooseFiles = true
-        openPanel.canChooseDirectories = true
-        openPanel.allowsMultipleSelection = true
-        openPanel.prompt = "Attach Files or Folders"
-
-        openPanel.begin { response in
-            if response == .OK {
-                let selectedURLs = openPanel.urls
-                var fileItems: [FileSystemItem] = []
-
-                for url in selectedURLs {
-                    if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
-                       type.conforms(to: .video) || type.conforms(to: .movie) {
-                        continue
-                    }
-                    var isDirectory: ObjCBool = false
-                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-                        let newItem = FileSystemItem(
-                            id: url,
-                            name: url.lastPathComponent,
-                            url: url,
-                            isDirectory: isDirectory.boolValue
-                        )
-                        fileItems.append(newItem)
-                    }
-                }
-                if !fileItems.isEmpty {
-                    inputViewModel.addAttachedFiles(fileItems: fileItems)
-                }
-            }
+        FileAttachmentPicker.presentOpenPanel(prompt: "Attach Files or Folders") { items in
+            inputViewModel.addAttachedFiles(fileItems: items)
         }
     }
     

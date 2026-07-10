@@ -136,12 +136,15 @@ final class ConversationManagementCoordinator {
     /// Finds the most recent empty conversation (zero messages) that can be reused.
     private func findReusableEmptyConversation() -> UUID? {
         guard let context = ChatPersistenceStore.shared.modelContainer?.mainContext else { return nil }
+        // [QA revival P1e] Never repurpose the QuickAccess conversation — it's owned by the
+        // panel. (create-on-first-send already means it's rarely empty, but guard the gap.)
+        let qaID = UserDefaults.standard.string(forKey: GlobalConstants.quickAccessOverlayConversationId).flatMap(UUID.init)
         var descriptor = FetchDescriptor<ConversationSD>(
             sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
         )
         descriptor.fetchLimit = 5
         guard let results = try? context.fetch(descriptor) else { return nil }
-        return results.first(where: { $0.messages.isEmpty })?.id
+        return results.first(where: { $0.messages.isEmpty && $0.id != qaID })?.id
     }
 
     // MARK: - Backend Profile Binding
@@ -201,9 +204,14 @@ final class ConversationManagementCoordinator {
     func transferSelectedConversationToOverlay() {
         guard let vm = viewModel else { return }
         guard let conversationID = vm.selectedConversationID else { return }
-        UserDefaults.standard.set(conversationID.uuidString, forKey: "quickAccessOverlayConversationId")
+        // [QA revival P0] Use the shared constants, not literals. The panel is created
+        // by AppDelegate reading GlobalConstants.quickAccessOverlayConversationId, and
+        // AppDelegate observes GlobalConstants.showQuickAccessPanelNotification
+        // ("devgentic.showQuickAccessPanel") — the old literal "showQuickAccessPanel"
+        // was never received, so the transfer flow silently did nothing.
+        UserDefaults.standard.set(conversationID.uuidString, forKey: GlobalConstants.quickAccessOverlayConversationId)
         NotificationCenter.default.post(
-            name: NSNotification.Name("showQuickAccessPanel"),
+            name: GlobalConstants.showQuickAccessPanelNotification,
             object: nil,
             userInfo: ["forceExpand": true]
         )

@@ -14,4 +14,7 @@ enum MessageSource: String, Codable, Sendable {
     case telegram
     case discord
     case slack
+    /// [Q2] Messages originated from the QuickAccess floating panel — distinguishes panel
+    /// traffic from main-window (.localUI) in ChatOps mirroring / analytics / audit.
+    case quickAccess
 }

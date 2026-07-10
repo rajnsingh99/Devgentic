@@ -52,7 +52,10 @@ struct BackendPickerButton: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingPopup, arrowEdge: .bottom) {
-            BackendSelectorPopup(
+            // Redesigned selector (search + type bubbles + single fixed-width list) — replaced the
+            // multi-column BackendSelectorPopup, whose 180pt-per-type columns overflowed the
+            // popover's resolved width and clipped.
+            ProfileSelectorPopover(
                 configuration: backendConfiguration,
                 isPresented: $showingPopup,
                 allowedProfileTypes: allowedProfileTypes

@@ -23,6 +23,17 @@ struct GlobalConstants {
     static let quickAccessOverlayConversationId = "quickAccessOverlayConversationId"
     static let quickAccessLastCloseTime = "quickAccessLastCloseTime"
     static let quickAccessWasExpandedOnClose = "quickAccessWasExpandedOnClose"
+    /// [QA revival P1b] The remembered QuickAccess profile (a chat-type profile UUID). Kept
+    /// separate from the main window's selection so the panel has its own sticky default.
+    static let quickAccessProfileID = "quickAccessProfileID"
+    /// [QA revival P1d] Panel enable flag + configurable global hotkey (Carbon key code +
+    /// modifiers) + session-timeout, all read by AppDelegate before the SwiftUI env exists.
+    static let quickAccessEnabled = "quickAccessEnabled"
+    static let quickAccessHotkeyKeyCode = "quickAccessHotkeyKeyCode"
+    static let quickAccessHotkeyModifiers = "quickAccessHotkeyModifiers"
+    // Stored in SECONDS (10s–5min range, default 60). New key so old minute-valued data isn't
+    // misread as seconds.
+    static let quickAccessSessionTimeoutSeconds = "quickAccessSessionTimeoutSeconds"
     
     // --- Backend ---
     static let selectedBackend = "selectedBackend"
@@ -38,6 +49,10 @@ struct GlobalConstants {
 
     // --- Notification Name ---
     static let showQuickAccessPanelNotification = Notification.Name("devgentic.showQuickAccessPanel")
+    /// [QA revival P2e] Navigate the main window to a conversation (userInfo["conversationID"]
+    /// = UUID string). Posted by a notification tap (AppDelegate) and by the panel's
+    /// "continue in main window" reverse-handoff. Observed in MainApplicationView.
+    static let openConversationNotification = Notification.Name("devgentic.openConversation")
 
     // --- Speech Notifications ---
     static let toggleVoiceInputNotification = Notification.Name("devgentic.toggleVoiceInput")

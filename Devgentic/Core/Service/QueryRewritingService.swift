@@ -34,9 +34,10 @@ actor QueryRewritingService {
 
         totalRewriteCount += 1
         let rewriteNum = totalRewriteCount
-        let queryPreview = String(currentQuery.prefix(80))
 
-        logger.notice("[RAG Rewrite #\(rewriteNum)] BEGIN — Query: \"\(queryPreview)\", History: \(history.count) messages")
+        // [M6] Log query LENGTH, not text — the query is user content and these lines reach the
+        // unified OS log.
+        logger.notice("[RAG Rewrite #\(rewriteNum)] BEGIN — Query: \(currentQuery.count) chars, History: \(history.count) messages")
 
         let recentHistory = formatRecentHistory(history)
 
@@ -91,7 +92,8 @@ actor QueryRewritingService {
             let wasChanged = cleaned != currentQuery
             logger.notice("[RAG Rewrite #\(rewriteNum)] COMPLETE — \(String(format: "%.2f", rewriteDuration))s, Changed: \(wasChanged)")
             if wasChanged {
-                logger.info("[RAG Rewrite #\(rewriteNum)] Original: \"\(queryPreview)\" → Rewritten: \"\(String(cleaned.prefix(80)))\"")
+                // [M6] Lengths only — both original and rewritten are user-derived content.
+                logger.info("[RAG Rewrite #\(rewriteNum)] Rewrote query: \(currentQuery.count) → \(cleaned.count) chars")
             }
             return cleaned
 

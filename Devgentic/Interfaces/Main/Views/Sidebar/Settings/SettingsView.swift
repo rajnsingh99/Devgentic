@@ -15,6 +15,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case notifications = "Notifications"
     case theme = "Theme"
     case chatOps = "ChatOps"
+    case quickAccess = "Quick Access"
     case about = "About"
 
     var id: String { self.rawValue }
@@ -34,6 +35,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             return "paintbrush"
         case .chatOps:
             return "paperplane.fill"
+        case .quickAccess:
+            return "bolt.circle"
         case .about:
             return "info.circle"
         }
@@ -48,6 +51,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .notifications: return String(localized: "Alerts and sounds")
         case .theme: return String(localized: "Colors and typography")
         case .chatOps: return String(localized: "Remote Telegram control")
+        case .quickAccess: return String(localized: "Global shortcut and panel")
         case .about: return String(localized: "Version and licenses")
         }
     }
@@ -68,6 +72,8 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
             ThemeSettingsView()
         case .chatOps:
             ChatOpsSettingsView()
+        case .quickAccess:
+            QuickAccessSettingsView()
         case .about:
             VStack(spacing: 16) {
                 Image(systemName: "bolt.fill")

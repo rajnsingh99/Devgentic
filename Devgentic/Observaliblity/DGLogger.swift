@@ -59,15 +59,32 @@ struct DGLogger: Sendable {
     // Each accepts an optional `metadata: [String: String]`. Values should be short
     // strings — JSON-stringify complex structures before passing in. Metadata is
     // sanitized at buffer-write time via TelemetrySanitizer.sanitizeFull(.standard).
+    //
+    // [M6] Privacy: DGLogger forces `privacy: .public` so os_log stays readable in Console
+    // (its default would redact every dynamic value as `<private>`, defeating the
+    // watch-Console-during-builds workflow). To keep that readability WITHOUT leaking secrets
+    // into the unified log store / sysdiagnose, persisted levels (info and above) route their
+    // message through TelemetrySanitizer BEFORE the os_log write — the same scrub the ring
+    // buffer applies — so paths/emails/keys/tokens are stripped from both sinks, matching the
+    // sanitization guarantee in PRIVACY.md. debug/trace stay raw: they are never persisted to
+    // the log store, are the highest-frequency levels (regex cost matters), and are dev-only.
+    // NOTE: the sanitizer is a PII/secret redactor, not a content redactor — free-form user or
+    // model text still reaches the log if a call site interpolates it, so DON'T log message
+    // bodies (log lengths/ids instead).
+
+    /// Sanitize a message for egress (OS log + ring buffer) — applied to persisted levels only.
+    private func sanitizedForEgress(_ message: String) -> String {
+        TelemetrySanitizer.sanitizeFull(message, level: .standard)
+    }
 
     /// Debug-level log. Goes to OS log ONLY — never buffered (per product decision:
-    /// info-floor for the diagnostic ring).
+    /// info-floor for the diagnostic ring). Raw (see the privacy note above).
     func debug(_ message: String, metadata: [String: String] = [:]) {
         osLogger.debug("\(message, privacy: .public)")
         // Intentionally NOT buffered.
     }
 
-    /// Trace-level log — Apple's lowest level, below debug. Never buffered.
+    /// Trace-level log — Apple's lowest level, below debug. Never buffered. Raw.
     /// Treated as an alias for debug at call sites; the OS log still sees .trace.
     func trace(_ message: String, metadata: [String: String] = [:]) {
         osLogger.trace("\(message, privacy: .public)")
@@ -77,20 +94,23 @@ struct DGLogger: Sendable {
     /// Generic bare log — os.Logger's `log(_:)` calls default to .default severity.
     /// We map to .notice which is Swift's closest equivalent (between info and warning).
     func log(_ message: String, metadata: [String: String] = [:]) {
-        osLogger.log("\(message, privacy: .public)")
-        route(level: .notice, message: message, metadata: metadata)
+        let sanitized = sanitizedForEgress(message)
+        osLogger.log("\(sanitized, privacy: .public)")
+        route(level: .notice, sanitizedMessage: sanitized, metadata: metadata)
     }
 
     /// Info-level log. Buffered if developer mode is on.
     func info(_ message: String, metadata: [String: String] = [:]) {
-        osLogger.info("\(message, privacy: .public)")
-        route(level: .info, message: message, metadata: metadata)
+        let sanitized = sanitizedForEgress(message)
+        osLogger.info("\(sanitized, privacy: .public)")
+        route(level: .info, sanitizedMessage: sanitized, metadata: metadata)
     }
 
     /// Notice-level log (between info and warning). Buffered if developer mode is on.
     func notice(_ message: String, metadata: [String: String] = [:]) {
-        osLogger.notice("\(message, privacy: .public)")
-        route(level: .notice, message: message, metadata: metadata)
+        let sanitized = sanitizedForEgress(message)
+        osLogger.notice("\(sanitized, privacy: .public)")
+        route(level: .notice, sanitizedMessage: sanitized, metadata: metadata)
     }
 
     /// Warning-level log. Optional canonical category stamps the entry so downstream
@@ -98,13 +118,14 @@ struct DGLogger: Sendable {
     func warning(_ message: String,
                  category errorCategory: AgentErrorCategory? = nil,
                  metadata: [String: String] = [:]) {
-        osLogger.warning("\(message, privacy: .public)")
+        let sanitized = sanitizedForEgress(message)
+        osLogger.warning("\(sanitized, privacy: .public)")
         var meta = metadata
         if let errorCategory {
             meta["agent_error_category"] = errorCategory.rawValue
             meta["agent_error_phase"] = errorCategory.phase.rawValue
         }
-        route(level: .warning, message: message, metadata: meta)
+        route(level: .warning, sanitizedMessage: sanitized, metadata: meta)
     }
 
     /// Error-level log. Accepts an optional underlying Error (for error-type
@@ -113,7 +134,8 @@ struct DGLogger: Sendable {
                error: (any Error)? = nil,
                category errorCategory: AgentErrorCategory? = nil,
                metadata: [String: String] = [:]) {
-        osLogger.error("\(message, privacy: .public)")
+        let sanitized = sanitizedForEgress(message)
+        osLogger.error("\(sanitized, privacy: .public)")
         var meta = metadata
         if let errorCategory {
             meta["agent_error_category"] = errorCategory.rawValue
@@ -127,7 +149,7 @@ struct DGLogger: Sendable {
             if !nsError.domain.isEmpty { meta["ns_domain"] = nsError.domain }
             if nsError.code != 0       { meta["ns_code"] = "\(nsError.code)" }
         }
-        route(level: .error, message: message, metadata: meta)
+        route(level: .error, sanitizedMessage: sanitized, metadata: meta)
     }
 
     /// Fault-level log. os.Logger's .fault() marks system-fault-level severity
@@ -135,20 +157,22 @@ struct DGLogger: Sendable {
     /// bucket since there's no separate "fault" tier in LogLevel — but the OS
     /// log still sees it at fault severity.
     func fault(_ message: String, metadata: [String: String] = [:]) {
-        osLogger.fault("\(message, privacy: .public)")
+        let sanitized = sanitizedForEgress(message)
+        osLogger.fault("\(sanitized, privacy: .public)")
         var meta = metadata
         meta["severity_override"] = "fault"
-        route(level: .error, message: message, metadata: meta)
+        route(level: .error, sanitizedMessage: sanitized, metadata: meta)
     }
 
     /// Critical-level log — severity between .error and .fault. Used for
     /// conditions that shouldn't happen in production but aren't quite fatal.
     /// Ring buffer uses .error bucket; OS log sees .critical.
     func critical(_ message: String, metadata: [String: String] = [:]) {
-        osLogger.critical("\(message, privacy: .public)")
+        let sanitized = sanitizedForEgress(message)
+        osLogger.critical("\(sanitized, privacy: .public)")
         var meta = metadata
         meta["severity_override"] = "critical"
-        route(level: .error, message: message, metadata: meta)
+        route(level: .error, sanitizedMessage: sanitized, metadata: meta)
     }
 
     // MARK: - Ring-buffer routing
@@ -165,13 +189,14 @@ struct DGLogger: Sendable {
         developerMode || (level >= .warning && diagnosticsEnabled)
     }
 
-    private func route(level: LogLevel, message: String, metadata: [String: String]) {
+    private func route(level: LogLevel, sanitizedMessage: String, metadata: [String: String]) {
         let devMode = UserDefaults.standard.bool(forKey: AppSettings.developerModeKey)
         guard Self.shouldPersist(level: level,
                                  developerMode: devMode,
                                  diagnosticsEnabled: AppSettings.diagnosticsRecordingEnabled) else { return }
 
-        let sanitizedMessage = TelemetrySanitizer.sanitizeFull(message, level: .standard)
+        // `sanitizedMessage` is already scrubbed by the caller (same TelemetrySanitizer pass
+        // applied to the os_log egress), so the buffer and the OS log stay consistent.
 
         // Sanitize metadata values individually (key names trusted — they come from
         // DGLogger call sites, not user input).

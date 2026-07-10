@@ -239,6 +239,8 @@ struct AgentMessageActionsView: View {
     var mainAppViewModel: MainApplicationViewModel
     @Environment(ChatHistoryViewModel.self) var chatHistoryViewModel
     @Environment(\.appTheme) private var theme
+    // [QA revival P1c] Hide Redo in the QuickAccess panel (it targets the main window).
+    @Environment(\.chatActionsSuppressed) private var chatActionsSuppressed
     @State private var didCopy: Bool = false
     @State private var showVariantsPopover: Bool = false
     @AppStorage(AppSettings.developerModeKey) private var isDeveloperMode: Bool = false
@@ -284,12 +286,14 @@ struct AgentMessageActionsView: View {
                     }
                 }
 
-                let isRedoDisabled = (message.agentResponse?.generationAttempts ?? 0) >= 5
-                ChatActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
-                    Label("Redo", systemImage: "arrow.clockwise")
+                if !chatActionsSuppressed {
+                    let isRedoDisabled = (message.agentResponse?.generationAttempts ?? 0) >= 5
+                    ChatActionButton(action: { mainAppViewModel.regenerateResponse(for: message) }, disabled: isRedoDisabled) {
+                        Label("Redo", systemImage: "arrow.clockwise")
+                    }
+                    .foregroundColor(isRedoDisabled ? theme.tertiaryText : theme.secondaryText)
+                    .accessibilityLabel("Regenerate response")
                 }
-                .foregroundColor(isRedoDisabled ? theme.tertiaryText : theme.secondaryText)
-                .accessibilityLabel("Regenerate response")
 
                 if containsCode {
                     ChatActionButton(action: { chatHistoryViewModel.openMessageInCodeViewer(message: message) }) {

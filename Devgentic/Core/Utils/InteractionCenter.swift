@@ -99,16 +99,23 @@ final class InteractionCenter {
     /// visible), honor the per-conversation notification toggle.
     nonisolated private static func dispatchStaleNotification(for item: PendingHITL) {
         Task.detached(priority: .utility) {
-            let isAppActive = await MainActor.run { NSApp.isActive }
-            guard !isAppActive else { return }
+            // [C6] Suppress when the user is actively viewing — app frontmost OR the
+            // non-activating QuickAccess panel is key. Without the panel term, a HITL banner
+            // the user is reading in the panel would still fire a "still waiting" notification.
+            let userIsViewing = await MainActor.run { NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false) }
+            guard !userIsViewing else { return }
 
             let config = await NotificationConfiguration.shared
             guard await config.isNotificationEnabled(for: item.origin.conversationID) else { return }
 
             let minutes = max(1, Int(Date().timeIntervalSince(item.timestamp) / 60))
+            // [L4] Do NOT put origin.title in the body — a conversation's title is often the raw
+            // first user message (always so for QuickAccess chats), which would surface the user's
+            // own prompt on the lock screen. A generic body is enough; the tap still deep-links to
+            // the right conversation.
             let payload = AppNotificationPayload(
                 title: "Still waiting for you",
-                body: "\(item.origin.title) has been waiting \(minutes) min for \(item.kind.staleNoun).",
+                body: "A conversation has been waiting \(minutes) min for \(item.kind.staleNoun).",
                 conversationID: item.origin.conversationID
             )
             await NotificationDispatcher.shared.dispatch(payload)

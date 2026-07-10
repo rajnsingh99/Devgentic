@@ -18,6 +18,9 @@ struct AgentBubbleContentView: View {
     @Environment(ThemeManager.self) private var themeManager
     @Environment(\.appTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // [QA revival P1c] When set (by the QuickAccess panel), hide Redo/Resume — they target
+    // the main window's conversation and no-op on a panel-only message.
+    @Environment(\.chatActionsSuppressed) private var chatActionsSuppressed
 
     @AppStorage(AppSettings.agentViewVariantKey) private var agentViewVariant: AgentViewVariant = .dynamicIsland
 
@@ -73,7 +76,7 @@ struct AgentBubbleContentView: View {
             if !message.isStreaming, message.lifecycleState.isInterrupted {
                 InterruptedRunChip(
                     wasParked: message.lifecycleState.parkedOperationID != nil,
-                    onResume: { mainAppViewModel.resumeRun(for: message) }
+                    onResume: chatActionsSuppressed ? nil : { mainAppViewModel.resumeRun(for: message) }
                 )
             }
 

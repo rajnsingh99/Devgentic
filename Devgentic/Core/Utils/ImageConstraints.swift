@@ -18,6 +18,14 @@ enum ImageConstraints {
     static let maxBytesForLocalModels: Int = 2_097_152  // 2MB
     static let jpegCompressionQuality: CGFloat = 0.8
 
+    /// [M7] Hard per-image attachment cap. Images larger than this are REJECTED (never modified /
+    /// downscaled) at attach and at egress, preventing: a main-thread hitch reading the whole file
+    /// on the @MainActor, in-row SQLite bloat / SQLITE_TOOBIG on write, uncompressed-RGBA decode
+    /// OOM (MLX), and cloud provider HTTP 400s. Set to the tightest cloud per-image limit
+    /// (Anthropic ~5 MB); raise it here to accept larger images at the cost of provider
+    /// compatibility. (Deliberately a REJECT cap, not the downscale path above.)
+    static let maxAttachmentImageBytes: Int64 = 5 * 1024 * 1024  // 5 MB
+
     /// Downscale and compress an image if it exceeds local model limits.
     /// Returns the original data if already within bounds.
     static func constrainForLocalModel(_ data: Data, mimeType: String) -> Data {

@@ -144,8 +144,17 @@ struct MainApplicationView: View {
                 isInputFocused = false
             }
         }
+        // [QA revival P2e] Deep-link + QuickAccess reverse-handoff: select the conversation in
+        // the main window and flip back to chat if a non-chat destination is showing. Serves
+        // both the notification-tap flow and the panel's "continue in main window" button.
+        .onReceive(NotificationCenter.default.publisher(for: GlobalConstants.openConversationNotification)) { note in
+            guard let idString = note.userInfo?["conversationID"] as? String,
+                  let id = UUID(uuidString: idString) else { return }
+            viewModel.navigateToPendingInteraction(conversationID: id, interface: .chat)
+            if !router.isShowingChat { router.returnToChat() }
+        }
     }
-    
+
     // MARK: - Subviews
 
     @ViewBuilder

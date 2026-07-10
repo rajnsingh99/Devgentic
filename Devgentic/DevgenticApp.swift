@@ -151,6 +151,18 @@ struct DevgenticApp: App {
                 .environment(chatInputViewModel)
                 .modelContainer(swiftDataContainer)
                 .tint(themeManager.currentTheme.accentColor)
+                .task {
+                    // [QA revival P1a] Hand the AppKit-created QuickAccess panel the shared
+                    // object graph so it can stream through the real backend. Use the adaptor
+                    // property `appDelegate` — the REAL devgentic.AppDelegate instance. (Do NOT
+                    // use AppDelegate.shared here: under @NSApplicationDelegateAdaptor,
+                    // NSApplication.shared.delegate is SwiftUI's forwarding wrapper, not our
+                    // class, so a cast would trap.)
+                    appDelegate.configureQuickAccess(
+                        mainAppViewModel: mainApplicationViewModel,
+                        themeManager: themeManager
+                    )
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     // Catch up any scheduled tasks that fired while the app was in the background.
                     SchedulerService.shared.evaluateAndFireDueTasks()

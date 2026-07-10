@@ -311,7 +311,10 @@ final class ActiveStreamManager {
                     await TraceRecorder.shared.captureConfigSnapshot(snapshot)
                 }
 
-                logger.info("[STREAM_HANDOFF] Passing to BackendOrchestrationService — traceID: \(traceContext.traceID), query: \(String(userQuery.prefix(80))), history: \(history.count) msgs, files: \(files.count)")
+                // [M6] Log the query LENGTH, not its text — the raw prompt is user content and this
+                // line goes to the unified OS log (readable via Console / sysdiagnose). traceID +
+                // history/file counts are enough to correlate the handoff.
+                logger.info("[STREAM_HANDOFF] Passing to BackendOrchestrationService — traceID: \(traceContext.traceID), query: \(userQuery.count) chars, history: \(history.count) msgs, files: \(files.count)")
 
                 let stream = self.backendOrchestrationService.streamMessage(
                     withConfig: config,
@@ -555,7 +558,10 @@ final class ActiveStreamManager {
                         // isn't bloated by full node outputs.
                         let summaryPreview = summary.count > 200 ? String(summary.prefix(200)) + "…" : summary
                         agentMessage.appendTimelineEvent(.thought(id: completedId, text: "✅ \(profileName): \(summaryPreview)"))
-                        logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(String(summary.prefix(200)))")
+                        // [M6] Log the summary LENGTH, not the node's output text (model content) —
+                        // this line reaches the unified OS log. The full output is in the per-node
+                        // Output panel + persisted via handleNodeCompleted for real inspection.
+                        logger.info("[WF_EVENT] NodeCompleted: '\(profileName)' [\(nodeID)] summary=\(summary.count) chars")
                         workflowExecutionState?.handleNodeCompleted(nodeID: nodeID, profileName: profileName, summary: summary, hasWarnings: nodeHasWarnings)
 
                     case .workflowNodeFailed(let nodeID, let profileName, let error, let suggestion):
@@ -1084,8 +1090,11 @@ final class ActiveStreamManager {
         }()
 
         Task.detached(priority: .utility) {
-            let isAppActive = await MainActor.run { NSApp.isActive }
-            guard !isAppActive else { return }
+            // [C6] Suppress when the user is actively viewing — app frontmost OR the
+            // non-activating QuickAccess panel is key (which NSApp.isActive alone misses,
+            // so a completion the user watches in the panel would otherwise double-notify).
+            let userIsViewing = await MainActor.run { NSApp.isActive || (AppDelegate.shared?.isQuickAccessPanelKey ?? false) }
+            guard !userIsViewing else { return }
 
             let config = await NotificationConfiguration.shared
             guard await config.isNotificationEnabled(for: notifConversationID) else { return }

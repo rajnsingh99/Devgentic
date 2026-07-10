@@ -228,14 +228,8 @@ private struct PermissionInteractionBanner: View {
         _argsExpanded = State(initialValue: confirmation.risk == .destructive)
     }
 
-    /// A1: banner accent driven by the tool's risk tier.
-    private var riskColor: Color {
-        switch confirmation.risk {
-        case .safe:        return theme.secondaryText
-        case .moderate:    return theme.warningColor
-        case .destructive: return theme.errorColor
-        }
-    }
+    /// A1: banner accent driven by the tool's risk tier. [Q3] Shared mapping via HITLRiskTier.color(in:).
+    private var riskColor: Color { confirmation.risk.color(in: theme) }
 
     /// A1: pretty-printed structured arguments (nil if params weren't valid JSON or are empty).
     private var prettyArgs: String? {

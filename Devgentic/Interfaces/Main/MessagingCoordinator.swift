@@ -647,6 +647,14 @@ final class MessagingCoordinator {
                     attachedTextFiles.append(textFile)
                 }
             } else if fileProcessorService.isImageFile(mimeType: mimeType, url: fileItem.url) {
+                // [M7] Reject an oversized image BEFORE reading it into memory. Fan-in safety net
+                // for every sender (main / ChatOps / QuickAccess / Scheduler), redo, and any file
+                // that grew since it was picked; interactive attaches are also warned at the picker.
+                // `fileSize` was already stat'd above, so a huge file is never read.
+                guard fileSize <= ImageConstraints.maxAttachmentImageBytes else {
+                    logger.warning("Skipping oversized image attachment '\(fileItem.name)' — \(fileSize) bytes exceeds the \(ImageConstraints.maxAttachmentImageBytes)-byte cap.")
+                    continue
+                }
                 do {
                     _ = fileItem.url.startAccessingSecurityScopedResource()
                     let data = try Data(contentsOf: fileItem.url)

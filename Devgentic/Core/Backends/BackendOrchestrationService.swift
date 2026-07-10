@@ -92,7 +92,22 @@ class BackendOrchestrationService {
 
                     switch fileContextStrategy {
                     case .contextualRAG:
-                        // Chunk, embed, and store for vector retrieval
+                        // [attachment-delivery fix] A freshly-attached file is EPHEMERAL context the
+                        // user is asking about — it MUST reach the model. contextualRAG previously
+                        // ONLY indexed the file and relied on similarity retrieval, which returns 0
+                        // chunks when the query ("explain this file") is semantically far from the
+                        // content (and query-rewrite is skipped on the first message) — so the model
+                        // got NOTHING and hallucinated "I can't access files". Now we ALSO inject the
+                        // budget-limited text (same vehicle as directInjection, so it fixes chat /
+                        // agent / workflow / QuickAccess at once), while STILL indexing it so later
+                        // turns and the oversize remainder stay retrievable. RAG retrieval below then
+                        // only SUPPLEMENTS (knowledge base + prior turns) instead of being the sole,
+                        // silently-failing content path.
+                        let (fileContext, docFailures) = await self.assembleTextFileContent(for: files)
+                        if !fileContext.isEmpty {
+                            queryForRequest = fileContext + "\n\n" + queryForRequest
+                        }
+                        await self.reportFileFailures(docFailures, span: context, continuation: continuation)
                         await RAGIndexingService.shared.indexAttachedFiles(
                             files: files,
                             conversationID: conversationID,
@@ -622,6 +637,15 @@ class BackendOrchestrationService {
             for item in items {
                 let didAccess = item.url.startAccessingSecurityScopedResource()
                 defer { if didAccess { item.url.stopAccessingSecurityScopedResource() } }
+                // [M7] Reject an oversized image at egress too — redo/re-send re-reads from the URL
+                // and bypasses the ingestion cap, and a pre-existing message may carry an
+                // over-limit image. Stat first so a huge file is never read into memory. Reported
+                // (not silent), so the turn still answers, just without this image.
+                let byteSize = (try? item.url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+                if byteSize > ImageConstraints.maxAttachmentImageBytes {
+                    failures.append(.imageResolutionFailed(path: item.url.path, underlying: "Image exceeds the \(ImageConstraints.maxAttachmentImageBytes / (1024 * 1024)) MB limit."))
+                    continue
+                }
                 do {
                     let data = try Data(contentsOf: item.url)
                     blocks.append(.image(ImagePayload(reference: .ephemeralData(data), mimeType: item.mime, alt: item.name)))
